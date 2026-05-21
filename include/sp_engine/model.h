@@ -89,6 +89,20 @@ int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tokens,
 int qwen3_generate(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
                    int eos_id);
 
+/* Persistent-KV O(n) greedy decode. Same signature/semantics as qwen3_generate,
+ * but maintains a position-indexed K/V cache so each token's weight matmuls run
+ * once (O(n) total) instead of re-prefilling the prefix every step (O(n^2)).
+ * Stores K/V post-RoPE; honors SP_ENGINE_FROB / SP_CPU_SCALAR / SP_KV_SPINOR.
+ * Greedy output matches qwen3_generate up to the float-reassociation floor, so
+ * GEN_KV gates on sequence (argmax) identity, not bit-equal logits. */
+int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                      int eos_id);
+
+/* Q4 calibration stats from the most recent forward on the Q4 weight path
+ * (SP_ENGINE_FROB=3 or 4): how many weight rows the mixed-precision calibration
+ * promoted to Q8, out of the total rows seen. Both 0 otherwise. (E_CPU_7.) */
+void qwen3_q4_stats(long *promoted, long *rows);
+
 /* ── dequantization (forward pass reads weights through these) ── */
 float    sp_f16_to_f32(uint16_t h);
 /* Round f32 to IEEE half (round-to-nearest-even). Used by the ggml-faithful

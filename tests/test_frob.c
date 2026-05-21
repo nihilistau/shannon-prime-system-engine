@@ -52,6 +52,7 @@ static int argmax(const float *x, uint32_t n) {
 }
 
 static int run(qwen3_model *m, const int32_t *toks, uint32_t nt, uint32_t nv, int mode, float *out) {
+    (void)nv;   /* signature carries it for symmetry; the forward derives nv from the model */
     set_frob(mode);
     return qwen3_forward(m, toks, (int)nt, out);
 }

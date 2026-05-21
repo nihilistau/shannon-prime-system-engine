@@ -10,6 +10,7 @@
 #include "sp_engine/model.h"
 #include "sp/frobenius_lift.h"
 #include "sp/poly_ring.h"
+#include "sp/spinor_block.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +33,30 @@ static int g_scalar = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
 static int g_ntt_attn = 0;
 #define SP_NTT_ATTN_SCALE 65536.0   /* 2^16: |q_int| ~ 2^21, |<q,k>| ~ 2^49 << M/2 ~ 2^59 */
 #define SP_KSTE_KV_SCALE  65536.0   /* fixed int32 quant for KSTE KV signatures (E_CPU_6) */
+
+/* Inline VHT2+Spinor KV-cache compression (E_CPU_8). When SP_KV_SPINOR=1 each
+ * post-norm/post-RoPE K and post-proj V head vector (head_dim long) is stored as
+ * the frozen 63-byte Spinor block(s) and decoded back (lossy) before attention
+ * reads it — the foundational KV codec (§4.5/§4.9), distinct from the KSTE sieve
+ * overlay (E_CPU_6). Gate OFF skips it entirely => bit-identical to E_CPU_2. */
+static int g_kv_spinor = 0;
+
+/* Round-trip a length-d vector through the Spinor codec in place (encode then
+ * decode). A Spinor block carries 55 anchors; head_dim=128 > 55, so split into
+ * ceil(d/55) balanced chunks (128 -> 43/43/42). The frozen 63-byte block layout
+ * is NOT modified; we just use ceil(d/55) of them per head vector. */
+static void kv_spinor_roundtrip(float *vec, int d) {
+    int nblk = (d + 54) / 55;
+    if (nblk < 1) return;
+    int base = d / nblk, extra = d % nblk, off = 0;
+    sp_spinor_block_t blk;
+    for (int b = 0; b < nblk; b++) {
+        int len = base + (b < extra ? 1 : 0);
+        sp_spinor_encode(vec + off, len, &blk);
+        (void)sp_spinor_decode(&blk, vec + off, len);   /* own freshly-encoded block: CRC valid */
+        off += len;
+    }
+}
 
 static float dot_f32(const float *a, const float *b, int n) {
 #if defined(SP_ENGINE_AVX2)
@@ -63,14 +88,49 @@ static float dot_f32(const float *a, const float *b, int n) {
  * residual per-logit gap is QK-RMSNorm-amplified F16 precision, not a logic error.) */
 static int g_f16_act = 0;
 
-/* Frobenius/Q8 weight path (E_CPU_3). SP_ENGINE_FROB selects how weight matmuls
- * run (see sp/frobenius_lift.h — per-row int8 codes + fp32 scale):
+/* Frobenius weight path. SP_ENGINE_FROB selects how weight matmuls run (see
+ * sp/frobenius_lift.h — per-row int8/int4 codes + fp32 scale):
  *   0 = pure f32 (default reference);
- *   1 = inline lift: accumulate q*x as float, scale once by row_scale/127;
- *   2 = dequant reference: lift each code back to f32 (q*row_scale/127) then the
- *       plain f32 dot. Modes 1 and 2 use identical Q8 weights and must agree to
- *       float-associativity (E_CPU_3's "identical to a reference fp32 matmul"). */
+ *   1 = Q8 inline lift: accumulate q*x as float, scale once by row_scale/127;
+ *   2 = Q8 dequant reference: lift each code back to f32 (q*row_scale/127) then
+ *       the plain f32 dot. Modes 1/2 use identical Q8 weights and must agree to
+ *       float-associativity (E_CPU_3's "identical to a reference fp32 matmul");
+ *   3 = Q4 inline lift (E_CPU_7): symmetric 4-bit codes [-7,7] packed two-per-byte,
+ *       scale once by row_scale/7; per-row calibration promotes high-error rows to
+ *       Q8 (mixed precision). v1 calibration is weight-only per-row sensitivity —
+ *       activation-based calibration is the Phase-4 refinement (roadmap §4.4/§7.5);
+ *   4 = Q4 dequant reference: same per-row codes/promotion as mode 3, lifted to
+ *       f32 then plain dot (the lift-faithfulness partner of mode 3).
+ * NOTE (cleanup): the Q4 quant/pack primitive should migrate into core/frobenius
+ * next to Q8 so CUDA/Vulkan/Hexagon share it; it lives here for now to keep the
+ * 2-CPU push in one repo (the engine already loops the Q8 lift locally too). */
 static int g_frob = 0;
+static float g_q4_promote = 0.25f;   /* promote a row to Q8 if its Q4 round-trip */
+static long  g_q4_promoted = 0;      /* rel-L2 error exceeds this (SP_Q4_PROMOTE) */
+static long  g_q4_rows = 0;          /* total rows seen on the Q4 path (for reporting) */
+
+/* round-half-away-from-zero to an integer, clamped to [-lim, lim] (the Frobenius
+ * convention; independent of the FP rounding mode). */
+static int frob_round_clamp(float x, int lim) {
+    int q = (int)copysignf(floorf(fabsf(x) + 0.5f), x);
+    return q > lim ? lim : (q < -lim ? -lim : q);
+}
+/* pack/unpack symmetric 4-bit codes in [-7,7] two-per-byte (low nibble = even
+ * index). Round-trips exactly for the [-8,7] two's-complement range, so it
+ * exercises real 4-bit storage without adding loss beyond the quantization. */
+static void q4_pack(const int8_t *codes, int n, uint8_t *nib) {
+    for (int i = 0; i < n; i += 2) {
+        uint8_t lo = (uint8_t)(codes[i] & 0xF);
+        uint8_t hi = (i + 1 < n) ? (uint8_t)(codes[i + 1] & 0xF) : 0u;
+        nib[i >> 1] = (uint8_t)(lo | (hi << 4));
+    }
+}
+static void q4_unpack(const uint8_t *nib, int n, int8_t *codes) {
+    for (int i = 0; i < n; i++) {
+        uint8_t v = (i & 1) ? (uint8_t)(nib[i >> 1] >> 4) : (uint8_t)(nib[i >> 1] & 0xF);
+        codes[i] = (int8_t)(v & 0x8 ? (int)v - 16 : (int)v);   /* sign-extend 4-bit */
+    }
+}
 
 /* bytes occupied by `n` contiguous elements of a ggml weight row. */
 static size_t row_bytes(uint32_t type, int n) {
@@ -100,28 +160,58 @@ static int matmul(const qwen3_model *m, const gguf_tensor *W,
             xr[i] = sp_f16_to_f32(sp_f32_to_f16(X[i]));
         X = xr;
     }
-    int8_t *q8 = NULL;
+    int8_t  *codes = NULL;          /* per-row int8/int4 codes (Q8: [-127,127], Q4: [-7,7]) */
+    uint8_t *nib   = NULL;          /* Q4 nibble-packed storage (two codes per byte) */
     if (g_frob) {
-        q8 = (int8_t *)malloc((size_t)in);
-        if (!q8) { free(wrow); free(xr); return 1; }
+        codes = (int8_t *)malloc((size_t)in);
+        if (!codes) { free(wrow); free(xr); return 1; }
+        if (g_frob >= 3) {
+            nib = (uint8_t *)malloc((size_t)(in + 1) / 2);
+            if (!nib) { free(wrow); free(xr); free(codes); return 1; }
+        }
     }
+    const int q4_path = (g_frob == 3 || g_frob == 4);
     for (int j = 0; j < out; j++) {
-        if (sp_dequant_row(base + (size_t)j * rb, W->type, in, wrow)) { free(wrow); free(xr); free(q8); return 1; }
+        if (sp_dequant_row(base + (size_t)j * rb, W->type, in, wrow)) {
+            free(wrow); free(xr); free(codes); free(nib); return 1;
+        }
         if (g_frob) {
             /* per-row Frobenius lift: quantize the f32 row once. */
             float s = sp_frob_row_scale(wrow, in);
-            for (int i = 0; i < in; i++) q8[i] = sp_frob_quant1(wrow[i], s);
-            float inv = s / (float)SP_FROB_QMAX;
-            if (g_frob == 2)                                  /* dequant reference */
-                for (int i = 0; i < in; i++) wrow[i] = (float)q8[i] * inv;
+            float inv;
+            if (!q4_path) {                                   /* Q8 (modes 1/2) */
+                for (int i = 0; i < in; i++) codes[i] = sp_frob_quant1(wrow[i], s);
+                inv = s / (float)SP_FROB_QMAX;
+            } else {                                          /* Q4 (modes 3/4) + calibration */
+                g_q4_rows++;
+                float inv4 = s / 7.0f;
+                double e2 = 0.0, n2 = 0.0;                    /* weight-only per-row sensitivity */
+                for (int i = 0; i < in; i++) {
+                    int q = (s == 0.0f) ? 0 : frob_round_clamp(wrow[i] / s * 7.0f, 7);
+                    codes[i] = (int8_t)q;
+                    double d = (double)wrow[i] - (double)((float)q * inv4);
+                    e2 += d * d; n2 += (double)wrow[i] * wrow[i];
+                }
+                if (n2 > 0.0 && sqrt(e2 / n2) > (double)g_q4_promote) {
+                    for (int i = 0; i < in; i++) codes[i] = sp_frob_quant1(wrow[i], s);  /* promote -> Q8 */
+                    inv = s / (float)SP_FROB_QMAX;
+                    g_q4_promoted++;
+                } else {
+                    q4_pack(codes, in, nib);                  /* exercise real 4-bit storage */
+                    q4_unpack(nib, in, codes);
+                    inv = inv4;
+                }
+            }
+            if (g_frob == 2 || g_frob == 4)                   /* dequant reference: lift to f32 */
+                for (int i = 0; i < in; i++) wrow[i] = (float)codes[i] * inv;
             for (int t = 0; t < n_tok; t++) {
                 const float *x = X + (size_t)t * in;
                 float acc = 0.0f;
-                if (g_frob == 2) {                            /* plain f32 dot of lifted weights */
+                if (g_frob == 2 || g_frob == 4) {             /* plain f32 dot of lifted weights */
                     for (int i = 0; i < in; i++) acc += wrow[i] * x[i];
                     Y[(size_t)t * out + j] = acc;
                 } else {                                      /* inline lift: scale once */
-                    for (int i = 0; i < in; i++) acc += (float)q8[i] * x[i];
+                    for (int i = 0; i < in; i++) acc += (float)codes[i] * x[i];
                     Y[(size_t)t * out + j] = acc * inv;
                 }
             }
@@ -132,7 +222,8 @@ static int matmul(const qwen3_model *m, const gguf_tensor *W,
     }
     free(wrow);
     free(xr);
-    free(q8);
+    free(codes);
+    free(nib);
     return 0;
 }
 
@@ -170,6 +261,19 @@ static const float *as_f32(const qwen3_model *m, const gguf_tensor *t) {
     return (const float *)gguf_tensor_data(m->gguf, t);
 }
 
+/* Read the runtime gate knobs once per forward/decode entry (all default OFF =
+ * the pure-f32 E_CPU_2 reference path). Shared by the prefill and the decode loop
+ * so both honor the same gates. */
+static void read_env_knobs(void) {
+    { const char *e = getenv("SP_ENGINE_F16_ACT");  g_f16_act  = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_FROB");     g_frob     = e ? atoi(e) : 0; }
+    { const char *e = getenv("SP_Q4_PROMOTE");      if (e) g_q4_promote = (float)atof(e);
+      g_q4_promoted = 0; g_q4_rows = 0; }
+    { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_NTT_ATTN"); g_ntt_attn = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_KV_SPINOR");       g_kv_spinor = (e && e[0] == '1'); }
+}
+
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
                      float *logits, sp_kste_tree_t *kv_trees) {
     const qwen3_config *c = &m->cfg;
@@ -182,10 +286,7 @@ int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
     const float eps = c->rms_eps, base = c->rope_freq_base;
     const float ascale = 1.0f / sqrtf((float)HD);
 
-    { const char *e = getenv("SP_ENGINE_F16_ACT");  g_f16_act  = (e && e[0] == '1'); }
-    { const char *e = getenv("SP_ENGINE_FROB");     g_frob     = e ? atoi(e) : 0; }
-    { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
-    { const char *e = getenv("SP_ENGINE_NTT_ATTN"); g_ntt_attn = (e && e[0] == '1'); }
+    read_env_knobs();
 
     int rc = 1;
     sp_pr_ctx *pr = NULL;          /* poly-ring context for NTT-attention (N=head_dim) */
@@ -248,6 +349,18 @@ int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
                 rmsnorm_head(kh, kn, HD, eps);
                 rope_neox(kh, HD, t, base);
             }
+        }
+
+        /* Inline VHT2+Spinor KV compression (E_CPU_8): store each cached K/V head
+         * vector as Spinor block(s) and read back the lossy reconstruction. Applied
+         * after QK-norm+RoPE so the cache holds position-finalized K (and post-proj
+         * V), exactly what the persistent-KV decode path will store. */
+        if (g_kv_spinor) {
+            for (int t = 0; t < n_tok; t++)
+                for (int h = 0; h < NKV; h++) {
+                    kv_spinor_roundtrip(k + (size_t)t * KVD + (size_t)h * HD, HD);
+                    kv_spinor_roundtrip(v + (size_t)t * KVD + (size_t)h * HD, HD);
+                }
         }
 
         /* KSTE KV-cache overlay (E_CPU_6): encode each cached K head-vector to its
@@ -330,4 +443,128 @@ done:
 
 int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float *logits) {
     return qwen3_forward_ex(m, tokens, n_tok, logits, NULL);
+}
+
+/* Q4 calibration stats from the most recent forward on the Q4 path (modes 3/4):
+ * how many weight rows were promoted to Q8 out of the total seen. Both 0 when
+ * SP_ENGINE_FROB!=3,4. Lets E_CPU_7 report the mixed-precision rate. */
+void qwen3_q4_stats(long *promoted, long *rows) {
+    if (promoted) *promoted = g_q4_promoted;
+    if (rows)     *rows     = g_q4_rows;
+}
+
+/* Persistent-KV O(n) greedy decode (GEN_KV). Same result as qwen3_generate but
+ * each token is processed once: per-layer K/V are computed for the single new
+ * token, stored post-RoPE into a position-indexed cache, and attention reads the
+ * cached K/V for all earlier positions. The expensive weight matmuls run on one
+ * token per step (O(n) total) instead of re-prefilling the whole prefix (O(n^2)).
+ *
+ * Honors the same gates as the prefill (SP_ENGINE_FROB, SP_CPU_SCALAR, SP_KV_SPINOR;
+ * the cache stores Spinor-compressed K/V when SP_KV_SPINOR=1). The NTT-attention
+ * path is prefill-only and not wired here. Greedy argmax must match qwen3_generate
+ * up to the float-reassociation floor (different softmax-sum lengths) — GEN_KV
+ * gates on argmax/sequence identity, not bit-equal logits. */
+int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                      int eos_id) {
+    if (!m || !seq || n_prompt <= 0 || n_gen < 0) return -1;
+    read_env_knobs();
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, FF = (int)c->n_ff, HD = (int)c->head_dim;
+    const int NH = (int)c->n_head, NKV = (int)c->n_head_kv;
+    const int QD = NH * HD, KVD = NKV * HD, group = NH / NKV, V = (int)c->n_vocab;
+    const float eps = c->rms_eps, base = c->rope_freq_base, ascale = 1.0f / sqrtf((float)HD);
+    const int P = n_prompt + n_gen;
+
+    int rc = -1, n = n_prompt;
+    float *kc   = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* K cache */
+    float *vc   = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* V cache */
+    float *x    = (float *)malloc((size_t)E * sizeof(float));   /* single-token residual */
+    float *nx   = (float *)malloc((size_t)E * sizeof(float));
+    float *q    = (float *)malloc((size_t)QD * sizeof(float));
+    float *knew = (float *)malloc((size_t)KVD * sizeof(float));
+    float *vnew = (float *)malloc((size_t)KVD * sizeof(float));
+    float *ao   = (float *)malloc((size_t)QD * sizeof(float));
+    float *ap   = (float *)malloc((size_t)E * sizeof(float));
+    float *gg   = (float *)malloc((size_t)FF * sizeof(float));
+    float *up   = (float *)malloc((size_t)FF * sizeof(float));
+    float *dn   = (float *)malloc((size_t)E * sizeof(float));
+    float *sc   = (float *)malloc((size_t)P * sizeof(float));
+    float *lg   = (float *)malloc((size_t)V * sizeof(float));
+    if (!kc || !vc || !x || !nx || !q || !knew || !vnew || !ao || !ap || !gg || !up || !dn || !sc || !lg)
+        goto done;
+
+    const uint8_t *emb = (const uint8_t *)gguf_tensor_data(m->gguf, m->token_embd);
+    size_t emb_rb = row_bytes(m->token_embd->type, E);
+    if (!emb || emb_rb == 0) goto done;
+
+    int produced = 0;
+    for (int pos = 0; pos < P; pos++) {
+        int tok = seq[pos];
+        if (sp_dequant_row(emb + (size_t)tok * emb_rb, m->token_embd->type, E, x)) goto done;
+
+        for (uint32_t L = 0; L < c->n_layers; L++) {
+            const qwen3_layer *ly = &m->layers[L];
+            rmsnorm(x, as_f32(m, ly->attn_norm), E, eps, nx);
+            if (matmul(m, ly->attn_q, nx, 1, E, QD, q))   goto done;
+            if (matmul(m, ly->attn_k, nx, 1, E, KVD, knew)) goto done;
+            if (matmul(m, ly->attn_v, nx, 1, E, KVD, vnew)) goto done;
+
+            const float *qn = as_f32(m, ly->attn_q_norm), *kn = as_f32(m, ly->attn_k_norm);
+            for (int h = 0; h < NH;  h++) { float *qh = q    + (size_t)h * HD; rmsnorm_head(qh, qn, HD, eps); rope_neox(qh, HD, pos, base); }
+            for (int h = 0; h < NKV; h++) { float *kh = knew + (size_t)h * HD; rmsnorm_head(kh, kn, HD, eps); rope_neox(kh, HD, pos, base); }
+            if (g_kv_spinor)
+                for (int h = 0; h < NKV; h++) { kv_spinor_roundtrip(knew + (size_t)h * HD, HD); kv_spinor_roundtrip(vnew + (size_t)h * HD, HD); }
+
+            float *kslot = kc + ((size_t)L * P + pos) * KVD;   /* store position-finalized K/V */
+            float *vslot = vc + ((size_t)L * P + pos) * KVD;
+            memcpy(kslot, knew, (size_t)KVD * sizeof(float));
+            memcpy(vslot, vnew, (size_t)KVD * sizeof(float));
+
+            for (int h = 0; h < NH; h++) {                     /* attention over cached [0,pos] */
+                int kvh = h / group;
+                const float *qh = q + (size_t)h * HD;
+                float maxs = -INFINITY;
+                for (int s = 0; s <= pos; s++) {
+                    const float *kh = kc + ((size_t)L * P + s) * KVD + (size_t)kvh * HD;
+                    float acc = 0.0f;
+                    for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+                    float d = acc * ascale; sc[s] = d; if (d > maxs) maxs = d;
+                }
+                float sum = 0.0f;
+                for (int s = 0; s <= pos; s++) { sc[s] = expf(sc[s] - maxs); sum += sc[s]; }
+                float inv = 1.0f / sum;
+                float *out = ao + (size_t)h * HD;
+                for (int i = 0; i < HD; i++) out[i] = 0.0f;
+                for (int s = 0; s <= pos; s++) {
+                    float w = sc[s] * inv;
+                    const float *vh = vc + ((size_t)L * P + s) * KVD + (size_t)kvh * HD;
+                    for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+                }
+            }
+            if (matmul(m, ly->attn_output, ao, 1, QD, E, ap)) goto done;
+            for (int i = 0; i < E; i++) x[i] += ap[i];
+
+            rmsnorm(x, as_f32(m, ly->ffn_norm), E, eps, nx);
+            if (matmul(m, ly->ffn_gate, nx, 1, E, FF, gg)) goto done;
+            if (matmul(m, ly->ffn_up,   nx, 1, E, FF, up)) goto done;
+            for (int i = 0; i < FF; i++) { float gv = gg[i]; gg[i] = gv / (1.0f + expf(-gv)) * up[i]; }
+            if (matmul(m, ly->ffn_down, gg, 1, FF, E, dn)) goto done;
+            for (int i = 0; i < E; i++) x[i] += dn[i];
+        }
+
+        if (pos >= n_prompt - 1 && produced < n_gen) {         /* emit next token */
+            rmsnorm(x, as_f32(m, m->output_norm), E, eps, nx);
+            if (matmul(m, m->output, nx, 1, E, V, lg)) goto done;
+            int amax = 0;
+            for (int j = 1; j < V; j++) if (lg[j] > lg[amax]) amax = j;
+            seq[n_prompt + produced] = amax;
+            produced++; n = n_prompt + produced;
+            if ((eos_id >= 0 && amax == eos_id) || produced >= n_gen) break;
+        }
+    }
+    rc = n;
+done:
+    free(kc); free(vc); free(x); free(nx); free(q); free(knew); free(vnew);
+    free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
+    return rc;
 }
