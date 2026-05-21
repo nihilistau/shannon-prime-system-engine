@@ -77,6 +77,18 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                      float *logits, sp_kste_tree_t *kv_trees);
 
+/* Greedy (argmax) autoregressive generation. `seq` holds `n_prompt` prompt token
+ * IDs and must have capacity for at least n_prompt + n_gen entries; generated
+ * tokens are appended in place. Stops after n_gen tokens, or earlier if `eos_id`
+ * (>= 0) is produced. Returns the new total sequence length, or < 0 on error.
+ *
+ * Reference implementation: each step re-runs qwen3_forward over the whole prefix
+ * and takes the argmax of the last position's logits. Correct by construction
+ * (it reuses the E_CPU_2-validated forward) at O(n^2) cost; a persistent-KV-cache
+ * decode is a later optimization to be validated for token-identity against this. */
+int qwen3_generate(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                   int eos_id);
+
 /* ── dequantization (forward pass reads weights through these) ── */
 float    sp_f16_to_f32(uint16_t h);
 /* Round f32 to IEEE half (round-to-nearest-even). Used by the ggml-faithful
