@@ -24,7 +24,11 @@
 #define SP_QWEN3_REF "qwen3_ref.bin"
 #endif
 
-#define N_GEN 24
+/* Tokens to generate. The O(n) decode is fast; the cost is the O(n^2) *reference*
+ * under scalar mode, so the default is small (8 consecutive argmax matches under
+ * scalar is strong sequence-identity evidence). SP_GEN_KV_N overrides for a
+ * thorough run (e.g. 24). */
+#define N_GEN_DEFAULT 8
 
 static void set_scalar(int on) {
 #ifdef _WIN32
@@ -54,14 +58,18 @@ static void GEN_KV(void) {
 
     set_scalar(1);   /* remove FMA reassociation as a confound */
 
-    int32_t *seq_ref = (int32_t *)malloc((size_t)(nt + N_GEN) * sizeof(int32_t));
-    int32_t *seq_kv  = (int32_t *)malloc((size_t)(nt + N_GEN) * sizeof(int32_t));
+    const char *ng = getenv("SP_GEN_KV_N");
+    int n_gen = ng ? atoi(ng) : N_GEN_DEFAULT;
+    if (n_gen < 1) n_gen = N_GEN_DEFAULT;
+
+    int32_t *seq_ref = (int32_t *)malloc((size_t)((int)nt + n_gen) * sizeof(int32_t));
+    int32_t *seq_kv  = (int32_t *)malloc((size_t)((int)nt + n_gen) * sizeof(int32_t));
     if (seq_ref && seq_kv) {
         memcpy(seq_ref, prompt, (size_t)nt * sizeof(int32_t));
         memcpy(seq_kv,  prompt, (size_t)nt * sizeof(int32_t));
-        int n_ref = qwen3_generate   (m, seq_ref, (int)nt, N_GEN, -1);   /* O(n^2) reference */
-        int n_kv  = qwen3_generate_kv(m, seq_kv,  (int)nt, N_GEN, -1);   /* O(n) persistent-KV */
-        SP_CHECK(n_ref == (int)nt + N_GEN && n_kv == n_ref, "both generated N_GEN tokens");
+        int n_ref = qwen3_generate   (m, seq_ref, (int)nt, n_gen, -1);   /* O(n^2) reference */
+        int n_kv  = qwen3_generate_kv(m, seq_kv,  (int)nt, n_gen, -1);   /* O(n) persistent-KV */
+        SP_CHECK(n_ref == (int)nt + n_gen && n_kv == n_ref, "both generated n_gen tokens");
         if (n_ref == n_kv) {
             int match = 1, first_bad = -1;
             for (int i = 0; i < n_ref; i++)
@@ -70,7 +78,7 @@ static void GEN_KV(void) {
                 fprintf(stderr, "    first divergence at position %d: ref %d vs kv %d\n",
                         first_bad, seq_ref[first_bad], seq_kv[first_bad]);
             else
-                fprintf(stderr, "    %d generated tokens identical (O(n) KV-cache == O(n^2) reference)\n", N_GEN);
+                fprintf(stderr, "    %d generated tokens identical (O(n) KV-cache == O(n^2) reference)\n", n_gen);
             SP_CHECK(match, "persistent-KV decode reproduces the reference token sequence");
         }
     } else {
