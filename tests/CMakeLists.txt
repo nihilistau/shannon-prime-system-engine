@@ -14,3 +14,13 @@ else()
 endif()
 
 add_test(NAME E_CPU_1 COMMAND test_loader)
+
+add_executable(test_model test_model.c)
+target_link_libraries(test_model PRIVATE sp_engine)
+target_compile_definitions(test_model PRIVATE SP_QWEN3_GGUF="${SP_QWEN3_GGUF}")
+if(MSVC)
+    target_compile_options(test_model PRIVATE /W4)
+else()
+    target_compile_options(test_model PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME MODEL_BIND COMMAND test_model)
