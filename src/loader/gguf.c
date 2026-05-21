@@ -311,3 +311,24 @@ const char *gguf_get_str(const gguf_ctx *c, const char *key) {
     const gguf_kv *kv = gguf_find_kv(c, key);
     return (kv && kv->type == GGUF_T_STRING) ? kv->str : NULL;
 }
+
+uint64_t gguf_kv_str_array(const gguf_ctx *c, const gguf_kv *kv,
+                           const char **ptrs, uint64_t *lens, uint64_t cap) {
+    if (!c || !kv || kv->type != GGUF_T_ARRAY || kv->arr_type != GGUF_T_STRING || !kv->arr_data)
+        return 0;
+    const uint8_t *p   = (const uint8_t *)kv->arr_data;
+    const uint8_t *end = c->base + c->size;
+    uint64_t n = kv->arr_len < cap ? kv->arr_len : cap;
+    for (uint64_t i = 0; i < n; i++) {
+        if ((uint64_t)(end - p) < 8) return i;                 /* truncated length */
+        uint64_t len = (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
+                       ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40) |
+                       ((uint64_t)p[6] << 48) | ((uint64_t)p[7] << 56);
+        p += 8;
+        if (len > (uint64_t)(end - p)) return i;               /* OOB string bytes */
+        ptrs[i] = (const char *)p;
+        lens[i] = len;
+        p += len;
+    }
+    return n;
+}

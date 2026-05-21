@@ -7,6 +7,7 @@ add_library(sp_engine STATIC
     forward/model.c
     forward/forward.c
     forward/generate.c
+    tokenizer/tokenizer.c
 )
 
 target_include_directories(sp_engine PUBLIC ${CMAKE_SOURCE_DIR}/include)

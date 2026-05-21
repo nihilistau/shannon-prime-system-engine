@@ -90,6 +90,12 @@ const gguf_kv *gguf_find_kv(const gguf_ctx *ctx, const char *key);
 int          gguf_get_u64(const gguf_ctx *ctx, const char *key, uint64_t *out);
 int          gguf_get_f32(const gguf_ctx *ctx, const char *key, float *out);
 const char  *gguf_get_str(const gguf_ctx *ctx, const char *key); /* NULL if absent */
+/* One-pass safe walk of a STRING-array KV (e.g. tokenizer.ggml.tokens/merges):
+ * fills `ptrs`/`lens` (capacity `cap`) with pointers into the mapping and lengths
+ * (strings are NOT NUL-terminated). Returns the number written (min(arr_len,cap),
+ * fewer if a bound is hit). 0 if the KV is missing or not a string array. */
+uint64_t gguf_kv_str_array(const gguf_ctx *ctx, const gguf_kv *kv,
+                           const char **ptrs, uint64_t *lens, uint64_t cap);
 
 /* bytes-per-element-block helpers for a ggml_type (for size validation). */
 const char *ggml_type_name(uint32_t type);
