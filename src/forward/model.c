@@ -1,5 +1,7 @@
 /* model.c — Qwen3 config + weight binding + dequant. See sp_engine/model.h. */
+#define _CRT_SECURE_NO_WARNINGS   /* getenv (SP_ARENA) is fine here (MSVC C4996) */
 #include "sp_engine/model.h"
+#include "sp_engine/arena.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,11 +150,26 @@ qwen3_model *qwen3_load(const char *path) {
     /* QK-norm is present iff layer 0 carries it (uniform across layers). */
     m->cfg.has_qk_norm = (m->layers[0].attn_q_norm != NULL && m->layers[0].attn_k_norm != NULL);
 
+    /* Packed-weight arena (roadmap §4.8), env-gated: SP_ARENA=q8|q4. Quantizes
+     * the matmul weights once; the forward then lifts inline from the arena.
+     * Default unset => NULL => the dequant-on-demand reference path (E_CPU_2). */
+    {
+        const char *e = getenv("SP_ARENA");
+        if (e && (strcmp(e, "q8") == 0 || strcmp(e, "q4") == 0)) {
+            int prec = (e[1] == '8') ? 8 : 4;
+            const char *pe = getenv("SP_Q4_PROMOTE");
+            float promote = pe ? (float)atof(pe) : 0.25f;
+            m->arena = sp_arena_build(m, prec, promote);
+            if (!m->arena) { qwen3_free(m); return NULL; }   /* fail loudly, no silent fallback */
+        }
+    }
+
     return m;
 }
 
 void qwen3_free(qwen3_model *m) {
     if (!m) return;
+    sp_arena_free(m->arena);
     free(m->layers);
     if (m->gguf) gguf_close(m->gguf);
     free(m);

@@ -47,13 +47,16 @@ typedef struct {
     const gguf_tensor *ffn_down;      /* [n_ff, n_embd]                  */
 } qwen3_layer;
 
-typedef struct {
+struct sp_arena;   /* sp_engine/arena.h — packed-weight arena (Phase 1a) */
+
+typedef struct qwen3_model {
     gguf_ctx          *gguf;          /* owned */
     qwen3_config       cfg;
     const gguf_tensor *token_embd;    /* [n_embd, n_vocab]               */
     const gguf_tensor *output_norm;   /* [n_embd]                        */
     const gguf_tensor *output;        /* [n_embd, n_vocab] (==token_embd if tied) */
     qwen3_layer       *layers;        /* n_layers */
+    struct sp_arena   *arena;         /* packed Q8/Q4 matmul weights when SP_ARENA set; else NULL */
 } qwen3_model;
 
 /* Open the GGUF, read the qwen3 config, and bind every weight. Returns NULL on

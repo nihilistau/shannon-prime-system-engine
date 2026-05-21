@@ -8,6 +8,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS   /* getenv is fine here (MSVC C4996) */
 #include "sp_engine/model.h"
+#include "sp_engine/arena.h"
 #include "sp/frobenius_lift.h"
 #include "sp/poly_ring.h"
 #include "sp/spinor_block.h"
@@ -119,9 +120,40 @@ static size_t row_bytes(uint32_t type, int n) {
     }
 }
 
+/* Arena matmul: Y[t,j] = (sum_i code[j,i]*X[t,i]) * row_scale[j]/qmax, reading the
+ * packed Q8/Q4 codes directly (the §4.8 inline-lift production path). Identical
+ * arithmetic to the FROB=1 (Q8) / FROB=3 (Q4) GGUF path, so it is byte-identical
+ * to them — only the weight bytes' home differs (arena vs re-quantized mapping). */
+static int matmul_arena(const sp_arena_tensor *at, const float *X,
+                        int n_tok, int in, int out, float *Y) {
+    if (at->rows != out || at->cols != in) return 1;
+    int8_t *unp = (int8_t *)malloc((size_t)in);   /* Q4 unpack scratch */
+    if (!unp) return 1;
+    for (int j = 0; j < out; j++) {
+        const uint8_t *rc = at->codes + at->row_off[j];
+        const int8_t *cp;
+        float inv;
+        if (at->row_prec[j] == 8) { cp = (const int8_t *)rc; inv = at->row_scale[j] / 127.0f; }
+        else { sp_frob_q4_unpack(rc, in, unp); cp = unp; inv = at->row_scale[j] / 7.0f; }
+        for (int t = 0; t < n_tok; t++) {
+            const float *x = X + (size_t)t * in;
+            float acc = 0.0f;
+            for (int i = 0; i < in; i++) acc += (float)cp[i] * x[i];
+            Y[(size_t)t * out + j] = acc * inv;
+        }
+    }
+    free(unp);
+    return 0;
+}
+
 /* Y[t,j] = sum_i W[i,j] * X[t,i]; W is the gguf tensor [in, out] (ne0=in). */
 static int matmul(const qwen3_model *m, const gguf_tensor *W,
                   const float *X, int n_tok, int in, int out, float *Y) {
+    if (m->arena) {                            /* packed-weight arena (§4.8) takes precedence */
+        const sp_arena_tensor *at = sp_arena_find(m->arena, W->name);
+        if (at) return matmul_arena(at, X, n_tok, in, out, Y);
+        /* not arena-ized (e.g. token_embd in 1a): fall through to the GGUF path */
+    }
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(m->gguf, W);
     size_t rb = row_bytes(W->type, in);
     if (!base || rb == 0) return 1;
