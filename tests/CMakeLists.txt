@@ -24,3 +24,17 @@ else()
     target_compile_options(test_model PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME MODEL_BIND COMMAND test_model)
+
+set(SP_QWEN3_REF
+    "D:/Files/models/Qwen/Qwen3-0.6B-GGUF/qwen3_ref.bin"
+    CACHE FILEPATH "Oracle logit dump (tools/oracle/dump_logits) for E_CPU_2")
+add_executable(test_forward test_forward.c)
+target_link_libraries(test_forward PRIVATE sp_engine)
+target_compile_definitions(test_forward PRIVATE
+    SP_QWEN3_GGUF="${SP_QWEN3_GGUF}" SP_QWEN3_REF="${SP_QWEN3_REF}")
+if(MSVC)
+    target_compile_options(test_forward PRIVATE /W4)
+else()
+    target_compile_options(test_forward PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME E_CPU_2 COMMAND test_forward)

@@ -60,8 +60,20 @@ typedef struct {
 qwen3_model *qwen3_load(const char *path);
 void         qwen3_free(qwen3_model *m);
 
+/* f32 reference forward pass over a token-ID sequence (prefill, causal).
+ * Writes logits for every position into `logits` (caller-allocated,
+ * n_tokens * n_vocab, position-major). Returns 0 on success.
+ * SP_ENGINE_BACKEND=cpu scalar reference path; correctness gate E_CPU_2. */
+int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
+                  float *logits);
+
 /* ── dequantization (forward pass reads weights through these) ── */
-float sp_f16_to_f32(uint16_t h);
+float    sp_f16_to_f32(uint16_t h);
+/* Round f32 to IEEE half (round-to-nearest-even). Used by the ggml-faithful
+ * validation path: ggml downcasts matmul activations (src1) to F16 when the
+ * weight (src0) is F16, so SP_ENGINE_F16_ACT=1 mimics that to match the oracle
+ * bit-for-bit under matched precision. */
+uint16_t sp_f32_to_f16(float f);
 /* Dequantize `n` elements of a tensor row starting at `src` (a pointer into the
  * mapping) of the given ggml_type into `dst` (f32). Supports F32, F16, Q8_0.
  * Returns 0 on success, nonzero for an unsupported type. */

@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -51,6 +52,10 @@ int main(int argc, char **argv) {
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx   = (uint32_t)n + 8;
     cp.n_batch = (uint32_t)n + 8;
+    if (argc > 4) { cp.n_threads = std::atoi(argv[4]); cp.n_threads_batch = cp.n_threads; }  // probe f32 summation-order sensitivity
+    cp.type_k  = GGML_TYPE_F32;   // full-precision KV cache: apples-to-apples
+    cp.type_v  = GGML_TYPE_F32;   // vs the engine's f32 reference path
+    cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     llama_context *ctx = llama_init_from_model(model, cp);
     if (!ctx) { std::fprintf(stderr, "context init failed\n"); return 1; }
 

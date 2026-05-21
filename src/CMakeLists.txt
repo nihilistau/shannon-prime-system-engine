@@ -5,6 +5,7 @@
 add_library(sp_engine STATIC
     loader/gguf.c
     forward/model.c
+    forward/forward.c
 )
 
 target_include_directories(sp_engine PUBLIC ${CMAKE_SOURCE_DIR}/include)

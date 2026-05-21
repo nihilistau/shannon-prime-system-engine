@@ -26,6 +26,31 @@ float sp_f16_to_f32(uint16_t h) {
     float out; memcpy(&out, &f, 4); return out;
 }
 
+uint16_t sp_f32_to_f16(float f) {
+    uint32_t x; memcpy(&x, &f, 4);
+    uint32_t sign = (x >> 16) & 0x8000u;
+    uint32_t e8   = (x >> 23) & 0xFFu;
+    uint32_t man  = x & 0x7FFFFFu;
+    if (e8 == 0xFFu)                                /* inf / nan */
+        return (uint16_t)(sign | 0x7C00u | (man ? 0x200u : 0u));
+    int32_t exp = (int32_t)e8 - 127 + 15;           /* rebias to half */
+    if (exp >= 0x1F) return (uint16_t)(sign | 0x7C00u);   /* overflow -> inf */
+    if (exp <= 0) {                                 /* subnormal / underflow */
+        if (exp < -10) return (uint16_t)sign;       /* magnitude too small -> 0 */
+        man |= 0x800000u;                           /* restore implicit 1 */
+        int shift = 14 - exp;                       /* shift in [14,24] */
+        uint32_t half = man >> shift;
+        uint32_t rem  = man & ((1u << shift) - 1u);
+        uint32_t mid  = 1u << (shift - 1);
+        if (rem > mid || (rem == mid && (half & 1u))) half++;  /* nearest-even */
+        return (uint16_t)(sign | half);
+    }
+    uint16_t h   = (uint16_t)(sign | ((uint32_t)exp << 10) | (man >> 13));
+    uint32_t rem = man & 0x1FFFu;
+    if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) h++;  /* carry ripples into exp */
+    return h;
+}
+
 int sp_dequant_row(const void *src, uint32_t type, int n, float *dst) {
     if (n < 0) return 1;
     switch (type) {
