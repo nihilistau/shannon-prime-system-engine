@@ -20,16 +20,32 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        std::fprintf(stderr, "usage: %s <model.gguf> <out.bin> <prompt>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <model.gguf> <out.bin> <prompt | @prompt_file>\n", argv[0]);
         return 2;
     }
     const char *model_path = argv[1];
     const char *out_path   = argv[2];
-    const char *prompt     = argv[3];
+    // The prompt: a literal arg, or "@path" to read raw bytes from a file. The
+    // file form is the only reliable way to pass non-ASCII UTF-8 on Windows,
+    // where argv is mangled through the system code page before we see it.
+    std::string prompt_buf;
+    const char *prompt = argv[3];
+    if (argv[3][0] == '@') {
+        FILE *pf = std::fopen(argv[3] + 1, "rb");
+        if (!pf) { std::fprintf(stderr, "cannot open prompt file %s\n", argv[3] + 1); return 1; }
+        std::fseek(pf, 0, SEEK_END); long sz = std::ftell(pf); std::fseek(pf, 0, SEEK_SET);
+        prompt_buf.resize(sz > 0 ? (size_t)sz : 0);
+        if (sz > 0 && std::fread(&prompt_buf[0], 1, (size_t)sz, pf) != (size_t)sz) {
+            std::fprintf(stderr, "short read on prompt file\n"); std::fclose(pf); return 1;
+        }
+        std::fclose(pf);
+        prompt = prompt_buf.c_str();
+    }
 
     llama_backend_init();
 

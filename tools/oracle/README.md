@@ -37,3 +37,27 @@ pass, and asserts max-token logit diff ≤ 1e-4 abs / ≤ 0.1% rel.
 
 Verified: `Qwen3-0.6B-f16.gguf` + "The capital of France is" → 5 tokens ×
 151936 vocab.
+
+**Non-ASCII prompts:** pass `@path` as the prompt arg to read the prompt bytes
+from a UTF-8 file. This is the only reliable way to feed multibyte UTF-8 on
+Windows, where `argv` is mangled through the system code page before the program
+sees it (it silently corrupts CJK/accented input into mojibake).
+
+## Tokenizer-encode oracle (TOK_ENCODE)
+
+The encode side (`sp_tokenizer_encode`, Qwen2 byte-level BPE) is validated to
+reproduce stock-llama IDs byte-for-byte. Supporting tools (Python, throwaway —
+kept committed as parity oracles, like the NTT `__int128` reference):
+
+- `gguf_peek.py` — minimal GGUF metadata reader; dumps `tokenizer.ggml.*`
+  (pre type, add_bos, merges) and decodes ref IDs back to the prompt string.
+- `bpe_proto.py` — reference Python implementation of the full Qwen2 pipeline
+  (regex pre-tok → byte-level → ranked BPE → specials). The algorithm oracle:
+  the C port must match it. Run `python -X utf8 tools/oracle/bpe_proto.py` to
+  re-verify against the probe set (`SP_PROBE_DIR` points at the oracle dumps).
+- `gen_unicode_tables.py` — generates `src/tokenizer/unicode_ranges.h`
+  (`\p{L}`/`\p{N}`/`\s` ranges) from Python `unicodedata` + the `regex` module.
+  Self-contained, not copied from llama.cpp. Re-run if a Unicode boundary drifts.
+- `gen_encode_fixture.py` — emits the byte-escaped C parity rows
+  (CJK/accented/Devanagari/digits/whitespace/specials) for `test_tokenizer.c`
+  from the oracle probe dumps.
