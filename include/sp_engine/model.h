@@ -11,6 +11,7 @@
 #define SP_ENGINE_MODEL_H
 
 #include "sp_engine/gguf.h"
+#include "sp/kste.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -66,6 +67,15 @@ void         qwen3_free(qwen3_model *m);
  * SP_ENGINE_BACKEND=cpu scalar reference path; correctness gate E_CPU_2. */
 int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                   float *logits);
+
+/* As qwen3_forward, but if `kv_trees` is non-NULL it additionally KSTE-encodes
+ * every cached K head-vector (the KSTE KV-cache overlay, gated in production by
+ * SP_KSTE_KV=1; E_CPU_6). Each post-norm/post-RoPE K head-vector is quantized to
+ * int32 and encoded to its 64-byte signature. `kv_trees` must hold
+ * n_layers * n_tokens * n_head_kv entries, indexed
+ * ((L*n_tokens + t)*n_head_kv + h). Pass NULL to skip (== qwen3_forward). */
+int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tokens,
+                     float *logits, sp_kste_tree_t *kv_trees);
 
 /* ── dequantization (forward pass reads weights through these) ── */
 float    sp_f16_to_f32(uint16_t h);

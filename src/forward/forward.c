@@ -31,6 +31,7 @@ static int g_scalar = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
  * scale. Sieve OFF. Softmax + V-sum stay f32. Gated against the f32-dot baseline. */
 static int g_ntt_attn = 0;
 #define SP_NTT_ATTN_SCALE 65536.0   /* 2^16: |q_int| ~ 2^21, |<q,k>| ~ 2^49 << M/2 ~ 2^59 */
+#define SP_KSTE_KV_SCALE  65536.0   /* fixed int32 quant for KSTE KV signatures (E_CPU_6) */
 
 static float dot_f32(const float *a, const float *b, int n) {
 #if defined(SP_ENGINE_AVX2)
@@ -169,7 +170,8 @@ static const float *as_f32(const qwen3_model *m, const gguf_tensor *t) {
     return (const float *)gguf_tensor_data(m->gguf, t);
 }
 
-int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float *logits) {
+int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                     float *logits, sp_kste_tree_t *kv_trees) {
     const qwen3_config *c = &m->cfg;
     const int E = (int)c->n_embd, FF = (int)c->n_ff, HD = (int)c->head_dim;
     const int NH = (int)c->n_head, NKV = (int)c->n_head_kv;
@@ -188,6 +190,7 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
     int rc = 1;
     sp_pr_ctx *pr = NULL;          /* poly-ring context for NTT-attention (N=head_dim) */
     int32_t *qi = NULL, *ki = NULL;
+    int32_t *kq = NULL;            /* int32 scratch for KSTE KV encoding */
     float *x   = (float *)malloc((size_t)n_tok * E * sizeof(float));   /* residual stream */
     float *nx  = (float *)malloc((size_t)n_tok * E * sizeof(float));   /* normed */
     float *q   = (float *)malloc((size_t)n_tok * QD * sizeof(float));
@@ -206,6 +209,10 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
         qi = (int32_t *)malloc((size_t)HD * sizeof(int32_t));
         ki = (int32_t *)malloc((size_t)HD * sizeof(int32_t));
         if (!pr || !qi || !ki) goto done;
+    }
+    if (kv_trees) {
+        kq = (int32_t *)malloc((size_t)HD * sizeof(int32_t));
+        if (!kq) goto done;
     }
 
     /* ── embedding lookup: token t's embedding is the contiguous E floats at t*E ── */
@@ -241,6 +248,18 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
                 rmsnorm_head(kh, kn, HD, eps);
                 rope_neox(kh, HD, t, base);
             }
+        }
+
+        /* KSTE KV-cache overlay (E_CPU_6): encode each cached K head-vector to its
+         * 64-byte signature. Deterministic int32 quantization -> byte-identical. */
+        if (kv_trees) {
+            for (int t = 0; t < n_tok; t++)
+                for (int h = 0; h < NKV; h++) {
+                    const float *kh = k + (size_t)t * KVD + (size_t)h * HD;
+                    for (int i = 0; i < HD; i++)
+                        kq[i] = (int32_t)lrintf(kh[i] * (float)SP_KSTE_KV_SCALE);
+                    sp_kste_encode(kq, HD, &kv_trees[((size_t)L * n_tok + t) * NKV + h]);
+                }
         }
 
         /* GQA causal attention */
@@ -305,6 +324,10 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
 done:
     free(x); free(nx); free(q); free(k); free(v); free(ao); free(ap);
     free(g); free(up); free(dn); free(sc);
-    free(qi); free(ki); sp_pr_free(pr);
+    free(qi); free(ki); free(kq); sp_pr_free(pr);
     return rc;
+}
+
+int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float *logits) {
+    return qwen3_forward_ex(m, tokens, n_tok, logits, NULL);
 }
