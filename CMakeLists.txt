@@ -10,37 +10,35 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-option(SP_ENGINE_BUILD_TESTS "Build engine tests" ON)
-option(SP_ENGINE_WITH_CUDA "Build with CUDA acceleration" OFF)
+# ── Options (the per-backend build scripts under scripts/build/ pass these) ──
+set(SP_ENGINE_BACKEND "cpu" CACHE STRING "Active backend: cpu|cuda|vulkan|hexagon")
+option(SP_ENGINE_WITH_AVX2   "CPU backend: emit AVX2 path"   ON)
+option(SP_ENGINE_WITH_AVX512 "CPU backend: emit AVX512 path" OFF)
+option(SP_ENGINE_WITH_CUDA   "Build with CUDA acceleration"  OFF)
+option(SP_ENGINE_BUILD_TESTS "Build engine tests"            ON)
 
 if(SP_ENGINE_WITH_CUDA)
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
 endif()
 
-# ──────────────────────────────────────────────────────────────────────
-# Phase 0 stub.  Source layout is:
-#   src/          — engine sources (GGUF loader, forward pass)
-#   include/sp/   — public headers
-#   tests/        — engine tests
-#   lib/shannon-prime-system  — submodule pointer to math core (Phase 5+)
-#
-# Each phase in shannon-prime-lattice/papers/PPT-LAT-Roadmap.md names
-# the deliverables; they get added to the build here.  Phase 5 lands
-# the engine bootstrap; Phase 6 lands two-node sharded inference.
-# ──────────────────────────────────────────────────────────────────────
+# ── Math core (Phase-1 primitives) via the submodule ───────────────────────
+# Engine consumes sp_ok_arith / sp_ntt_crt / sp_poly_ring / sp_vht2 /
+# sp_frobenius / sp_kste. Build the submodule's libs but NOT its unit tests.
+set(SP_SYSTEM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/shannon-prime-system/CMakeLists.txt)
+    message(FATAL_ERROR "math-core submodule missing — run: git submodule update --init")
+endif()
+add_subdirectory(lib/shannon-prime-system)
 
-# Sub-targets enabled per phase:
-# add_subdirectory(lib/shannon-prime-system)
-# add_subdirectory(src)
-# add_subdirectory(include)
+# ── Engine library + backend ────────────────────────────────────────────────
+add_subdirectory(src)
 
 if(SP_ENGINE_BUILD_TESTS)
     enable_testing()
-    # add_subdirectory(tests)  # enabled in Phase 5
+    add_subdirectory(tests)
 endif()
 
-message(STATUS "shannon-prime-system-engine ${PROJECT_VERSION} configured (Phase 0)")
-if(SP_ENGINE_WITH_CUDA)
-    message(STATUS "  CUDA acceleration: ENABLED")
-endif()
+message(STATUS "shannon-prime-system-engine ${PROJECT_VERSION} configured "
+               "(backend=${SP_ENGINE_BACKEND}, AVX2=${SP_ENGINE_WITH_AVX2}, "
+               "AVX512=${SP_ENGINE_WITH_AVX512})")
