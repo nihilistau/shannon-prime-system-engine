@@ -8,6 +8,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS   /* getenv is fine here (MSVC C4996) */
 #include "sp_engine/model.h"
+#include "sp/frobenius_lift.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,15 @@
  * path is actually *closer* to ggml in KL terms; F16-act exists to demonstrate the
  * residual per-logit gap is QK-RMSNorm-amplified F16 precision, not a logic error.) */
 static int g_f16_act = 0;
+
+/* Frobenius/Q8 weight path (E_CPU_3). SP_ENGINE_FROB selects how weight matmuls
+ * run (see sp/frobenius_lift.h — per-row int8 codes + fp32 scale):
+ *   0 = pure f32 (default reference);
+ *   1 = inline lift: accumulate q*x as float, scale once by row_scale/127;
+ *   2 = dequant reference: lift each code back to f32 (q*row_scale/127) then the
+ *       plain f32 dot. Modes 1 and 2 use identical Q8 weights and must agree to
+ *       float-associativity (E_CPU_3's "identical to a reference fp32 matmul"). */
+static int g_frob = 0;
 
 /* bytes occupied by `n` contiguous elements of a ggml weight row. */
 static size_t row_bytes(uint32_t type, int n) {
@@ -49,17 +59,43 @@ static int matmul(const qwen3_model *m, const gguf_tensor *W,
             xr[i] = sp_f16_to_f32(sp_f32_to_f16(X[i]));
         X = xr;
     }
+    int8_t *q8 = NULL;
+    if (g_frob) {
+        q8 = (int8_t *)malloc((size_t)in);
+        if (!q8) { free(wrow); free(xr); return 1; }
+    }
     for (int j = 0; j < out; j++) {
-        if (sp_dequant_row(base + (size_t)j * rb, W->type, in, wrow)) { free(wrow); free(xr); return 1; }
-        for (int t = 0; t < n_tok; t++) {
-            const float *x = X + (size_t)t * in;
-            float acc = 0.0f;
-            for (int i = 0; i < in; i++) acc += wrow[i] * x[i];
-            Y[(size_t)t * out + j] = acc;
+        if (sp_dequant_row(base + (size_t)j * rb, W->type, in, wrow)) { free(wrow); free(xr); free(q8); return 1; }
+        if (g_frob) {
+            /* per-row Frobenius lift: quantize the f32 row once. */
+            float s = sp_frob_row_scale(wrow, in);
+            for (int i = 0; i < in; i++) q8[i] = sp_frob_quant1(wrow[i], s);
+            float inv = s / (float)SP_FROB_QMAX;
+            if (g_frob == 2)                                  /* dequant reference */
+                for (int i = 0; i < in; i++) wrow[i] = (float)q8[i] * inv;
+            for (int t = 0; t < n_tok; t++) {
+                const float *x = X + (size_t)t * in;
+                float acc = 0.0f;
+                if (g_frob == 2) {                            /* plain f32 dot of lifted weights */
+                    for (int i = 0; i < in; i++) acc += wrow[i] * x[i];
+                    Y[(size_t)t * out + j] = acc;
+                } else {                                      /* inline lift: scale once */
+                    for (int i = 0; i < in; i++) acc += (float)q8[i] * x[i];
+                    Y[(size_t)t * out + j] = acc * inv;
+                }
+            }
+        } else {
+            for (int t = 0; t < n_tok; t++) {
+                const float *x = X + (size_t)t * in;
+                float acc = 0.0f;
+                for (int i = 0; i < in; i++) acc += wrow[i] * x[i];
+                Y[(size_t)t * out + j] = acc;
+            }
         }
     }
     free(wrow);
     free(xr);
+    free(q8);
     return 0;
 }
 
@@ -109,6 +145,7 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
     const float ascale = 1.0f / sqrtf((float)HD);
 
     { const char *e = getenv("SP_ENGINE_F16_ACT"); g_f16_act = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_FROB");    g_frob    = e ? atoi(e) : 0; }
 
     int rc = 1;
     float *x   = (float *)malloc((size_t)n_tok * E * sizeof(float));   /* residual stream */
