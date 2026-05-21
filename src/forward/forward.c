@@ -14,6 +14,37 @@
 #include <string.h>
 #include <math.h>
 
+#if defined(SP_ENGINE_AVX2) || defined(SP_ENGINE_AVX512)
+#include <immintrin.h>
+#endif
+
+/* f32 dot product. AVX2 (8-wide, FMA) when compiled with SP_ENGINE_AVX2 and not
+ * forced scalar; falls back to the same sequential scalar reduction the scalar
+ * path uses for the tail. E_CPU_4 gates the AVX2 path against the scalar one. */
+static int g_scalar = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
+
+static float dot_f32(const float *a, const float *b, int n) {
+#if defined(SP_ENGINE_AVX2)
+    if (!g_scalar) {
+        __m256 acc = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8)
+            acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), acc);
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        float s = _mm_cvtss_f32(lo);
+        for (; i < n; i++) s += a[i] * b[i];   /* scalar tail */
+        return s;
+    }
+#endif
+    float s = 0.0f;
+    for (int i = 0; i < n; i++) s += a[i] * b[i];
+    return s;
+}
+
 /* ggml-faithful precision mode: when SP_ENGINE_F16_ACT=1, matmul rounds each
  * activation to F16 before the dot, mimicking ggml downcasting src1 to F16 for an
  * F16 weight. Read once (see qwen3_forward). Default 0 = pure-f32 reference path,
@@ -85,12 +116,8 @@ static int matmul(const qwen3_model *m, const gguf_tensor *W,
                 }
             }
         } else {
-            for (int t = 0; t < n_tok; t++) {
-                const float *x = X + (size_t)t * in;
-                float acc = 0.0f;
-                for (int i = 0; i < in; i++) acc += wrow[i] * x[i];
-                Y[(size_t)t * out + j] = acc;
-            }
+            for (int t = 0; t < n_tok; t++)
+                Y[(size_t)t * out + j] = dot_f32(wrow, X + (size_t)t * in, in);
         }
     }
     free(wrow);
@@ -146,6 +173,7 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
 
     { const char *e = getenv("SP_ENGINE_F16_ACT"); g_f16_act = (e && e[0] == '1'); }
     { const char *e = getenv("SP_ENGINE_FROB");    g_frob    = e ? atoi(e) : 0; }
+    { const char *e = getenv("SP_CPU_SCALAR");     g_scalar  = (e && e[0] == '1'); }
 
     int rc = 1;
     float *x   = (float *)malloc((size_t)n_tok * E * sizeof(float));   /* residual stream */

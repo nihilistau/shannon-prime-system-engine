@@ -20,3 +20,23 @@ if(MSVC)
 else()
     target_compile_options(sp_engine PRIVATE -Wall -Wextra -Wshadow)
 endif()
+
+# AVX2 / AVX512 matmul path (E_CPU_4). Compiling with the ISA enables the
+# intrinsics under SP_ENGINE_AVX2 / SP_ENGINE_AVX512; the scalar reference stays
+# selectable at runtime via SP_CPU_SCALAR=1 (roadmap §8.7).
+if(SP_ENGINE_WITH_AVX2)
+    target_compile_definitions(sp_engine PRIVATE SP_ENGINE_AVX2=1)
+    if(MSVC)
+        target_compile_options(sp_engine PRIVATE /arch:AVX2)
+    else()
+        target_compile_options(sp_engine PRIVATE -mavx2 -mfma)
+    endif()
+endif()
+if(SP_ENGINE_WITH_AVX512)
+    target_compile_definitions(sp_engine PRIVATE SP_ENGINE_AVX512=1)
+    if(MSVC)
+        target_compile_options(sp_engine PRIVATE /arch:AVX512)
+    else()
+        target_compile_options(sp_engine PRIVATE -mavx512f)
+    endif()
+endif()
