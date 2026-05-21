@@ -101,36 +101,13 @@ static int g_f16_act = 0;
  *       activation-based calibration is the Phase-4 refinement (roadmap §4.4/§7.5);
  *   4 = Q4 dequant reference: same per-row codes/promotion as mode 3, lifted to
  *       f32 then plain dot (the lift-faithfulness partner of mode 3).
- * NOTE (cleanup): the Q4 quant/pack primitive should migrate into core/frobenius
- * next to Q8 so CUDA/Vulkan/Hexagon share it; it lives here for now to keep the
- * 2-CPU push in one repo (the engine already loops the Q8 lift locally too). */
+ * The Q4 quant/pack/calibration primitives live in core/frobenius (sp_frob_q4_*)
+ * so every backend shares one implementation; the engine supplies only the
+ * per-row promotion policy (the SP_Q4_PROMOTE threshold). */
 static int g_frob = 0;
 static float g_q4_promote = 0.25f;   /* promote a row to Q8 if its Q4 round-trip */
 static long  g_q4_promoted = 0;      /* rel-L2 error exceeds this (SP_Q4_PROMOTE) */
 static long  g_q4_rows = 0;          /* total rows seen on the Q4 path (for reporting) */
-
-/* round-half-away-from-zero to an integer, clamped to [-lim, lim] (the Frobenius
- * convention; independent of the FP rounding mode). */
-static int frob_round_clamp(float x, int lim) {
-    int q = (int)copysignf(floorf(fabsf(x) + 0.5f), x);
-    return q > lim ? lim : (q < -lim ? -lim : q);
-}
-/* pack/unpack symmetric 4-bit codes in [-7,7] two-per-byte (low nibble = even
- * index). Round-trips exactly for the [-8,7] two's-complement range, so it
- * exercises real 4-bit storage without adding loss beyond the quantization. */
-static void q4_pack(const int8_t *codes, int n, uint8_t *nib) {
-    for (int i = 0; i < n; i += 2) {
-        uint8_t lo = (uint8_t)(codes[i] & 0xF);
-        uint8_t hi = (i + 1 < n) ? (uint8_t)(codes[i + 1] & 0xF) : 0u;
-        nib[i >> 1] = (uint8_t)(lo | (hi << 4));
-    }
-}
-static void q4_unpack(const uint8_t *nib, int n, int8_t *codes) {
-    for (int i = 0; i < n; i++) {
-        uint8_t v = (i & 1) ? (uint8_t)(nib[i >> 1] >> 4) : (uint8_t)(nib[i >> 1] & 0xF);
-        codes[i] = (int8_t)(v & 0x8 ? (int)v - 16 : (int)v);   /* sign-extend 4-bit */
-    }
-}
 
 /* bytes occupied by `n` contiguous elements of a ggml weight row. */
 static size_t row_bytes(uint32_t type, int n) {
@@ -184,22 +161,16 @@ static int matmul(const qwen3_model *m, const gguf_tensor *W,
                 inv = s / (float)SP_FROB_QMAX;
             } else {                                          /* Q4 (modes 3/4) + calibration */
                 g_q4_rows++;
-                float inv4 = s / 7.0f;
-                double e2 = 0.0, n2 = 0.0;                    /* weight-only per-row sensitivity */
-                for (int i = 0; i < in; i++) {
-                    int q = (s == 0.0f) ? 0 : frob_round_clamp(wrow[i] / s * 7.0f, 7);
-                    codes[i] = (int8_t)q;
-                    double d = (double)wrow[i] - (double)((float)q * inv4);
-                    e2 += d * d; n2 += (double)wrow[i] * wrow[i];
-                }
-                if (n2 > 0.0 && sqrt(e2 / n2) > (double)g_q4_promote) {
+                /* per-row weight-only sensitivity (core primitive) decides Q4 vs Q8 */
+                if (sp_frob_q4_row_relerr(wrow, in) > g_q4_promote) {
                     for (int i = 0; i < in; i++) codes[i] = sp_frob_quant1(wrow[i], s);  /* promote -> Q8 */
                     inv = s / (float)SP_FROB_QMAX;
                     g_q4_promoted++;
                 } else {
-                    q4_pack(codes, in, nib);                  /* exercise real 4-bit storage */
-                    q4_unpack(nib, in, codes);
-                    inv = inv4;
+                    for (int i = 0; i < in; i++) codes[i] = sp_frob_quant1_q4(wrow[i], s);
+                    sp_frob_q4_pack(codes, in, nib);          /* round-trip real 4-bit storage */
+                    sp_frob_q4_unpack(nib, in, codes);
+                    inv = s / 7.0f;
                 }
             }
             if (g_frob == 2 || g_frob == 4)                   /* dequant reference: lift to f32 */
