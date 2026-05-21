@@ -9,6 +9,7 @@
 #define _CRT_SECURE_NO_WARNINGS   /* getenv is fine here (MSVC C4996) */
 #include "sp_engine/model.h"
 #include "sp/frobenius_lift.h"
+#include "sp/poly_ring.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,14 @@
  * forced scalar; falls back to the same sequential scalar reduction the scalar
  * path uses for the tail. E_CPU_4 gates the AVX2 path against the scalar one. */
 static int g_scalar = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
+
+/* NTT-attention (E_CPU_5): when SP_ENGINE_NTT_ATTN=1, each attention score <q,k>
+ * is computed by the Phase-1C poly-ring kernel — quantize the (post-norm, post-
+ * RoPE) head vectors to int32 (scale SP_NTT_ATTN_SCALE), recover <q,k> EXACTLY as
+ * coefficient 0 of the negacyclic product (sp_pr_inner), then divide back out the
+ * scale. Sieve OFF. Softmax + V-sum stay f32. Gated against the f32-dot baseline. */
+static int g_ntt_attn = 0;
+#define SP_NTT_ATTN_SCALE 65536.0   /* 2^16: |q_int| ~ 2^21, |<q,k>| ~ 2^49 << M/2 ~ 2^59 */
 
 static float dot_f32(const float *a, const float *b, int n) {
 #if defined(SP_ENGINE_AVX2)
@@ -171,11 +180,14 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
     const float eps = c->rms_eps, base = c->rope_freq_base;
     const float ascale = 1.0f / sqrtf((float)HD);
 
-    { const char *e = getenv("SP_ENGINE_F16_ACT"); g_f16_act = (e && e[0] == '1'); }
-    { const char *e = getenv("SP_ENGINE_FROB");    g_frob    = e ? atoi(e) : 0; }
-    { const char *e = getenv("SP_CPU_SCALAR");     g_scalar  = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_F16_ACT");  g_f16_act  = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_FROB");     g_frob     = e ? atoi(e) : 0; }
+    { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_NTT_ATTN"); g_ntt_attn = (e && e[0] == '1'); }
 
     int rc = 1;
+    sp_pr_ctx *pr = NULL;          /* poly-ring context for NTT-attention (N=head_dim) */
+    int32_t *qi = NULL, *ki = NULL;
     float *x   = (float *)malloc((size_t)n_tok * E * sizeof(float));   /* residual stream */
     float *nx  = (float *)malloc((size_t)n_tok * E * sizeof(float));   /* normed */
     float *q   = (float *)malloc((size_t)n_tok * QD * sizeof(float));
@@ -188,6 +200,13 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
     float *dn  = (float *)malloc((size_t)n_tok * E * sizeof(float));
     float *sc  = (float *)malloc((size_t)n_tok * sizeof(float));       /* attn scores */
     if (!x || !nx || !q || !k || !v || !ao || !ap || !g || !up || !dn || !sc) goto done;
+
+    if (g_ntt_attn) {
+        pr = sp_pr_init((uint32_t)HD);          /* head_dim must be in {128,256,512} */
+        qi = (int32_t *)malloc((size_t)HD * sizeof(int32_t));
+        ki = (int32_t *)malloc((size_t)HD * sizeof(int32_t));
+        if (!pr || !qi || !ki) goto done;
+    }
 
     /* ── embedding lookup: token t's embedding is the contiguous E floats at t*E ── */
     {
@@ -229,12 +248,21 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
             for (int h = 0; h < NH; h++) {
                 int kvh = h / group;
                 const float *qh = q + (size_t)t * QD + (size_t)h * HD;
+                if (g_ntt_attn)
+                    for (int i = 0; i < HD; i++) qi[i] = (int32_t)lrintf(qh[i] * (float)SP_NTT_ATTN_SCALE);
                 float maxs = -INFINITY;
                 for (int s = 0; s <= t; s++) {
                     const float *kh = k + (size_t)s * KVD + (size_t)kvh * HD;
-                    float d = 0.0f;
-                    for (int i = 0; i < HD; i++) d += qh[i] * kh[i];
-                    d *= ascale;
+                    float d;
+                    if (g_ntt_attn) {
+                        for (int i = 0; i < HD; i++) ki[i] = (int32_t)lrintf(kh[i] * (float)SP_NTT_ATTN_SCALE);
+                        int64_t ip = sp_pr_inner(pr, qi, ki);   /* exact <q_int,k_int> */
+                        d = (float)((double)ip / (SP_NTT_ATTN_SCALE * SP_NTT_ATTN_SCALE)) * ascale;
+                    } else {
+                        float acc = 0.0f;
+                        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+                        d = acc * ascale;
+                    }
                     sc[s] = d;
                     if (d > maxs) maxs = d;
                 }
@@ -277,5 +305,6 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
 done:
     free(x); free(nx); free(q); free(k); free(v); free(ao); free(ap);
     free(g); free(up); free(dn); free(sc);
+    free(qi); free(ki); sp_pr_free(pr);
     return rc;
 }
