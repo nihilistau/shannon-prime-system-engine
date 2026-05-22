@@ -1,0 +1,24 @@
+//============================================================================
+// sp_hex.idl — Phase 2-HX FastRPC interface (Hexagon V69 HTP).
+//
+// Recreated fresh for shannon-prime-system-engine. The C:\Qualcomm\Hexagon_IDE
+// \S22U project + the SDK examples are STRUCTURAL REFERENCE ONLY — no code copied.
+//
+// Architecture (settled, see SESSION-STATE-lat-2-HX): WHOLE-FORWARD-ON-DSP. The
+// host (phone ARM) uploads each weight tensor once into its own rpcmem buffer
+// (exact-alloc: IDL length == buffer bytes), then calls one forward method per
+// prefill chunk; the cDSP runs the full gemma3/qwen3 forward in HVX and returns
+// logits. ~2 FastRPC calls per chunk, mirroring the CUDA/Vulkan device-runs-the-
+// forward pattern. (upload + forward methods land in HX.3a.)
+//
+// HX.2 = wiring smoke only: open/close + ping. Proves qaic + skel + stub +
+// FastRPC + unsigned-PD round-trip with OUR IDL on R5CT22445JA before any kernel.
+//============================================================================
+
+#include "AEEStdDef.idl"
+#include "remote.idl"
+
+interface sp_hex : remote_handle64 {
+   // y = x + 1, computed on the cDSP. HX.2 round-trip smoke.
+   long ping(in long x, rout long y);
+};

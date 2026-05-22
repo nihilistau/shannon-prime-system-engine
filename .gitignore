@@ -74,3 +74,8 @@ Thumbs.db
 
 # Claude Code worktrees / local agent state
 .claude/
+
+# Hexagon SDK build_cmake output trees (under src/backends/hexagon/dsp/)
+hexagon_*_toolv*/
+android_*_aarch64/
+hexagonsim_*/

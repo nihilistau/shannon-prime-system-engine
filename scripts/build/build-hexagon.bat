@@ -41,7 +41,7 @@ cmake -S "%SP_ENGINE%" -B "%SP_BUILD_DIR%" -G %SP_GENERATOR% -DCMAKE_BUILD_TYPE=
 if errorlevel 1 exit /b 1
 
 :android_build
-cmake --build "%SP_BUILD_DIR%" --config %SP_BUILD_TYPE_DEFAULT% -j --target test_ppl rpcmem_probe
+cmake --build "%SP_BUILD_DIR%" --config %SP_BUILD_TYPE_DEFAULT% -j --target test_ppl rpcmem_probe test_hex_rt
 if errorlevel 1 exit /b 1
 echo ANDROID_BUILD_EXIT=0
 if /I "%WHAT%"=="both" goto :dsp

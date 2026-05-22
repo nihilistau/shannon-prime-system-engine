@@ -42,3 +42,28 @@ target_include_directories(rpcmem_probe PRIVATE
 target_link_libraries(rpcmem_probe PRIVATE
     ${SP_HEX_RPCMEM_LIB} ${SP_HEX_CDSPRPC_LIB} log dl)
 message(STATUS "sp_engine: Hexagon HX.2-prep rpcmem_probe target ON")
+
+# ── HX.2 FastRPC round-trip (sp_hex IDL). qaic generates the host stub + header
+# from inc/sp_hex.idl (same IDL the DSP skel under dsp/ uses); test_hex_rt links
+# the stub + rpcmem + cdsprpc and pings the cDSP. Generated files are build
+# artifacts (not committed) — only inc/sp_hex.idl is. ──
+set(SP_HEX_IDL ${CMAKE_CURRENT_SOURCE_DIR}/inc/sp_hex.idl)
+set(SP_HEX_GEN ${CMAKE_CURRENT_BINARY_DIR}/idl_gen)
+set(SP_HEX_QAIC "${HEXSDK}/ipc/fastrpc/qaic/WinNT/qaic.exe")
+file(MAKE_DIRECTORY ${SP_HEX_GEN})
+add_custom_command(
+    OUTPUT ${SP_HEX_GEN}/sp_hex.h ${SP_HEX_GEN}/sp_hex_stub.c ${SP_HEX_GEN}/sp_hex_skel.c
+    COMMAND "${SP_HEX_QAIC}" -mdll -o ${SP_HEX_GEN}
+            -I${HEXSDK}/incs/ -I${HEXSDK}/incs/stddef/ ${SP_HEX_IDL}
+    DEPENDS ${SP_HEX_IDL}
+    COMMENT "qaic sp_hex.idl -> host stub + header"
+    VERBATIM)
+add_custom_target(sp_hex_idl DEPENDS ${SP_HEX_GEN}/sp_hex.h ${SP_HEX_GEN}/sp_hex_stub.c)
+
+add_executable(test_hex_rt sp_hex_rt.c ${SP_HEX_GEN}/sp_hex_stub.c)
+add_dependencies(test_hex_rt sp_hex_idl)
+target_include_directories(test_hex_rt PRIVATE
+    ${SP_HEX_GEN} ${SP_HEX_RPCMEM_INC} ${SP_HEX_STDDEF_INC} ${SP_HEX_FASTRPC_INC})
+target_link_libraries(test_hex_rt PRIVATE
+    ${SP_HEX_RPCMEM_LIB} ${SP_HEX_CDSPRPC_LIB} log dl)
+message(STATUS "sp_engine: Hexagon HX.2 test_hex_rt round-trip target ON")
