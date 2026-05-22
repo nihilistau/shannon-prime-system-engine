@@ -576,9 +576,14 @@ done:
 /* Qwen3 forward on CUDA (CU.5). Deltas vs gemma3: no embedding scale, plain
  * residuals (no sandwich post-norms), SwiGLU (silu) not GeGLU, single RoPE base
  * + full causal (no sliding window), untied LM head (g_w.head, arena-packed in
- * Q8). Mirrors the CPU qwen3_forward (src/forward/forward.c). */
-extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
-                                  int n_tok, float *logits) {
+ * Q8). Mirrors the CPU qwen3_forward (src/forward/forward.c).
+ *
+ * _ex: if kv_trees != NULL, KSTE-encode each cached K head-vector (E_CU_6). The
+ * post-norm/post-RoPE K is copied D->H per layer and run through the existing
+ * host sp_kste_encode (byte-identical to the CPU E_CPU_6 path by construction;
+ * the on-device KSTE kernel is deferred — see SESSION-STATE). */
+extern "C" int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens,
+                                     int n_tok, float *logits, sp_kste_tree_t *kv_trees) {
     if (!m || m->cfg.arch != SP_ARCH_QWEN3) { sp_set_error("qwen3_forward_cuda: not a qwen3 model"); return 1; }
 
     const qwen3_config *c = &m->cfg;
@@ -592,6 +597,7 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
     const char *ntt_e = getenv("SP_ENGINE_NTT_ATTN");
     const int ntt = (ntt_e && ntt_e[0] == '1');
     const float ntt_qscale = 65536.0f;   /* SP_NTT_ATTN_SCALE */
+    const float kste_scale = 65536.0f;   /* SP_KSTE_KV_SCALE (E_CU_6) */
 
     if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
     cublasHandle_t cb = g_w.cublas;
@@ -599,6 +605,7 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
 
     int *dtoks = NULL;
     float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,*dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL;
+    float *host_k = NULL; int32_t *kq = NULL;   /* E_CU_6 KSTE: D->H K + int32 quant scratch */
     int rc = 1;
     if (cudaMalloc(&dtoks, (size_t)n_tok*sizeof(int)) != cudaSuccess) { sp_set_error("dtoks OOM"); goto done; }
     DALLOC(dx, (size_t)n_tok*E);   DALLOC(dnx, (size_t)n_tok*E);
@@ -607,6 +614,11 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
     DALLOC(dg, (size_t)n_tok*FF);  DALLOC(dup, (size_t)n_tok*FF); DALLOC(ddn, (size_t)n_tok*E);
     DALLOC(dlog, (size_t)n_tok*V);
     if (g_w.scratch_n) DALLOC(dscr, g_w.scratch_n);
+    if (kv_trees) {
+        host_k = (float *)malloc((size_t)n_tok * KVD * sizeof(float));
+        kq = (int32_t *)malloc((size_t)HD * sizeof(int32_t));
+        if (!host_k || !kq) { sp_set_error("kste host OOM"); goto done; }
+    }
 
     if (cudaMemcpyAsync(dtoks, tokens, (size_t)n_tok*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("upload tokens"); goto done;
@@ -625,6 +637,24 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
         k_rmsnorm_head<<<n_tok*NKV, HD, 0, st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
         k_rope<<<n_tok*NH, HD/2, 0, st>>>(dq, NH, HD, QD, base);
         k_rope<<<n_tok*NKV, HD/2, 0, st>>>(dk, NKV, HD, KVD, base);
+
+        /* E_CU_6 KSTE-KV: encode each post-norm/post-RoPE K head-vector to its
+         * 64-byte signature via the host sp_kste_encode (byte-identical to the CPU
+         * E_CPU_6 path). dk must be finalized first, so sync + copy D->H. */
+        if (kv_trees) {
+            cudaError_t e = cudaStreamSynchronize(st);
+            if (e != cudaSuccess) { fail_cuda(e, "kste stream sync"); goto done; }
+            if (cudaMemcpy(host_k, dk, (size_t)n_tok*KVD*sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                sp_set_error("kste K D->H"); goto done;
+            }
+            for (int t = 0; t < n_tok; t++)
+                for (int h = 0; h < NKV; h++) {
+                    const float *kh = host_k + (size_t)t * KVD + (size_t)h * HD;
+                    for (int i = 0; i < HD; i++) kq[i] = (int32_t)lrintf(kh[i] * kste_scale);
+                    sp_kste_encode(kq, HD, &kv_trees[((size_t)L * n_tok + t) * NKV + h]);
+                }
+        }
+
         {   int bd = HD > n_tok ? HD : n_tok; if (bd > 1024) bd = 1024;
             size_t shm = (size_t)n_tok * sizeof(float);
             if (ntt)   /* E_CU_5: exact integer score path (full causal) */
@@ -662,7 +692,13 @@ done:
     if (dao) cudaFree(dao); if (dap) cudaFree(dap);
     if (dg) cudaFree(dg); if (dup) cudaFree(dup); if (ddn) cudaFree(ddn);
     if (dlog) cudaFree(dlog); if (dscr) cudaFree(dscr);
+    free(host_k); free(kq);
     return rc;
+}
+
+extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
+                                  int n_tok, float *logits) {
+    return qwen3_forward_cuda_ex(m, tokens, n_tok, logits, NULL);
 }
 
 extern "C" void sp_cuda_model_release(const qwen3_model *m) {

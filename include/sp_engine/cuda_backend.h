@@ -40,6 +40,13 @@ int gemma3_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_token
 int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                        float *logits);
 
+/* As qwen3_forward_cuda, but if kv_trees is non-NULL each post-norm/post-RoPE K
+ * head-vector is KSTE-encoded to its 64-byte signature (E_CU_6) via the host
+ * sp_kste_encode. kv_trees holds n_layers * n_tokens * n_kv_heads entries,
+ * indexed ((L*n_tokens + t)*n_kv_heads + h). Pass NULL to skip (== forward). */
+int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens, int n_tokens,
+                          float *logits, sp_kste_tree_t *kv_trees);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);
