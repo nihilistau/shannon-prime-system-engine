@@ -214,3 +214,19 @@ else()
     target_compile_options(test_spm PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME SPM_ENCODE COMMAND test_spm)
+
+# T_FRO_4 — Gemma3-1B PPL gate. SLOW / phase-close: run via `ctest -R T_FRO_4`,
+# not in the fast every-commit suite (a full PPL pass is minutes).
+add_executable(test_ppl test_ppl.c)
+target_link_libraries(test_ppl PRIVATE sp_engine)
+target_compile_definitions(test_ppl PRIVATE
+    SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}"
+    SP_PPL_CORPUS_DEF="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ppl/wiki.tiny.raw"
+    SP_PPL_ORACLE_DEF="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ppl/wiki.tiny.oracle_ppl.txt")
+if(MSVC)
+    target_compile_options(test_ppl PRIVATE /W4)
+else()
+    target_compile_options(test_ppl PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME T_FRO_4 COMMAND test_ppl)
+set_tests_properties(T_FRO_4 PROPERTIES LABELS "SLOW" TIMEOUT 3600)

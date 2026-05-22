@@ -1,0 +1,7 @@
+32.86939
+# Stock llama.cpp (f16) perplexity over wiki.tiny.raw, single 168-token window,
+# scored positions [84,167) (first = n_ctx/2). Regenerate:
+#   tools/oracle/dump_logits.exe <gemma3-f16.gguf> wiki.tiny.ref.bin @tests/fixtures/ppl/wiki.tiny.raw
+#   python tools/oracle/ppl_from_logits.py wiki.tiny.ref.bin
+# n_ctx for the engine (test_ppl) must equal the token count (168) so its single
+# chunk matches this window. The .ref.bin (176 MB) is regenerable, not committed.
