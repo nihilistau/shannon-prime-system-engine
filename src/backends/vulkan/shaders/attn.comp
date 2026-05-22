@@ -1,0 +1,60 @@
+#version 450
+/* attn.comp — GQA causal/windowed softmax attention. One workgroup per (token t,
+ * query head h). Mirrors CUDA k_attn. Scalar f32. Scores held in shared sc[]
+ * (fixed MAXTOK; n_ctx for the engine gates is <= 168 << 1024). Softmax + V-sum
+ * reduction is done by the single lane tid==0 over [s0..t] (matches CUDA's
+ * threadIdx.x==0 serial max/exp), so reduction order is deterministic.
+ *   win < 0  -> full causal;  win >= 0 -> sliding window [max(0,t-win+1), t].
+ * Dispatch: (n_tok * n_heads, 1, 1). */
+
+#define MAXTOK 1024
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly  buffer Qbuf { float Q[]; };   /* [n_tok x QD] */
+layout(std430, binding = 1) readonly  buffer Kbuf { float K[]; };   /* [n_tok x KVD] */
+layout(std430, binding = 2) readonly  buffer Vbuf { float V[]; };   /* [n_tok x KVD] */
+layout(std430, binding = 3) writeonly buffer Obuf { float AO[]; };  /* [n_tok x QD] */
+
+layout(push_constant) uniform PC {
+    int n_tok; int QD; int KVD; int HD; int group; float ascale; int win;
+} pc;
+
+shared float sc[MAXTOK];
+shared float g_sum;
+
+void main() {
+    int n_heads = pc.QD / pc.HD;
+    int b = int(gl_WorkGroupID.x);
+    int t = b / n_heads;
+    int h = b % n_heads;
+    int kvh = h / pc.group;
+    if (pc.n_tok > MAXTOK) return;   /* host guarantees n_tok <= MAXTOK; guard OOB */
+    int qoff = t * pc.QD + h * pc.HD;
+    int s0 = (pc.win >= 0 && t - pc.win + 1 > 0) ? (t - pc.win + 1) : 0;
+    int tid = int(gl_LocalInvocationID.x);
+
+    for (int s = s0 + tid; s <= t; s += int(gl_WorkGroupSize.x)) {
+        int koff = s * pc.KVD + kvh * pc.HD;
+        float acc = 0.0;
+        for (int i = 0; i < pc.HD; i++) acc += Q[qoff + i] * K[koff + i];
+        sc[s] = acc * pc.ascale;
+    }
+    barrier();
+
+    if (tid == 0) {
+        float m = sc[s0];
+        for (int s = s0 + 1; s <= t; s++) if (sc[s] > m) m = sc[s];
+        float sum = 0.0;
+        for (int s = s0; s <= t; s++) { float e = exp(sc[s] - m); sc[s] = e; sum += e; }
+        g_sum = sum;
+    }
+    barrier();
+
+    float inv = 1.0 / g_sum;
+    for (int i = tid; i < pc.HD; i += int(gl_WorkGroupSize.x)) {
+        float acc = 0.0;
+        for (int s = s0; s <= t; s++)
+            acc += sc[s] * V[s * pc.KVD + kvh * pc.HD + i];
+        AO[t * pc.QD + h * pc.HD + i] = acc * inv;
+    }
+}

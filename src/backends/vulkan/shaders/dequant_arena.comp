@@ -1,0 +1,55 @@
+#version 450
+/* dequant_arena.comp — decode a per-row Frobenius packed weight (Q8 or per-row-
+ * promoted Q4) to f32, row-major [rows x cols]. Mirrors CUDA k_dequant_arena and
+ * the CPU matmul_arena lift: w[j][i] = code * row_scale[j] / qmax (qmax 127 for a
+ * Q8 row, 7 for a Q4 row). Q4 codes are two-per-byte, low nibble = even index,
+ * sign-extended.
+ *
+ * The codes buffer is the raw math-core byte stream, exposed here as a uint[]
+ * (std430). row_off[j] is a BYTE offset; we read the containing uint and shift out
+ * the target byte. This avoids the 8-bit-storage extension (not universal).
+ *
+ * WORKGROUP-COUNT: the untied Qwen3 LM head has rows = vocab = 151936 > the 65535
+ * per-dim dispatch limit. So we DISPATCH (ceil(cols/16), ceil(rows/16), 1) with a
+ * 16x16 workgroup decoding a 16-row x 16-col block — rows land on a tiled dim, not
+ * one-workgroup-per-row, so neither dim exceeds 65535 (151936/16 = 9496). */
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer Codes  { uint   codes[]; };   /* raw byte stream as uint words */
+layout(std430, binding = 1) readonly buffer RowOff { uvec2  row_off[]; }; /* [rows] uint64 byte offset, lo/hi */
+layout(std430, binding = 2) readonly buffer RowScl { float  row_scale[]; };
+layout(std430, binding = 3) readonly buffer RowPrc { uint   row_prec[]; }; /* [rows] one prec byte per uint word */
+layout(std430, binding = 4) writeonly buffer Out   { float  outv[]; };
+
+layout(push_constant) uniform PC { int rows; int cols; } pc;
+
+/* read the byte at absolute byte-offset `boff` from the codes uint stream. */
+uint read_byte(uint boff) {
+    uint word = codes[boff >> 2u];
+    uint sh = (boff & 3u) * 8u;
+    return (word >> sh) & 0xFFu;
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);   /* col */
+    int j = int(gl_GlobalInvocationID.y);   /* row */
+    if (j >= pc.rows || i >= pc.cols) return;
+
+    /* row_off is uint64; codes_bytes fits in 32 bits for these models, so use lo. */
+    uint rbase = row_off[j].x;
+    int code;
+    float inv;
+    if (row_prec[j] == 8u) {
+        uint ub = read_byte(rbase + uint(i));
+        code = int(ub);
+        if (code >= 128) code -= 256;            /* sign-extend int8 */
+        inv = row_scale[j] * (1.0 / 127.0);
+    } else {
+        uint byte = read_byte(rbase + uint(i >> 1));
+        uint nib = ((i & 1) != 0) ? ((byte >> 4u) & 0xFu) : (byte & 0xFu);
+        code = int(nib ^ 8u) - 8;                /* sign-extend 4-bit */
+        inv = row_scale[j] * (1.0 / 7.0);
+    }
+    outv[j * pc.cols + i] = float(code) * inv;
+}

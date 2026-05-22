@@ -298,3 +298,72 @@ if(SP_ENGINE_WITH_CUDA)
     set_tests_properties(T_FRO_4_CU PROPERTIES LABELS "SLOW" TIMEOUT 3600
         ENVIRONMENT "SP_BACKEND=cuda")
 endif()
+
+# ── Vulkan backend (Phase 2-VK). Built only when SP_ENGINE_WITH_VULKAN; the test
+# pulls the Vulkan lib transitively through sp_engine's PUBLIC link. Mirrors the
+# CUDA test set. ──
+if(SP_ENGINE_WITH_VULKAN)
+    add_executable(test_vulkan_smoke test_vulkan_smoke.c)
+    target_link_libraries(test_vulkan_smoke PRIVATE sp_engine)
+    if(MSVC)
+        target_compile_options(test_vulkan_smoke PRIVATE /W4)
+    else()
+        target_compile_options(test_vulkan_smoke PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME VULKAN_SMOKE COMMAND test_vulkan_smoke)
+
+    add_executable(test_gemma3_vulkan test_gemma3_vulkan.c)
+    target_link_libraries(test_gemma3_vulkan PRIVATE sp_engine)
+    target_compile_definitions(test_gemma3_vulkan PRIVATE SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}")
+    if(MSVC)
+        target_compile_options(test_gemma3_vulkan PRIVATE /W4)
+    else()
+        target_compile_options(test_gemma3_vulkan PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME M_GEMMA3_VULKAN COMMAND test_gemma3_vulkan)
+    set_tests_properties(M_GEMMA3_VULKAN PROPERTIES TIMEOUT 1200)
+
+    add_executable(test_qwen3_vulkan test_qwen3_vulkan.c)
+    target_link_libraries(test_qwen3_vulkan PRIVATE sp_engine)
+    target_compile_definitions(test_qwen3_vulkan PRIVATE
+        SP_QWEN3_GGUF="${SP_QWEN3_GGUF}" SP_QWEN3_REF="${SP_QWEN3_REF}")
+    if(MSVC)
+        target_compile_options(test_qwen3_vulkan PRIVATE /W4)
+    else()
+        target_compile_options(test_qwen3_vulkan PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME M_QWEN3_VULKAN COMMAND test_qwen3_vulkan)
+    set_tests_properties(M_QWEN3_VULKAN PROPERTIES TIMEOUT 1200)
+
+    add_executable(test_ntt_attn_vulkan test_ntt_attn_vulkan.c)
+    target_link_libraries(test_ntt_attn_vulkan PRIVATE sp_engine)
+    target_compile_definitions(test_ntt_attn_vulkan PRIVATE
+        SP_QWEN3_GGUF="${SP_QWEN3_GGUF}" SP_QWEN3_REF="${SP_QWEN3_REF}")
+    if(MSVC)
+        target_compile_options(test_ntt_attn_vulkan PRIVATE /W4)
+    else()
+        target_compile_options(test_ntt_attn_vulkan PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME E_VK_5 COMMAND test_ntt_attn_vulkan)
+    set_tests_properties(E_VK_5 PROPERTIES TIMEOUT 1200)
+
+    add_executable(test_kste_kv_vulkan test_kste_kv_vulkan.c)
+    target_link_libraries(test_kste_kv_vulkan PRIVATE sp_engine)
+    target_compile_definitions(test_kste_kv_vulkan PRIVATE
+        SP_QWEN3_GGUF="${SP_QWEN3_GGUF}" SP_QWEN3_REF="${SP_QWEN3_REF}")
+    if(MSVC)
+        target_compile_options(test_kste_kv_vulkan PRIVATE /W4)
+    else()
+        target_compile_options(test_kste_kv_vulkan PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME E_VK_6 COMMAND test_kste_kv_vulkan)
+    set_tests_properties(E_VK_6 PROPERTIES TIMEOUT 1200)
+
+    # T_FRO_4 on Vulkan: same test_ppl gate, routed through the Vulkan forward via
+    # SP_BACKEND=vulkan. (a) vulkan-f32 PPL vs the f16 oracle <=0.05%; (b) per-row
+    # Q8 arena drift vs vulkan-f32 <=2%. SLOW / phase-close. Run inside the
+    # env-vulkan shell so the Vulkan loader is on PATH.
+    add_test(NAME T_FRO_4_VK COMMAND test_ppl)
+    set_tests_properties(T_FRO_4_VK PROPERTIES LABELS "SLOW" TIMEOUT 3600
+        ENVIRONMENT "SP_BACKEND=vulkan")
+endif()

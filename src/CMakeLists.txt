@@ -74,3 +74,65 @@ if(SP_ENGINE_WITH_CUDA)
     target_compile_definitions(sp_engine PUBLIC SP_ENGINE_WITH_CUDA=1)
     message(STATUS "sp_engine: CUDA backend ON (arch=${CMAKE_CUDA_ARCHITECTURES})")
 endif()
+
+# ── Vulkan compute backend (Phase 2-VK). Mirrors the CUDA block: a separate
+# static lib (sp_engine_vulkan) so the engine's /W4 host flags stay isolated.
+# No cuBLAS analog — the GEMM is a hand-written tiled f32 compute shader. GLSL
+# compute shaders compile to SPIR-V at BUILD time via glslc into C initializer-
+# list headers (foo.spv.h) that the backend #includes (no runtime .spv loading).
+# The C engine sees gemma3_forward_vulkan via SP_ENGINE_WITH_VULKAN +
+# vulkan_backend.h. ──
+if(SP_ENGINE_WITH_VULKAN)
+    find_package(Vulkan REQUIRED)
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        find_program(Vulkan_GLSLC_EXECUTABLE glslc
+            HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+    endif()
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "sp_engine: glslc not found (need the Vulkan SDK on PATH)")
+    endif()
+
+    set(SP_VK_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/shaders)
+    set(SP_VK_SPV_DIR    ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
+    file(MAKE_DIRECTORY ${SP_VK_SPV_DIR})
+    set(SP_VK_SHADERS
+        gemm embed_scale rmsnorm rmsnorm_head rope attn attn_ntt
+        gelu_mul silu_mul add dequant_arena)
+    set(SP_VK_SPV_HEADERS)
+    foreach(s ${SP_VK_SHADERS})
+        set(_src ${SP_VK_SHADER_DIR}/${s}.comp)
+        set(_hdr ${SP_VK_SPV_DIR}/${s}.spv.h)
+        add_custom_command(
+            OUTPUT ${_hdr}
+            COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O --target-env=vulkan1.1
+                    -mfmt=c -o ${_hdr} ${_src}
+            DEPENDS ${_src}
+            COMMENT "glslc ${s}.comp -> ${s}.spv.h"
+            VERBATIM)
+        list(APPEND SP_VK_SPV_HEADERS ${_hdr})
+    endforeach()
+    add_custom_target(sp_vk_shaders DEPENDS ${SP_VK_SPV_HEADERS})
+
+    add_library(sp_engine_vulkan STATIC
+        backends/vulkan/vulkan_backend.cpp
+        backends/vulkan/vulkan_forward.cpp
+    )
+    add_dependencies(sp_engine_vulkan sp_vk_shaders)
+    # vulkan_forward.cpp #includes the generated *.spv.h — make the object rebuild
+    # whenever a shader changes (Ninja's initial /showIncludes scan can't see the
+    # headers before they exist, so declare the dependency explicitly).
+    set_source_files_properties(backends/vulkan/vulkan_forward.cpp
+        PROPERTIES OBJECT_DEPENDS "${SP_VK_SPV_HEADERS}")
+    target_include_directories(sp_engine_vulkan PUBLIC ${CMAKE_SOURCE_DIR}/include)
+    target_include_directories(sp_engine_vulkan PRIVATE ${SP_VK_SPV_DIR})
+    # Math-core packed formats the Vulkan kernels read directly (arena Q8/Q4) +
+    # KSTE host encode; the Vulkan loader for device mgmt and dispatch.
+    target_link_libraries(sp_engine_vulkan PUBLIC
+        Vulkan::Vulkan
+        sp_frobenius sp_vht2 sp_kste)
+    # sp_engine consumers (tests) pull the Vulkan lib transitively, and the C
+    # sources compile the SP_BACKEND=vulkan dispatch branch.
+    target_link_libraries(sp_engine PUBLIC sp_engine_vulkan)
+    target_compile_definitions(sp_engine PUBLIC SP_ENGINE_WITH_VULKAN=1)
+    message(STATUS "sp_engine: Vulkan backend ON (glslc=${Vulkan_GLSLC_EXECUTABLE})")
+endif()

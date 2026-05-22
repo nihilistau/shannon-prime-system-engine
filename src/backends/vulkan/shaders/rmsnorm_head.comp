@@ -1,0 +1,39 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+/* rmsnorm_head.comp — in-place per-head RMSNorm over head_dim d. One workgroup per
+ * (token,head); local_size_x = 128 (= HD for Qwen3/Gemma3, matches CUDA blockDim=HD).
+ * Mirrors CUDA k_rmsnorm_head: ms = sum_sq/d (f64); v_i = v_i * (1/sqrt(ms+eps)) * w_i.
+ * Dispatch: (n_tok * n_heads, 1, 1). base[t*rowstride + h*d]. */
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer Base { float base[]; };       /* in/out */
+layout(std430, binding = 1) readonly buffer Wbuf { float w[]; };
+
+layout(push_constant) uniform PC { int n_heads; int d; int rowstride; float eps; } pc;
+
+shared double sh[128];
+
+void main() {
+    int b = int(gl_WorkGroupID.x);
+    int t = b / pc.n_heads;
+    int h = b % pc.n_heads;
+    int tid = int(gl_LocalInvocationID.x);
+    int off = t * pc.rowstride + h * pc.d;
+
+    double s = 0.0;
+    for (int i = tid; i < pc.d; i += int(gl_WorkGroupSize.x)) {
+        double v = double(base[off + i]);
+        s += v * v;
+    }
+    sh[tid] = s;
+    barrier();
+    for (uint o = gl_WorkGroupSize.x / 2u; o > 0u; o >>= 1u) {
+        if (uint(tid) < o) sh[tid] += sh[tid + o];
+        barrier();
+    }
+    float ms = float(sh[0] / double(pc.d));
+    float scale = 1.0 / sqrt(ms + pc.eps);
+    for (int i = tid; i < pc.d; i += int(gl_WorkGroupSize.x))
+        base[off + i] = base[off + i] * scale * w[i];
+}

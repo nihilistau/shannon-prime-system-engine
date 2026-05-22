@@ -1,0 +1,32 @@
+#version 450
+/* rope.comp — NEOX RoPE on each (token,head) vector at position p=t. The cos/sin
+ * rotation factors are PRECOMPUTED ON THE HOST (libm powf/cosf/sinf, bit-for-bit
+ * the CPU rope_neox path) and uploaded in `cs` as interleaved (cos,sin) pairs
+ * indexed [t*half + i]. This removes GLSL pow/cos/sin (NVIDIA's Vulkan path uses
+ * lower-precision approximations than CUDA libdevice / host libm, which dominated
+ * the cross-backend logit drift) so the rotation matches CPU to the f32 floor.
+ * Dispatch: (n_tok * n_heads, 1, 1); local_size_x = 64 (= HD/2). */
+
+/* local_size_x = 128 covers HD/2 for both Qwen3 (HD=128 -> half=64) and Gemma3
+ * (HD=256 -> half=128); the loop strides by the workgroup size so any half works. */
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer Base { float base[]; };       /* in/out */
+layout(std430, binding = 1) readonly buffer Cs { vec2 cs[]; };   /* [n_tok*half] (cos,sin) */
+
+layout(push_constant) uniform PC { int n_heads; int d; int rowstride; } pc;
+
+void main() {
+    int b = int(gl_WorkGroupID.x);
+    int t = b / pc.n_heads;
+    int h = b % pc.n_heads;
+    int hd2 = pc.d / 2;
+    int off = t * pc.rowstride + h * pc.d;
+    for (int i = int(gl_LocalInvocationID.x); i < hd2; i += int(gl_WorkGroupSize.x)) {
+        vec2 v = cs[t * hd2 + i];
+        float c = v.x, s = v.y;
+        float a = base[off + i], bb = base[off + i + hd2];
+        base[off + i]       = a * c - bb * s;
+        base[off + i + hd2] = a * s + bb * c;
+    }
+}
