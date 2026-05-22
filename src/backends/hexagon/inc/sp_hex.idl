@@ -21,4 +21,11 @@
 interface sp_hex : remote_handle64 {
    // y = x + 1, computed on the cDSP. HX.2 round-trip smoke.
    long ping(in long x, rout long y);
+
+   // HX.3a: per-tensor weight upload (the rpcmem exact-alloc path the 574 MB Q8
+   // arena uses). The host rpcmem_alloc's EXACTLY `data`'s length and passes it;
+   // the DSP returns CRC-32 of the bytes it actually received. Host compares to
+   // its own CRC-32 — a mismatch means the transfer is not byte-exact (the
+   // exact-alloc / silent-zero-fill trap). `crc` is the CRC bits in an int32.
+   long upload_crc(in sequence<uint8> data, rout long crc);
 };

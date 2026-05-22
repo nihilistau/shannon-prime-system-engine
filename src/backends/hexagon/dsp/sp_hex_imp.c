@@ -41,3 +41,27 @@ int sp_hex_ping(remote_handle64 h, int x, int *y) {
     FARF(RUNTIME_HIGH, "sp_hex: ping x=%d -> y=%d", x, *y);
     return 0;
 }
+
+/* Standard reflected CRC-32 (IEEE / zlib polynomial 0xEDB88320), table-less.
+ * Identical algorithm host-side (sp_hex_rt.c) — equal CRC iff equal bytes. */
+static unsigned int sp_hex_crc32(const unsigned char *p, int n) {
+    unsigned int crc = 0xFFFFFFFFu;
+    for (int i = 0; i < n; i++) {
+        crc ^= (unsigned int)p[i];
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (unsigned int)(-(int)(crc & 1u)));
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+/* HX.3a upload byte-exactness proof: CRC-32 the bytes the DSP received over
+ * FastRPC. If the host's rpcmem registration size != the IDL length, the bridge
+ * silently zero-fills and this CRC will not match the host's — the exact-alloc
+ * trap, caught here before it can poison a forward pass. */
+int sp_hex_upload_crc(remote_handle64 h, const unsigned char *data, int dataLen, int *crc) {
+    (void)h;
+    unsigned int c = sp_hex_crc32(data, dataLen);
+    *crc = (int)c;
+    FARF(RUNTIME_HIGH, "sp_hex: upload_crc len=%d crc=0x%08x", dataLen, c);
+    return 0;
+}
