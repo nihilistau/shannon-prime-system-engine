@@ -175,6 +175,17 @@ else()
 endif()
 add_test(NAME COMPOSE COMMAND test_compose)
 
+# ── Phase 2-FMT: .sp-model format (E_FMT_0 primitives, E_FMT_4 round-trip) ──
+add_executable(test_sp_hash test_sp_hash.c)
+target_link_libraries(test_sp_hash PRIVATE sp_engine)
+target_include_directories(test_sp_hash PRIVATE ${CMAKE_SOURCE_DIR}/src/io)
+if(MSVC)
+    target_compile_options(test_sp_hash PRIVATE /W4)
+else()
+    target_compile_options(test_sp_hash PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME E_FMT_0 COMMAND test_sp_hash)
+
 # ── Gemma3-1B (2nd architecture; SP1) ──
 set(SP_GEMMA3_GGUF
     "D:/Files/Models/Mine/gemma-3-1b-it/gemma-3-1b-it-f16/gemma-3-1b-it-f16.gguf"
@@ -214,6 +225,35 @@ else()
     target_compile_options(test_spm PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME SPM_ENCODE COMMAND test_spm)
+
+# E_FMT_1..4 — .sp-model format gates. One binary, four named subtests selected
+# by SP_FMT_SUBTEST (the TOK_DECODE/TOK_ENCODE one-binary-many-tests pattern).
+# Invokes the sp_transcode binary; writes .sp-model/.sp-tokenizer under the build
+# dir. E_FMT_4 (closure gate) transcodes + runs the full forward on both paths.
+add_executable(test_sp_model_roundtrip test_sp_model_roundtrip.c)
+target_link_libraries(test_sp_model_roundtrip PRIVATE sp_engine)
+target_include_directories(test_sp_model_roundtrip PRIVATE ${CMAKE_SOURCE_DIR}/src/io)
+add_dependencies(test_sp_model_roundtrip sp_transcode)
+target_compile_definitions(test_sp_model_roundtrip PRIVATE
+    SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}"
+    SP_QWEN3_GGUF="${SP_QWEN3_GGUF}"
+    SP_TRANSCODE_BIN="$<TARGET_FILE:sp_transcode>"
+    SP_FMT_OUT_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+if(MSVC)
+    target_compile_options(test_sp_model_roundtrip PRIVATE /W4)
+else()
+    target_compile_options(test_sp_model_roundtrip PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME E_FMT_1 COMMAND test_sp_model_roundtrip)
+add_test(NAME E_FMT_2 COMMAND test_sp_model_roundtrip)
+add_test(NAME E_FMT_3 COMMAND test_sp_model_roundtrip)
+add_test(NAME E_FMT_4 COMMAND test_sp_model_roundtrip)
+add_test(NAME E_FMT_4_QWEN3 COMMAND test_sp_model_roundtrip)
+set_tests_properties(E_FMT_1 PROPERTIES ENVIRONMENT "SP_FMT_SUBTEST=E_FMT_1" TIMEOUT 600)
+set_tests_properties(E_FMT_2 PROPERTIES ENVIRONMENT "SP_FMT_SUBTEST=E_FMT_2" TIMEOUT 600)
+set_tests_properties(E_FMT_3 PROPERTIES ENVIRONMENT "SP_FMT_SUBTEST=E_FMT_3" TIMEOUT 600)
+set_tests_properties(E_FMT_4 PROPERTIES ENVIRONMENT "SP_FMT_SUBTEST=E_FMT_4" TIMEOUT 1800)
+set_tests_properties(E_FMT_4_QWEN3 PROPERTIES ENVIRONMENT "SP_FMT_SUBTEST=E_FMT_4_QWEN3" TIMEOUT 1800)
 
 # T_FRO_4 — Gemma3-1B PPL gate. SLOW / phase-close: run via `ctest -R T_FRO_4`,
 # not in the fast every-commit suite (a full PPL pass is minutes).

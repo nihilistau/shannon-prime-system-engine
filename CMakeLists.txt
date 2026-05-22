@@ -34,6 +34,9 @@ add_subdirectory(lib/shannon-prime-system)
 # ── Engine library + backend ────────────────────────────────────────────────
 add_subdirectory(src)
 
+# ── Tools (Phase 2-FMT: the sp_transcode GGUF -> .sp-model CLI) ──────────────
+add_subdirectory(tools/sp_transcode)
+
 if(SP_ENGINE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

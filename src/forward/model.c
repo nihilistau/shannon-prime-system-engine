@@ -239,6 +239,7 @@ void qwen3_free(qwen3_model *m) {
     free(m->norm_buf); free((void *)m->norm_src);
     sp_arena_free(m->arena);
     free(m->layers);
+    free(m->synth_tensors);   /* .sp-model adapter synthetic tensors (NULL otherwise) */
     if (m->gguf) gguf_close(m->gguf);
     free(m);
 }
