@@ -166,6 +166,52 @@ __global__ void k_attn(const float *Q, const float *K, const float *V,
     }
 }
 
+/* NTT-attention (E_CU_5): the score <q,k> is computed EXACTLY in integers — the
+ * head vectors are quantized to int32 (x qscale=2^16) and the inner product is
+ * accumulated in int64, which is bit-identical to the CPU poly-ring sp_pr_inner
+ * (coeff 0 of the negacyclic product == sum_i q_i k_i; |ip| ~ 2^49 << 2^63). The
+ * NTT itself is the CPU's overflow-free mechanism; on GPU int64 holds it directly
+ * (see CU.6 note). Full causal (prefill). Softmax + V-sum stay f32, as on CPU. */
+__global__ void k_attn_ntt(const float *Q, const float *K, const float *V,
+                           int n_tok, int QD, int KVD, int HD, int group,
+                           float ascale, float qscale, float *AO) {
+    extern __shared__ float sc[];
+    int n_heads = QD / HD;
+    int b = blockIdx.x, t = b / n_heads, h = b % n_heads, kvh = h / group;
+    const float *qh = Q + (size_t)t * QD + (size_t)h * HD;
+    double qs2 = (double)qscale * (double)qscale;
+
+    for (int s = threadIdx.x; s <= t; s += blockDim.x) {
+        const float *kh = K + (size_t)s * KVD + (size_t)kvh * HD;
+        long long ip = 0;
+        for (int i = 0; i < HD; i++) {
+            int qi = (int)lrintf(qh[i] * qscale);
+            int ki = (int)lrintf(kh[i] * qscale);
+            ip += (long long)qi * (long long)ki;
+        }
+        sc[s] = (float)((double)ip / qs2) * ascale;   /* exact integer <q,k>/2^32 */
+    }
+    __syncthreads();
+
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float m = sc[0];
+        for (int s = 1; s <= t; s++) if (sc[s] > m) m = sc[s];
+        float sum = 0.0f;
+        for (int s = 0; s <= t; s++) { float e = expf(sc[s] - m); sc[s] = e; sum += e; }
+        g_sum = sum;
+    }
+    __syncthreads();
+
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s <= t; s++)
+            acc += sc[s] * V[(size_t)s * KVD + (size_t)kvh * HD + i];
+        AO[(size_t)t * QD + (size_t)h * HD + i] = acc * inv;
+    }
+}
+
 __global__ void k_gelu_mul(float *g, const float *up, size_t n) {
     size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -542,6 +588,10 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
     const int group = NH / NKV;
     const float eps = c->rms_eps, base = c->rope_freq_base;
     const float ascale = 1.0f / sqrtf((float)HD);
+    /* E_CU_5 NTT-attention: exact integer <q,k> via int64 (== CPU sp_pr_inner). */
+    const char *ntt_e = getenv("SP_ENGINE_NTT_ATTN");
+    const int ntt = (ntt_e && ntt_e[0] == '1');
+    const float ntt_qscale = 65536.0f;   /* SP_NTT_ATTN_SCALE */
 
     if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
     cublasHandle_t cb = g_w.cublas;
@@ -576,8 +626,13 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
         k_rope<<<n_tok*NH, HD/2, 0, st>>>(dq, NH, HD, QD, base);
         k_rope<<<n_tok*NKV, HD/2, 0, st>>>(dk, NKV, HD, KVD, base);
         {   int bd = HD > n_tok ? HD : n_tok; if (bd > 1024) bd = 1024;
-            k_attn<<<n_tok*NH, bd, (size_t)n_tok*sizeof(float), st>>>(   /* full causal: win=-1 */
-                dq, dk, dv, n_tok, QD, KVD, HD, group, ascale, -1, dao); }
+            size_t shm = (size_t)n_tok * sizeof(float);
+            if (ntt)   /* E_CU_5: exact integer score path (full causal) */
+                k_attn_ntt<<<n_tok*NH, bd, shm, st>>>(
+                    dq, dk, dv, n_tok, QD, KVD, HD, group, ascale, ntt_qscale, dao);
+            else       /* plain f32 dot, full causal (win=-1) */
+                k_attn<<<n_tok*NH, bd, shm, st>>>(
+                    dq, dk, dv, n_tok, QD, KVD, HD, group, ascale, -1, dao); }
         if (gemm_w(cb, st, &g_w.Wo[L], dao, dap, n_tok, dscr)) goto done;
         k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dap, nE);    /* plain residual */
 
