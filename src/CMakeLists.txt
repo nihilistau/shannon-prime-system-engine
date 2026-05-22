@@ -5,6 +5,7 @@
 add_library(sp_engine STATIC
     loader/gguf.c
     forward/model.c
+    forward/kernels.c
     forward/forward.c
     forward/generate.c
     forward/arena.c
