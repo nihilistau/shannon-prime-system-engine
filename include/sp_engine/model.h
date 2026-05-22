@@ -73,6 +73,11 @@ typedef struct qwen3_model {
     const gguf_tensor **norm_src;     /* [n_norm] keys (norm tensors) */
     float             **norm_buf;     /* [n_norm] owned f32 copies */
     int                 n_norm;
+    /* .sp-model adapter path (Phase 2-FMT): when a model is reconstructed from a
+     * .sp-model (sp_model_to_qwen3), gguf is NULL and the layer pointers reference
+     * this owned synthetic gguf_tensor array instead of a GGUF mapping. NULL for
+     * GGUF-loaded models. Freed by qwen3_free. */
+    gguf_tensor        *synth_tensors;
 } qwen3_model;
 
 /* Open the GGUF, read the qwen3 config, and bind every weight. Returns NULL on

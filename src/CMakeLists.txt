@@ -13,9 +13,15 @@ add_library(sp_engine STATIC
     forward/generate.c
     forward/arena.c
     tokenizer/tokenizer.c
+    # Phase 2-FMT: .sp-model on-disk format (loader + adapter + hash primitives).
+    io/sp_hash.c
+    io/sp_model_load.c
+    io/sp_model_adapter.c
 )
 
 target_include_directories(sp_engine PUBLIC ${CMAKE_SOURCE_DIR}/include)
+# io/*.c includes "sp_hash.h" from its own directory.
+target_include_directories(sp_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/io)
 
 # Math-core primitives the forward pass / kernels consume (PUBLIC: their
 # include/sp headers propagate to engine consumers and tests).

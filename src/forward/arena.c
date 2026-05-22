@@ -105,6 +105,21 @@ sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote,
     return a;
 }
 
+sp_arena *sp_arena_from_packed(const sp_arena_tensor *ts, int n, int precision) {
+    if (!ts || n < 0 || (precision != 8 && precision != 4)) return NULL;
+    sp_arena *a = (sp_arena *)calloc(1, sizeof *a);
+    if (!a) return NULL;
+    a->t = (sp_arena_tensor *)calloc((size_t)(n ? n : 1), sizeof(sp_arena_tensor));
+    if (!a->t) { free(a); return NULL; }
+    a->n = n; a->precision = precision;
+    for (int k = 0; k < n; k++) {
+        a->t[k] = ts[k];                    /* shallow: arena now owns the pt buffers */
+        a->bytes += sp_frob_packed_tensor_bytes(&a->t[k].pt);
+        a->total_rows += a->t[k].pt.rows;
+    }
+    return a;
+}
+
 void sp_arena_free(sp_arena *a) {
     if (!a) return;
     for (int k = 0; k < a->n; k++) sp_frob_packed_free(&a->t[k].pt);

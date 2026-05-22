@@ -49,6 +49,14 @@ void      sp_arena_free(sp_arena *a);
 /* Lookup a packed tensor by its GGUF tensor name; NULL if not arena-ized. */
 const sp_arena_tensor *sp_arena_find(const sp_arena *a, const char *name);
 
+/* Adopt an array of already-packed named tensors into a fresh arena (the .sp-model
+ * load path, Phase 2-FMT). `ts` is copied by value into the arena, which then OWNS
+ * the inner pt.{codes,row_scale,row_off,row_prec} buffers (freed by sp_arena_free).
+ * The caller must NOT free those buffers afterwards. `precision` records 8 or 4 for
+ * sp_arena_precision. Returns NULL on a bad arg or alloc failure (in which case the
+ * caller still owns `ts`). */
+sp_arena *sp_arena_from_packed(const sp_arena_tensor *ts, int n, int precision);
+
 /* Reconstruct row `r` of a packed tensor to `cols` f32 values (inline lift:
  * code * row_scale / qmax). Used for the embedding lookup when the embedding is
  * in the arena. Returns 0 on success. */
