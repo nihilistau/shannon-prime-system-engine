@@ -188,3 +188,17 @@ else()
     target_compile_options(test_gemma3_bind PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME GEMMA3_BIND COMMAND test_gemma3_bind)
+
+set(SP_GEMMA3_REF
+    "D:/Files/Models/Mine/gemma-3-1b-it/gemma-3-1b-it-f16/gemma3_ref.bin"
+    CACHE FILEPATH "Gemma3 oracle logit dump (tools/oracle/dump_logits) for M_GEMMA3_CPU")
+add_executable(test_gemma3_forward test_gemma3_forward.c)
+target_link_libraries(test_gemma3_forward PRIVATE sp_engine)
+target_compile_definitions(test_gemma3_forward PRIVATE
+    SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}" SP_GEMMA3_REF="${SP_GEMMA3_REF}")
+if(MSVC)
+    target_compile_options(test_gemma3_forward PRIVATE /W4)
+else()
+    target_compile_options(test_gemma3_forward PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME M_GEMMA3_CPU COMMAND test_gemma3_forward)

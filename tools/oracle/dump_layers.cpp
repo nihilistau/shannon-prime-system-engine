@@ -30,6 +30,12 @@ static bool want(const char *name) {
            std::strncmp(name, "Kcur-",      5) == 0 ||   // post-RoPE K
            std::strncmp(name, "Vcur-",      5) == 0 ||   // V (no RoPE)
            std::strncmp(name, "kqv-",       4) == 0 ||   // attention core output
+           // Gemma3 sandwich-norm + GeGLU checkpoints (Task 4 per-layer diff)
+           std::strncmp(name, "attn_post_norm-", 15) == 0 || // post-attn norm out
+           std::strncmp(name, "sa_out-",        7) == 0 ||   // x + post_attn_norm(attn)
+           std::strncmp(name, "ffn_norm-",       9) == 0 ||  // pre-FFN norm out
+           std::strncmp(name, "ffn_out-",        8) == 0 ||  // GeGLU intermediate (pre post-norm)
+           std::strncmp(name, "ffn_post_norm-", 14) == 0 ||  // post-FFN norm out
            std::strcmp (name, "result_norm") == 0;
 }
 
