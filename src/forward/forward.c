@@ -260,8 +260,24 @@ static void rope_neox(float *v, int d, int p, float base) {
 }
 
 static const float *as_f32(const qwen3_model *m, const gguf_tensor *t) {
-    /* norm weights are F32 1-D: read directly from the mapping. */
+    /* norm weights are F32 1-D. After source release they are served from owned
+     * copies (the mapping is gone); otherwise read directly from the mapping. */
+    if (m->released) {
+        for (int i = 0; i < m->n_norm; i++) if (m->norm_src[i] == t) return m->norm_buf[i];
+        return NULL;   /* every norm the forward reads was copied in release */
+    }
     return (const float *)gguf_tensor_data(m->gguf, t);
+}
+
+/* Embedding lookup for token `tok` -> dst[E]: from the arena if the embedding is
+ * packed (1b), else dequantized from the GGUF mapping. */
+static int embed_row(const qwen3_model *m, int32_t tok, int E, float *dst) {
+    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+    if (at) return sp_arena_dequant_row(at, (int)tok, dst);
+    const uint8_t *emb = (const uint8_t *)gguf_tensor_data(m->gguf, m->token_embd);
+    size_t rb = row_bytes(m->token_embd->type, E);
+    if (!emb || rb == 0) return 1;
+    return sp_dequant_row(emb + (size_t)tok * rb, m->token_embd->type, E, dst);
 }
 
 /* Read the runtime gate knobs once per forward/decode entry (all default OFF =
@@ -320,12 +336,8 @@ int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
     }
 
     /* ── embedding lookup: token t's embedding is the contiguous E floats at t*E ── */
-    {
-        const uint8_t *emb = (const uint8_t *)gguf_tensor_data(m->gguf, m->token_embd);
-        size_t rb = row_bytes(m->token_embd->type, E);
-        for (int t = 0; t < n_tok; t++)
-            if (sp_dequant_row(emb + (size_t)tokens[t] * rb, m->token_embd->type, E, x + (size_t)t * E)) goto done;
-    }
+    for (int t = 0; t < n_tok; t++)
+        if (embed_row(m, tokens[t], E, x + (size_t)t * E)) goto done;
 
     for (uint32_t L = 0; L < c->n_layers; L++) {
         const qwen3_layer *ly = &m->layers[L];
@@ -496,14 +508,10 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
     if (!kc || !vc || !x || !nx || !q || !knew || !vnew || !ao || !ap || !gg || !up || !dn || !sc || !lg)
         goto done;
 
-    const uint8_t *emb = (const uint8_t *)gguf_tensor_data(m->gguf, m->token_embd);
-    size_t emb_rb = row_bytes(m->token_embd->type, E);
-    if (!emb || emb_rb == 0) goto done;
-
     int produced = 0;
     for (int pos = 0; pos < P; pos++) {
         int tok = seq[pos];
-        if (sp_dequant_row(emb + (size_t)tok * emb_rb, m->token_embd->type, E, x)) goto done;
+        if (embed_row(m, tok, E, x)) goto done;
 
         for (uint32_t L = 0; L < c->n_layers; L++) {
             const qwen3_layer *ly = &m->layers[L];

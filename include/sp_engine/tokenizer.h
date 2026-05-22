@@ -26,6 +26,11 @@ typedef struct sp_tokenizer sp_tokenizer;
  * tokenizer. Returns NULL if the vocab metadata is absent or on allocation
  * failure. */
 sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g);
+/* As sp_tokenizer_load, but if `own` is nonzero the vocab + merge bytes are
+ * copied into owned buffers so the tokenizer no longer borrows the GGUF mapping
+ * (required before qwen3_release_source unmaps it). own==0 borrows (the default,
+ * lower memory). */
+sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own);
 void          sp_tokenizer_free(sp_tokenizer *t);
 
 uint32_t sp_tokenizer_vocab_size(const sp_tokenizer *t);

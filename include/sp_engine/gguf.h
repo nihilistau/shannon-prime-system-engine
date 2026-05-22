@@ -71,6 +71,15 @@ typedef struct gguf_ctx gguf_ctx;
 gguf_ctx *gguf_open(const char *path);
 void      gguf_close(gguf_ctx *ctx);
 
+/* Release just the file mapping (the large weight data) while keeping the parsed
+ * tensor table and metadata (names, dims, scalar/string KVs) so the descriptor
+ * stays usable for lookups. After this, gguf_tensor_data() returns NULL and a
+ * STRING-array KV's element bytes (arr_data) are invalid — every consumer of the
+ * mapping (weights, embedding, norms, tokenizer vocab) must have copied what it
+ * needs first. Used by the packed-weight arena to drop the F16 source (§4.8).
+ * gguf_close() remains safe to call afterwards. */
+void      gguf_release_data(gguf_ctx *ctx);
+
 uint32_t gguf_version(const gguf_ctx *ctx);
 uint64_t gguf_n_tensors(const gguf_ctx *ctx);
 uint64_t gguf_n_kv(const gguf_ctx *ctx);

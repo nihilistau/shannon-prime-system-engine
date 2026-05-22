@@ -80,13 +80,15 @@ static int build_tensor(const qwen3_model *m, const gguf_tensor *W, int prec,
     return 0;
 }
 
-sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote) {
+sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote,
+                         int include_embed) {
     if (!m || (precision != 8 && precision != 4)) return NULL;
     const qwen3_config *c = &m->cfg;
 
     /* collect the matmul weight tensors: 7 per layer + LM head `output`
-     * (only if untied — a tied output is the embedding, kept f32 in 1a). */
-    int cap = (int)c->n_layers * 7 + 1;
+     * (only if untied — a tied output is the embedding) + optionally the
+     * embedding itself (1b, needed before releasing the source). */
+    int cap = (int)c->n_layers * 7 + 2;
     const gguf_tensor **src = (const gguf_tensor **)malloc((size_t)cap * sizeof(*src));
     if (!src) return NULL;
     int n = 0;
@@ -97,6 +99,7 @@ sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote) 
         src[n++] = L->ffn_gate; src[n++] = L->ffn_up; src[n++] = L->ffn_down;
     }
     if (m->output && m->output != m->token_embd) src[n++] = m->output;
+    if (include_embed && m->token_embd) src[n++] = m->token_embd;
 
     sp_arena *a = (sp_arena *)calloc(1, sizeof *a);
     if (!a) { free((void *)src); return NULL; }
@@ -131,6 +134,25 @@ const sp_arena_tensor *sp_arena_find(const sp_arena *a, const char *name) {
     for (int k = 0; k < a->n; k++)
         if (strcmp(a->t[k].name, name) == 0) return &a->t[k];
     return NULL;
+}
+
+int sp_arena_dequant_row(const sp_arena_tensor *at, int r, float *dst) {
+    if (!at || r < 0 || r >= at->rows) return 1;
+    const uint8_t *rc = at->codes + at->row_off[r];
+    if (at->row_prec[r] == 8) {
+        const int8_t *cp = (const int8_t *)rc;
+        float inv = at->row_scale[r] / 127.0f;
+        for (int i = 0; i < at->cols; i++) dst[i] = (float)cp[i] * inv;
+    } else {
+        float inv = at->row_scale[r] / 7.0f;
+        int8_t v;
+        for (int i = 0; i < at->cols; i++) {
+            uint8_t b = (i & 1) ? (uint8_t)(rc[i >> 1] >> 4) : (uint8_t)(rc[i >> 1] & 0xF);
+            v = (int8_t)((b & 0x8) ? (int)b - 16 : (int)b);
+            dst[i] = (float)v * inv;
+        }
+    }
+    return 0;
 }
 
 size_t sp_arena_bytes(const sp_arena *a)      { return a ? a->bytes : 0; }

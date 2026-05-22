@@ -262,6 +262,20 @@ void gguf_close(gguf_ctx *ctx) {
     free(ctx);
 }
 
+void gguf_release_data(gguf_ctx *ctx) {
+    if (!ctx || !ctx->base) return;
+#ifdef _WIN32
+    UnmapViewOfFile((LPCVOID)ctx->base);
+    if (ctx->hMap)  { CloseHandle(ctx->hMap);  ctx->hMap  = NULL; }
+    if (ctx->hFile && ctx->hFile != INVALID_HANDLE_VALUE) { CloseHandle(ctx->hFile); ctx->hFile = INVALID_HANDLE_VALUE; }
+#else
+    munmap((void *)ctx->base, ctx->size);
+    if (ctx->fd > 0) { close(ctx->fd); ctx->fd = 0; }
+#endif
+    ctx->base = NULL;   /* tensor data + kv arr_data now invalid; the parsed tensor
+                         * table, kv keys/scalars/str copies, and path remain. */
+}
+
 uint32_t gguf_version(const gguf_ctx *c)     { return c->version; }
 uint64_t gguf_n_tensors(const gguf_ctx *c)   { return c->n_tensors; }
 uint64_t gguf_n_kv(const gguf_ctx *c)        { return c->n_kv; }
@@ -278,7 +292,7 @@ const gguf_tensor *gguf_find_tensor(const gguf_ctx *c, const char *name) {
     return NULL;
 }
 const void *gguf_tensor_data(const gguf_ctx *c, const gguf_tensor *t) {
-    if (!t) return NULL;
+    if (!t || !c->base) return NULL;   /* base NULL after gguf_release_data */
     return c->base + c->data_offset + t->offset;
 }
 

@@ -57,12 +57,28 @@ typedef struct qwen3_model {
     const gguf_tensor *output;        /* [n_embd, n_vocab] (==token_embd if tied) */
     qwen3_layer       *layers;        /* n_layers */
     struct sp_arena   *arena;         /* packed Q8/Q4 matmul weights when SP_ARENA set; else NULL */
+    /* source-release state (Phase 1b): after qwen3_release_source the GGUF data
+     * mapping is unmapped; norms are served from owned f32 copies and the
+     * embedding + all matmul weights from the arena. */
+    int                 released;
+    const gguf_tensor **norm_src;     /* [n_norm] keys (norm tensors) */
+    float             **norm_buf;     /* [n_norm] owned f32 copies */
+    int                 n_norm;
 } qwen3_model;
 
 /* Open the GGUF, read the qwen3 config, and bind every weight. Returns NULL on
  * a missing/inconsistent tensor or a non-qwen3 architecture. */
 qwen3_model *qwen3_load(const char *path);
 void         qwen3_free(qwen3_model *m);
+
+/* Release the F16 GGUF source (Phase 1b, §4.8). Requires a packed arena that
+ * includes the embedding (SP_ARENA + SP_ARENA_EMBED). Copies the norm weights to
+ * owned f32, then unmaps the GGUF data — after this the forward reads only the
+ * arena (matmul weights + embedding) and the owned norms, so peak memory drops
+ * to the packed footprint. A tokenizer, if used afterwards, must have been loaded
+ * owning (sp_tokenizer_load_ex(g,1)) before this call. Returns 0 on success.
+ * qwen3_load performs this automatically when SP_ARENA_RELEASE=1. */
+int          qwen3_release_source(qwen3_model *m);
 
 /* f32 reference forward pass over a token-ID sequence (prefill, causal).
  * Writes logits for every position into `logits` (caller-allocated,

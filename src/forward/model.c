@@ -159,16 +159,59 @@ qwen3_model *qwen3_load(const char *path) {
             int prec = (e[1] == '8') ? 8 : 4;
             const char *pe = getenv("SP_Q4_PROMOTE");
             float promote = pe ? (float)atof(pe) : 0.25f;
-            m->arena = sp_arena_build(m, prec, promote);
+            const char *re = getenv("SP_ARENA_RELEASE");
+            const char *ee = getenv("SP_ARENA_EMBED");
+            int release = (re && re[0] == '1');
+            int embed   = release || (ee && ee[0] == '1');   /* release implies embed */
+            m->arena = sp_arena_build(m, prec, promote, embed);
             if (!m->arena) { qwen3_free(m); return NULL; }   /* fail loudly, no silent fallback */
+            if (release && qwen3_release_source(m)) { qwen3_free(m); return NULL; }
         }
     }
 
     return m;
 }
 
+/* Phase 1b: copy norms to owned f32, then unmap the GGUF data. See model.h. */
+int qwen3_release_source(qwen3_model *m) {
+    if (!m) return 1;
+    if (m->released) return 0;
+    if (!m->arena || !m->token_embd) return 1;                 /* need an arena to release into */
+    /* the embedding must be packed (else the forward still needs the mapping) */
+    if (!sp_arena_find(m->arena, m->token_embd->name)) return 1;
+
+    int cap = (int)m->cfg.n_layers * 4 + 1;
+    m->norm_src = (const gguf_tensor **)malloc((size_t)cap * sizeof(*m->norm_src));
+    m->norm_buf = (float **)malloc((size_t)cap * sizeof(*m->norm_buf));
+    if (!m->norm_src || !m->norm_buf) return 1;
+    int k = 0, rc = 0;
+    #define COPY_NORM(T) do { \
+        const gguf_tensor *t_ = (T); \
+        if (t_ && rc == 0) { \
+            int len = (int)t_->n_elements; \
+            float *b = (float *)malloc((size_t)len * sizeof(float)); \
+            if (!b || sp_dequant_row(gguf_tensor_data(m->gguf, t_), t_->type, len, b)) { free(b); rc = 1; } \
+            else { m->norm_src[k] = t_; m->norm_buf[k] = b; k++; } \
+        } } while (0)
+    for (uint32_t i = 0; i < m->cfg.n_layers && rc == 0; i++) {
+        const qwen3_layer *L = &m->layers[i];
+        COPY_NORM(L->attn_norm); COPY_NORM(L->ffn_norm);
+        COPY_NORM(L->attn_q_norm); COPY_NORM(L->attn_k_norm);
+    }
+    COPY_NORM(m->output_norm);
+    #undef COPY_NORM
+    m->n_norm = k;
+    if (rc) return 1;
+
+    gguf_release_data(m->gguf);   /* drop the F16 source; structs/names kept */
+    m->released = 1;
+    return 0;
+}
+
 void qwen3_free(qwen3_model *m) {
     if (!m) return;
+    for (int i = 0; i < m->n_norm; i++) free(m->norm_buf[i]);
+    free(m->norm_buf); free((void *)m->norm_src);
     sp_arena_free(m->arena);
     free(m->layers);
     if (m->gguf) gguf_close(m->gguf);
