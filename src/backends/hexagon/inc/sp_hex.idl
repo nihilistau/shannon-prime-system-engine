@@ -28,4 +28,11 @@ interface sp_hex : remote_handle64 {
    // its own CRC-32 — a mismatch means the transfer is not byte-exact (the
    // exact-alloc / silent-zero-fill trap). `crc` is the CRC bits in an int32.
    long upload_crc(in sequence<uint8> data, rout long crc);
+
+   // HX.3a: scalar f32 matmul on the cDSP — y[j] = sum_i w[j*cols + i] * x[i],
+   // j in [0,rows) (ggml weight layout: row j is `cols` contiguous f32; one
+   // token). Proves the DSP f32 compute kernel + the float data path are correct
+   // (host compares to its own dot) before the whole forward is assembled on it.
+   long matmul_f32(in sequence<float> w, in long rows, in long cols,
+                   in sequence<float> x, rout sequence<float> y);
 };

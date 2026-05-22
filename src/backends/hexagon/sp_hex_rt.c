@@ -87,6 +87,41 @@ int main(void) {
         printf("HX.3a UPLOAD BYTE-EXACT OK (32 MB rpcmem transfer verified)\n");
     }
 
+    /* ── HX.3a: scalar f32 matmul on the cDSP, verified == host dot ──
+     * The core forward kernel. Synthetic operands (deterministic); DSP computes
+     * y[j]=sum_i w[j*cols+i]*x[i], host computes the same in the same order, and
+     * they must agree bit-for-bit (both IEEE f32 scalar). */
+    {
+        const int rows = 256, cols = 512;
+        float *w = (float *)rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, (long)rows * cols * 4);
+        float *x = (float *)rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, cols * 4);
+        float *y = (float *)rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, rows * 4);
+        if (!w || !x || !y) {
+            printf("HX.3a: matmul rpcmem_alloc FAILED\n");
+            if (w) rpcmem_free(w); if (x) rpcmem_free(x); if (y) rpcmem_free(y);
+            sp_hex_close(h); rpcmem_deinit(); return 1;
+        }
+        for (int i = 0; i < rows * cols; i++) w[i] = (float)((i % 257) - 128) / 64.0f;
+        for (int i = 0; i < cols; i++)        x[i] = (float)((i % 131) - 64) / 32.0f;
+
+        nErr = sp_hex_matmul_f32(h, w, rows * cols, rows, cols, x, cols, y, rows);
+
+        double worst = 0.0;
+        for (int j = 0; j < rows; j++) {
+            float acc = 0.0f;
+            for (int i = 0; i < cols; i++) acc += w[(long)j * cols + i] * x[i];
+            double d = (double)y[j] - (double)acc; if (d < 0) d = -d;
+            if (d > worst) worst = d;
+        }
+        printf("sp_hex_matmul_f32(%dx%d): worst |dsp-host| = %.3e (rc=0x%x)\n", rows, cols, worst, nErr);
+        rpcmem_free(w); rpcmem_free(x); rpcmem_free(y);
+        if (nErr || worst > 1e-3) {
+            printf("HX.3a MATMUL FAIL\n");
+            sp_hex_close(h); rpcmem_deinit(); return 1;
+        }
+        printf("HX.3a MATMUL OK (cDSP scalar f32 dot matches host)\n");
+    }
+
     sp_hex_close(h);
     rpcmem_deinit();
     return 0;

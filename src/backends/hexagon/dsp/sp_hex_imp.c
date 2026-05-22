@@ -65,3 +65,20 @@ int sp_hex_upload_crc(remote_handle64 h, const unsigned char *data, int dataLen,
     FARF(RUNTIME_HIGH, "sp_hex: upload_crc len=%d crc=0x%08x", dataLen, c);
     return 0;
 }
+
+/* HX.3a: scalar f32 matmul on the cDSP — the core forward kernel (ggml weight
+ * layout: y[j] = sum_i w[j*cols + i] * x[i]). Pure scalar f32, no HVX yet (HX.3b
+ * swaps this to qf32 HVX). Same op order as the engine's dot_f32 scalar path, so
+ * the result matches the host bit-for-bit. */
+int sp_hex_matmul_f32(remote_handle64 h, const float *w, int wLen, int rows, int cols,
+                      const float *x, int xLen, float *y, int yLen) {
+    (void)h; (void)wLen; (void)xLen;
+    for (int j = 0; j < rows && j < yLen; j++) {
+        const float *wr = w + (long)j * cols;
+        float acc = 0.0f;
+        for (int i = 0; i < cols; i++) acc += wr[i] * x[i];
+        y[j] = acc;
+    }
+    FARF(RUNTIME_HIGH, "sp_hex: matmul_f32 rows=%d cols=%d", rows, cols);
+    return 0;
+}
