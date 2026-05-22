@@ -74,3 +74,11 @@ if(SP_ENGINE_WITH_CUDA)
     target_compile_definitions(sp_engine PUBLIC SP_ENGINE_WITH_CUDA=1)
     message(STATUS "sp_engine: CUDA backend ON (arch=${CMAKE_CUDA_ARCHITECTURES})")
 endif()
+
+# ── Hexagon V69 HTP backend (Phase 2-HX). Mirrors the CUDA block's shape, but
+# the host side cross-compiles to aarch64-android (FastRPC is intra-device IPC,
+# Android-arm -> cDSP) and the DSP HVX skel builds separately via the SDK. The
+# subdir early-returns unless SP_ENGINE_TARGET_ANDROID. HX.2-prep: rpcmem_probe
+# (proved 574.5 MB Q8 arena single-buffer upload feasible). HX.2+: IDL stub +
+# DSP skel + the SP_BACKEND=hexagon dispatch. ──
+add_subdirectory(backends/hexagon)
