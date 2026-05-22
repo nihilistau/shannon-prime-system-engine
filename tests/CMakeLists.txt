@@ -4,6 +4,10 @@ set(SP_QWEN3_GGUF
     "D:/Files/models/Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-f16.gguf"
     CACHE FILEPATH "Qwen3-0.6B f16 GGUF used by the engine tests")
 
+# Phase 2-HX: the aarch64-android on-phone build only needs test_ppl (T_FRO_4).
+# The rest of the suite needs the Qwen3 model + desktop-only paths; skip it.
+if(NOT SP_ENGINE_TARGET_ANDROID)
+
 add_executable(test_loader test_loader.c)
 target_link_libraries(test_loader PRIVATE sp_engine)
 target_compile_definitions(test_loader PRIVATE SP_QWEN3_GGUF="${SP_QWEN3_GGUF}")
@@ -215,14 +219,25 @@ else()
 endif()
 add_test(NAME SPM_ENCODE COMMAND test_spm)
 
+endif() # NOT SP_ENGINE_TARGET_ANDROID
+
 # T_FRO_4 — Gemma3-1B PPL gate. SLOW / phase-close: run via `ctest -R T_FRO_4`,
 # not in the fast every-commit suite (a full PPL pass is minutes).
+# On Android the corpus + oracle live next to the binary in SP_DEVICE_DIR; the
+# default defs point there (overridable at runtime via SP_PPL_CORPUS/ORACLE).
 add_executable(test_ppl test_ppl.c)
 target_link_libraries(test_ppl PRIVATE sp_engine)
+if(SP_ENGINE_TARGET_ANDROID)
+    target_compile_definitions(test_ppl PRIVATE
+        SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}"
+        SP_PPL_CORPUS_DEF="wiki.tiny.raw"
+        SP_PPL_ORACLE_DEF="wiki.tiny.oracle_ppl.txt")
+else()
 target_compile_definitions(test_ppl PRIVATE
     SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}"
     SP_PPL_CORPUS_DEF="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ppl/wiki.tiny.raw"
     SP_PPL_ORACLE_DEF="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ppl/wiki.tiny.oracle_ppl.txt")
+endif()
 if(MSVC)
     target_compile_options(test_ppl PRIVATE /W4)
 else()
