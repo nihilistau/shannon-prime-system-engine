@@ -34,6 +34,12 @@ sp_status sp_cuda_device_info(int dev, char *name, int name_cap,
 int gemma3_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                         float *logits);
 
+/* Qwen3 f32/Q8/Q4 forward on CUDA. Same contract as the CPU qwen3_forward:
+ * prefill, causal; logits[n_tokens * n_vocab] position-major. Requires arch ==
+ * SP_ARCH_QWEN3. Honors the packed-weight arena when m->arena is set. [CU.5] */
+int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tokens,
+                       float *logits);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

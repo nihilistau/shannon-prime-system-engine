@@ -254,6 +254,18 @@ if(SP_ENGINE_WITH_CUDA)
     add_test(NAME M_GEMMA3_CUDA COMMAND test_gemma3_cuda)
     set_tests_properties(M_GEMMA3_CUDA PROPERTIES TIMEOUT 600)
 
+    add_executable(test_qwen3_cuda test_qwen3_cuda.c)
+    target_link_libraries(test_qwen3_cuda PRIVATE sp_engine)
+    target_compile_definitions(test_qwen3_cuda PRIVATE
+        SP_QWEN3_GGUF="${SP_QWEN3_GGUF}" SP_QWEN3_REF="${SP_QWEN3_REF}")
+    if(MSVC)
+        target_compile_options(test_qwen3_cuda PRIVATE /W4)
+    else()
+        target_compile_options(test_qwen3_cuda PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME M_QWEN3_CUDA COMMAND test_qwen3_cuda)
+    set_tests_properties(M_QWEN3_CUDA PROPERTIES TIMEOUT 600)
+
     # T_FRO_4 on CUDA: same test_ppl gate, routed through the CUDA forward via
     # SP_BACKEND=cuda. (a) cuda-f32 PPL vs the f16 oracle <=0.05%; (b) per-row Q8
     # arena drift vs cuda-f32 <=2%. SLOW / phase-close. Run inside the env-cuda

@@ -1,7 +1,11 @@
-/* cuda_gemma3.cu — Gemma3 forward pass on CUDA (Phase 2-CU, CU.1 f32 + CU.2 Q8/Q4).
+/* cuda_forward.cu — Gemma3 + Qwen3 forward pass on CUDA (Phase 2-CU).
+ *   CU.1 f32 + CU.2/CU.4 Q8/Q4 arena (gemma3); CU.5 qwen3_forward_cuda (E_CU_1..4);
+ *   CU.6 NTT-attention (E_CU_5); CU.7 KSTE-KV (E_CU_6).
  *
- * Mirrors the CPU gemma3_forward (src/forward/gemma3.c) op-for-op so the
- * CUDA-vs-CPU output gate (§8.3, <=1e-3 rel) and T_FRO_4 hold. cuBLAS SGEMM for
+ * Mirrors the CPU forward passes op-for-op (gemma3_forward in src/forward/gemma3.c,
+ * qwen3_forward in src/forward/forward.c) so the CUDA-vs-CPU output gate (§8.3,
+ * <=1e-3 rel) and T_FRO_4 hold. The two forwards share the device weight cache,
+ * the kernels, and the GEMM helper (kernels must stay in one TU). cuBLAS SGEMM for
  * the 8 matmuls (q/k/v/o, gate/up/down, tied head); hand-written kernels for the
  * rmsnorm / per-head QK-norm / NEOX RoPE / GQA windowed softmax / GeGLU / embed
  * scale. Single stream + CUBLAS_DEFAULT_MATH (sm_75 has no TF32 SGEMM, so f32
@@ -172,6 +176,16 @@ __global__ void k_gelu_mul(float *g, const float *up, size_t n) {
     }
 }
 
+/* SwiGLU (Qwen3 FFN): g = silu(g) * up, silu(x) = x / (1 + exp(-x)). Matches the
+ * CPU forward.c SwiGLU. */
+__global__ void k_silu_mul(float *g, const float *up, size_t n) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = g[idx];
+        g[idx] = (x / (1.0f + expf(-x))) * up[idx];
+    }
+}
+
 __global__ void k_add(float *x, const float *y, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[i] += y[i];
@@ -180,12 +194,13 @@ __global__ void k_add(float *x, const float *y, size_t n) {
 /* Decode a per-row Frobenius packed weight (Q8 or per-row-promoted Q4) to f32,
  * row-major [rows x cols]. Mirrors matmul_arena: w[j][i] = code * row_scale[j]/qmax
  * (qmax 127 for a Q8 row, 7 for a Q4 row). Q4 codes are two-per-byte, low nibble =
- * even index, sign-extended. grid=(ceil(cols/256), rows). */
+ * even index, sign-extended. grid=(rows, ceil(cols/256)): rows on grid.x (limit
+ * 2^31, so an untied LM head with V>65535 rows is fine), cols on grid.y. */
 __global__ void k_dequant_arena(const unsigned char *codes, const unsigned long long *row_off,
                                 const float *row_scale, const unsigned char *row_prec,
                                 int rows, int cols, float *out) {
-    int j = blockIdx.y;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.x;
+    int i = blockIdx.y * blockDim.x + threadIdx.x;
     if (j >= rows || i >= cols) return;
     const unsigned char *rc = codes + row_off[j];
     int code; float inv;
@@ -218,10 +233,12 @@ struct CudaWeights {
     int L;
     cublasHandle_t cublas;
     cudaStream_t   stream;
-    float *embd;        /* [V*E] tied token-embd / LM head, f32 */
+    float *embd;        /* [V*E] token-embd f32 (embed gather; also gemma3 tied head) */
     float *out_norm;    /* [E] */
+    DevTensor head;     /* untied LM head (qwen3 m->output, f32-or-packed); unused when tied */
     size_t scratch_n;   /* max packed weight elem count (0 if no arena) */
     DevTensor *Wq, *Wk, *Wv, *Wo, *Wgate, *Wup, *Wdown;
+    /* post_attn/post_ffw are gemma3-only (sandwich norms); NULL arrays on qwen3. */
     float **attn_norm, **ffn_norm, **q_norm, **k_norm, **post_attn, **post_ffw;
 };
 static CudaWeights g_w = {};
@@ -290,6 +307,7 @@ static void free_devtensor(DevTensor *d) {
 static void free_weights(CudaWeights *w) {
     if (w->embd) cudaFree(w->embd);
     if (w->out_norm) cudaFree(w->out_norm);
+    free_devtensor(&w->head);   /* untied head (no-op when tied: all ptrs NULL) */
     DevTensor **dts[] = { &w->Wq,&w->Wk,&w->Wv,&w->Wo,&w->Wgate,&w->Wup,&w->Wdown };
     for (size_t a = 0; a < sizeof(dts)/sizeof(dts[0]); a++) {
         DevTensor *arr = *dts[a];
@@ -337,6 +355,9 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     const int NH = (int)c->n_head, NKV = (int)c->n_head_kv, V = (int)c->n_vocab;
     const int QD = NH * HD, KVD = NKV * HD, L = (int)c->n_layers;
 
+    const int is_gemma = (c->arch == SP_ARCH_GEMMA3);
+    const int tied = (m->output == m->token_embd);
+
     CudaWeights z = {}; *w = z;
     w->key = m; w->L = L;
 
@@ -346,8 +367,8 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     CB(cublasSetStream(w->cublas, w->stream), "cublasSetStream");
     CB(cublasSetMathMode(w->cublas, CUBLAS_DEFAULT_MATH), "cublasSetMathMode");
 
-    /* tied embedding / head: f32 (from the arena if it was packed for release;
-     * else GGUF). Used by both the embed gather and the head SGEMM. */
+    /* token embedding (the embed gather always uses f32; gemma3's tied head reuses
+     * it). From the arena if it was packed for release, else GGUF. */
     {
         const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
         if (eat) {
@@ -369,10 +390,16 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     w->out_norm = upload_vec(m, m->output_norm, E);
     if (!w->out_norm) { free_weights(w); return 1; }
 
+    /* untied LM head (qwen3): a separate weight, arena-packed in Q8. Tied (gemma3):
+     * the head GEMM reuses w->embd; w->head stays zeroed. */
+    if (!tied) {
+        if (build_w(m, m->output, E, V, &w->head, &w->scratch_n)) { free_weights(w); return 1; }
+    }
+
     ALLOC_DT(Wq); ALLOC_DT(Wk); ALLOC_DT(Wv); ALLOC_DT(Wo);
     ALLOC_DT(Wgate); ALLOC_DT(Wup); ALLOC_DT(Wdown);
     ALLOC_NM(attn_norm); ALLOC_NM(ffn_norm); ALLOC_NM(q_norm); ALLOC_NM(k_norm);
-    ALLOC_NM(post_attn); ALLOC_NM(post_ffw);
+    if (is_gemma) { ALLOC_NM(post_attn); ALLOC_NM(post_ffw); }   /* sandwich norms */
 
     for (int Li = 0; Li < L; Li++) {
         const qwen3_layer *ly = &m->layers[Li];
@@ -381,7 +408,7 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
         BUILDW(Wgate, ffn_gate, E, FF); BUILDW(Wup, ffn_up, E, FF); BUILDW(Wdown, ffn_down, FF, E);
         UPV(attn_norm, attn_norm, E);   UPV(ffn_norm, ffn_norm, E);
         UPV(q_norm, attn_q_norm, HD);   UPV(k_norm, attn_k_norm, HD);
-        UPV(post_attn, post_attn_norm, E); UPV(post_ffw, post_ffw_norm, E);
+        if (is_gemma) { UPV(post_attn, post_attn_norm, E); UPV(post_ffw, post_ffw_norm, E); }
     }
     return 0;
 }
@@ -400,9 +427,11 @@ static int gemm(cublasHandle_t h, const float *dW, const float *dX, float *dY,
 static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
                   const float *dX, float *dY, int n_tok, float *scratch) {
     if (W->f32) return gemm(h, W->f32, dX, dY, n_tok, W->in, W->out);
-    dim3 grid((W->in + 255) / 256, W->out);
+    dim3 grid(W->out, (W->in + 255) / 256);   /* rows on grid.x (V can exceed 65535) */
     k_dequant_arena<<<grid, 256, 0, st>>>(W->codes, W->row_off, W->row_scale, W->row_prec,
                                           W->out, W->in, scratch);
+    cudaError_t le = cudaGetLastError();
+    if (le != cudaSuccess) return fail_cuda(le, "k_dequant_arena launch");
     return gemm(h, scratch, dX, dY, n_tok, W->in, W->out);
 }
 
@@ -480,6 +509,89 @@ extern "C" int gemma3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
 
     k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
     if (gemm(cb, g_w.embd, dnx, dlog, n_tok, E, V)) goto done;   /* tied head, f32 */
+
+    if (cudaMemcpyAsync(logits, dlog, (size_t)n_tok*V*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+        sp_set_error("download logits"); goto done;
+    }
+    { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "stream sync"); goto done; } }
+    { cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) { fail_cuda(e, "kernel launch"); goto done; } }
+    rc = 0;
+
+done:
+    if (dtoks) cudaFree(dtoks);
+    if (dx) cudaFree(dx); if (dnx) cudaFree(dnx);
+    if (dq) cudaFree(dq); if (dk) cudaFree(dk); if (dv) cudaFree(dv);
+    if (dao) cudaFree(dao); if (dap) cudaFree(dap);
+    if (dg) cudaFree(dg); if (dup) cudaFree(dup); if (ddn) cudaFree(ddn);
+    if (dlog) cudaFree(dlog); if (dscr) cudaFree(dscr);
+    return rc;
+}
+
+/* Qwen3 forward on CUDA (CU.5). Deltas vs gemma3: no embedding scale, plain
+ * residuals (no sandwich post-norms), SwiGLU (silu) not GeGLU, single RoPE base
+ * + full causal (no sliding window), untied LM head (g_w.head, arena-packed in
+ * Q8). Mirrors the CPU qwen3_forward (src/forward/forward.c). */
+extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
+                                  int n_tok, float *logits) {
+    if (!m || m->cfg.arch != SP_ARCH_QWEN3) { sp_set_error("qwen3_forward_cuda: not a qwen3 model"); return 1; }
+
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, FF = (int)c->n_ff, HD = (int)c->head_dim;
+    const int NH = (int)c->n_head, NKV = (int)c->n_head_kv, V = (int)c->n_vocab;
+    const int QD = NH * HD, KVD = NKV * HD;
+    const int group = NH / NKV;
+    const float eps = c->rms_eps, base = c->rope_freq_base;
+    const float ascale = 1.0f / sqrtf((float)HD);
+
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
+    cublasHandle_t cb = g_w.cublas;
+    cudaStream_t st = g_w.stream;
+
+    int *dtoks = NULL;
+    float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,*dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL;
+    int rc = 1;
+    if (cudaMalloc(&dtoks, (size_t)n_tok*sizeof(int)) != cudaSuccess) { sp_set_error("dtoks OOM"); goto done; }
+    DALLOC(dx, (size_t)n_tok*E);   DALLOC(dnx, (size_t)n_tok*E);
+    DALLOC(dq, (size_t)n_tok*QD);  DALLOC(dk, (size_t)n_tok*KVD); DALLOC(dv, (size_t)n_tok*KVD);
+    DALLOC(dao, (size_t)n_tok*QD); DALLOC(dap, (size_t)n_tok*E);
+    DALLOC(dg, (size_t)n_tok*FF);  DALLOC(dup, (size_t)n_tok*FF); DALLOC(ddn, (size_t)n_tok*E);
+    DALLOC(dlog, (size_t)n_tok*V);
+    if (g_w.scratch_n) DALLOC(dscr, g_w.scratch_n);
+
+    if (cudaMemcpyAsync(dtoks, tokens, (size_t)n_tok*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+        sp_set_error("upload tokens"); goto done;
+    }
+    {   dim3 grid(n_tok, (E + 255) / 256);   /* embed lookup, no scale (embscale=1) */
+        k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dtoks, n_tok, E, 1.0f, dx); }
+
+    for (int L = 0; L < (int)c->n_layers; L++) {
+        const size_t nE = (size_t)n_tok * E;
+
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+        if (gemm_w(cb, st, &g_w.Wq[L], dnx, dq, n_tok, dscr)) goto done;
+        if (gemm_w(cb, st, &g_w.Wk[L], dnx, dk, n_tok, dscr)) goto done;
+        if (gemm_w(cb, st, &g_w.Wv[L], dnx, dv, n_tok, dscr)) goto done;
+        k_rmsnorm_head<<<n_tok*NH, HD, 0, st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
+        k_rmsnorm_head<<<n_tok*NKV, HD, 0, st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
+        k_rope<<<n_tok*NH, HD/2, 0, st>>>(dq, NH, HD, QD, base);
+        k_rope<<<n_tok*NKV, HD/2, 0, st>>>(dk, NKV, HD, KVD, base);
+        {   int bd = HD > n_tok ? HD : n_tok; if (bd > 1024) bd = 1024;
+            k_attn<<<n_tok*NH, bd, (size_t)n_tok*sizeof(float), st>>>(   /* full causal: win=-1 */
+                dq, dk, dv, n_tok, QD, KVD, HD, group, ascale, -1, dao); }
+        if (gemm_w(cb, st, &g_w.Wo[L], dao, dap, n_tok, dscr)) goto done;
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dap, nE);    /* plain residual */
+
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+        if (gemm_w(cb, st, &g_w.Wgate[L], dnx, dg, n_tok, dscr)) goto done;
+        if (gemm_w(cb, st, &g_w.Wup[L], dnx, dup, n_tok, dscr)) goto done;
+        {   size_t nFF = (size_t)n_tok * FF;
+            k_silu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
+        if (gemm_w(cb, st, &g_w.Wdown[L], dg, ddn, n_tok, dscr)) goto done;
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, ddn, nE);    /* plain residual */
+    }
+
+    k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
+    if (gemm_w(cb, st, &g_w.head, dnx, dlog, n_tok, dscr)) goto done;   /* untied head */
 
     if (cudaMemcpyAsync(logits, dlog, (size_t)n_tok*V*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
         sp_set_error("download logits"); goto done;

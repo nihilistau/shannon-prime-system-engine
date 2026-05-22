@@ -56,7 +56,7 @@ if(SP_ENGINE_WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)
     add_library(sp_engine_cuda STATIC
         backends/cuda/cuda_backend.cu
-        backends/cuda/cuda_gemma3.cu
+        backends/cuda/cuda_forward.cu
     )
     set_target_properties(sp_engine_cuda PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
