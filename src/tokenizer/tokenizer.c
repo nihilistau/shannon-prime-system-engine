@@ -67,6 +67,8 @@ struct sp_tokenizer {
     sp_hmap       merge;        /* "A B" merge-line bytes -> rank                      */
     sp_special   *spec;         /* special surfaces, sorted longest-first              */
     uint32_t      n_spec;
+    char         *tok_blob;     /* owned vocab bytes (owning mode); NULL if borrowing  */
+    char         *merge_blob;   /* owned merge bytes (owning mode); NULL if borrowing  */
 };
 
 /* GPT2 bytes_to_unicode: printable bytes (33..126,161..172,174..255) map to
@@ -95,7 +97,9 @@ static int spec_cmp_desc(const void *a, const void *b) {
     return (la < lb) - (la > lb);   /* longer first */
 }
 
-sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g) {
+sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g) { return sp_tokenizer_load_ex(g, 0); }
+
+sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own) {
     const gguf_kv *kv = gguf_find_kv(g, "tokenizer.ggml.tokens");
     if (!kv || kv->type != GGUF_T_ARRAY || kv->arr_type != GGUF_T_STRING) return NULL;
     uint64_t nv = kv->arr_len;
@@ -110,7 +114,22 @@ sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g) {
     if (gguf_kv_str_array(g, kv, t->tok, t->len, nv) != nv) { sp_tokenizer_free(t); return NULL; }
     build_byte_maps(t);
 
-    /* vocab map: token bytes -> id */
+    /* owning mode: copy the token bytes into an owned blob and repoint tok[] so
+     * the tokenizer no longer borrows the GGUF mapping. */
+    if (own) {
+        uint64_t total = 0;
+        for (uint64_t i = 0; i < nv; i++) total += t->len[i];
+        t->tok_blob = (char *)malloc((size_t)(total ? total : 1));
+        if (!t->tok_blob) { sp_tokenizer_free(t); return NULL; }
+        uint64_t off = 0;
+        for (uint64_t i = 0; i < nv; i++) {
+            memcpy(t->tok_blob + off, t->tok[i], (size_t)t->len[i]);
+            t->tok[i] = t->tok_blob + off;
+            off += t->len[i];
+        }
+    }
+
+    /* vocab map: token bytes -> id (keys are owned when own, else into the mapping) */
     if (!hmap_init(&t->vocab, (size_t)nv)) { sp_tokenizer_free(t); return NULL; }
     for (uint32_t i = 0; i < t->n_vocab; i++)
         hmap_put(&t->vocab, t->tok[i], (uint32_t)t->len[i], (int64_t)i);
@@ -122,9 +141,23 @@ sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g) {
         const char **mp = (const char **)malloc((size_t)nm * sizeof(char *));
         uint64_t    *ml = (uint64_t *)malloc((size_t)nm * sizeof(uint64_t));
         if (mp && ml && gguf_kv_str_array(g, mkv, mp, ml, nm) == nm && hmap_init(&t->merge, (size_t)nm)) {
-            for (uint64_t i = 0; i < nm; i++) hmap_put(&t->merge, mp[i], (uint32_t)ml[i], (int64_t)i);
+            const char **key = mp;
+            if (own) {                 /* copy merge bytes into an owned blob, key off it */
+                uint64_t total = 0;
+                for (uint64_t i = 0; i < nm; i++) total += ml[i];
+                t->merge_blob = (char *)malloc((size_t)(total ? total : 1));
+                if (t->merge_blob) {
+                    uint64_t off = 0;
+                    for (uint64_t i = 0; i < nm; i++) {
+                        memcpy(t->merge_blob + off, mp[i], (size_t)ml[i]);
+                        mp[i] = t->merge_blob + off;   /* reuse mp[] as the owned-pointer array */
+                        off += ml[i];
+                    }
+                }
+            }
+            for (uint64_t i = 0; i < nm; i++) hmap_put(&t->merge, key[i], (uint32_t)ml[i], (int64_t)i);
         }
-        free((void *)mp); free(ml);   /* keys point into the mapping; arrays themselves are scratch */
+        free((void *)mp); free(ml);   /* the pointer arrays are scratch; keys live in mapping or blob */
     }
 
     /* special surfaces: token_type CONTROL(3) or USER_DEFINED(4) */
@@ -157,7 +190,9 @@ sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g) {
 void sp_tokenizer_free(sp_tokenizer *t) {
     if (!t) return;
     hmap_free(&t->vocab); hmap_free(&t->merge);
-    free(t->spec); free((void *)t->tok); free(t->len); free(t);
+    free(t->spec); free((void *)t->tok); free(t->len);
+    free(t->tok_blob); free(t->merge_blob);
+    free(t);
 }
 
 uint32_t sp_tokenizer_vocab_size(const sp_tokenizer *t) { return t ? t->n_vocab : 0; }

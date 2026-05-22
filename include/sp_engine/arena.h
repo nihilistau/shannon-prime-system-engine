@@ -45,13 +45,22 @@ struct qwen3_model;   /* forward decl (sp_engine/model.h) */
 
 /* Build a packed arena over the model's matmul weight tensors. `precision` is 8
  * (Q8) or 4 (Q4 mixed: rows whose Q4 round-trip rel-error exceeds `q4_promote`
- * are stored Q8). Returns NULL on error. The embedding and norms are left out
- * (Phase 1a). The model's GGUF mapping must still be open during the build. */
-sp_arena *sp_arena_build(const struct qwen3_model *m, int precision, float q4_promote);
+ * are stored Q8). If `include_embed` is nonzero the token-embedding tensor is
+ * packed too (Phase 1b — required before releasing the GGUF source); otherwise
+ * the embedding stays f32 from the mapping (Phase 1a, which keeps the E_CPU_9
+ * byte-identity-to-FROB gate). Norms are never packed. Returns NULL on error.
+ * The model's GGUF mapping must still be open during the build. */
+sp_arena *sp_arena_build(const struct qwen3_model *m, int precision, float q4_promote,
+                         int include_embed);
 void      sp_arena_free(sp_arena *a);
 
 /* Lookup a packed tensor by its GGUF tensor name; NULL if not arena-ized. */
 const sp_arena_tensor *sp_arena_find(const sp_arena *a, const char *name);
+
+/* Reconstruct row `r` of a packed tensor to `cols` f32 values (inline lift:
+ * code * row_scale / qmax). Used for the embedding lookup when the embedding is
+ * in the arena. Returns 0 on success. */
+int sp_arena_dequant_row(const sp_arena_tensor *at, int r, float *dst);
 
 size_t sp_arena_bytes(const sp_arena *a);       /* total packed bytes (codes+scales+meta) */
 int    sp_arena_precision(const sp_arena *a);   /* 8 or 4 */
