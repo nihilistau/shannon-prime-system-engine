@@ -1,0 +1,48 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+/* gemm.comp — tiled f32 GEMM with f64 accumulation. Mirrors the CUDA cuBLAS SGEMM mapping:
+ * ggml weight W is [ne0=in, ne1=out] row-major [out x in] with y[j]=sum_i W[i+j*in]*x[i].
+ * X is row-major [n_tok x in], Y is row-major [n_tok x out]:
+ *   Y[t, j] = sum_i W[j*in + i] * X[t*in + i].
+ * One workgroup computes a TILE x TILE block of Y; gid.x indexes out columns (j),
+ * gid.y indexes token rows (t). Pure f32, no relaxed precision -> deterministic. */
+
+#define TILE 16
+layout(local_size_x = TILE, local_size_y = TILE) in;
+
+layout(std430, binding = 0) readonly buffer Wbuf { float W[]; };   /* [out x in], row j contiguous */
+layout(std430, binding = 1) readonly buffer Xbuf { float X[]; };   /* [n_tok x in], row t contiguous */
+layout(std430, binding = 2) writeonly buffer Ybuf { float Y[]; };  /* [n_tok x out] */
+
+layout(push_constant) uniform PC { int n_tok; int in_dim; int out_dim; } pc;
+
+shared float As[TILE][TILE];   /* X tile: [tokRow][k] */
+shared float Bs[TILE][TILE];   /* W tile: [k][outCol] */
+
+void main() {
+    int j = int(gl_GlobalInvocationID.x);   /* out column */
+    int t = int(gl_GlobalInvocationID.y);   /* token row  */
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+
+    /* f64 accumulator: the CPU/cuBLAS reference accumulates K=in_dim products
+     * (up to n_ff=6912) with shallow reduction trees; a flat f32 register would
+     * floor at ~K*eps ~ 8e-4. Accumulating in f64 (operands stay f32) keeps the
+     * Vulkan logits within the §8.6.1 precision floor of CPU f32. */
+    double acc = 0.0LF;
+    int K = pc.in_dim;
+    int ntiles = (K + TILE - 1) / TILE;
+    for (int kt = 0; kt < ntiles; kt++) {
+        int kbase = kt * TILE;
+        /* load X[t, kbase+lx] into As[ly][lx] */
+        int kx = kbase + lx;
+        As[ly][lx] = (t < pc.n_tok && kx < K) ? X[t * K + kx] : 0.0;
+        /* load W[j, kbase+ly] into Bs[ly][lx]  (W row j = out column j) */
+        int ky = kbase + ly;
+        Bs[ly][lx] = (j < pc.out_dim && ky < K) ? W[j * K + ky] : 0.0;
+        barrier();
+        for (int k = 0; k < TILE; k++) acc += double(As[ly][k]) * double(Bs[k][lx]);
+        barrier();
+    }
+    if (t < pc.n_tok && j < pc.out_dim) Y[t * pc.out_dim + j] = float(acc);
+}

@@ -5,6 +5,9 @@
 #ifdef SP_ENGINE_WITH_CUDA
 #include "sp_engine/cuda_backend.h"   /* sp_cuda_model_release */
 #endif
+#ifdef SP_ENGINE_WITH_VULKAN
+#include "sp_engine/vulkan_backend.h"   /* sp_vulkan_model_release */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -234,6 +237,9 @@ void qwen3_free(qwen3_model *m) {
     if (!m) return;
 #ifdef SP_ENGINE_WITH_CUDA
     sp_cuda_model_release(m);   /* drop device weights cached by model pointer */
+#endif
+#ifdef SP_ENGINE_WITH_VULKAN
+    sp_vulkan_model_release(m);   /* drop device weights cached by model pointer */
 #endif
     for (int i = 0; i < m->n_norm; i++) free(m->norm_buf[i]);
     free(m->norm_buf); free((void *)m->norm_src);

@@ -1,0 +1,38 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+/* rmsnorm.comp — out[row] = rmsnorm(x[row]) * w over n elems. One workgroup/row;
+ * sum_sq accumulated in f64 (matches CPU + CUDA k_rmsnorm).
+ *   ms = (double)sum_sq / n;  scale = 1/sqrt((float)ms + eps);  out_i = x_i*scale*w_i.
+ * Dispatch: (n_rows, 1, 1). */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly  buffer Xin  { float x[]; };
+layout(std430, binding = 1) readonly  buffer Wbuf { float w[]; };
+layout(std430, binding = 2) writeonly buffer Oout { float outv[]; };
+
+layout(push_constant) uniform PC { int n; float eps; } pc;
+
+shared double sh[256];
+
+void main() {
+    int row = int(gl_WorkGroupID.x);
+    int tid = int(gl_LocalInvocationID.x);
+    int base = row * pc.n;
+
+    double s = 0.0;
+    for (int i = tid; i < pc.n; i += int(gl_WorkGroupSize.x)) {
+        double v = double(x[base + i]);
+        s += v * v;
+    }
+    sh[tid] = s;
+    barrier();
+    for (uint o = gl_WorkGroupSize.x / 2u; o > 0u; o >>= 1u) {
+        if (uint(tid) < o) sh[tid] += sh[tid + o];
+        barrier();
+    }
+    float ms = float(sh[0] / double(pc.n));
+    float scale = 1.0 / sqrt(ms + pc.eps);
+    for (int i = tid; i < pc.n; i += int(gl_WorkGroupSize.x))
+        outv[base + i] = x[base + i] * scale * w[i];
+}

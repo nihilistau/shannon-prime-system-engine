@@ -5,6 +5,9 @@
 #ifdef SP_ENGINE_WITH_CUDA
 #include "sp_engine/cuda_backend.h"
 #endif
+#ifdef SP_ENGINE_WITH_VULKAN
+#include "sp_engine/vulkan_backend.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +27,13 @@ int sp_perplexity(const qwen3_model *m, const sp_tokenizer *tok,
     { const char *be = getenv("SP_BACKEND");
       if (be && strcmp(be, "cuda") == 0 && m->cfg.arch == SP_ARCH_GEMMA3)
           fwd = gemma3_forward_cuda; }
+#endif
+#ifdef SP_ENGINE_WITH_VULKAN
+    /* SP_BACKEND=vulkan routes the gemma3 forward through the Vulkan backend
+     * (Phase 2-VK), mirroring the CUDA branch. The CPU path stays the default. */
+    { const char *be = getenv("SP_BACKEND");
+      if (be && strcmp(be, "vulkan") == 0 && m->cfg.arch == SP_ARCH_GEMMA3)
+          fwd = gemma3_forward_vulkan; }
 #endif
 
     /* tokenize the whole corpus once (BOS auto-prepended when add_bos_token=1). */

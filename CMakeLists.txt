@@ -15,6 +15,7 @@ set(SP_ENGINE_BACKEND "cpu" CACHE STRING "Active backend: cpu|cuda|vulkan|hexago
 option(SP_ENGINE_WITH_AVX2   "CPU backend: emit AVX2 path"   ON)
 option(SP_ENGINE_WITH_AVX512 "CPU backend: emit AVX512 path" OFF)
 option(SP_ENGINE_WITH_CUDA   "Build with CUDA acceleration"  OFF)
+option(SP_ENGINE_WITH_VULKAN "Build with Vulkan compute acceleration" OFF)
 option(SP_ENGINE_BUILD_TESTS "Build engine tests"            ON)
 
 if(SP_ENGINE_WITH_CUDA)

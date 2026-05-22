@@ -1,0 +1,65 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_ARB_gpu_shader_fp64  : require
+/* attn_ntt.comp — NTT-attention (E_VK_5): the score <q,k> is computed EXACTLY in
+ * integers. Head vectors are quantized to int32 (x qscale=2^16) and the inner
+ * product is accumulated in int64, which is bit-identical to the CPU poly-ring
+ * sp_pr_inner (coeff 0 of the negacyclic product == sum_i q_i k_i; |ip| ~ 2^49 <<
+ * 2^63). Mirrors CUDA k_attn_ntt. Full causal (prefill). Softmax + V-sum stay f32.
+ * Dispatch: (n_tok * n_heads, 1, 1). Requires shaderInt64 + shaderFloat64. */
+
+#define MAXTOK 1024
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly  buffer Qbuf { float Q[]; };
+layout(std430, binding = 1) readonly  buffer Kbuf { float K[]; };
+layout(std430, binding = 2) readonly  buffer Vbuf { float V[]; };
+layout(std430, binding = 3) writeonly buffer Obuf { float AO[]; };
+
+layout(push_constant) uniform PC {
+    int n_tok; int QD; int KVD; int HD; int group; float ascale; float qscale;
+} pc;
+
+shared float sc[MAXTOK];
+shared float g_sum;
+
+void main() {
+    int n_heads = pc.QD / pc.HD;
+    int b = int(gl_WorkGroupID.x);
+    int t = b / n_heads;
+    int h = b % n_heads;
+    int kvh = h / pc.group;
+    if (pc.n_tok > MAXTOK) return;   /* host guarantees n_tok <= MAXTOK; guard OOB */
+    int qoff = t * pc.QD + h * pc.HD;
+    double qs2 = double(pc.qscale) * double(pc.qscale);
+    int tid = int(gl_LocalInvocationID.x);
+
+    for (int s = tid; s <= t; s += int(gl_WorkGroupSize.x)) {
+        int koff = s * pc.KVD + kvh * pc.HD;
+        int64_t ip = 0L;
+        for (int i = 0; i < pc.HD; i++) {
+            int qi = int(round(Q[qoff + i] * pc.qscale));
+            int ki = int(round(K[koff + i] * pc.qscale));
+            ip += int64_t(qi) * int64_t(ki);
+        }
+        sc[s] = float(double(ip) / qs2) * pc.ascale;   /* exact integer <q,k>/2^32 */
+    }
+    barrier();
+
+    if (tid == 0) {
+        float m = sc[0];
+        for (int s = 1; s <= t; s++) if (sc[s] > m) m = sc[s];
+        float sum = 0.0;
+        for (int s = 0; s <= t; s++) { float e = exp(sc[s] - m); sc[s] = e; sum += e; }
+        g_sum = sum;
+    }
+    barrier();
+
+    float inv = 1.0 / g_sum;
+    for (int i = tid; i < pc.HD; i += int(gl_WorkGroupSize.x)) {
+        float acc = 0.0;
+        for (int s = 0; s <= t; s++)
+            acc += sc[s] * V[s * pc.KVD + kvh * pc.HD + i];
+        AO[t * pc.QD + h * pc.HD + i] = acc * inv;
+    }
+}

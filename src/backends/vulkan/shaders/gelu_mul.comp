@@ -1,0 +1,21 @@
+#version 450
+/* gelu_mul.comp — GeGLU (Gemma3 FFN): g = gelu_tanh(g) * up. Mirrors CUDA
+ * k_gelu_mul: 0.5*x*(1+tanh(k*(x+0.044715*x^3)))*up, k = 0.7978845608028654.
+ * Dispatch: (ceil(n/256), 1, 1). */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer Gbuf { float g[]; };          /* in/out */
+layout(std430, binding = 1) readonly buffer Ubuf { float up[]; };
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < pc.n) {
+        float x = g[idx];
+        const float k = 0.7978845608028654;
+        float th = tanh(k * (x + 0.044715 * x * x * x));
+        g[idx] = 0.5 * x * (1.0 + th) * up[idx];
+    }
+}

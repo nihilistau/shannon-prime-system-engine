@@ -1,0 +1,18 @@
+#version 450
+/* embed_scale.comp — x[t,i] = embd[toks[t], i] * scale. Mirrors CUDA k_embed_scale.
+ * Dispatch: (ceil(E/256), n_tok, 1); one invocation per (token, embd elem). */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly  buffer Embd { float embd[]; };  /* [V x E] */
+layout(std430, binding = 1) readonly  buffer Toks { int toks[]; };    /* [n_tok] */
+layout(std430, binding = 2) writeonly buffer Xout { float x[]; };     /* [n_tok x E] */
+
+layout(push_constant) uniform PC { int n_tok; int E; float scale; } pc;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    int t = int(gl_GlobalInvocationID.y);
+    if (t < pc.n_tok && i < pc.E)
+        x[t * pc.E + i] = embd[toks[t] * pc.E + i] * pc.scale;
+}

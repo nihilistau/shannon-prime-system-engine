@@ -1,0 +1,14 @@
+#version 450
+/* add.comp — x += y (residual). Mirrors CUDA k_add. Dispatch: (ceil(n/256),1,1). */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer Xbuf { float x[]; };          /* in/out */
+layout(std430, binding = 1) readonly buffer Ybuf { float y[]; };
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < pc.n) x[i] += y[i];
+}
