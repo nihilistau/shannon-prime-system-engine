@@ -16,7 +16,12 @@ option(SP_ENGINE_WITH_AVX2   "CPU backend: emit AVX2 path"   ON)
 option(SP_ENGINE_WITH_AVX512 "CPU backend: emit AVX512 path" OFF)
 option(SP_ENGINE_WITH_CUDA   "Build with CUDA acceleration"  OFF)
 option(SP_ENGINE_WITH_VULKAN "Build with Vulkan compute acceleration" OFF)
+option(SP_ENGINE_WITH_HEXAGON "Build with Hexagon V69 HTP acceleration" OFF)
 option(SP_ENGINE_BUILD_TESTS "Build engine tests"            ON)
+# Phase 2-HX: cross-compiling to aarch64-android for the on-phone PPL runner.
+# When ON, the test tree builds only test_ppl (the T_FRO_4 gate) — the rest of
+# the suite needs the Qwen3 model and is run on the desktop CPU/CUDA builds.
+option(SP_ENGINE_TARGET_ANDROID "Phase 2-HX aarch64-android on-phone build" OFF)
 
 if(SP_ENGINE_WITH_CUDA)
     enable_language(CUDA)
