@@ -16,10 +16,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
 #if defined(SP_ENGINE_AVX2) || defined(SP_ENGINE_AVX512)
 #include <immintrin.h>
 #endif
+
+/* Format-lock (Piece 3, roadmap §8.2.2): the persistent Spinor KV cache stores
+ * NBLK = ceil(head_dim/SP_SPINOR_BODY_LEN) frozen 63-byte blocks per head — the
+ * on-disk/on-wire §4.9 KV layout. Freeze the block contract the split arithmetic
+ * (kv_spinor_split) and the GPU backends both depend on; a change is a compile
+ * error until SP_SPINOR_LAYOUT_VERSION is bumped with a migration. */
+_Static_assert(sizeof(sp_spinor_block_t) == 63, "Spinor KV block is 63 bytes (frozen)");
+_Static_assert(SP_SPINOR_BODY_LEN == 55, "Spinor block carries 55 anchors; KV head-split assumes this");
+_Static_assert(SP_SPINOR_LAYOUT_VERSION == 1u, "Spinor KV layout v1 frozen; bump + migrate to change");
 
 /* f32 dot product. AVX2 (8-wide, FMA) when compiled with SP_ENGINE_AVX2 and not
  * forced scalar; falls back to the same sequential scalar reduction the scalar
@@ -41,22 +51,52 @@ static int g_ntt_attn = 0;
  * reads it — the foundational KV codec (§4.5/§4.9), distinct from the KSTE sieve
  * overlay (E_CPU_6). Gate OFF skips it entirely => bit-identical to E_CPU_2. */
 static int g_kv_spinor = 0;
+/* SP_KV_SPINOR_REF=1: in qwen3_generate_kv, store the cache as f32 + an in-place
+ * round-trip (the §4.9 "reference fp32 cache, parity tests only") instead of the
+ * production Spinor-block cache. Decode-from-block is arithmetically identical to
+ * the in-place round-trip, so the two paths must produce identical sequences —
+ * that equivalence is the Piece-2 gate (cf. E_CPU_9's arena==FROB byte gate). */
+static int g_kv_spinor_ref = 0;
+
+/* Spinor-block split for a head vector of length d. A block carries 55 anchors;
+ * head_dim=128 > 55, so split into ceil(d/55) balanced chunks (128 -> 43/43/42).
+ * The frozen 63-byte block layout is NOT modified. Returns the block count and
+ * fills lens[] (caller sizes lens[] >= SP_KV_MAX_BLOCKS). */
+#define SP_KV_MAX_BLOCKS 8
+static int kv_spinor_split(int d, int lens[SP_KV_MAX_BLOCKS]) {
+    int nblk = (d + 54) / 55;
+    if (nblk < 1) nblk = 1;
+    if (nblk > SP_KV_MAX_BLOCKS) nblk = SP_KV_MAX_BLOCKS;
+    int base = d / nblk, extra = d % nblk;
+    for (int b = 0; b < nblk; b++) lens[b] = base + (b < extra ? 1 : 0);
+    return nblk;
+}
 
 /* Round-trip a length-d vector through the Spinor codec in place (encode then
- * decode). A Spinor block carries 55 anchors; head_dim=128 > 55, so split into
- * ceil(d/55) balanced chunks (128 -> 43/43/42). The frozen 63-byte block layout
- * is NOT modified; we just use ceil(d/55) of them per head vector. */
+ * decode). Used by the prefill KV path (E_CPU_8) and the parity-reference decode. */
 static void kv_spinor_roundtrip(float *vec, int d) {
-    int nblk = (d + 54) / 55;
-    if (nblk < 1) return;
-    int base = d / nblk, extra = d % nblk, off = 0;
+    int lens[SP_KV_MAX_BLOCKS];
+    int nblk = kv_spinor_split(d, lens), off = 0;
     sp_spinor_block_t blk;
     for (int b = 0; b < nblk; b++) {
-        int len = base + (b < extra ? 1 : 0);
-        sp_spinor_encode(vec + off, len, &blk);
-        (void)sp_spinor_decode(&blk, vec + off, len);   /* own freshly-encoded block: CRC valid */
-        off += len;
+        sp_spinor_encode(vec + off, lens[b], &blk);
+        (void)sp_spinor_decode(&blk, vec + off, lens[b]);   /* own freshly-encoded block: CRC valid */
+        off += lens[b];
     }
+}
+
+/* Encode a head vector (length d) into its nblk persistent Spinor blocks. */
+static void kv_spinor_encode_head(const float *vec, int d, sp_spinor_block_t *blks) {
+    int lens[SP_KV_MAX_BLOCKS];
+    int nblk = kv_spinor_split(d, lens), off = 0;
+    for (int b = 0; b < nblk; b++) { sp_spinor_encode(vec + off, lens[b], &blks[b]); off += lens[b]; }
+}
+
+/* Decode the nblk persistent Spinor blocks of a head back to d f32 values. */
+static void kv_spinor_decode_head(const sp_spinor_block_t *blks, int d, float *vec) {
+    int lens[SP_KV_MAX_BLOCKS];
+    int nblk = kv_spinor_split(d, lens), off = 0;
+    for (int b = 0; b < nblk; b++) { (void)sp_spinor_decode(&blks[b], vec + off, lens[b]); off += lens[b]; }
 }
 
 static float dot_f32(const float *a, const float *b, int n) {
@@ -291,6 +331,7 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
     { const char *e = getenv("SP_ENGINE_NTT_ATTN"); g_ntt_attn = (e && e[0] == '1'); }
     { const char *e = getenv("SP_KV_SPINOR");       g_kv_spinor = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_KV_SPINOR_REF");   g_kv_spinor_ref = (e && e[0] == '1'); }
 }
 
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
@@ -490,25 +531,56 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
     const float eps = c->rms_eps, base = c->rope_freq_base, ascale = 1.0f / sqrtf((float)HD);
     const int P = n_prompt + n_gen;
 
-    int rc = -1, n = n_prompt;
-    float *kc   = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* K cache */
-    float *vc   = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* V cache */
-    float *x    = (float *)malloc((size_t)E * sizeof(float));   /* single-token residual */
-    float *nx   = (float *)malloc((size_t)E * sizeof(float));
-    float *q    = (float *)malloc((size_t)QD * sizeof(float));
-    float *knew = (float *)malloc((size_t)KVD * sizeof(float));
-    float *vnew = (float *)malloc((size_t)KVD * sizeof(float));
-    float *ao   = (float *)malloc((size_t)QD * sizeof(float));
-    float *ap   = (float *)malloc((size_t)E * sizeof(float));
-    float *gg   = (float *)malloc((size_t)FF * sizeof(float));
-    float *up   = (float *)malloc((size_t)FF * sizeof(float));
-    float *dn   = (float *)malloc((size_t)E * sizeof(float));
-    float *sc   = (float *)malloc((size_t)P * sizeof(float));
-    float *lg   = (float *)malloc((size_t)V * sizeof(float));
-    if (!kc || !vc || !x || !nx || !q || !knew || !vnew || !ao || !ap || !gg || !up || !dn || !sc || !lg)
+    /* Production KV layout (Piece 2): SP_KV_SPINOR=1 stores the cache as frozen
+     * 63-byte Spinor blocks (NBLK per head) and decodes on read into a per-LAYER
+     * f32 scratch, so resident KV memory is the packed blocks + one layer's worth
+     * of scratch, not the full f32 cache. SP_KV_SPINOR_REF=1 keeps the f32 cache
+     * (parity reference, §4.9). Gate off => f32 cache, no codec (regression). */
+    int blk_lens[SP_KV_MAX_BLOCKS];
+    const int NBLK = kv_spinor_split(HD, blk_lens);
+    const int use_blocks = g_kv_spinor && !g_kv_spinor_ref;
+
+    int rc = -1, n = n_prompt, produced = 0;
+    /* All pointers NULL-first so any early `goto done` frees only NULLs. */
+    sp_spinor_block_t *kcb = NULL, *vcb = NULL;   /* block KV cache (use_blocks) */
+    float *kc = NULL, *vc = NULL;                 /* f32 KV cache (ref / gate-off) */
+    float *kdec = NULL, *vdec = NULL;             /* per-layer decode scratch (use_blocks) */
+    float *x = NULL, *nx = NULL, *q = NULL, *knew = NULL, *vnew = NULL, *ao = NULL;
+    float *ap = NULL, *gg = NULL, *up = NULL, *dn = NULL, *sc = NULL, *lg = NULL;
+
+    if (use_blocks) {
+        size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
+        kcb  = (sp_spinor_block_t *)malloc(nb * sizeof(sp_spinor_block_t));
+        vcb  = (sp_spinor_block_t *)malloc(nb * sizeof(sp_spinor_block_t));
+        kdec = (float *)malloc((size_t)P * KVD * sizeof(float));
+        vdec = (float *)malloc((size_t)P * KVD * sizeof(float));
+        if (!kcb || !vcb || !kdec || !vdec) goto done;
+        fprintf(stderr, "    [KV] Spinor-block cache: %zu B vs f32 %zu B (%.2fx) - %d blocks/head, %d B/block\n",
+                2 * nb * sizeof(sp_spinor_block_t),
+                2 * (size_t)c->n_layers * P * KVD * sizeof(float),
+                (double)((size_t)c->n_layers * P * KVD * sizeof(float)) /
+                (double)((size_t)c->n_layers * P * NKV * NBLK * sizeof(sp_spinor_block_t)),
+                NBLK, (int)sizeof(sp_spinor_block_t));
+    } else {
+        kc = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* K cache */
+        vc = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* V cache */
+        if (!kc || !vc) goto done;
+    }
+    x    = (float *)malloc((size_t)E * sizeof(float));   /* single-token residual */
+    nx   = (float *)malloc((size_t)E * sizeof(float));
+    q    = (float *)malloc((size_t)QD * sizeof(float));
+    knew = (float *)malloc((size_t)KVD * sizeof(float));
+    vnew = (float *)malloc((size_t)KVD * sizeof(float));
+    ao   = (float *)malloc((size_t)QD * sizeof(float));
+    ap   = (float *)malloc((size_t)E * sizeof(float));
+    gg   = (float *)malloc((size_t)FF * sizeof(float));
+    up   = (float *)malloc((size_t)FF * sizeof(float));
+    dn   = (float *)malloc((size_t)E * sizeof(float));
+    sc   = (float *)malloc((size_t)P * sizeof(float));
+    lg   = (float *)malloc((size_t)V * sizeof(float));
+    if (!x || !nx || !q || !knew || !vnew || !ao || !ap || !gg || !up || !dn || !sc || !lg)
         goto done;
 
-    int produced = 0;
     for (int pos = 0; pos < P; pos++) {
         int tok = seq[pos];
         if (embed_row(m, tok, E, x)) goto done;
@@ -523,20 +595,44 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
             const float *qn = as_f32(m, ly->attn_q_norm), *kn = as_f32(m, ly->attn_k_norm);
             for (int h = 0; h < NH;  h++) { float *qh = q    + (size_t)h * HD; rmsnorm_head(qh, qn, HD, eps); rope_neox(qh, HD, pos, base); }
             for (int h = 0; h < NKV; h++) { float *kh = knew + (size_t)h * HD; rmsnorm_head(kh, kn, HD, eps); rope_neox(kh, HD, pos, base); }
-            if (g_kv_spinor)
-                for (int h = 0; h < NKV; h++) { kv_spinor_roundtrip(knew + (size_t)h * HD, HD); kv_spinor_roundtrip(vnew + (size_t)h * HD, HD); }
-
-            float *kslot = kc + ((size_t)L * P + pos) * KVD;   /* store position-finalized K/V */
-            float *vslot = vc + ((size_t)L * P + pos) * KVD;
-            memcpy(kslot, knew, (size_t)KVD * sizeof(float));
-            memcpy(vslot, vnew, (size_t)KVD * sizeof(float));
+            /* Store the position-finalized K/V; KC/VC then point at the f32 the
+             * attention reads as KC[s*KVD + kvh*HD]. Block path: encode into the
+             * persistent block cache, decode [0,pos] of this layer into the per-
+             * layer scratch. f32 path: optional in-place round-trip (parity ref),
+             * then memcpy into the full f32 cache. decode(encode(x)) is identical
+             * to the in-place round-trip, so the two paths agree bit-for-bit. */
+            const float *KC, *VC;
+            if (use_blocks) {
+                sp_spinor_block_t *kb = kcb + ((size_t)L * P + pos) * NKV * NBLK;
+                sp_spinor_block_t *vb = vcb + ((size_t)L * P + pos) * NKV * NBLK;
+                for (int h = 0; h < NKV; h++) {
+                    kv_spinor_encode_head(knew + (size_t)h * HD, HD, kb + (size_t)h * NBLK);
+                    kv_spinor_encode_head(vnew + (size_t)h * HD, HD, vb + (size_t)h * NBLK);
+                }
+                for (int s = 0; s <= pos; s++) {                /* decode the live window into scratch */
+                    const sp_spinor_block_t *ks = kcb + ((size_t)L * P + s) * NKV * NBLK;
+                    const sp_spinor_block_t *vs = vcb + ((size_t)L * P + s) * NKV * NBLK;
+                    for (int h = 0; h < NKV; h++) {
+                        kv_spinor_decode_head(ks + (size_t)h * NBLK, HD, kdec + (size_t)s * KVD + (size_t)h * HD);
+                        kv_spinor_decode_head(vs + (size_t)h * NBLK, HD, vdec + (size_t)s * KVD + (size_t)h * HD);
+                    }
+                }
+                KC = kdec; VC = vdec;
+            } else {
+                if (g_kv_spinor)   /* SP_KV_SPINOR_REF: f32 cache with the lossy round-trip */
+                    for (int h = 0; h < NKV; h++) { kv_spinor_roundtrip(knew + (size_t)h * HD, HD); kv_spinor_roundtrip(vnew + (size_t)h * HD, HD); }
+                memcpy(kc + ((size_t)L * P + pos) * KVD, knew, (size_t)KVD * sizeof(float));
+                memcpy(vc + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
+                KC = kc + (size_t)L * P * KVD;
+                VC = vc + (size_t)L * P * KVD;
+            }
 
             for (int h = 0; h < NH; h++) {                     /* attention over cached [0,pos] */
                 int kvh = h / group;
                 const float *qh = q + (size_t)h * HD;
                 float maxs = -INFINITY;
                 for (int s = 0; s <= pos; s++) {
-                    const float *kh = kc + ((size_t)L * P + s) * KVD + (size_t)kvh * HD;
+                    const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
                     float acc = 0.0f;
                     for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
                     float d = acc * ascale; sc[s] = d; if (d > maxs) maxs = d;
@@ -548,7 +644,7 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
                 for (int i = 0; i < HD; i++) out[i] = 0.0f;
                 for (int s = 0; s <= pos; s++) {
                     float w = sc[s] * inv;
-                    const float *vh = vc + ((size_t)L * P + s) * KVD + (size_t)kvh * HD;
+                    const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
                     for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                 }
             }
@@ -575,6 +671,7 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
     }
     rc = n;
 done:
+    free(kcb); free(vcb); free(kdec); free(vdec);
     free(kc); free(vc); free(x); free(nx); free(q); free(knew); free(vnew);
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
     return rc;

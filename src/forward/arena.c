@@ -8,6 +8,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Format-lock (Piece 3, roadmap §8.2.2): the packed arena is the byte layout the
+ * CUDA/Vulkan/Hexagon backends will read, so its dequant contract is frozen here.
+ * A change to any of these REQUIRES bumping SP_ARENA_LAYOUT_VERSION and a cross-
+ * backend migration — these asserts make a silent drift a compile error. */
+_Static_assert(SP_ARENA_LAYOUT_VERSION == 1u, "arena layout v1 frozen; bump + migrate to change");
+_Static_assert(SP_FROB_QMAX  == 127, "arena Q8 dequant: code in [-127,127], q*scale/127");
+_Static_assert(SP_FROB_QMAX4 == 7,   "arena Q4 dequant: code in [-7,7], q*scale/7, two per byte");
+_Static_assert(sizeof(float) == 4,   "arena per-row Frobenius scale is 4-byte IEEE-754 on the wire");
+
 struct sp_arena {
     sp_arena_tensor *t;
     int    n;
