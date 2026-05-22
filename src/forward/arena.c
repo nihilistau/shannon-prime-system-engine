@@ -8,11 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Format-lock (Piece 3, roadmap §8.2.2): the packed arena is the byte layout the
- * CUDA/Vulkan/Hexagon backends will read, so its dequant contract is frozen here.
- * A change to any of these REQUIRES bumping SP_ARENA_LAYOUT_VERSION and a cross-
- * backend migration — these asserts make a silent drift a compile error. */
-_Static_assert(SP_ARENA_LAYOUT_VERSION == 1u, "arena layout v1 frozen; bump + migrate to change");
+/* Format-lock (Piece 3, roadmap §8.2.2): the packed arena byte layout + dequant
+ * contract are owned by the math core (sp/frobenius_lift.h); these asserts make a
+ * silent drift of that contract a compile error on the engine side too. A change
+ * REQUIRES bumping SP_FROB_ARENA_LAYOUT_VERSION (math core) + a cross-backend migration. */
+_Static_assert(SP_FROB_ARENA_LAYOUT_VERSION == 1u, "arena layout v1 frozen; bump + migrate to change");
 _Static_assert(SP_FROB_QMAX  == 127, "arena Q8 dequant: code in [-127,127], q*scale/127");
 _Static_assert(SP_FROB_QMAX4 == 7,   "arena Q4 dequant: code in [-7,7], q*scale/7, two per byte");
 _Static_assert(sizeof(float) == 4,   "arena per-row Frobenius scale is 4-byte IEEE-754 on the wire");
@@ -37,8 +37,23 @@ static size_t row_bytes(uint32_t type, int n) {
     }
 }
 
-/* Quantize one GGUF weight tensor W (ggml layout [ne0=in=cols, ne1=out=rows])
- * into the arena slot `out`. Returns 0 on success. */
+/* Row reader for sp_frob_pack_tensor: dequant GGUF source row `j` (F32/F16/Q8_0)
+ * to `cols` f32. Keeps the GGUF format knowledge engine-side; the math-core packer
+ * never sees a gguf_tensor and never materializes the whole tensor as f32. */
+typedef struct {
+    const uint8_t *base;   /* start of the tensor's data in the GGUF mapping */
+    uint32_t       type;   /* ggml type of the source rows */
+    size_t         rb;     /* bytes per source row */
+    int            cols;
+} gguf_row_ctx;
+
+static int gguf_get_row(void *ctx, int j, float *dst) {
+    const gguf_row_ctx *g = (const gguf_row_ctx *)ctx;
+    return sp_dequant_row(g->base + (size_t)j * g->rb, g->type, g->cols, dst);
+}
+
+/* Pack one GGUF weight tensor W (ggml layout [ne0=in=cols, ne1=out=rows]) into the
+ * arena slot `out` via the math-core mixed-precision packer. Returns 0 on success. */
 static int build_tensor(const qwen3_model *m, const gguf_tensor *W, int prec,
                         float promote, sp_arena_tensor *out, long *promoted) {
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(m->gguf, W);
@@ -47,46 +62,9 @@ static int build_tensor(const qwen3_model *m, const gguf_tensor *W, int prec,
     int rows = (int)W->dims[1];     /* out */
     size_t rb = row_bytes(W->type, cols);
     if (rb == 0 || cols <= 0 || rows <= 0) return 1;
-
-    float  *wrow = (float *)malloc((size_t)cols * sizeof(float));
-    int8_t *tmp  = (int8_t *)malloc((size_t)cols);                 /* Q4 pack scratch */
-    out->row_prec  = (uint8_t *)malloc((size_t)rows);
-    out->row_scale = (float *)malloc((size_t)rows * sizeof(float));
-    out->row_off   = (size_t *)malloc((size_t)rows * sizeof(size_t));
-    out->codes     = (uint8_t *)malloc((size_t)rows * (size_t)cols);  /* upper bound (all Q8) */
-    if (!wrow || !tmp || !out->row_prec || !out->row_scale || !out->row_off || !out->codes) {
-        free(wrow); free(tmp); return 1;
-    }
-    out->rows = rows; out->cols = cols;
     snprintf(out->name, sizeof out->name, "%s", W->name);
-
-    size_t off = 0;
-    int rc = 0;
-    for (int j = 0; j < rows && rc == 0; j++) {
-        if (sp_dequant_row(base + (size_t)j * rb, W->type, cols, wrow)) { rc = 1; break; }
-        float s = sp_frob_row_scale(wrow, cols);
-        int p = prec;
-        if (prec == 4 && sp_frob_q4_row_relerr(wrow, cols) > promote) { p = 8; (*promoted)++; }
-        out->row_prec[j] = (uint8_t)p;
-        out->row_scale[j] = s;
-        out->row_off[j] = off;
-        uint8_t *dst = out->codes + off;
-        if (p == 8) {
-            int8_t *q = (int8_t *)dst;
-            for (int i = 0; i < cols; i++) q[i] = sp_frob_quant1(wrow[i], s);
-            off += (size_t)cols;
-        } else {
-            for (int i = 0; i < cols; i++) tmp[i] = sp_frob_quant1_q4(wrow[i], s);
-            sp_frob_q4_pack(tmp, cols, dst);
-            off += (size_t)((cols + 1) / 2);
-        }
-    }
-    free(wrow); free(tmp);
-    if (rc) return 1;
-    out->codes_bytes = off;
-    uint8_t *shr = (uint8_t *)realloc(out->codes, off ? off : 1);   /* shrink to actual */
-    if (shr) out->codes = shr;
-    return 0;
+    gguf_row_ctx ctx = { base, W->type, rb, cols };
+    return sp_frob_pack_tensor(rows, cols, prec, promote, gguf_get_row, &ctx, &out->pt, promoted);
 }
 
 sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote,
@@ -120,9 +98,8 @@ sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote,
         if (build_tensor(m, src[k], precision, q4_promote, &a->t[k], &a->promoted)) {
             free((void *)src); sp_arena_free(a); return NULL;
         }
-        a->bytes += a->t[k].codes_bytes
-                  + (size_t)a->t[k].rows * (sizeof(float) + sizeof(size_t) + 1);
-        a->total_rows += a->t[k].rows;
+        a->bytes += sp_frob_packed_tensor_bytes(&a->t[k].pt);
+        a->total_rows += a->t[k].pt.rows;
     }
     free((void *)src);
     return a;
@@ -130,10 +107,7 @@ sp_arena *sp_arena_build(const qwen3_model *m, int precision, float q4_promote,
 
 void sp_arena_free(sp_arena *a) {
     if (!a) return;
-    for (int k = 0; k < a->n; k++) {
-        free(a->t[k].row_prec); free(a->t[k].row_scale);
-        free(a->t[k].row_off);  free(a->t[k].codes);
-    }
+    for (int k = 0; k < a->n; k++) sp_frob_packed_free(&a->t[k].pt);
     free(a->t);
     free(a);
 }
@@ -146,22 +120,7 @@ const sp_arena_tensor *sp_arena_find(const sp_arena *a, const char *name) {
 }
 
 int sp_arena_dequant_row(const sp_arena_tensor *at, int r, float *dst) {
-    if (!at || r < 0 || r >= at->rows) return 1;
-    const uint8_t *rc = at->codes + at->row_off[r];
-    if (at->row_prec[r] == 8) {
-        const int8_t *cp = (const int8_t *)rc;
-        float inv = at->row_scale[r] / 127.0f;
-        for (int i = 0; i < at->cols; i++) dst[i] = (float)cp[i] * inv;
-    } else {
-        float inv = at->row_scale[r] / 7.0f;
-        int8_t v;
-        for (int i = 0; i < at->cols; i++) {
-            uint8_t b = (i & 1) ? (uint8_t)(rc[i >> 1] >> 4) : (uint8_t)(rc[i >> 1] & 0xF);
-            v = (int8_t)((b & 0x8) ? (int)b - 16 : (int)b);
-            dst[i] = (float)v * inv;
-        }
-    }
-    return 0;
+    return at ? sp_frob_packed_dequant_row(&at->pt, r, dst) : 1;
 }
 
 size_t sp_arena_bytes(const sp_arena *a)      { return a ? a->bytes : 0; }

@@ -24,9 +24,10 @@
 
 /* Format-lock (Piece 3, roadmap §8.2.2): the persistent Spinor KV cache stores
  * NBLK = ceil(head_dim/SP_SPINOR_BODY_LEN) frozen 63-byte blocks per head — the
- * on-disk/on-wire §4.9 KV layout. Freeze the block contract the split arithmetic
- * (kv_spinor_split) and the GPU backends both depend on; a change is a compile
- * error until SP_SPINOR_LAYOUT_VERSION is bumped with a migration. */
+ * on-disk/on-wire §4.9 KV layout. The split arithmetic + codec live in the math
+ * core (sp_spinor_blocks_for / sp_spinor_encode_vec / sp_spinor_decode_vec); these
+ * asserts freeze the block contract the engine and the GPU backends both depend on,
+ * so a change is a compile error until SP_SPINOR_LAYOUT_VERSION is bumped + migrated. */
 _Static_assert(sizeof(sp_spinor_block_t) == 63, "Spinor KV block is 63 bytes (frozen)");
 _Static_assert(SP_SPINOR_BODY_LEN == 55, "Spinor block carries 55 anchors; KV head-split assumes this");
 _Static_assert(SP_SPINOR_LAYOUT_VERSION == 1u, "Spinor KV layout v1 frozen; bump + migrate to change");
@@ -58,45 +59,18 @@ static int g_kv_spinor = 0;
  * that equivalence is the Piece-2 gate (cf. E_CPU_9's arena==FROB byte gate). */
 static int g_kv_spinor_ref = 0;
 
-/* Spinor-block split for a head vector of length d. A block carries 55 anchors;
- * head_dim=128 > 55, so split into ceil(d/55) balanced chunks (128 -> 43/43/42).
- * The frozen 63-byte block layout is NOT modified. Returns the block count and
- * fills lens[] (caller sizes lens[] >= SP_KV_MAX_BLOCKS). */
-#define SP_KV_MAX_BLOCKS 8
-static int kv_spinor_split(int d, int lens[SP_KV_MAX_BLOCKS]) {
-    int nblk = (d + 54) / 55;
-    if (nblk < 1) nblk = 1;
-    if (nblk > SP_KV_MAX_BLOCKS) nblk = SP_KV_MAX_BLOCKS;
-    int base = d / nblk, extra = d % nblk;
-    for (int b = 0; b < nblk; b++) lens[b] = base + (b < extra ? 1 : 0);
-    return nblk;
-}
-
-/* Round-trip a length-d vector through the Spinor codec in place (encode then
- * decode). Used by the prefill KV path (E_CPU_8) and the parity-reference decode. */
+/* The multi-block KV head codec (head vector -> ceil(d/55) frozen 63-byte blocks,
+ * balanced split) lives in the math core: sp_spinor_blocks_for / sp_spinor_encode_vec
+ * / sp_spinor_decode_vec (sp/spinor_block.h). The persistent KV cache in
+ * qwen3_generate_kv calls those directly. The only engine-local helper is the
+ * in-place round-trip used by the prefill KV path (E_CPU_8) and the generate_kv
+ * f32 parity reference. */
+#define KV_HEAD_MAX_BLOCKS 16   /* stack temp; covers head_dim up to 16*55 = 880 */
 static void kv_spinor_roundtrip(float *vec, int d) {
-    int lens[SP_KV_MAX_BLOCKS];
-    int nblk = kv_spinor_split(d, lens), off = 0;
-    sp_spinor_block_t blk;
-    for (int b = 0; b < nblk; b++) {
-        sp_spinor_encode(vec + off, lens[b], &blk);
-        (void)sp_spinor_decode(&blk, vec + off, lens[b]);   /* own freshly-encoded block: CRC valid */
-        off += lens[b];
-    }
-}
-
-/* Encode a head vector (length d) into its nblk persistent Spinor blocks. */
-static void kv_spinor_encode_head(const float *vec, int d, sp_spinor_block_t *blks) {
-    int lens[SP_KV_MAX_BLOCKS];
-    int nblk = kv_spinor_split(d, lens), off = 0;
-    for (int b = 0; b < nblk; b++) { sp_spinor_encode(vec + off, lens[b], &blks[b]); off += lens[b]; }
-}
-
-/* Decode the nblk persistent Spinor blocks of a head back to d f32 values. */
-static void kv_spinor_decode_head(const sp_spinor_block_t *blks, int d, float *vec) {
-    int lens[SP_KV_MAX_BLOCKS];
-    int nblk = kv_spinor_split(d, lens), off = 0;
-    for (int b = 0; b < nblk; b++) { (void)sp_spinor_decode(&blks[b], vec + off, lens[b]); off += lens[b]; }
+    sp_spinor_block_t blks[KV_HEAD_MAX_BLOCKS];
+    if (sp_spinor_blocks_for(d) > KV_HEAD_MAX_BLOCKS) return;   /* head_dim beyond supported range */
+    sp_spinor_encode_vec(vec, d, blks);
+    (void)sp_spinor_decode_vec(blks, d, vec);   /* own freshly-encoded blocks: CRC valid */
 }
 
 static float dot_f32(const float *a, const float *b, int n) {
@@ -166,15 +140,16 @@ static size_t row_bytes(uint32_t type, int n) {
  * to them — only the weight bytes' home differs (arena vs re-quantized mapping). */
 static int matmul_arena(const sp_arena_tensor *at, const float *X,
                         int n_tok, int in, int out, float *Y) {
-    if (at->rows != out || at->cols != in) return 1;
+    const sp_frob_packed_tensor *pt = &at->pt;
+    if (pt->rows != out || pt->cols != in) return 1;
     int8_t *unp = (int8_t *)malloc((size_t)in);   /* Q4 unpack scratch */
     if (!unp) return 1;
     for (int j = 0; j < out; j++) {
-        const uint8_t *rc = at->codes + at->row_off[j];
+        const uint8_t *rc = pt->codes + pt->row_off[j];
         const int8_t *cp;
         float inv;
-        if (at->row_prec[j] == 8) { cp = (const int8_t *)rc; inv = at->row_scale[j] / 127.0f; }
-        else { sp_frob_q4_unpack(rc, in, unp); cp = unp; inv = at->row_scale[j] / 7.0f; }
+        if (pt->row_prec[j] == 8) { cp = (const int8_t *)rc; inv = pt->row_scale[j] / 127.0f; }
+        else { sp_frob_q4_unpack(rc, in, unp); cp = unp; inv = pt->row_scale[j] / 7.0f; }
         for (int t = 0; t < n_tok; t++) {
             const float *x = X + (size_t)t * in;
             float acc = 0.0f;
@@ -536,8 +511,7 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
      * f32 scratch, so resident KV memory is the packed blocks + one layer's worth
      * of scratch, not the full f32 cache. SP_KV_SPINOR_REF=1 keeps the f32 cache
      * (parity reference, §4.9). Gate off => f32 cache, no codec (regression). */
-    int blk_lens[SP_KV_MAX_BLOCKS];
-    const int NBLK = kv_spinor_split(HD, blk_lens);
+    const int NBLK = sp_spinor_blocks_for(HD);
     const int use_blocks = g_kv_spinor && !g_kv_spinor_ref;
 
     int rc = -1, n = n_prompt, produced = 0;
@@ -606,15 +580,15 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
                 sp_spinor_block_t *kb = kcb + ((size_t)L * P + pos) * NKV * NBLK;
                 sp_spinor_block_t *vb = vcb + ((size_t)L * P + pos) * NKV * NBLK;
                 for (int h = 0; h < NKV; h++) {
-                    kv_spinor_encode_head(knew + (size_t)h * HD, HD, kb + (size_t)h * NBLK);
-                    kv_spinor_encode_head(vnew + (size_t)h * HD, HD, vb + (size_t)h * NBLK);
+                    sp_spinor_encode_vec(knew + (size_t)h * HD, HD, kb + (size_t)h * NBLK);
+                    sp_spinor_encode_vec(vnew + (size_t)h * HD, HD, vb + (size_t)h * NBLK);
                 }
                 for (int s = 0; s <= pos; s++) {                /* decode the live window into scratch */
                     const sp_spinor_block_t *ks = kcb + ((size_t)L * P + s) * NKV * NBLK;
                     const sp_spinor_block_t *vs = vcb + ((size_t)L * P + s) * NKV * NBLK;
                     for (int h = 0; h < NKV; h++) {
-                        kv_spinor_decode_head(ks + (size_t)h * NBLK, HD, kdec + (size_t)s * KVD + (size_t)h * HD);
-                        kv_spinor_decode_head(vs + (size_t)h * NBLK, HD, vdec + (size_t)s * KVD + (size_t)h * HD);
+                        (void)sp_spinor_decode_vec(ks + (size_t)h * NBLK, HD, kdec + (size_t)s * KVD + (size_t)h * HD);
+                        (void)sp_spinor_decode_vec(vs + (size_t)h * NBLK, HD, vdec + (size_t)s * KVD + (size_t)h * HD);
                     }
                 }
                 KC = kdec; VC = vdec;

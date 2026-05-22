@@ -4,39 +4,31 @@
  * matmul reads the packed codes and lifts inline (no per-matmul re-quantization,
  * and — once the source is released in Phase 1b — no decoded fp32 arena).
  *
- * This in-memory packed format is what the GPU backends (CUDA/Vulkan/Hexagon)
- * will read, so it carries an explicit version. NOTE: per-ROW Frobenius Q8/Q4,
- * NOT ggml's per-32-block Q8_0 — the two are not interchangeable.
+ * The packed per-tensor FORMAT (per-row Q8/Q4, the byte layout the GPU backends
+ * read) lives in the math core (sp/frobenius_lift.h: sp_frob_packed_tensor +
+ * SP_FROB_ARENA_LAYOUT_VERSION). This file adds only the engine-side collection:
+ * a named set of packed tensors built by iterating the model's weight tensors.
  *
- * Phase 1a (this file): arena covers the matmul weights only (attn q/k/v/o,
- * ffn gate/up/down, LM-head `output`); the embedding and norms stay f32 from the
- * GGUF mapping. Phase 1b folds the embedding in and releases the mapping.
+ * Phase 1a: arena covers the matmul weights only (attn q/k/v/o, ffn gate/up/down,
+ * LM-head `output`); the embedding and norms stay f32 from the GGUF mapping. Phase
+ * 1b folds the embedding in and releases the mapping.
  */
 #ifndef SP_ENGINE_ARENA_H
 #define SP_ENGINE_ARENA_H
 
 #include <stdint.h>
 #include <stddef.h>
+#include "sp/frobenius_lift.h"   /* sp_frob_packed_tensor + SP_FROB_ARENA_LAYOUT_VERSION */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define SP_ARENA_LAYOUT_VERSION 1u
-
-/* One packed weight tensor. Codes are row-major with a per-row byte offset and a
- * per-row precision (8 or 4) so Q4 mixed-precision can promote outlier rows to
- * Q8. A Q8 row is `cols` int8 codes; a Q4 row is ceil(cols/2) nibble pairs.
- * Dequant of code q in row r: q * row_scale[r] / (row_prec[r]==8 ? 127 : 7). */
+/* One arena entry: a GGUF tensor name plus its math-core mixed-precision packed
+ * form (the SP_FROB_ARENA_LAYOUT_VERSION byte layout; per-row Q8/Q4). */
 typedef struct {
-    char     name[256];
-    int      rows;          /* = out (weight rows) */
-    int      cols;          /* = in  (elems per row) */
-    uint8_t *row_prec;      /* [rows] 8 or 4 */
-    float   *row_scale;     /* [rows] per-row Frobenius scale (max abs) */
-    size_t  *row_off;       /* [rows] byte offset of the row's codes in `codes` */
-    uint8_t *codes;         /* packed codes (Q8: int8; Q4: nibble pairs) */
-    size_t   codes_bytes;
+    char                  name[256];
+    sp_frob_packed_tensor pt;
 } sp_arena_tensor;
 
 typedef struct sp_arena sp_arena;
