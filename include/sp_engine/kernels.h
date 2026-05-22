@@ -31,6 +31,18 @@ void rmsnorm_head(float *v, const float *w, int d, float eps);
 /* NEOX RoPE on a head vector (length d) at position p, given the rope base. */
 void rope_neox(float *v, int d, int p, float base);
 
+/* Causal GQA softmax attention for one query head over the cached K/V at
+ * positions [0, pos]. K/V are laid out [s*KVD + kvh*HD] (s = key position,
+ * kvh = the kv-head this query maps to). Computes scores = ascale * <qh, k_s>,
+ * a max-shifted softmax, and the weighted V-sum into out[HD].
+ *   win < 0  -> full causal (attend to all s in [0, pos]);
+ *   win >= 0 -> sliding window, attend to s in [max(0, pos-win+1), pos].
+ * `sc` is caller scratch of length >= pos+1. This is the plain f32 path; the
+ * Qwen3 NTT-attention overlay (E_CPU_5) stays inline in forward.c. */
+void kernels_attn_head(const float *qh, const float *KC, const float *VC,
+                       int pos, int KVD, int kvh, int HD, float ascale, int win,
+                       float *sc, float *out);
+
 /* Y[t,j] = sum_i W[i,j] * X[t,i]; W is the gguf tensor [in,out] (ne0=in). Honors
  * the packed-weight arena (if built) and the SP_ENGINE_FROB/F16_ACT knobs. */
 int matmul(const qwen3_model *m, const gguf_tensor *W,

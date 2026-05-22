@@ -182,33 +182,31 @@ int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
                 }
         }
 
-        /* GQA causal attention */
+        /* GQA causal attention. Plain f32 path uses the shared kernels_attn_head
+         * (full causal, win=-1); the NTT-attention overlay (E_CPU_5) stays inline
+         * here since its score is computed via the exact poly-ring inner product. */
         for (int t = 0; t < n_tok; t++) {
             for (int h = 0; h < NH; h++) {
                 int kvh = h / group;
                 const float *qh = q + (size_t)t * QD + (size_t)h * HD;
-                if (g_ntt_attn)
-                    for (int i = 0; i < HD; i++) qi[i] = (int32_t)lrintf(qh[i] * (float)SP_NTT_ATTN_SCALE);
+                float *out = ao + (size_t)t * QD + (size_t)h * HD;
+                if (!g_ntt_attn) {
+                    kernels_attn_head(qh, k, v, t, KVD, kvh, HD, ascale, -1, sc, out);
+                    continue;
+                }
+                for (int i = 0; i < HD; i++) qi[i] = (int32_t)lrintf(qh[i] * (float)SP_NTT_ATTN_SCALE);
                 float maxs = -INFINITY;
                 for (int s = 0; s <= t; s++) {
                     const float *kh = k + (size_t)s * KVD + (size_t)kvh * HD;
-                    float d;
-                    if (g_ntt_attn) {
-                        for (int i = 0; i < HD; i++) ki[i] = (int32_t)lrintf(kh[i] * (float)SP_NTT_ATTN_SCALE);
-                        int64_t ip = sp_pr_inner(pr, qi, ki);   /* exact <q_int,k_int> */
-                        d = (float)((double)ip / (SP_NTT_ATTN_SCALE * SP_NTT_ATTN_SCALE)) * ascale;
-                    } else {
-                        float acc = 0.0f;
-                        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
-                        d = acc * ascale;
-                    }
+                    for (int i = 0; i < HD; i++) ki[i] = (int32_t)lrintf(kh[i] * (float)SP_NTT_ATTN_SCALE);
+                    int64_t ip = sp_pr_inner(pr, qi, ki);   /* exact <q_int,k_int> */
+                    float d = (float)((double)ip / (SP_NTT_ATTN_SCALE * SP_NTT_ATTN_SCALE)) * ascale;
                     sc[s] = d;
                     if (d > maxs) maxs = d;
                 }
                 float sum = 0.0f;
                 for (int s = 0; s <= t; s++) { sc[s] = expf(sc[s] - maxs); sum += sc[s]; }
                 float inv = 1.0f / sum;
-                float *out = ao + (size_t)t * QD + (size_t)h * HD;
                 for (int i = 0; i < HD; i++) out[i] = 0.0f;
                 for (int s = 0; s <= t; s++) {
                     float w = sc[s] * inv;

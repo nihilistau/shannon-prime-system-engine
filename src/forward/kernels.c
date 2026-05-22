@@ -197,6 +197,30 @@ void rope_neox(float *v, int d, int p, float base) {
     }
 }
 
+void kernels_attn_head(const float *qh, const float *KC, const float *VC,
+                       int pos, int KVD, int kvh, int HD, float ascale, int win,
+                       float *sc, float *out) {
+    int s0 = (win >= 0 && pos - win + 1 > 0) ? pos - win + 1 : 0;
+    float maxs = -INFINITY;
+    for (int s = s0; s <= pos; s++) {
+        const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];   /* scalar acc: matches E_CPU_2 */
+        float d = acc * ascale;
+        sc[s] = d;
+        if (d > maxs) maxs = d;
+    }
+    float sum = 0.0f;
+    for (int s = s0; s <= pos; s++) { sc[s] = expf(sc[s] - maxs); sum += sc[s]; }
+    float inv = 1.0f / sum;
+    for (int i = 0; i < HD; i++) out[i] = 0.0f;
+    for (int s = s0; s <= pos; s++) {
+        float w = sc[s] * inv;
+        const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
+        for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+    }
+}
+
 const float *as_f32(const qwen3_model *m, const gguf_tensor *t) {
     if (m->released) {
         for (int i = 0; i < m->n_norm; i++) if (m->norm_src[i] == t) return m->norm_buf[i];
