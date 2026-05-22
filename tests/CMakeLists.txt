@@ -253,4 +253,12 @@ if(SP_ENGINE_WITH_CUDA)
     endif()
     add_test(NAME M_GEMMA3_CUDA COMMAND test_gemma3_cuda)
     set_tests_properties(M_GEMMA3_CUDA PROPERTIES TIMEOUT 600)
+
+    # T_FRO_4 on CUDA: same test_ppl gate, routed through the CUDA forward via
+    # SP_BACKEND=cuda. (a) cuda-f32 PPL vs the f16 oracle <=0.05%; (b) per-row Q8
+    # arena drift vs cuda-f32 <=2%. SLOW / phase-close. Run inside the env-cuda
+    # shell so the CUDA runtime DLLs are on PATH.
+    add_test(NAME T_FRO_4_CU COMMAND test_ppl)
+    set_tests_properties(T_FRO_4_CU PROPERTIES LABELS "SLOW" TIMEOUT 3600
+        ENVIRONMENT "SP_BACKEND=cuda")
 endif()

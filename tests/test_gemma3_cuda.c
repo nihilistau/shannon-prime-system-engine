@@ -1,8 +1,12 @@
-/* test_gemma3_cuda.c — M_GEMMA3_CUDA: the CUDA Gemma3 f32 forward matches the
- * CPU f32 forward on identical tokens (§8.3 cross-backend gate). Distributional,
- * same rationale as M_GEMMA3_CPU/§8.6.1: per-head QK-RMSNorm amplifies tiny
- * reduction-order (cuBLAS-vs-scalar) differences, so we gate on argmax + mean KL
- * and report the worst per-logit rel-diff rather than hard-bounding every logit. */
+/* test_gemma3_cuda.c — M_GEMMA3_CUDA: the CUDA Gemma3 forward matches the CPU
+ * forward on identical tokens (§8.3 cross-backend gate). Two scenarios:
+ *   (f32) plain GGUF f32 weights — CU.1.
+ *   (q8 ) per-row Frobenius Q8 arena (SP_ARENA=q8) — CU.2: the CUDA device-side
+ *         decode-on-demand (k_dequant_arena) vs the CPU matmul_arena inline lift,
+ *         on the SAME codes (the arena is built CPU-side at load), so the two
+ *         differ only by float reassociation + cuBLAS reduction order.
+ * Distributional gate (argmax + mean KL), worst per-logit rel-diff reported —
+ * same §8.6.1 rationale as M_GEMMA3_CPU (QK-norm amplifies reduction-order noise). */
 #define _CRT_SECURE_NO_WARNINGS
 #include "sp/sp_test.h"
 #include "sp_engine/gguf.h"
@@ -19,7 +23,15 @@
 #define SP_GEMMA3_GGUF "gemma-3-1b-it-f16.gguf"
 #endif
 
-/* KL(P||Q) in nats, P=softmax(p), Q=softmax(q). */
+#ifdef _WIN32
+#define ENV_SET(k, v) _putenv_s((k), (v))
+#define ENV_CLR(k)    _putenv_s((k), "")
+#else
+#include <stdlib.h>
+static void ENV_SET(const char *k, const char *v) { setenv(k, v, 1); }
+static void ENV_CLR(const char *k) { unsetenv(k); }
+#endif
+
 static double kl_div(const float *p, const float *q, uint32_t n) {
     float pmax = p[0], qmax = q[0];
     for (uint32_t j = 1; j < n; j++) { if (p[j] > pmax) pmax = p[j]; if (q[j] > qmax) qmax = q[j]; }
@@ -33,35 +45,35 @@ static double kl_div(const float *p, const float *q, uint32_t n) {
     return kl;
 }
 
-static void M_GEMMA3_CUDA(void) {
-    SP_CHECK(sp_cuda_device_count() >= 1, "CUDA device visible");
-    if (sp_cuda_device_count() < 1) { fprintf(stderr, "    %s\n", sp_last_error()); return; }
+/* Load (optionally with the Q8 arena), run CPU + CUDA forward on the same tokens,
+ * gate on argmax + mean KL, report worst rel-diff. */
+static void run_compare(const char *tag, int q8) {
+    fprintf(stderr, "  [%s]\n", tag);
+    if (q8) ENV_SET("SP_ARENA", "q8"); else ENV_CLR("SP_ARENA");
 
     gguf_ctx *g = gguf_open(SP_GEMMA3_GGUF);
     SP_CHECK(g != NULL, "open gemma3 GGUF");
     if (!g) return;
-    qwen3_model *m = qwen3_load(SP_GEMMA3_GGUF);
+    qwen3_model *m = qwen3_load(SP_GEMMA3_GGUF);   /* honors SP_ARENA */
     sp_tokenizer *tok = sp_tokenizer_load(g);
     SP_CHECK(m && tok, "load model + tokenizer");
-    if (!m || !tok) { sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g); return; }
-    SP_CHECK(m->cfg.arch == SP_ARCH_GEMMA3, "arch gemma3");
+    if (!m || !tok) { sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g); ENV_CLR("SP_ARENA"); return; }
+    SP_CHECK(q8 ? (m->arena != NULL) : (m->arena == NULL), "arena state matches scenario");
 
     const char *prompt = "The capital of France is Paris, and the Eiffel Tower stands there.";
     int32_t toks[128];
-    long nt = sp_tokenizer_encode(tok, prompt, strlen(prompt), /*parse_special=*/0, toks, 128);
+    long nt = sp_tokenizer_encode(tok, prompt, strlen(prompt), 0, toks, 128);
     SP_CHECK(nt > 1 && nt <= 128, "tokenize prompt");
-    if (nt < 2) { sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g); return; }
     const int V = (int)m->cfg.n_vocab;
-    fprintf(stderr, "    n_tok=%ld vocab=%d\n", nt, V);
 
     float *cpu = (float *)malloc((size_t)nt * V * sizeof(float));
     float *cu  = (float *)malloc((size_t)nt * V * sizeof(float));
     SP_CHECK(cpu && cu, "alloc logits");
-    if (!cpu || !cu) { free(cpu); free(cu); sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g); return; }
+    if (nt < 2 || !cpu || !cu) { free(cpu); free(cu); sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g); ENV_CLR("SP_ARENA"); return; }
 
-    int rc_cpu = gemma3_forward(m, toks, (int)nt, cpu);
+    int rc_cpu = gemma3_forward(m, toks, (int)nt, cpu);          /* CPU: arena if q8 */
+    int rc_cu  = gemma3_forward_cuda(m, toks, (int)nt, cu);      /* CUDA: device decode if q8 */
     SP_CHECK(rc_cpu == 0, "cpu gemma3_forward");
-    int rc_cu = gemma3_forward_cuda(m, toks, (int)nt, cu);
     SP_CHECK(rc_cu == 0, "cuda gemma3_forward_cuda");
     if (rc_cu != 0) fprintf(stderr, "    sp_last_error: %s\n", sp_last_error());
 
@@ -80,7 +92,7 @@ static void M_GEMMA3_CUDA(void) {
                 if (b[j] > b[am_g]) am_g = j;
             }
             if (am_c == am_g) argmax_ok++;
-            double kl = kl_div(a, b, (uint32_t)V);   /* KL(cpu || cuda) */
+            double kl = kl_div(a, b, (uint32_t)V);
             kl_sum += kl; if (kl > kl_max) kl_max = kl;
         }
         double kl_mean = kl_sum / (double)nt;
@@ -89,11 +101,19 @@ static void M_GEMMA3_CUDA(void) {
                 nt, V, worst_abs, worst_rel, argmax_ok, nt, kl_mean, kl_max);
         SP_CHECK_EQ_I64(argmax_ok, nt, "CUDA argmax matches CPU at every position");
         SP_CHECK(kl_mean < 1.0e-5, "mean KL(cpu||cuda) below 1e-5 nats");
-        SP_CHECK(worst_rel < 1.0e-2, "worst per-logit rel-diff below 1e-2 (gross-bug guard)");
+        SP_CHECK(worst_rel < 1.0e-2, "worst per-logit rel-diff below 1e-2");
     }
 
     free(cpu); free(cu);
     sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g);
+    ENV_CLR("SP_ARENA");
+}
+
+static void M_GEMMA3_CUDA(void) {
+    SP_CHECK(sp_cuda_device_count() >= 1, "CUDA device visible");
+    if (sp_cuda_device_count() < 1) { fprintf(stderr, "    %s\n", sp_last_error()); return; }
+    run_compare("f32 GGUF weights (CU.1)", /*q8=*/0);
+    run_compare("Q8 per-row Frobenius arena (CU.2)", /*q8=*/1);
 }
 
 int main(void) { SP_RUN(M_GEMMA3_CUDA); return SP_DONE(); }
