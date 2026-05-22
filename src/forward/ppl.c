@@ -8,6 +8,9 @@
 #ifdef SP_ENGINE_WITH_VULKAN
 #include "sp_engine/vulkan_backend.h"
 #endif
+#ifdef SP_ENGINE_WITH_HEXAGON
+#include "sp_engine/hexagon_backend.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +37,13 @@ int sp_perplexity(const qwen3_model *m, const sp_tokenizer *tok,
     { const char *be = getenv("SP_BACKEND");
       if (be && strcmp(be, "vulkan") == 0 && m->cfg.arch == SP_ARCH_GEMMA3)
           fwd = gemma3_forward_vulkan; }
+#endif
+#ifdef SP_ENGINE_WITH_HEXAGON
+    /* SP_BACKEND=hexagon routes the gemma3 forward through the Hexagon V69 backend
+     * (Phase 2-HX): layers + final norm on the cDSP, embed + head host-side. */
+    { const char *be = getenv("SP_BACKEND");
+      if (be && strcmp(be, "hexagon") == 0 && m->cfg.arch == SP_ARCH_GEMMA3)
+          fwd = gemma3_forward_hexagon; }
 #endif
 
     /* tokenize the whole corpus once (BOS auto-prepended when add_bos_token=1). */

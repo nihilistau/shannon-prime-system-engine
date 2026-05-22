@@ -285,6 +285,15 @@ endif()
 add_test(NAME T_FRO_4 COMMAND test_ppl)
 set_tests_properties(T_FRO_4 PROPERTIES LABELS "SLOW" TIMEOUT 3600)
 
+# ── HX.3a parity gate (on the phone): cDSP Q8 layers-forward vs CPU Q8. Android
+# exe, pushed + run via adb (not a desktop ctest). ──
+if(SP_ENGINE_TARGET_ANDROID AND SP_ENGINE_WITH_HEXAGON)
+    add_executable(test_hex_fwd test_hex_fwd.c)
+    target_link_libraries(test_hex_fwd PRIVATE sp_engine)
+    target_compile_definitions(test_hex_fwd PRIVATE SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}")
+    target_compile_options(test_hex_fwd PRIVATE -Wall -Wextra)
+endif()
+
 # ── CUDA backend (Phase 2-CU). Built only when SP_ENGINE_WITH_CUDA; the test
 # pulls the CUDA lib transitively through sp_engine's PUBLIC link. ──
 if(SP_ENGINE_WITH_CUDA)

@@ -8,6 +8,9 @@
 #ifdef SP_ENGINE_WITH_VULKAN
 #include "sp_engine/vulkan_backend.h"   /* sp_vulkan_model_release */
 #endif
+#ifdef SP_ENGINE_WITH_HEXAGON
+#include "sp_engine/hexagon_backend.h"   /* sp_hexagon_model_release */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -240,6 +243,9 @@ void qwen3_free(qwen3_model *m) {
 #endif
 #ifdef SP_ENGINE_WITH_VULKAN
     sp_vulkan_model_release(m);   /* drop device weights cached by model pointer */
+#endif
+#ifdef SP_ENGINE_WITH_HEXAGON
+    sp_hexagon_model_release(m);   /* drop FastRPC handle + DSP weight blob */
 #endif
     for (int i = 0; i < m->n_norm; i++) free(m->norm_buf[i]);
     free(m->norm_buf); free((void *)m->norm_src);

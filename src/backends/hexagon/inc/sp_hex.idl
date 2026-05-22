@@ -35,4 +35,16 @@ interface sp_hex : remote_handle64 {
    // (host compares to its own dot) before the whole forward is assembled on it.
    long matmul_f32(in sequence<float> w, in long rows, in long cols,
                    in sequence<float> x, rout sequence<float> y);
+
+   // HX.3a: run the gemma3 transformer LAYERS + final output RMSNorm on the cDSP.
+   // The host does the embedding lookup (×√n_embd) and the tied LM head; this
+   // takes the embedded hidden `x` [n_tok*n_embd], the Q8/f32 weight blob
+   // (sp_hex_layout.h), a `scratch` work buffer (sp_hex_scratch_elems), and writes
+   // the final-normed hidden `hidden` [n_tok*n_embd]. Scalar f32 for HX.3a (gated
+   // == on-phone CPU Q8 PPL); HX.3b swaps the matmul to qf32 HVX.
+   long forward(in long n_layers, in long n_embd, in long n_ff, in long head_dim,
+                in long n_head, in long n_head_kv, in long sliding_window,
+                in float eps, in float rope_global, in float rope_local,
+                in long n_tok, in sequence<float> x, in sequence<uint8> weights,
+                in sequence<float> scratch, rout sequence<float> hidden);
 };

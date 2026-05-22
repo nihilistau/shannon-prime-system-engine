@@ -67,3 +67,21 @@ target_include_directories(test_hex_rt PRIVATE
 target_link_libraries(test_hex_rt PRIVATE
     ${SP_HEX_RPCMEM_LIB} ${SP_HEX_CDSPRPC_LIB} log dl)
 message(STATUS "sp_engine: Hexagon HX.2 test_hex_rt round-trip target ON")
+
+# ── HX.3a forward: compile the FastRPC host stub + the layers-on-DSP orchestration
+# (sp_hex_host.c) INTO sp_engine. Compiling into the engine (vs a separate lib)
+# avoids a static-library cycle with sp_engine on lld (the host calls embed_row/
+# matmul/sp_arena_find; ppl.c calls gemma3_forward_hexagon). Gated by
+# SP_ENGINE_WITH_HEXAGON so the desktop CPU/CUDA/VK builds are untouched. ──
+if(SP_ENGINE_WITH_HEXAGON)
+    target_sources(sp_engine PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/sp_hex_host.c
+        ${SP_HEX_GEN}/sp_hex_stub.c)
+    add_dependencies(sp_engine sp_hex_idl)
+    target_include_directories(sp_engine PRIVATE
+        ${SP_HEX_GEN} ${CMAKE_CURRENT_SOURCE_DIR}
+        ${SP_HEX_RPCMEM_INC} ${SP_HEX_STDDEF_INC} ${SP_HEX_FASTRPC_INC})
+    target_compile_definitions(sp_engine PUBLIC SP_ENGINE_WITH_HEXAGON=1)
+    target_link_libraries(sp_engine PUBLIC ${SP_HEX_RPCMEM_LIB} ${SP_HEX_CDSPRPC_LIB} log dl)
+    message(STATUS "sp_engine: Hexagon HX.3a forward (sp_hex_host) compiled into sp_engine")
+endif()

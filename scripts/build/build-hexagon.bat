@@ -37,11 +37,11 @@ if not exist "%NDK_TC%" goto :no_ndk
 REM Configure once (single logical line: caret continuations inside a
 REM parenthesised if-block break cmd's parser with this host's spaced paths).
 if exist "%SP_BUILD_DIR%\CMakeCache.txt" goto :android_build
-cmake -S "%SP_ENGINE%" -B "%SP_BUILD_DIR%" -G %SP_GENERATOR% -DCMAKE_BUILD_TYPE=%SP_BUILD_TYPE_DEFAULT% -DCMAKE_TOOLCHAIN_FILE="%NDK_TC%" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-31 -DSP_ENGINE_BACKEND=hexagon -DSP_ENGINE_TARGET_ANDROID=ON -DSP_ENGINE_WITH_AVX2=OFF -DSP_ENGINE_WITH_AVX512=OFF -DSP_ENGINE_WITH_CUDA=OFF -DSP_ENGINE_BUILD_TESTS=ON -DSP_GEMMA3_GGUF="%DEV%/gemma-3-1b-it-f16.gguf" -DSP_QWEN3_GGUF="%DEV%/Qwen3-0.6B-f16.gguf"
+cmake -S "%SP_ENGINE%" -B "%SP_BUILD_DIR%" -G %SP_GENERATOR% -DCMAKE_BUILD_TYPE=%SP_BUILD_TYPE_DEFAULT% -DCMAKE_TOOLCHAIN_FILE="%NDK_TC%" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-31 -DSP_ENGINE_BACKEND=hexagon -DSP_ENGINE_TARGET_ANDROID=ON -DSP_ENGINE_WITH_HEXAGON=ON -DSP_ENGINE_WITH_AVX2=OFF -DSP_ENGINE_WITH_AVX512=OFF -DSP_ENGINE_WITH_CUDA=OFF -DSP_ENGINE_BUILD_TESTS=ON -DSP_GEMMA3_GGUF="%DEV%/gemma-3-1b-it-f16.gguf" -DSP_QWEN3_GGUF="%DEV%/Qwen3-0.6B-f16.gguf"
 if errorlevel 1 exit /b 1
 
 :android_build
-cmake --build "%SP_BUILD_DIR%" --config %SP_BUILD_TYPE_DEFAULT% -j --target test_ppl rpcmem_probe test_hex_rt
+cmake --build "%SP_BUILD_DIR%" --config %SP_BUILD_TYPE_DEFAULT% -j --target test_ppl rpcmem_probe test_hex_rt test_hex_fwd
 if errorlevel 1 exit /b 1
 echo ANDROID_BUILD_EXIT=0
 if /I "%WHAT%"=="both" goto :dsp
