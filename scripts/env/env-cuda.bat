@@ -1,38 +1,44 @@
 @echo off
-REM ─────────────────────────────────────────────────────────────────────
-REM env-cuda.bat — CUDA backend environment (CUDA 12.4 + VS2019 BT)
-REM Pinned toolchain.  Do not bump CUDA or VS without a project decision.
-REM ─────────────────────────────────────────────────────────────────────
+REM ---------------------------------------------------------------------
+REM env-cuda.bat -- CUDA backend environment (VS2019 BT + CUDA 13.2 + Ninja).
+REM Pinned toolchain (CUDA version in env-common.bat). ASCII only; goto-based
+REM error handling (the VS path contains "(x86)", which breaks if-blocks).
+REM
+REM Host reality (2026-05-22): RTX 2060 = sm_75 (Turing); CUDA 13.2 on PATH;
+REM VS2019 BuildTools only (no full VS install). nvcc's registry-based VS
+REM lookup fails with BuildTools-only, so the build passes --use-local-env
+REM (see build-cuda.bat) to make nvcc inherit this vcvars64 shell env.
+REM ---------------------------------------------------------------------
 
 call "%~dp0env-common.bat"
 
-if not exist "%SP_PIN_VS_BUILDTOOLS%\VC\Auxiliary\Build\vcvars64.bat" (
-    echo [env-cuda] ERROR: VS2019 Build Tools not at expected location:
-    echo            %SP_PIN_VS_BUILDTOOLS%
-    exit /b 1
-)
-if not exist "%SP_PIN_CUDA_ROOT%\bin\nvcc.exe" (
-    echo [env-cuda] ERROR: CUDA %SP_PIN_CUDA_VERSION% not at expected location:
-    echo            %SP_PIN_CUDA_ROOT%
-    echo            Install CUDA Toolkit %SP_PIN_CUDA_VERSION% from NVIDIA.
-    exit /b 1
-)
+set "_VCVARS=%SP_PIN_VS_BUILDTOOLS%\VC\Auxiliary\Build\vcvars64.bat"
+if not exist "%_VCVARS%" goto :no_vcvars
+if not exist "%SP_PIN_CUDA_ROOT%\bin\nvcc.exe" goto :no_cuda
 
-call "%SP_PIN_VS_BUILDTOOLS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+call "%_VCVARS%" >nul
 
-set CUDA_PATH=%SP_PIN_CUDA_ROOT%
-set CUDAToolkit_ROOT=%SP_PIN_CUDA_ROOT%
-set PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%
+set "CUDA_PATH=%SP_PIN_CUDA_ROOT%"
+set "CUDAToolkit_ROOT=%SP_PIN_CUDA_ROOT%"
+set "PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%"
 
-REM Target SM architectures.  RTX 3000 series = sm_86; RTX 4000 = sm_89.
-REM We compile both; selectable at runtime by cudaGetDeviceProperties.
-set SP_CUDA_ARCH=86;89
+REM Target SM architecture. RTX 2060 = sm_75 (Turing). Older SMs unsupported.
+set SP_CUDA_ARCH=75
 
 set SP_BACKEND=cuda
 set SP_BUILD_DIR=%SP_ENGINE%\build-cuda
 
-nvcc --version | findstr "release" >nul && (
-    for /f "tokens=5,6 delims=, " %%a in ('nvcc --version ^| findstr "release"') do (
-        echo [env-cuda] nvcc release %%a%%b activated.  SP_CUDA_ARCH=%SP_CUDA_ARCH%  SP_BUILD_DIR=%SP_BUILD_DIR%
-    )
-) || echo [env-cuda] nvcc activated.  SP_CUDA_ARCH=%SP_CUDA_ARCH%
+echo [env-cuda] VS2019 BT + CUDA %SP_PIN_CUDA_VERSION% activated.  SP_CUDA_ARCH=%SP_CUDA_ARCH%  SP_BUILD_DIR=%SP_BUILD_DIR%
+goto :eof
+
+:no_vcvars
+echo [env-cuda] ERROR: VS2019 Build Tools vcvars64.bat not found at:
+echo           %_VCVARS%
+echo           Install VS2019 Build Tools or correct SP_PIN_VS_BUILDTOOLS in env-common.bat.
+exit /b 1
+
+:no_cuda
+echo [env-cuda] ERROR: CUDA %SP_PIN_CUDA_VERSION% nvcc not found at:
+echo           %SP_PIN_CUDA_ROOT%\bin\nvcc.exe
+echo           Install CUDA Toolkit %SP_PIN_CUDA_VERSION% or correct SP_PIN_CUDA_VERSION in env-common.bat.
+exit /b 1

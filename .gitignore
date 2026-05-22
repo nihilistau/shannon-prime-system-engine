@@ -1,9 +1,9 @@
-# Build directories
-build/
-build-*/
-out/
-cmake-build-*/
-_build/
+# Build directories (anchored to repo root so scripts/build/ stays tracked)
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+/_build/
 
 # Object files
 *.o

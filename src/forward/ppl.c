@@ -2,8 +2,12 @@
  * See sp_engine/ppl.h. */
 #define _CRT_SECURE_NO_WARNINGS
 #include "sp_engine/ppl.h"
+#ifdef SP_ENGINE_WITH_CUDA
+#include "sp_engine/cuda_backend.h"
+#endif
 
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 typedef int (*forward_fn)(const qwen3_model *, const int32_t *, int, float *);
@@ -14,6 +18,13 @@ int sp_perplexity(const qwen3_model *m, const sp_tokenizer *tok,
     if (!m || !tok || !text || n_ctx < 4 || !ppl) return 1;
     const int V = (int)m->cfg.n_vocab;
     forward_fn fwd = (m->cfg.arch == SP_ARCH_GEMMA3) ? gemma3_forward : qwen3_forward;
+#ifdef SP_ENGINE_WITH_CUDA
+    /* SP_BACKEND=cuda routes the gemma3 forward through the CUDA backend
+     * (Phase 2-CU). The CPU path stays the default/reference. */
+    { const char *be = getenv("SP_BACKEND");
+      if (be && strcmp(be, "cuda") == 0 && m->cfg.arch == SP_ARCH_GEMMA3)
+          fwd = gemma3_forward_cuda; }
+#endif
 
     /* tokenize the whole corpus once (BOS auto-prepended when add_bos_token=1). */
     int cap = (int)text_len + 16;

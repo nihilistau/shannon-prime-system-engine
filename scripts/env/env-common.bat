@@ -13,8 +13,10 @@ set SP_SYSTEM=%SP_REPO_ROOT%\shannon-prime-system
 set SP_ENGINE=%SP_REPO_ROOT%\shannon-prime-system-engine
 
 REM Toolchain pins. Any change here is a project decision, not a session decision.
+REM CUDA 13.2 pin (2026-05-22, 2-CU): dev host has 13.2 on PATH + RTX 2060 (sm_75);
+REM roadmap 8.3 amended to 13.2 + sm_75. The old 12.4/sm_86-89 line is retired.
 set SP_PIN_VS_BUILDTOOLS=C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools
-set SP_PIN_CUDA_VERSION=12.4
+set SP_PIN_CUDA_VERSION=13.2
 set SP_PIN_CUDA_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%SP_PIN_CUDA_VERSION%
 set SP_PIN_VULKAN_MIN=1.3.250
 set SP_PIN_HEXAGON_SDK=C:\Qualcomm\Hexagon_SDK\5.4.0.x

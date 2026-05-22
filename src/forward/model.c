@@ -2,6 +2,9 @@
 #define _CRT_SECURE_NO_WARNINGS   /* getenv (SP_ARENA) is fine here (MSVC C4996) */
 #include "sp_engine/model.h"
 #include "sp_engine/arena.h"
+#ifdef SP_ENGINE_WITH_CUDA
+#include "sp_engine/cuda_backend.h"   /* sp_cuda_model_release */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -229,6 +232,9 @@ int qwen3_release_source(qwen3_model *m) {
 
 void qwen3_free(qwen3_model *m) {
     if (!m) return;
+#ifdef SP_ENGINE_WITH_CUDA
+    sp_cuda_model_release(m);   /* drop device weights cached by model pointer */
+#endif
     for (int i = 0; i < m->n_norm; i++) free(m->norm_buf[i]);
     free(m->norm_buf); free((void *)m->norm_src);
     sp_arena_free(m->arena);
