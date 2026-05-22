@@ -18,17 +18,24 @@
 extern "C" {
 #endif
 
+/* Model architecture. Selects the forward pass + which optional config fields and
+ * per-layer tensors are populated. Default 0 = Qwen3 (calloc-zeroed configs and
+ * existing callers get the right value with no churn). */
+typedef enum { SP_ARCH_QWEN3 = 0, SP_ARCH_GEMMA3 = 1 } sp_arch_t;
+
 typedef struct {
-    uint32_t n_layers;        /* qwen3.block_count                       */
-    uint32_t n_embd;          /* qwen3.embedding_length                  */
-    uint32_t n_ff;            /* qwen3.feed_forward_length               */
-    uint32_t n_head;          /* qwen3.attention.head_count              */
-    uint32_t n_head_kv;       /* qwen3.attention.head_count_kv (GQA)     */
-    uint32_t head_dim;        /* qwen3.attention.key_length              */
+    sp_arch_t arch;           /* SP_ARCH_QWEN3 (default) | SP_ARCH_GEMMA3 */
+    uint32_t n_layers;        /* {arch}.block_count                      */
+    uint32_t n_embd;          /* {arch}.embedding_length                 */
+    uint32_t n_ff;            /* {arch}.feed_forward_length              */
+    uint32_t n_head;          /* {arch}.attention.head_count             */
+    uint32_t n_head_kv;       /* {arch}.attention.head_count_kv (GQA)    */
+    uint32_t head_dim;        /* {arch}.attention.key_length             */
     uint32_t n_vocab;         /* from token_embd / output rows           */
     uint32_t context_length;
-    float    rope_freq_base;  /* qwen3.rope.freq_base                    */
-    float    rms_eps;         /* qwen3.attention.layer_norm_rms_epsilon  */
+    uint32_t sliding_window;  /* gemma3 local-attn window; 0 = none      */
+    float    rope_freq_base;  /* {arch}.rope.freq_base (gemma3: global)  */
+    float    rms_eps;         /* {arch}.attention.layer_norm_rms_epsilon */
     int      has_qk_norm;     /* per-head Q/K RMSNorm present            */
     int      tied_embedding;  /* output.weight absent -> reuse token_embd*/
 } qwen3_config;
@@ -41,10 +48,12 @@ typedef struct {
     const gguf_tensor *attn_output;   /* [n_head*head_dim, n_embd]       */
     const gguf_tensor *attn_q_norm;   /* [head_dim] or NULL              */
     const gguf_tensor *attn_k_norm;   /* [head_dim] or NULL              */
+    const gguf_tensor *post_attn_norm;/* gemma3 post_attention_norm; NULL on qwen3 */
     const gguf_tensor *ffn_norm;      /* [n_embd]                        */
     const gguf_tensor *ffn_gate;      /* [n_embd, n_ff]                  */
     const gguf_tensor *ffn_up;        /* [n_embd, n_ff]                  */
     const gguf_tensor *ffn_down;      /* [n_ff, n_embd]                  */
+    const gguf_tensor *post_ffw_norm; /* gemma3 post_ffw_norm; NULL on qwen3 */
 } qwen3_layer;
 
 struct sp_arena;   /* sp_engine/arena.h — packed-weight arena (Phase 1a) */
@@ -86,6 +95,14 @@ int          qwen3_release_source(qwen3_model *m);
  * SP_ENGINE_BACKEND=cpu scalar reference path; correctness gate E_CPU_2. */
 int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                   float *logits);
+
+/* Gemma3 f32 reference forward pass (prefill, causal). Same logits layout/return
+ * as qwen3_forward. Requires a model loaded with arch == SP_ARCH_GEMMA3. The
+ * Gemma deltas vs Qwen3: embedding scale (×√n_embd), sandwich norms (post-attn /
+ * post-ffw on the residual branch), GeGLU FFN, local/global sliding-window attn
+ * with dual RoPE base, tied LM head. Correctness gate M_GEMMA3_CPU. */
+int gemma3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
+                   float *logits);
 
 /* As qwen3_forward, but if `kv_trees` is non-NULL it additionally KSTE-encodes
  * every cached K head-vector (the KSTE KV-cache overlay, gated in production by

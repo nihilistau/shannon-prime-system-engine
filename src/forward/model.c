@@ -92,24 +92,35 @@ qwen3_model *qwen3_load(const char *path) {
     if (!g) return NULL;
 
     const char *arch = gguf_get_str(g, "general.architecture");
-    if (!arch || strcmp(arch, "qwen3") != 0) { gguf_close(g); return NULL; }
+    if (!arch || (strcmp(arch, "qwen3") != 0 && strcmp(arch, "gemma3") != 0)) {
+        gguf_close(g); return NULL;
+    }
 
     qwen3_model *m = (qwen3_model *)calloc(1, sizeof(*m));
     if (!m) { gguf_close(g); return NULL; }
     m->gguf = g;
     qwen3_config *c = &m->cfg;
+    c->arch = (strcmp(arch, "gemma3") == 0) ? SP_ARCH_GEMMA3 : SP_ARCH_QWEN3;
+
+    /* metadata keys are namespaced by architecture (e.g. "qwen3.block_count" /
+     * "gemma3.block_count"); build the prefix once. */
+    const char *p = arch;   /* == "qwen3" | "gemma3" */
+    char key[96];
+    #define K(suffix) (snprintf(key, sizeof key, "%s." suffix, p), key)
 
     uint64_t v;
     int ok = 1;
-    ok &= gguf_get_u64(g, "qwen3.block_count", &v);            c->n_layers = (uint32_t)v;
-    ok &= gguf_get_u64(g, "qwen3.embedding_length", &v);       c->n_embd   = (uint32_t)v;
-    ok &= gguf_get_u64(g, "qwen3.feed_forward_length", &v);    c->n_ff     = (uint32_t)v;
-    ok &= gguf_get_u64(g, "qwen3.attention.head_count", &v);   c->n_head   = (uint32_t)v;
-    ok &= gguf_get_u64(g, "qwen3.attention.head_count_kv", &v);c->n_head_kv= (uint32_t)v;
-    ok &= gguf_get_u64(g, "qwen3.attention.key_length", &v);   c->head_dim = (uint32_t)v;
-    if (gguf_get_u64(g, "qwen3.context_length", &v)) c->context_length = (uint32_t)v;
-    if (!gguf_get_f32(g, "qwen3.rope.freq_base", &c->rope_freq_base)) c->rope_freq_base = 1e6f;
-    if (!gguf_get_f32(g, "qwen3.attention.layer_norm_rms_epsilon", &c->rms_eps)) c->rms_eps = 1e-6f;
+    ok &= gguf_get_u64(g, K("block_count"), &v);             c->n_layers  = (uint32_t)v;
+    ok &= gguf_get_u64(g, K("embedding_length"), &v);        c->n_embd    = (uint32_t)v;
+    ok &= gguf_get_u64(g, K("feed_forward_length"), &v);     c->n_ff      = (uint32_t)v;
+    ok &= gguf_get_u64(g, K("attention.head_count"), &v);    c->n_head    = (uint32_t)v;
+    ok &= gguf_get_u64(g, K("attention.head_count_kv"), &v); c->n_head_kv = (uint32_t)v;
+    ok &= gguf_get_u64(g, K("attention.key_length"), &v);    c->head_dim  = (uint32_t)v;
+    if (gguf_get_u64(g, K("context_length"), &v)) c->context_length = (uint32_t)v;
+    if (gguf_get_u64(g, K("attention.sliding_window"), &v)) c->sliding_window = (uint32_t)v;
+    if (!gguf_get_f32(g, K("rope.freq_base"), &c->rope_freq_base)) c->rope_freq_base = 1e6f;
+    if (!gguf_get_f32(g, K("attention.layer_norm_rms_epsilon"), &c->rms_eps)) c->rms_eps = 1e-6f;
+    #undef K
     if (!ok) { qwen3_free(m); return NULL; }
 
     m->token_embd  = want(g, "token_embd.weight");
@@ -141,10 +152,18 @@ qwen3_model *qwen3_load(const char *path) {
         BIND(ffn_gate,    "ffn_gate.weight");
         BIND(ffn_up,      "ffn_up.weight");
         BIND(ffn_down,    "ffn_down.weight");
+        if (c->arch == SP_ARCH_GEMMA3) {
+            BIND(post_attn_norm, "post_attention_norm.weight");  /* sandwich norms */
+            BIND(post_ffw_norm,  "post_ffw_norm.weight");
+        }
         #undef BIND
         if (!L->attn_norm || !L->attn_q || !L->attn_k || !L->attn_v || !L->attn_output ||
             !L->ffn_norm  || !L->ffn_gate || !L->ffn_up || !L->ffn_down) {
             qwen3_free(m); return NULL;
+        }
+        if (c->arch == SP_ARCH_GEMMA3 &&
+            (!L->attn_q_norm || !L->attn_k_norm || !L->post_attn_norm || !L->post_ffw_norm)) {
+            qwen3_free(m); return NULL;   /* gemma3 requires sandwich + QK norms */
         }
     }
     /* QK-norm is present iff layer 0 carries it (uniform across layers). */

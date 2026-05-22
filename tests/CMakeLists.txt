@@ -174,3 +174,17 @@ else()
     target_compile_options(test_compose PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME COMPOSE COMMAND test_compose)
+
+# ── Gemma3-1B (2nd architecture; SP1) ──
+set(SP_GEMMA3_GGUF
+    "D:/Files/Models/Mine/gemma-3-1b-it/gemma-3-1b-it-f16/gemma-3-1b-it-f16.gguf"
+    CACHE FILEPATH "Gemma3-1B f16 GGUF for the engine tests")
+add_executable(test_gemma3_bind test_gemma3_bind.c)
+target_link_libraries(test_gemma3_bind PRIVATE sp_engine)
+target_compile_definitions(test_gemma3_bind PRIVATE SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}")
+if(MSVC)
+    target_compile_options(test_gemma3_bind PRIVATE /W4)
+else()
+    target_compile_options(test_gemma3_bind PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME GEMMA3_BIND COMMAND test_gemma3_bind)
