@@ -69,6 +69,13 @@ struct sp_tokenizer {
     uint32_t      n_spec;
     char         *tok_blob;     /* owned vocab bytes (owning mode); NULL if borrowing  */
     char         *merge_blob;   /* owned merge bytes (owning mode); NULL if borrowing  */
+    /* SPM (SentencePiece "llama") path — Gemma3 etc. */
+    int           spm;          /* 1 if tokenizer.ggml.model == "llama"                */
+    const float  *scores;       /* n_vocab unigram scores (mapping ptr, or owned blob) */
+    float        *scores_blob;  /* owned scores copy (owning mode); NULL if borrowing  */
+    int32_t       byte_tok[256];/* SPM byte-fallback: byte -> "<0xXX>" token id (-1 NA)*/
+    int           add_bos;      /* tokenizer.ggml.add_bos_token (auto-prepend BOS)     */
+    int32_t       bos_id;       /* tokenizer.ggml.bos_token_id                         */
 };
 
 /* GPT2 bytes_to_unicode: printable bytes (33..126,161..172,174..255) map to
@@ -184,6 +191,34 @@ sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own) {
             }
         }
     }
+
+    /* SPM ("llama") path: Gemma3 etc. need the unigram scores + byte-fallback
+     * tokens. (BPE models leave spm=0 and never touch these.) */
+    t->bos_id = -1;
+    {
+        const char *model = gguf_get_str(g, "tokenizer.ggml.model");
+        t->spm = (model && strcmp(model, "llama") == 0);
+    }
+    { uint64_t b; if (gguf_get_u64(g, "tokenizer.ggml.bos_token_id", &b)) t->bos_id = (int32_t)b; }
+    { uint64_t a; if (gguf_get_u64(g, "tokenizer.ggml.add_bos_token", &a)) t->add_bos = (int)a; }
+    if (t->spm) {
+        const gguf_kv *sk = gguf_find_kv(g, "tokenizer.ggml.scores");
+        if (!sk || sk->type != GGUF_T_ARRAY || sk->arr_type != GGUF_T_FLOAT32 ||
+            sk->arr_len != nv) { sp_tokenizer_free(t); return NULL; }
+        t->scores = (const float *)sk->arr_data;
+        if (own) {
+            t->scores_blob = (float *)malloc((size_t)nv * sizeof(float));
+            if (!t->scores_blob) { sp_tokenizer_free(t); return NULL; }
+            memcpy(t->scores_blob, t->scores, (size_t)nv * sizeof(float));
+            t->scores = t->scores_blob;
+        }
+        /* byte-fallback table: byte b -> id of "<0xXX>" (must all resolve) */
+        for (int b = 0; b < 256; b++) {
+            char nm[8]; int nl = snprintf(nm, sizeof nm, "<0x%02X>", b);
+            t->byte_tok[b] = (int32_t)hmap_get(&t->vocab, nm, (uint32_t)nl, -1);
+            if (t->byte_tok[b] < 0) { sp_tokenizer_free(t); return NULL; }
+        }
+    }
     return t;
 }
 
@@ -191,7 +226,7 @@ void sp_tokenizer_free(sp_tokenizer *t) {
     if (!t) return;
     hmap_free(&t->vocab); hmap_free(&t->merge);
     free(t->spec); free((void *)t->tok); free(t->len);
-    free(t->tok_blob); free(t->merge_blob);
+    free(t->tok_blob); free(t->merge_blob); free(t->scores_blob);
     free(t);
 }
 
@@ -394,11 +429,130 @@ static int encode_text(const sp_tokenizer *t, const unsigned char *s, size_t len
     return rc;
 }
 
+/* ===== SPM (SentencePiece "llama") encode — Gemma3 etc. ====================== *
+ * Greedy bigram-merge by unigram score, byte-parity with llama.cpp's
+ * llm_tokenizer_spm_session. Normalisation: spaces -> U+2581 (no space prefix on
+ * Gemma, add_space_prefix=0). Byte fallback for symbols not in the vocab. Since a
+ * merge only ever forms a vocab token, resegment is just token-or-byte-fallback
+ * (the oracle's rev_merge recursion is dead for non-"unused" tokens). */
+
+static int utf8_len(unsigned char c0) {
+    if (c0 < 0x80) return 1;
+    if ((c0 & 0xE0) == 0xC0) return 2;
+    if ((c0 & 0xF0) == 0xE0) return 3;
+    if ((c0 & 0xF8) == 0xF0) return 4;
+    return 1;   /* malformed lead byte: one byte */
+}
+
+typedef struct { int prev, next; const char *text; int n; } spm_sym;
+typedef struct { int left, right; float score; int size; } spm_bigram;
+
+/* max-heap priority: higher score first; tie -> smaller left index (matches the
+ * oracle comparator (l.score<r.score)||(l.score==r.score && l.left>r.left)). */
+static int spm_hi(const spm_bigram *a, const spm_bigram *b) {
+    return (a->score > b->score) || (a->score == b->score && a->left < b->left);
+}
+static void spm_push(spm_bigram *h, int *hn, spm_bigram bg) {
+    int i = (*hn)++; h[i] = bg;
+    while (i > 0) { int p = (i - 1) >> 1; if (!spm_hi(&h[i], &h[p])) break;
+        spm_bigram tmp = h[i]; h[i] = h[p]; h[p] = tmp; i = p; }
+}
+static spm_bigram spm_pop(spm_bigram *h, int *hn) {
+    spm_bigram top = h[0]; h[0] = h[--(*hn)];
+    int i = 0;
+    for (;;) { int l = 2*i+1, r = 2*i+2, m = i;
+        if (l < *hn && spm_hi(&h[l], &h[m])) m = l;
+        if (r < *hn && spm_hi(&h[r], &h[m])) m = r;
+        if (m == i) break;
+        spm_bigram tmp = h[i]; h[i] = h[m]; h[m] = tmp; i = m; }
+    return top;
+}
+
+/* Encode one raw-text fragment [s,len) (no specials) into out via SPM merge. */
+static int spm_fragment(const sp_tokenizer *t, const unsigned char *s, size_t len,
+                        int32_t *out, int max_out, long *cnt) {
+    if (len == 0) return 0;
+    /* escape: every ' ' -> U+2581 (E2 96 81); other bytes copied. */
+    unsigned char *esc = (unsigned char *)malloc(3 * len + 1);
+    if (!esc) return -1;
+    size_t el = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == 0x20) { esc[el++] = 0xE2; esc[el++] = 0x96; esc[el++] = 0x81; }
+        else esc[el++] = s[i];
+    }
+    /* split into UTF-8-char symbols (doubly linked over an array). */
+    spm_sym *sym = (spm_sym *)malloc((el + 1) * sizeof *sym);
+    spm_bigram *heap = (spm_bigram *)malloc((4 * el + 16) * sizeof *heap);
+    if (!sym || !heap) { free(esc); free(sym); free(heap); return -1; }
+    int ns = 0;
+    for (size_t o = 0; o < el; ) {
+        int L = utf8_len(esc[o]); if (o + (size_t)L > el) L = (int)(el - o);
+        sym[ns].text = (const char *)(esc + o); sym[ns].n = L;
+        sym[ns].prev = ns - 1; sym[ns].next = (o + (size_t)L >= el) ? -1 : ns + 1;
+        o += (size_t)L; ns++;
+    }
+    int hn = 0;
+    #define SPM_TRY(LFT, RGT) do { \
+        int l_ = (LFT), r_ = (RGT); \
+        if (l_ >= 0 && r_ >= 0) { \
+            int nn = sym[l_].n + sym[r_].n; \
+            int64_t id_ = hmap_get(&t->vocab, sym[l_].text, (uint32_t)nn, -1); \
+            if (id_ >= 0) { spm_bigram bg; bg.left = l_; bg.right = r_; \
+                bg.score = t->scores[id_]; bg.size = nn; spm_push(heap, &hn, bg); } \
+        } } while (0)
+    for (int i = 1; i < ns; i++) SPM_TRY(i - 1, i);
+    while (hn > 0) {
+        spm_bigram bg = spm_pop(heap, &hn);
+        spm_sym *Lf = &sym[bg.left], *Rt = &sym[bg.right];
+        if (Lf->n == 0 || Rt->n == 0 || Lf->n + Rt->n != bg.size) continue;
+        Lf->n += Rt->n; Rt->n = 0;
+        Lf->next = Rt->next;
+        if (Rt->next >= 0) sym[Rt->next].prev = bg.left;
+        SPM_TRY(Lf->prev, bg.left);
+        SPM_TRY(bg.left, Lf->next);
+    }
+    #undef SPM_TRY
+    for (int i = 0; i != -1; i = sym[i].next) {
+        int64_t id = hmap_get(&t->vocab, sym[i].text, (uint32_t)sym[i].n, -1);
+        if (id >= 0) emit(out, max_out, cnt, (int32_t)id);
+        else for (int j = 0; j < sym[i].n; j++)
+            emit(out, max_out, cnt, t->byte_tok[(unsigned char)sym[i].text[j]]);
+    }
+    free(esc); free(sym); free(heap);
+    return 0;
+}
+
+/* SPM top level: optional BOS, special-token partition, SPM merge on the gaps. */
+static long spm_encode(const sp_tokenizer *t, const unsigned char *s, size_t text_len,
+                       int parse_special, int32_t *out, int max_out) {
+    long cnt = 0; int rc = 0;
+    if (t->add_bos && t->bos_id >= 0) emit(out, max_out, &cnt, t->bos_id);
+    size_t tstart = 0, i = 0;
+    while (i < text_len) {
+        int hit = 0;
+        if (parse_special && t->n_spec) {
+            for (uint32_t k = 0; k < t->n_spec; k++) {
+                uint32_t sl = t->spec[k].len;
+                if (sl && i + sl <= text_len && memcmp(s + i, t->spec[k].surf, sl) == 0) {
+                    if (i > tstart && (rc = spm_fragment(t, s + tstart, i - tstart, out, max_out, &cnt))) goto done;
+                    emit(out, max_out, &cnt, t->spec[k].id);
+                    i += sl; tstart = i; hit = 1; break;
+                }
+            }
+        }
+        if (!hit) i++;
+    }
+    if (tstart < text_len) rc = spm_fragment(t, s + tstart, text_len - tstart, out, max_out, &cnt);
+done:
+    return rc ? -1 : cnt;
+}
+
 long sp_tokenizer_encode(const sp_tokenizer *t, const char *text, size_t text_len,
                          int parse_special, int32_t *out, int max_out) {
     if (!t || (!text && text_len > 0) || (!out && max_out > 0)) return -1;
     if (text_len == 0) return 0;
     const unsigned char *s = (const unsigned char *)text;
+    if (t->spm) return spm_encode(t, s, text_len, parse_special, out, max_out);
 
     /* scratch sized to the whole input (codepoints <= bytes; enc <= 2*bytes) */
     uint32_t      *cps  = (uint32_t *)malloc(text_len * sizeof(uint32_t));

@@ -44,10 +44,14 @@ long sp_tokenizer_decode(const sp_tokenizer *t, const int32_t *ids, int n,
                          char *buf, size_t cap);
 
 /* Encode `text_len` bytes of UTF-8 into token IDs in `out` (capacity `max_out`).
- * No BOS/EOS is added (Qwen3 sets add_bos_token=0; the caller prepends control
- * tokens if it wants them). If `parse_special` is nonzero, CONTROL/USER_DEFINED
- * token surfaces (e.g. "<|im_start|>") in the text are matched literally
- * (longest-first) and emitted as their own IDs; the gaps are BPE-encoded.
+ * Dispatches on the vocab's tokenizer model: "gpt2"/BPE (Qwen family) runs the
+ * byte-level BPE pipeline; "llama"/SPM (Gemma family) runs the SentencePiece
+ * bigram-merge (spaces -> U+2581, byte fallback). BOS is auto-prepended iff the
+ * GGUF sets tokenizer.ggml.add_bos_token=1 (Qwen3=0 -> none; Gemma3=1 -> id 2),
+ * matching the oracle's add_special=true. If `parse_special` is nonzero,
+ * CONTROL/USER_DEFINED token surfaces (e.g. "<|im_start|>", "<start_of_turn>") in
+ * the text are matched literally (longest-first) and emitted as their own IDs;
+ * the gaps are BPE/SPM-encoded.
  * Returns the number of tokens produced, or -1 on error. If the count exceeds
  * `max_out` the output is truncated but the full count is still returned (so the
  * caller can resize and retry). */

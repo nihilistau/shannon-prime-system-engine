@@ -1,0 +1,3 @@
+# Test fixtures are byte-exact oracle inputs/outputs — never convert line endings
+# (the tokenizer/PPL gates compare against bytes the stock llama.cpp saw).
+tests/fixtures/** -text

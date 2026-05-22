@@ -202,3 +202,15 @@ else()
     target_compile_options(test_gemma3_forward PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME M_GEMMA3_CPU COMMAND test_gemma3_forward)
+
+add_executable(test_spm test_spm.c)
+target_link_libraries(test_spm PRIVATE sp_engine)
+target_compile_definitions(test_spm PRIVATE
+    SP_GEMMA3_GGUF="${SP_GEMMA3_GGUF}"
+    SP_SPM_FIXDIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/spm")
+if(MSVC)
+    target_compile_options(test_spm PRIVATE /W4)
+else()
+    target_compile_options(test_spm PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME SPM_ENCODE COMMAND test_spm)
