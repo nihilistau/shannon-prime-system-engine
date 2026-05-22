@@ -246,32 +246,36 @@ git commit -m "[lat-2-CPU] Oracle: Gemma3 per-layer checkpoints for the forward 
 - Create: `src/forward/gemma3.c`
 - Modify: `src/CMakeLists.txt` (add `forward/gemma3.c`)
 
-- [ ] **Step 1: Gemma helpers in `gemma3.c`.**
+**Constants pinned from the oracle reference (`shannon-prime-lattice-llama/src/models/gemma3.cpp`
++ `llama-hparams.h`), confirmed before coding — no discovery needed:**
+- **RMSNorm:** the oracle uses plain `LLM_NORM_RMS` (`x/rms·w`) for ALL Gemma norms (the `(1+w)`
+  is baked into the GGUF weights at conversion). ⇒ Gemma3 reuses the engine's **existing shared
+  `rmsnorm`/`rmsnorm_head`** — NO `(1+w)` variant (adding 1 would double-count).
+- **Embedding scale:** `×sqrtf(n_embd)` = √1152, applied to the token embeddings.
+- **QK-norm:** `rmsnorm_head(q, attn_q_norm)`, `rmsnorm_head(k, attn_k_norm)` over head_dim=256,
+  BEFORE RoPE (V is neither normed nor roped).
+- **RoPE base:** global layers 1e6 (`rope.freq_base`); local/SWA layers **10000** (llama default
+  `rope_freq_base_train_swa`, since the GGUF has no override). NEOX rope, n_rot = head_dim.
+- **Global-layer pattern:** SWA period 6 ⇒ layer `il` is GLOBAL (full attn, base 1e6) when
+  `(il+1)%6==0` (il = 5,11,17,23); the other 22 layers are local (sliding window 512, base 10000).
+- **Query scale:** `f_attention_scale = 1/sqrt(head_dim)` = `1/sqrt(256)` (the 1B branch), applied
+  to scores (engine `ascale`); build_attn kq_scale is 1.0.
+- **Residual:** post-norm THEN add — `sa_out = inpL + post_attn_norm(wo·attn)`, then
+  `out = sa_out + post_ffw_norm(ffn(ffn_norm(sa_out)))`.
+- **No softcap** (final_logit_softcapping absent ⇒ 0). **Tied head** (`m->output == token_embd`).
+
+- [ ] **Step 1: Gemma helper in `gemma3.c`** (only GELU is new; norms reuse the shared kernels):
 
 ```c
-/* Gemma RMSNorm: out[i] = x[i]/rms(x) * (1 + w[i]). rms over n with eps. */
-static void rmsnorm_gemma(const float *x, const float *w, int n, float eps, float *out) {
-    double ss = 0.0;
-    for (int i = 0; i < n; i++) ss += (double)x[i] * x[i];
-    float inv = (float)(1.0 / sqrt(ss / n + eps));
-    for (int i = 0; i < n; i++) out[i] = x[i] * inv * (1.0f + w[i]);
-}
-/* Per-head in-place Gemma QK-norm over head_dim. */
-static void rmsnorm_gemma_head(float *v, const float *w, int n, float eps) {
-    double ss = 0.0;
-    for (int i = 0; i < n; i++) ss += (double)v[i] * v[i];
-    float inv = (float)(1.0 / sqrt(ss / n + eps));
-    for (int i = 0; i < n; i++) v[i] = v[i] * inv * (1.0f + w[i]);
-}
-/* gelu, tanh approximation (Gemma): 0.5x(1+tanh(√(2/π)(x+0.044715x³))). */
+/* GELU, tanh approximation (Gemma FFN, LLM_FFN_GELU): matches ggml_gelu. */
 static float gelu_tanh(float x) {
     const float k = 0.7978845608028654f; /* sqrt(2/pi) */
     return 0.5f * x * (1.0f + tanhf(k * (x + 0.044715f * x * x * x)));
 }
 ```
 
-  (Match `rms` reduction order to the oracle once Task 3 checkpoints are in hand; the existing
-  Qwen3 `rmsnorm` uses an f32/f64 accumulate documented in §8.6.1 — reuse the same convention.)
+  Use the shared `rmsnorm`/`rmsnorm_head` (validated for Qwen3 against the same oracle) for every
+  Gemma norm site — they are the exact `LLM_NORM_RMS` arithmetic the oracle applies.
 - [ ] **Step 2: Write `gemma3_forward`** on the shared kernels. Skeleton (prefill, pure-f32
   reference path; arch deltas inline). Sliding-window/global selected per layer:
 
