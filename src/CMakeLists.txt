@@ -7,6 +7,7 @@ add_library(sp_engine STATIC
     forward/model.c
     forward/kernels.c
     forward/forward.c
+    forward/gemma3.c
     forward/generate.c
     forward/arena.c
     tokenizer/tokenizer.c
