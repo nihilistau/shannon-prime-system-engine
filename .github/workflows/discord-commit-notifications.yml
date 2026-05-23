@@ -1,0 +1,43 @@
+name: Discord Commit Notifications
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  notify-discord:
+    runs-on: ubuntu-latest
+    steps:
+      # Add your Discord webhook in:
+      #   Repository Settings -> Secrets and variables -> Actions -> New repository secret
+      # Secret name: DISCORD_WEBHOOK
+      # Secret value: paste the full Discord webhook URL there.
+      # Do not hardcode the webhook URL in this workflow file.
+      - name: Send pushed commits to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ -z "${DISCORD_WEBHOOK}" ]; then
+            echo "DISCORD_WEBHOOK secret is not set."
+            echo "Add it in GitHub: Settings -> Secrets and variables -> Actions -> New repository secret."
+            exit 1
+          fi
+
+          jq -c '.commits[] | {
+            content: (
+              "New commit pushed to main\n"
+              + "**Message:** " + .message + "\n"
+              + "**Author:** " + .author.name + "\n"
+              + "**URL:** <" + .url + ">"
+            )
+          }' "${GITHUB_EVENT_PATH}" | while IFS= read -r payload; do
+            curl --fail-with-body \
+              --header "Content-Type: application/json" \
+              --request POST \
+              --data "${payload}" \
+              "${DISCORD_WEBHOOK}"
+          done
