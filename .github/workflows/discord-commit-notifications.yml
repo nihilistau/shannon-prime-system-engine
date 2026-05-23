@@ -21,10 +21,17 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
+          set -o pipefail
+
           if [ -z "${DISCORD_WEBHOOK}" ]; then
             echo "DISCORD_WEBHOOK secret is not set."
             echo "Add it in GitHub: Settings -> Secrets and variables -> Actions -> New repository secret."
             exit 1
+          fi
+
+          if ! jq -e '.commits | length > 0' "${GITHUB_EVENT_PATH}" > /dev/null; then
+            echo "No commits found in this push payload; nothing to notify."
+            exit 0
           fi
 
           jq -c '.commits[] | {
@@ -39,5 +46,5 @@ jobs:
               --header "Content-Type: application/json" \
               --request POST \
               --data "${payload}" \
-              "${DISCORD_WEBHOOK}"
+              "${DISCORD_WEBHOOK}" || exit 1
           done
