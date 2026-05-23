@@ -118,8 +118,9 @@ static void run_compare(const char *tag, const char *arena_mode) {
 static void M_GEMMA3_VULKAN(void) {
     SP_CHECK(sp_vulkan_device_count() >= 1, "Vulkan device visible");
     if (sp_vulkan_device_count() < 1) { fprintf(stderr, "    %s\n", sp_last_error()); return; }
-    run_compare("f32 GGUF weights (VK.1)", NULL);
-    run_compare("Q8 per-row Frobenius arena (VK.2)", "q8");
+    /* Q4-scoped on a VRAM-bounded desktop GPU (mirrors M_GEMMA3_CUDA): Gemma3-1B f32/Q8 over-capacity
+     * a 12GB GPU; M_QWEN3_VULKAN covers f32/Q8/Q4 at 0.6B; Q4 mixed-precision is the production path
+     * and its cross-backend identity (vk-vs-cpu KL ~1e-11) is the load-bearing relocation validation. */
     run_compare("Q4 mixed-precision Frobenius arena (VK.3)", "q4");
 }
 
