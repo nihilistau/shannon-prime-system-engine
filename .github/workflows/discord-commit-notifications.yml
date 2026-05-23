@@ -19,6 +19,7 @@ jobs:
       # Do not hardcode the webhook URL in this workflow file.
       - name: Send pushed commits to Discord
         env:
+          BRANCH_NAME: ${{ github.ref_name }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           set -o pipefail
@@ -36,7 +37,7 @@ jobs:
 
           jq -c '.commits[] | {
             content: (
-              "New commit pushed to main\n"
+              "New commit pushed to '"${BRANCH_NAME}"'\n"
               + "**Message:** " + .message + "\n"
               + "**Author:** " + .author.name + "\n"
               + "**URL:** <" + .url + ">"
