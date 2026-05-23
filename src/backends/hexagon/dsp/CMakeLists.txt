@@ -33,6 +33,13 @@ set(srcs
 
 add_library(sp_hex_skel SHARED ${srcs})
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
+# HX.3b: enable f32 HVX on the V69 skel. `-mhvx -mhvx-length=128B` is the reference-
+# verified base spelling (prior S22U flags.make; the bare build_cmake CLI does not
+# default -mhvx on v69). `-mhvx-ieee-fp` gates Q6_Vsf_* IEEE-single codegen — the one
+# accurate fragment of the retired "Q6_Vsf_* is broken" note: prior HVX was fixed-point
+# and never carried this flag, the likely source of that misattribution. The kernels
+# are C, so the flags go on CMAKE_C_FLAGS (matching the reference's C_FLAGS placement).
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mhvx -mhvx-length=128B -mhvx-ieee-fp")
 include_directories(${common_incs})
 
 # qaic: ../inc/sp_hex.idl -> sp_hex.h + sp_hex_skel.c + sp_hex_stub.c in the build dir.

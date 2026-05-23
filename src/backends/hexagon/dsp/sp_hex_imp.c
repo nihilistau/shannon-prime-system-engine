@@ -8,9 +8,15 @@
  * generated from ../inc/sp_hex.idl by qaic and dispatches to these.
  *
  * V69 HVX rules for HX.3 (do NOT rediscover — see SESSION-STATE-lat-2-HX):
- *   - Q6_Vsf_* IEEE single-float family is BROKEN on V69 (off 4-20 absolute):
- *     do intermediate math in qf32 (Q6_Vqf32_*), sf->qf32 at input,
- *     Q6_Vsf_equals_Vqf32 only at final store.
+ *   - V69 has NO sf-result float multiply/add: the float multiply/add ALWAYS emit
+ *     32-bit qfloat (qf32), per the V69 HVX Programmer's Reference (Multiply/Add
+ *     single precision vector by vector, p.150/246). The sf family is NOT broken --
+ *     sf inputs feed Q6_Vqf32_vmpy_VsfVsf directly. The mandated matmul shape is:
+ *     sf inputs -> qf32 products -> qf32 accumulate (Q6_Vqf32_vadd_*) -> a single
+ *     Q6_Vsf_equals_Vqf32 convert at the end. The retired "BROKEN, off 4-20 absolute"
+ *     note was a qf32 result emitted without that final convert -- a missing
+ *     conversion mislabeled a silicon defect. -mhvx-ieee-fp (dsp/CMakeLists.txt) is
+ *     the codegen prerequisite the prior fixed-point HVX build never carried.
  *   - qurt_hvx_lock(QURT_HVX_MODE_128B) is thread-local; FastRPC runs the method
  *     on a worker thread — lock ONCE at the top of the forward method (whole-
  *     forward-on-DSP = one method), not in open.
@@ -22,6 +28,76 @@
 #include "HAP_farf.h"
 #include "sp_hex.h"
 #include "../sp_hex_layout.h"   /* host<->DSP weight-blob contract */
+
+#ifdef __HVX__   /* HX.3b f32 HVX matmul primitive (-mhvx-ieee-fp enables the float family) */
+#include <hexagon_types.h>     /* HVX_Vector */
+#include <hexagon_protos.h>    /* Q6_* HVX intrinsics */
+#include "qurt_hvx.h"          /* qurt_hvx_lock/unlock + QURT_HVX_MODE_128B (gotcha #4) */
+/* f32 dot on V69 HVX, the hardware-mandated float shape (see the header note):
+ * sf inputs -> Q6_Vqf32_vmpy_VsfVsf products (V69 float multiply emits qf32) ->
+ * qf32 lane accumulate -> a 5-step vror/qf32-add tree reduces the 32 lanes to lane
+ * 0 -> one Q6_Vsf_equals_Vqf32 convert. The vector body runs whole 32-float
+ * (128-byte) blocks; a scalar epilogue takes the n%32 tail. The aligned vector loads
+ * assume 128-byte-aligned a,b -- true for page-aligned rpcmem tensor rows whose cols
+ * is a multiple of 32 (the Gemma3/Qwen3 projection dims are). The lane-reduction
+ * sums in a different order than the sequential scalar path, so it tracks the scalar
+ * reference only to the 8.6.1 precision floor, never bit-for-bit. */
+static float hx_dot_hvx(const float *a, const float *b, int n) {
+    int nb = n & ~31;                 /* whole 32-float (128-byte) blocks */
+    float sum = 0.0f;
+    if (nb > 0) {
+        /* first block initialises the qf32 accumulator (avoids relying on a
+         * canonical "zero qf32" bit pattern). */
+        HVX_Vector acc = Q6_Vqf32_vmpy_VsfVsf(*(const HVX_Vector *)a,
+                                              *(const HVX_Vector *)b);
+        for (int i = 32; i < nb; i += 32)
+            acc = Q6_Vqf32_vadd_Vqf32Vqf32(
+                      acc, Q6_Vqf32_vmpy_VsfVsf(*(const HVX_Vector *)(a + i),
+                                                *(const HVX_Vector *)(b + i)));
+        /* horizontal reduce qf32 lanes: rotate right by 64/32/16/8/4 bytes + add. */
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 64));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 32));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 16));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 8));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 4));
+        float lanes[32] __attribute__((aligned(128)));
+        *(HVX_Vector *)lanes = Q6_Vsf_equals_Vqf32(acc);   /* qf32 -> IEEE single */
+        sum = lanes[0];
+    }
+    for (int i = nb; i < n; i++) sum += a[i] * b[i];       /* scalar tail */
+    return sum;
+}
+/* Q8 dot: int8 codes (row) against f32 activations (x), same qf32 shape as
+ * hx_dot_hvx with a tiny scalar int8->sf widen per 32-chunk into a 128-byte-aligned
+ * tile (V69 exposes no in-vector int8->sf convert here; the widen is cheap next to
+ * the HVX multiply-accumulate it feeds — the in-vector-widen / integer-vrmpy fast
+ * path is the deferred acceleration). Returns the raw dot; caller applies the row
+ * scale. The HVX unit is held by the enclosing method (sp_hex_forward), not here. */
+static float hx_dot_q8_hvx(const signed char *row, const float *x, int n) {
+    int nb = n & ~31;
+    float sum = 0.0f;
+    if (nb > 0) {
+        float wf[32] __attribute__((aligned(128)));
+        HVX_Vector acc; int first = 1;
+        for (int i = 0; i < nb; i += 32) {
+            for (int c = 0; c < 32; c++) wf[c] = (float)row[i + c];   /* scalar widen */
+            HVX_Vector p = Q6_Vqf32_vmpy_VsfVsf(*(const HVX_Vector *)wf,
+                                                *(const HVX_Vector *)(x + i));
+            acc = first ? p : Q6_Vqf32_vadd_Vqf32Vqf32(acc, p); first = 0;
+        }
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 64));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 32));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 16));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 8));
+        acc = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_V_vror_VR(acc, 4));
+        float lanes[32] __attribute__((aligned(128)));
+        *(HVX_Vector *)lanes = Q6_Vsf_equals_Vqf32(acc);
+        sum = lanes[0];
+    }
+    for (int i = nb; i < n; i++) sum += (float)row[i] * x[i];   /* scalar tail */
+    return sum;
+}
+#endif /* __HVX__ */
 
 int sp_hex_open(const char *uri, remote_handle64 *h) {
     (void)uri;
@@ -69,18 +145,31 @@ int sp_hex_upload_crc(remote_handle64 h, const unsigned char *data, int dataLen,
 }
 
 /* HX.3a: scalar f32 matmul on the cDSP — the core forward kernel (ggml weight
- * layout: y[j] = sum_i w[j*cols + i] * x[i]). Pure scalar f32, no HVX yet (HX.3b
- * swaps this to qf32 HVX). Same op order as the engine's dot_f32 scalar path, so
- * the result matches the host bit-for-bit. */
+ * layout: y[j] = sum_i w[j*cols + i] * x[i]). Under __HVX__ each row runs the qf32
+ * HVX dot (hx_dot_hvx, HX.3b); otherwise the scalar f32 path -- which the host A/B
+ * still computes as the reference. The HVX lane-reduction reorders the sum, so the
+ * cDSP-HVX result tracks the scalar host reference only to the 8.6.1 precision
+ * floor, not bit-for-bit (the prior scalar-vs-host exact-zero match no longer holds
+ * once HVX is on -- this is the expected, gated behaviour). */
 int sp_hex_matmul_f32(remote_handle64 h, const float *w, int wLen, int rows, int cols,
                       const float *x, int xLen, float *y, int yLen) {
     (void)h; (void)wLen; (void)xLen;
+#ifdef __HVX__
+    /* Reserve the 128B HVX unit on this FastRPC worker thread (gotcha #4: the lock is
+     * thread-local and FastRPC dispatches the method on a worker thread). Lock once
+     * around the whole row loop, not per row. */
+    qurt_hvx_lock(QURT_HVX_MODE_128B);
+    for (int j = 0; j < rows && j < yLen; j++)
+        y[j] = hx_dot_hvx(w + (long)j * cols, x, cols);
+    qurt_hvx_unlock();
+#else
     for (int j = 0; j < rows && j < yLen; j++) {
         const float *wr = w + (long)j * cols;
         float acc = 0.0f;
         for (int i = 0; i < cols; i++) acc += wr[i] * x[i];
         y[j] = acc;
     }
+#endif
     FARF(RUNTIME_HIGH, "sp_hex: matmul_f32 rows=%d cols=%d", rows, cols);
     return 0;
 }
@@ -126,9 +215,13 @@ static void hx_matmul_q8(const unsigned char *blk, int out, int in,
         float inv = scales[j] / 127.0f;
         for (int t = 0; t < n_tok; t++) {
             const float *x = X + (size_t)t * in;
+#ifdef __HVX__
+            Y[(size_t)t * out + j] = hx_dot_q8_hvx(row, x, in) * inv;
+#else
             float acc = 0.0f;
             for (int i = 0; i < in; i++) acc += (float)row[i] * x[i];
             Y[(size_t)t * out + j] = acc * inv;
+#endif
         }
     }
 }
@@ -162,6 +255,12 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
                    const unsigned char *weights, int weightsLen,
                    const float *scratch, int scratchLen, float *hidden, int hiddenLen) {
     (void)hdl; (void)xLen; (void)weightsLen; (void)scratchLen; (void)hiddenLen;
+#ifdef __HVX__
+    /* Reserve the 128B HVX unit once for the whole forward (gotcha #4: thread-local,
+     * one FastRPC method = one worker thread). All hx_matmul_q8 calls below run HVX
+     * dots under this lock; the scalar norm/rope/attn kernels are unaffected. */
+    qurt_hvx_lock(QURT_HVX_MODE_128B);
+#endif
     float *scr = (float *)scratch;   /* `in` buffer is writable host rpcmem; carve work area */
     sp_hex_cfg cfg = { n_layers, n_embd, n_ff, head_dim, n_head, n_head_kv,
                        sliding_window, eps, rope_global, rope_local };
@@ -241,6 +340,9 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
       for (int t = 0; t < n_tok; t++)
           hx_rmsnorm(resid + (size_t)t * E, on, E, eps, hidden + (size_t)t * E); }
 
+#ifdef __HVX__
+    qurt_hvx_unlock();
+#endif
     FARF(RUNTIME_HIGH, "sp_hex: forward n_tok=%d n_layers=%d done", n_tok, n_layers);
     return 0;
 }

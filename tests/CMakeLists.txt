@@ -79,6 +79,17 @@ else()
 endif()
 add_test(NAME E_CPU_5 COMMAND test_ntt_attn)
 
+# E_HX_5 -- Hexagon NTT-attention substitution lock (int64 dot == sp_pr_inner). Host-only
+# (no Hexagon toolchain/device); the on-cDSP NTT-attention forward is the deferred analog.
+add_executable(test_ntt_attn_hexagon test_ntt_attn_hexagon.c)
+target_link_libraries(test_ntt_attn_hexagon PRIVATE sp_engine)
+if(MSVC)
+    target_compile_options(test_ntt_attn_hexagon PRIVATE /W4)
+else()
+    target_compile_options(test_ntt_attn_hexagon PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME E_HX_5 COMMAND test_ntt_attn_hexagon)
+
 add_executable(test_kste_kv test_kste_kv.c)
 target_link_libraries(test_kste_kv PRIVATE sp_engine)
 target_compile_definitions(test_kste_kv PRIVATE
