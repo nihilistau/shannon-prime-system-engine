@@ -3,19 +3,18 @@
 #   2-CPU.B  forward/*.c             (Qwen3 forward pass)
 #   2-CPU.C+ backends/cpu/*.c        (Frobenius matmul, AVX2, NTT-attn, KV)
 add_library(sp_engine STATIC
-    common/sp_error.c
-    loader/gguf.c
-    forward/model.c
-    forward/kernels.c
-    forward/forward.c
-    forward/gemma3.c
+    # CPU backend forward — the AVX-overlay sibling of the device backends' forwards
+    # (cuda_forward.cu / vulkan_forward / sp_hex_imp.c); math-core's scalar forward is the
+    # reference oracle these all validate against (§8.7.2 Phase 2-L1.VALIDATE, Option C).
+    # cpu_overlay.c carries the CPU kernel surface incl. the SP_ENGINE_AVX2-guarded dot_f32.
+    backends/cpu/cpu_overlay.c
+    backends/cpu/cpu_forward.c
+    backends/cpu/cpu_gemma3.c
+    backends/cpu/cpu_generate.c
+    # Engine-side pieces the relocation did NOT move: the perplexity / T_FRO_4 eval harness,
+    # the tokenizer, and the .sp-model -> qwen3 adapter (the §8.7.3 HANDLE work — stays for now).
     forward/ppl.c
-    forward/generate.c
-    forward/arena.c
     tokenizer/tokenizer.c
-    # Phase 2-FMT: .sp-model on-disk format (loader + adapter + hash primitives).
-    io/sp_hash.c
-    io/sp_model_load.c
     io/sp_model_adapter.c
 )
 
@@ -26,7 +25,16 @@ target_include_directories(sp_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/io)
 # Math-core primitives the forward pass / kernels consume (PUBLIC: their
 # include/sp headers propagate to engine consumers and tests).
 target_link_libraries(sp_engine PUBLIC
-    sp_frobenius sp_ntt_crt sp_poly_ring sp_kste sp_vht2)
+    # Phase-1 primitives (unchanged) plus the relocated L1 infrastructure the engine now
+    # CONSUMES from the math core: model representation + GGUF load/free/release lifecycle
+    # (sp_model), packed-weight arena (sp_arena), GGUF v3 parser (sp_gguf), weight-dtype
+    # dequant (sp_weight_dtype), the .sp-model loader (sp_io_format) and its hash primitives
+    # (sp_io_hash). The same-named symbols satisfy the engine's kept sp_engine/* declaration
+    # headers. The math-core FORWARD libraries (sp_forward / sp_forward_dispatch /
+    # sp_forward_kernels) are the reference twin and are deliberately NOT linked — linking them
+    # would duplicate the CPU backend's qwen3_forward / gemma3_forward symbols.
+    sp_frobenius sp_ntt_crt sp_poly_ring sp_kste sp_vht2
+    sp_gguf sp_weight_dtype sp_io_hash sp_io_format sp_model sp_arena)
 
 if(MSVC)
     target_compile_options(sp_engine PRIVATE /W4)
