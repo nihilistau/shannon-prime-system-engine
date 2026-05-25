@@ -75,7 +75,7 @@ typedef struct {
     uint32_t arch_id;               /* 12 */
     uint32_t arch_struct_size;      /* 16  bytes of arch payload actually used */
     uint32_t arch_struct_capacity;  /* 20  == 256 */
-    uint8_t  arch_struct[256];      /* 24  memcpy-direct payload (qwen3_config in v0) */
+    uint8_t  arch_struct[256];      /* 24  memcpy-direct payload: sp_arch_info (sp_l1.h; E_PARITY_3) */
     uint8_t  tokenizer_hash[32];    /* 280 SHA-256 of paired .sp-tokenizer file */
     uint32_t vocab_size;            /* 312 */
     uint32_t tensor_count;          /* 316 */

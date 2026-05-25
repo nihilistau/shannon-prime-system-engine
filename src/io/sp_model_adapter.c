@@ -17,6 +17,7 @@
 #include "sp_engine/model.h"
 #include "sp_engine/arena.h"
 #include "sp/frobenius_lift.h"
+#include "sp/sp_l1.h"            /* sp_arch_info (E_PARITY_3 frozen contract) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -88,11 +89,32 @@ struct qwen3_model *sp_model_to_qwen3(const sp_model *m) {
     if (!q) { sp_set_error("adapter: OOM model"); return NULL; }
     q->gguf = NULL; q->released = 1;          /* norms served from owned buffers */
 
-    /* arch_struct payload is the engine qwen3_config (v0 §3 arch_struct). */
-    if (h->arch_struct_size < sizeof(qwen3_config)) { sp_set_error("adapter: arch_struct too small"); free(q); return NULL; }
-    memcpy(&q->cfg, h->arch_struct, sizeof(qwen3_config));
-    const qwen3_config *c = &q->cfg;
-    if (c->n_vocab != h->vocab_size) { sp_set_error("adapter: vocab mismatch arch_struct"); free(q); return NULL; }
+    /* arch_struct payload is sp_arch_info (PPT-LAT-SP-MODEL-v0 §3 — frozen contract).
+     * Reconstruct qwen3_config from sp_arch_info + tensor table inspection at load time. */
+    if (h->arch_struct_size < sizeof(sp_arch_info)) {
+        sp_set_error("adapter: arch_struct too small for sp_arch_info"); free(q); return NULL;
+    }
+    sp_arch_info sai; memset(&sai, 0, sizeof sai);
+    memcpy(&sai, h->arch_struct, sizeof(sp_arch_info));
+    if (sai.vocab_size != h->vocab_size) { sp_set_error("adapter: vocab mismatch arch_struct"); free(q); return NULL; }
+
+    qwen3_config *cfg = &q->cfg;
+    cfg->arch           = (sai.arch_id == (uint32_t)SP_ARCH_ID_GEMMA3) ? SP_ARCH_GEMMA3 : SP_ARCH_QWEN3;
+    cfg->n_layers       = sai.n_layers;
+    cfg->n_embd         = sai.hidden_dim;
+    cfg->n_ff           = sai.n_ff;
+    cfg->n_head         = sai.n_heads;
+    cfg->n_head_kv      = sai.n_kv_heads;
+    cfg->head_dim       = sai.head_dim;
+    cfg->n_vocab        = sai.vocab_size;
+    cfg->context_length = sai.max_context;
+    cfg->sliding_window = sai.swa_window;
+    cfg->rope_freq_base = sai.rope_freq_base;
+    cfg->rms_eps        = (sai.rms_eps != 0.0f) ? sai.rms_eps : 1e-6f;
+    cfg->has_qk_norm    = sai.has_qk_norm ? 1 : 0;
+    cfg->tied_embedding = sai.tied_embeddings ? 1 : 0;
+    const qwen3_config *c = cfg;
+    if (c->n_vocab != h->vocab_size) { sp_set_error("adapter: vocab mismatch reconstructed"); free(q); return NULL; }
 
     /* synthetic gguf_tensor entries: the layer pointers reference these. Layout:
      *   [0]                     token_embd

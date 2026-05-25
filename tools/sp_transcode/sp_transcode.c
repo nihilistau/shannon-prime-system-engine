@@ -24,6 +24,7 @@
 #include "sp_engine/gguf.h"
 #include "sp_engine/model.h"     /* sp_dequant_row, sp_f16_to_f32 */
 #include "sp/frobenius_lift.h"
+#include "sp/sp_l1.h"            /* sp_arch_info, sp_precision (E_PARITY_3) */
 #include "sp_hash.h"
 
 #include <stdio.h>
@@ -232,17 +233,41 @@ static int write_tokenizer(const char *path, const gguf_ctx *g,
     return 0;
 }
 
-/* Populate the engine's qwen3_config into the 256-byte arch_struct. We reload
- * the model via qwen3_load to reuse the exact arch detection (no duplication). */
+/* Populate sp_arch_info into the 256-byte arch_struct (PPT-LAT-SP-MODEL-v0 §3).
+ * The frozen spec mandates arch_struct = sp_arch_info (not qwen3_config). Fields
+ * are transcoded from the engine's GGUF arch detection via qwen3_load. */
 static int fill_arch_struct(const char *gguf_path, uint8_t arch_struct[256],
                             uint32_t *arch_id, uint32_t *arch_size, uint32_t *vocab) {
     qwen3_model *qm = qwen3_load(gguf_path);
     if (!qm) { fprintf(stderr, "qwen3_load failed (arch detect)\n"); return 1; }
+    const qwen3_config *c = &qm->cfg;
+
+    sp_arch_info ai;
+    memset(&ai, 0, sizeof ai);
+    int gemma = (c->arch == SP_ARCH_GEMMA3);
+    ai.arch_id          = gemma ? (uint32_t)SP_ARCH_ID_GEMMA3 : (uint32_t)SP_ARCH_ID_QWEN3;
+    ai.vocab_size       = c->n_vocab;
+    ai.hidden_dim       = c->n_embd;
+    ai.n_layers         = c->n_layers;
+    ai.n_heads          = c->n_head;
+    ai.n_kv_heads       = c->n_head_kv;
+    ai.head_dim         = c->head_dim;
+    ai.max_context      = c->context_length;
+    ai.swa_window       = c->sliding_window;
+    ai.rope_freq_base   = c->rope_freq_base;
+    ai.ffn_variant      = gemma ? 1u : 0u;   /* 1=GeGLU(gemma3), 0=SwiGLU(qwen3) */
+    ai.norm_variant     = gemma ? 1u : 0u;   /* 1=sandwich(gemma3), 0=pre-norm(qwen3) */
+    ai.tied_embeddings  = c->tied_embedding ? 1u : 0u;
+    ai.has_qk_norm      = c->has_qk_norm ? 1u : 0u;
+    ai.n_ff             = c->n_ff;
+    ai.rms_eps          = c->rms_eps;
+    ai.preferred_precision = (uint32_t)SP_PRECISION_FP16;
+
     memset(arch_struct, 0, 256);
-    memcpy(arch_struct, &qm->cfg, sizeof(qwen3_config));
-    *arch_id  = (qm->cfg.arch == SP_ARCH_GEMMA3) ? SP_ARCH_ID_GEMMA3 : SP_ARCH_ID_QWEN3;
-    *arch_size = (uint32_t)sizeof(qwen3_config);
-    *vocab    = qm->cfg.n_vocab;
+    memcpy(arch_struct, &ai, sizeof ai);
+    *arch_id   = ai.arch_id;
+    *arch_size = (uint32_t)sizeof(sp_arch_info);
+    *vocab     = ai.vocab_size;
     qwen3_free(qm);
     return 0;
 }

@@ -63,6 +63,10 @@ venv/
 *.ckpt
 models/
 
+# Test fixture artifacts emitted to the working tree by test runs
+*.spm
+*.spt
+
 # OS files
 .DS_Store
 Thumbs.db
