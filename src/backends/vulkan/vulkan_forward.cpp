@@ -70,6 +70,9 @@ static const uint32_t spv_add[] =
 static const uint32_t spv_dequant_arena[] =
 #include "dequant_arena.spv.h"
 ;
+static const uint32_t spv_round_f16[] =
+#include "round_f16.spv.h"
+;
 
 /* The attention shaders hold the per-query scores in a fixed shared array
  * sc[MAXTOK]; n_tok must not exceed it (the engine gates run n_ctx <= 168, but a
@@ -170,7 +173,7 @@ struct Pipe {
 
 enum {
     P_GEMM, P_EMBED, P_RMSNORM, P_RMSNORM_HEAD, P_ROPE, P_ATTN, P_ATTN_NTT,
-    P_GELU, P_SILU, P_ADD, P_DEQUANT, P_COUNT
+    P_GELU, P_SILU, P_ADD, P_DEQUANT, P_ROUND_F16, P_COUNT
 };
 
 struct PipeSpec { const uint32_t *spv; size_t bytes; int n_bind; uint32_t pc_bytes; };
@@ -285,6 +288,7 @@ static int build_pipes(VulkanWeights *w) {
     specs[P_SILU]         = { spv_silu_mul,     sizeof(spv_silu_mul),     2, sizeof(PC_elem) };
     specs[P_ADD]          = { spv_add,          sizeof(spv_add),          2, sizeof(PC_elem) };
     specs[P_DEQUANT]      = { spv_dequant_arena,sizeof(spv_dequant_arena),5, sizeof(PC_deq) };
+    specs[P_ROUND_F16]   = { spv_round_f16,   sizeof(spv_round_f16),   1, sizeof(PC_elem) };
     for (int i = 0; i < P_COUNT; i++)
         if (make_pipe(&w->pipes[i], specs[i])) return 1;
     return 0;
@@ -585,6 +589,13 @@ static void rec_end(VulkanWeights *w) {
 /* ── GEMM helpers ── */
 #define CEIL_DIV(a,b) (((a)+(b)-1)/(b))
 
+static int rec_round_f16(VulkanWeights *w, VkBuffer buf, uint32_t n) {
+    PC_elem pc = { n };
+    VkBuffer b[1] = { buf };
+    return rec_dispatch(&w->pipes[P_ROUND_F16], b, 1, &pc, sizeof(pc),
+                        (uint32_t)CEIL_DIV(n, 256), 1, 1);
+}
+
 /* record Y[n_tok x out] = X[n_tok x in] * W^T via the gemm shader. */
 static int rec_gemm(VulkanWeights *w, VkBuffer dW, VkBuffer dX, VkBuffer dY,
                     int n_tok, int in, int out) {
@@ -658,6 +669,8 @@ extern "C" int gemma3_forward_vulkan(const qwen3_model *m, const int32_t *tokens
     const float gbase = c->rope_freq_base, lbase = 10000.0f;
     const float ascale = 1.0f / sqrtf((float)HD);
     const float embscale = sqrtf((float)E);
+    const char *fp16_e = getenv("SP_ENGINE_FP16");
+    const int fp16 = (fp16_e && fp16_e[0] == '1');
 
     if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
 
@@ -683,8 +696,8 @@ extern "C" int gemma3_forward_vulkan(const qwen3_model *m, const int32_t *tokens
     /* count dispatches: embed(1) + per layer (rmsnorm + 3 gemm_w (each <=2) +
      * 2 rmsh + 2 rope + attn + Wo gemm_w(<=2) + rmsnorm + add + rmsnorm +
      * 2 gemm_w(<=2) + gelu + Wdown gemm_w(<=2) + rmsnorm + add) + out rmsnorm +
-     * head gemm. Be generous (each gemm_w may be 2). */
-    if (rec_begin(&g_w, 4 + (int)c->n_layers * 28 + 4)) goto done;
+     * head gemm. Be generous (each gemm_w may be 2). fp16 adds 7 rounds/layer + 1. */
+    if (rec_begin(&g_w, 4 + (int)c->n_layers * 28 + 4 + (fp16 ? 1 + (int)c->n_layers * 7 : 0))) goto done;
 
     {   PC_embed pc = { n_tok, E, embscale };
         VkBuffer b[3] = { g_w.embd.buf, s.dtoks.buf, s.dx.buf };
@@ -700,6 +713,7 @@ extern "C" int gemma3_forward_vulkan(const qwen3_model *m, const int32_t *tokens
         /* attn_norm */
         { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dx.buf, g_w.attn_norm[L].buf, s.dnx.buf };
           if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
+        if (fp16) { if (rec_round_f16(&g_w, s.dnx.buf, (uint32_t)((size_t)n_tok*E))) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wq[L], s.dnx.buf, s.dq.buf, n_tok, &s.dscr)) goto done;
         if (rec_gemm_w(&g_w, &g_w.Wk[L], s.dnx.buf, s.dk.buf, n_tok, &s.dscr)) goto done;
         if (rec_gemm_w(&g_w, &g_w.Wv[L], s.dnx.buf, s.dv.buf, n_tok, &s.dscr)) goto done;
@@ -711,9 +725,15 @@ extern "C" int gemma3_forward_vulkan(const qwen3_model *m, const int32_t *tokens
           if (rec_dispatch(&g_w.pipes[P_ROPE], b, 2, &pc, sizeof(pc), (uint32_t)(n_tok*NH),1,1)) goto done; }
         { PC_rope pc = { NKV, HD, KVD }; VkBuffer b[2] = { s.dk.buf, rope_tbl };
           if (rec_dispatch(&g_w.pipes[P_ROPE], b, 2, &pc, sizeof(pc), (uint32_t)(n_tok*NKV),1,1)) goto done; }
+        if (fp16) {
+            if (rec_round_f16(&g_w, s.dq.buf,  (uint32_t)((size_t)n_tok*QD)))  goto done;
+            if (rec_round_f16(&g_w, s.dk.buf,  (uint32_t)((size_t)n_tok*KVD))) goto done;
+            if (rec_round_f16(&g_w, s.dv.buf,  (uint32_t)((size_t)n_tok*KVD))) goto done;
+        }
         { PC_attn pc = { n_tok, QD, KVD, HD, group, ascale, win };
           VkBuffer b[4] = { s.dq.buf, s.dk.buf, s.dv.buf, s.dao.buf };
           if (rec_dispatch(&g_w.pipes[P_ATTN], b, 4, &pc, sizeof(pc), (uint32_t)(n_tok*NH),1,1)) goto done; }
+        if (fp16) { if (rec_round_f16(&g_w, s.dao.buf, (uint32_t)((size_t)n_tok*QD))) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wo[L], s.dao.buf, s.dap.buf, n_tok, &s.dscr)) goto done;
         { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dap.buf, g_w.post_attn[L].buf, s.dnx.buf };
           if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
@@ -722,11 +742,13 @@ extern "C" int gemma3_forward_vulkan(const qwen3_model *m, const int32_t *tokens
 
         { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dx.buf, g_w.ffn_norm[L].buf, s.dnx.buf };
           if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
+        if (fp16) { if (rec_round_f16(&g_w, s.dnx.buf, (uint32_t)((size_t)n_tok*E))) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wgate[L], s.dnx.buf, s.dg.buf, n_tok, &s.dscr)) goto done;
         if (rec_gemm_w(&g_w, &g_w.Wup[L], s.dnx.buf, s.dup.buf, n_tok, &s.dscr)) goto done;
         { uint32_t nFF = (uint32_t)((size_t)n_tok*FF); PC_elem pc = { nFF };
           VkBuffer b[2] = { s.dg.buf, s.dup.buf };
           if (rec_dispatch(&g_w.pipes[P_GELU], b, 2, &pc, sizeof(pc), (uint32_t)CEIL_DIV(nFF,256),1,1)) goto done; }
+        if (fp16) { uint32_t nFF = (uint32_t)((size_t)n_tok*FF); if (rec_round_f16(&g_w, s.dg.buf, nFF)) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wdown[L], s.dg.buf, s.ddn.buf, n_tok, &s.dscr)) goto done;
         { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.ddn.buf, g_w.post_ffw[L].buf, s.dnx.buf };
           if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
@@ -736,6 +758,7 @@ extern "C" int gemma3_forward_vulkan(const qwen3_model *m, const int32_t *tokens
 
     { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dx.buf, g_w.out_norm.buf, s.dnx.buf };
       if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
+    if (fp16) { if (rec_round_f16(&g_w, s.dnx.buf, (uint32_t)((size_t)n_tok*E))) goto done; }
     /* tied head, f32: reuse embd weight. */
     if (rec_gemm(&g_w, g_w.embd.buf, s.dnx.buf, s.dlog.buf, n_tok, E, V)) goto done;
 
@@ -773,6 +796,8 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
     const int ntt = (ntt_e && ntt_e[0] == '1');
     const float ntt_qscale = 65536.0f;   /* SP_NTT_ATTN_SCALE */
     const float kste_scale = 65536.0f;   /* SP_KSTE_KV_SCALE (E_VK_6) */
+    const char *fp16_e = getenv("SP_ENGINE_FP16");
+    const int fp16 = (fp16_e && fp16_e[0] == '1');
 
     if (ntt && !vk_ctx()->has_int64) { sp_set_error("qwen3_forward_vulkan: device lacks shaderInt64 for NTT-attn"); return 1; }
 
@@ -808,7 +833,7 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
      * flush after the K is finalized in each layer. */
 
     /* embed lookup, no scale (embscale=1) */
-    if (rec_begin(&g_w, 4 + (int)c->n_layers * 28 + 4)) goto done;
+    if (rec_begin(&g_w, 4 + (int)c->n_layers * 28 + 4 + (fp16 ? 1 + (int)c->n_layers * 7 : 0))) goto done;
     {   PC_embed pc = { n_tok, E, 1.0f };
         VkBuffer b[3] = { g_w.embd.buf, s.dtoks.buf, s.dx.buf };
         if (rec_dispatch(&g_w.pipes[P_EMBED], b, 3, &pc, sizeof(pc),
@@ -819,6 +844,7 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
 
         { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dx.buf, g_w.attn_norm[L].buf, s.dnx.buf };
           if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
+        if (fp16) { if (rec_round_f16(&g_w, s.dnx.buf, (uint32_t)((size_t)n_tok*E))) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wq[L], s.dnx.buf, s.dq.buf, n_tok, &s.dscr)) goto done;
         if (rec_gemm_w(&g_w, &g_w.Wk[L], s.dnx.buf, s.dk.buf, n_tok, &s.dscr)) goto done;
         if (rec_gemm_w(&g_w, &g_w.Wv[L], s.dnx.buf, s.dv.buf, n_tok, &s.dscr)) goto done;
@@ -830,6 +856,11 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
           if (rec_dispatch(&g_w.pipes[P_ROPE], b, 2, &pc, sizeof(pc), (uint32_t)(n_tok*NH),1,1)) goto done; }
         { PC_rope pc = { NKV, HD, KVD }; VkBuffer b[2] = { s.dk.buf, s.drope_g.buf };
           if (rec_dispatch(&g_w.pipes[P_ROPE], b, 2, &pc, sizeof(pc), (uint32_t)(n_tok*NKV),1,1)) goto done; }
+        if (fp16) {
+            if (rec_round_f16(&g_w, s.dq.buf,  (uint32_t)((size_t)n_tok*QD)))  goto done;
+            if (rec_round_f16(&g_w, s.dk.buf,  (uint32_t)((size_t)n_tok*KVD))) goto done;
+            if (rec_round_f16(&g_w, s.dv.buf,  (uint32_t)((size_t)n_tok*KVD))) goto done;
+        }
 
         /* E_VK_6 KSTE-KV: K must be finalized first, so flush, download D->H,
          * encode on the host, then start a fresh command buffer for the rest. */
@@ -843,7 +874,7 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
                     for (int i = 0; i < HD; i++) kq[i] = (int32_t)lrintf(kh[i] * kste_scale);
                     sp_kste_encode(kq, HD, &kv_trees[((size_t)L * n_tok + t) * NKV + h]);
                 }
-            if (rec_begin(&g_w, 4 + 28)) goto done;
+            if (rec_begin(&g_w, 4 + 28 + (fp16 ? 3 : 0))) goto done;
         }
 
         if (ntt) {
@@ -855,17 +886,20 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
             VkBuffer b[4] = { s.dq.buf, s.dk.buf, s.dv.buf, s.dao.buf };
             if (rec_dispatch(&g_w.pipes[P_ATTN], b, 4, &pc, sizeof(pc), (uint32_t)(n_tok*NH),1,1)) goto done;
         }
+        if (fp16) { if (rec_round_f16(&g_w, s.dao.buf, (uint32_t)((size_t)n_tok*QD))) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wo[L], s.dao.buf, s.dap.buf, n_tok, &s.dscr)) goto done;
         { PC_elem pc = { nE }; VkBuffer b[2] = { s.dx.buf, s.dap.buf };   /* plain residual */
           if (rec_dispatch(&g_w.pipes[P_ADD], b, 2, &pc, sizeof(pc), (uint32_t)CEIL_DIV(nE,256),1,1)) goto done; }
 
         { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dx.buf, g_w.ffn_norm[L].buf, s.dnx.buf };
           if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
+        if (fp16) { if (rec_round_f16(&g_w, s.dnx.buf, (uint32_t)((size_t)n_tok*E))) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wgate[L], s.dnx.buf, s.dg.buf, n_tok, &s.dscr)) goto done;
         if (rec_gemm_w(&g_w, &g_w.Wup[L], s.dnx.buf, s.dup.buf, n_tok, &s.dscr)) goto done;
         { uint32_t nFF = (uint32_t)((size_t)n_tok*FF); PC_elem pc = { nFF };
           VkBuffer b[2] = { s.dg.buf, s.dup.buf };
           if (rec_dispatch(&g_w.pipes[P_SILU], b, 2, &pc, sizeof(pc), (uint32_t)CEIL_DIV(nFF,256),1,1)) goto done; }
+        if (fp16) { uint32_t nFF = (uint32_t)((size_t)n_tok*FF); if (rec_round_f16(&g_w, s.dg.buf, nFF)) goto done; }
         if (rec_gemm_w(&g_w, &g_w.Wdown[L], s.dg.buf, s.ddn.buf, n_tok, &s.dscr)) goto done;
         { PC_elem pc = { nE }; VkBuffer b[2] = { s.dx.buf, s.ddn.buf };   /* plain residual */
           if (rec_dispatch(&g_w.pipes[P_ADD], b, 2, &pc, sizeof(pc), (uint32_t)CEIL_DIV(nE,256),1,1)) goto done; }
@@ -875,13 +909,14 @@ extern "C" int qwen3_forward_vulkan_ex(const qwen3_model *m, const int32_t *toke
         if (kv_trees) {
             if (rec_submit_wait(&g_w)) goto done;
             rec_end(&g_w);
-            if (L + 1 < (int)c->n_layers) { if (rec_begin(&g_w, 4 + 28)) goto done; }
-            else { if (rec_begin(&g_w, 8)) goto done; }   /* final norm + head */
+            if (L + 1 < (int)c->n_layers) { if (rec_begin(&g_w, 4 + 28 + (fp16 ? 4 : 0))) goto done; }
+            else { if (rec_begin(&g_w, 8 + (fp16 ? 1 : 0))) goto done; }   /* final norm + head */
         }
     }
 
     { PC_rms pc = { E, eps }; VkBuffer b[3] = { s.dx.buf, g_w.out_norm.buf, s.dnx.buf };
       if (rec_dispatch(&g_w.pipes[P_RMSNORM], b, 3, &pc, sizeof(pc), (uint32_t)n_tok,1,1)) goto done; }
+    if (fp16) { if (rec_round_f16(&g_w, s.dnx.buf, (uint32_t)((size_t)n_tok*E))) goto done; }
     if (rec_gemm_w(&g_w, &g_w.head, s.dnx.buf, s.dlog.buf, n_tok, &s.dscr)) goto done;   /* untied head */
 
     if (rec_submit_wait(&g_w)) goto done;

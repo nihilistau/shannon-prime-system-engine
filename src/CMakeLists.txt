@@ -111,7 +111,7 @@ if(SP_ENGINE_WITH_VULKAN)
     file(MAKE_DIRECTORY ${SP_VK_SPV_DIR})
     set(SP_VK_SHADERS
         gemm embed_scale rmsnorm rmsnorm_head rope attn attn_ntt
-        gelu_mul silu_mul add dequant_arena)
+        gelu_mul silu_mul add dequant_arena round_f16)
     set(SP_VK_SPV_HEADERS)
     foreach(s ${SP_VK_SHADERS})
         set(_src ${SP_VK_SHADER_DIR}/${s}.comp)

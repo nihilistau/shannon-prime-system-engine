@@ -157,6 +157,28 @@ static void T_FRO_4(void) {
              "E_FP16_1: engine-cpu-fp16 PPL matches oracle f16 within precision floor");
     ENV_CLR("SP_ENGINE_FP16");
 
+    /* ── E_FP16_3: fp16 working-precision pass on Vulkan (§8.7.6). Only runs when
+     * SP_BACKEND=vulkan is set; same oracle and gate as E_FP16_1. ── */
+    {   const char *bk = getenv("SP_BACKEND");
+        if (bk && bk[0] == 'v') {   /* "vulkan" */
+            qwen3_free(m);
+            clear_matmul_knobs();
+            ENV_SET("SP_BACKEND", "vulkan");
+            ENV_SET("SP_ENGINE_FP16", "1");
+            m = qwen3_load(SP_GEMMA3_GGUF);
+            SP_CHECK(m != NULL, "reload model for E_FP16_3 (VK fp16)");
+            double ppl_fp16_vk = 0, se_fp16_vk = 0;
+            int rc3 = m ? sp_perplexity(m, tok, text, clen, n_ctx, &ppl_fp16_vk, &se_fp16_vk, NULL) : 1;
+            SP_CHECK(rc3 == 0, "E_FP16_3 VK fp16 perplexity");
+            double cx16vk = (oracle > 0.0) ? (ppl_fp16_vk - oracle) / oracle : 1.0;
+            fprintf(stderr, "    E_FP16_3 VK fp16: PPL=%.5f  vs oracle rel-diff=%+.4f%% (gate %.3f%%)\n",
+                    ppl_fp16_vk, 100.0 * cx16vk, 100.0 * gate_f32);
+            SP_CHECK((cx16vk < 0 ? -cx16vk : cx16vk) < gate_f32,
+                     "E_FP16_3: engine-vulkan-fp16 PPL matches oracle f16 within precision floor");
+            ENV_CLR("SP_ENGINE_FP16");
+        }
+    }
+
     free(text); sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g);
 }
 
