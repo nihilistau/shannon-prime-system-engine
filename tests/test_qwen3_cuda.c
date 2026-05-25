@@ -157,6 +157,23 @@ static void M_QWEN3_CUDA(void) {
     }
     ENV_CLR("SP_ARENA");
 
+    /* ── E_FP16_2 (cuda-vs-cpu piece): fp16 working precision on BOTH backends, on
+     * the f16 weights (no arena). CPU-fp16 and CUDA-fp16 both round activations + Q/K/V
+     * to fp16 and accumulate in f32, so they must agree at the cross-backend floor —
+     * the Frobenius-lift cross-backend identity at fp16 (§8.7.5 E_FP16_2). ── */
+    ENV_SET("SP_ENGINE_FP16", "1");
+    m = qwen3_load(SP_QWEN3_GGUF);
+    SP_CHECK(m != NULL, "qwen3 load for fp16 cross-backend (E_FP16_2)");
+    if (m) {
+        int r1 = qwen3_forward(m, toks, (int)nt, cpu);        /* CPU fp16  */
+        int r2 = qwen3_forward_cuda(m, toks, (int)nt, cu);    /* CUDA fp16 */
+        SP_CHECK(r1 == 0 && r2 == 0, "qwen3 fp16 forward cpu + cuda");
+        if (r2) fprintf(stderr, "    sp_last_error: %s\n", sp_last_error());
+        if (r1 == 0 && r2 == 0) compare("E_FP16_2 fp16 cuda-vs-cpu", cpu, cu, nt, V, 1.0e-5);
+        qwen3_free(m);
+    }
+    ENV_CLR("SP_ENGINE_FP16");
+
     free(cpu); free(cu); free(toks); free(ref);
 }
 

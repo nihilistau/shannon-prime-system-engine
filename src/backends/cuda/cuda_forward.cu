@@ -33,6 +33,7 @@
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cuda_fp16.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -55,6 +56,16 @@ static int fail_cublas(cublasStatus_t s, const char *where) {
     return 1;
 }
 #define CB(call, where) do { cublasStatus_t _s = (call); if (_s != CUBLAS_STATUS_SUCCESS) return fail_cublas(_s, where); } while (0)
+
+/* fp16 working precision (2-L1.FP16, SP_ENGINE_FP16): round a device f32 buffer to
+ * IEEE binary16 and back — the CUDA mirror of the CPU r16() (cpu_overlay.c). Weights
+ * are already f16-valued (f16 GGUF dequant) and cuBLAS SGEMM keeps the f32 accumulator,
+ * so rounding the activation + Q/K/V operands reproduces the same f16-weights ×
+ * f16-activations → f32 scheme as the CPU path and the llama.cpp f16 oracle. */
+__global__ void k_round_f16(float *x, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] = __half2float(__float2half_rn(x[i]));
+}
 
 /* on-disk bytes of `n` contiguous elements of a ggml weight row (matches CPU). */
 static size_t row_bytes(uint32_t type, int n) {
@@ -603,6 +614,13 @@ extern "C" int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens
     cublasHandle_t cb = g_w.cublas;
     cudaStream_t st = g_w.stream;
 
+    /* fp16 working precision (E_FP16_1/E_FP16_2). Weights stay f32 (f16-valued) +
+     * SGEMM f32 accumulate; round the activation + Q/K/V operands to f16 at the same
+     * points the CPU SP_ENGINE_FP16 path does, so CUDA-fp16 == CPU-fp16 cross-backend. */
+    const char *fp16_e = getenv("SP_ENGINE_FP16");
+    const int fp16 = (fp16_e && fp16_e[0] == '1');
+    #define R16(buf, cnt) do { if (fp16) k_round_f16<<<(unsigned)(((size_t)(cnt)+255)/256), 256, 0, st>>>((buf), (size_t)(cnt)); } while (0)
+
     int *dtoks = NULL;
     float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,*dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL;
     float *host_k = NULL; int32_t *kq = NULL;   /* E_CU_6 KSTE: D->H K + int32 quant scratch */
@@ -630,6 +648,7 @@ extern "C" int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens
         const size_t nE = (size_t)n_tok * E;
 
         k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+        R16(dnx, (size_t)n_tok*E);                        /* fp16 q/k/v matmul activations */
         if (gemm_w(cb, st, &g_w.Wq[L], dnx, dq, n_tok, dscr)) goto done;
         if (gemm_w(cb, st, &g_w.Wk[L], dnx, dk, n_tok, dscr)) goto done;
         if (gemm_w(cb, st, &g_w.Wv[L], dnx, dv, n_tok, dscr)) goto done;
@@ -655,6 +674,7 @@ extern "C" int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens
                 }
         }
 
+        R16(dq, (size_t)n_tok*QD); R16(dk, (size_t)n_tok*KVD); R16(dv, (size_t)n_tok*KVD);  /* fp16 Q/K/V into attention */
         {   int bd = HD > n_tok ? HD : n_tok; if (bd > 1024) bd = 1024;
             size_t shm = (size_t)n_tok * sizeof(float);
             if (ntt)   /* E_CU_5: exact integer score path (full causal) */
@@ -663,19 +683,23 @@ extern "C" int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens
             else       /* plain f32 dot, full causal (win=-1) */
                 k_attn<<<n_tok*NH, bd, shm, st>>>(
                     dq, dk, dv, n_tok, QD, KVD, HD, group, ascale, -1, dao); }
+        R16(dao, (size_t)n_tok*QD);                       /* fp16 o-proj activations */
         if (gemm_w(cb, st, &g_w.Wo[L], dao, dap, n_tok, dscr)) goto done;
         k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dap, nE);    /* plain residual */
 
         k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+        R16(dnx, (size_t)n_tok*E);                        /* fp16 ffn matmul activations */
         if (gemm_w(cb, st, &g_w.Wgate[L], dnx, dg, n_tok, dscr)) goto done;
         if (gemm_w(cb, st, &g_w.Wup[L], dnx, dup, n_tok, dscr)) goto done;
         {   size_t nFF = (size_t)n_tok * FF;
             k_silu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
+        R16(dg, (size_t)n_tok*FF);                        /* fp16 down-proj activations */
         if (gemm_w(cb, st, &g_w.Wdown[L], dg, ddn, n_tok, dscr)) goto done;
         k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, ddn, nE);    /* plain residual */
     }
 
     k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
+    R16(dnx, (size_t)n_tok*E);                            /* fp16 head activations */
     if (gemm_w(cb, st, &g_w.head, dnx, dlog, n_tok, dscr)) goto done;   /* untied head */
 
     if (cudaMemcpyAsync(logits, dlog, (size_t)n_tok*V*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
@@ -693,6 +717,7 @@ done:
     if (dg) cudaFree(dg); if (dup) cudaFree(dup); if (ddn) cudaFree(ddn);
     if (dlog) cudaFree(dlog); if (dscr) cudaFree(dscr);
     free(host_k); free(kq);
+    #undef R16
     return rc;
 }
 
