@@ -15,14 +15,21 @@
 
 /* ── runtime gate knobs honored by these kernels (default OFF = pure-f32) ── */
 static int   g_scalar  = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
-static int   g_f16_act = 0;   /* SP_ENGINE_F16_ACT=1 rounds activations to F16 (ggml-faithful) */
+static int   g_f16_act = 0;   /* SP_ENGINE_F16_ACT=1 rounds matmul activations to F16 (ggml-faithful) */
+static int   g_fp16    = 0;   /* SP_ENGINE_FP16=1 fp16 working precision (2-L1.FP16, E_FP16_1):
+                               * f16 matmul activations + f16 KV/attention inputs, f32 accumulator,
+                               * f32 residual — matches the llama.cpp f16 scheme the oracle uses. */
 static int   g_frob    = 0;   /* SP_ENGINE_FROB: 0 f32, 1/2 Q8 inline/dequant, 3/4 Q4 inline/dequant */
 static float g_q4_promote = 0.25f;   /* promote a Q4 row to Q8 if its round-trip rel-L2 exceeds this */
 static long  g_q4_promoted = 0;
 static long  g_q4_rows = 0;
 
+/* round one f32 to the nearest IEEE binary16 value and back (fp16 working precision). */
+static inline float r16(float v) { return sp_f16_to_f32(sp_f32_to_f16(v)); }
+
 void sp_kernels_read_env(void) {
     { const char *e = getenv("SP_ENGINE_F16_ACT");  g_f16_act  = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_ENGINE_FP16");     g_fp16     = (e && e[0] == '1'); }
     { const char *e = getenv("SP_ENGINE_FROB");     g_frob     = e ? atoi(e) : 0; }
     { const char *e = getenv("SP_Q4_PROMOTE");      if (e) g_q4_promote = (float)atof(e);
       g_q4_promoted = 0; g_q4_rows = 0; }
@@ -103,9 +110,10 @@ int matmul(const qwen3_model *m, const gguf_tensor *W,
     float *wrow = (float *)malloc((size_t)in * sizeof(float));
     if (!wrow) return 1;
     /* When mimicking ggml's F16 src1 downcast, round the activation rows once
-     * up front (the same rounded x is reused across all `out` weight rows). */
+     * up front (the same rounded x is reused across all `out` weight rows).
+     * fp16 working precision (SP_ENGINE_FP16) does the same activation downcast. */
     float *xr = NULL;
-    if (g_f16_act) {
+    if (g_f16_act || g_fp16) {
         xr = (float *)malloc((size_t)n_tok * in * sizeof(float));
         if (!xr) { free(wrow); return 1; }
         for (size_t i = 0; i < (size_t)n_tok * in; i++)
@@ -205,7 +213,9 @@ void kernels_attn_head(const float *qh, const float *KC, const float *VC,
     for (int s = s0; s <= pos; s++) {
         const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
         float acc = 0.0f;
-        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];   /* scalar acc: matches E_CPU_2 */
+        /* fp16 working precision (SP_ENGINE_FP16): fp16 Q/K into the dot, f32 acc. */
+        if (g_fp16) for (int i = 0; i < HD; i++) acc += r16(qh[i]) * r16(kh[i]);
+        else        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];   /* scalar acc: matches E_CPU_2 */
         float d = acc * ascale;
         sc[s] = d;
         if (d > maxs) maxs = d;
@@ -217,7 +227,8 @@ void kernels_attn_head(const float *qh, const float *KC, const float *VC,
     for (int s = s0; s <= pos; s++) {
         float w = sc[s] * inv;
         const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
-        for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+        if (g_fp16) for (int i = 0; i < HD; i++) out[i] += w * r16(vh[i]);   /* fp16 V */
+        else        for (int i = 0; i < HD; i++) out[i] += w * vh[i];
     }
 }
 
