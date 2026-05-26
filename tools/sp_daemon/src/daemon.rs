@@ -93,6 +93,9 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
     let pos = session.position().expect("sp_session_position");
     info!("L1 FFI OK — session_position={pos}");
 
+    let (events_tx, _) =
+        tokio::sync::broadcast::channel::<crate::state::ChatEvent>(64);
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -101,6 +104,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
         vocab_size,
         tokens_decoded: AtomicU64::new(0),
         started_at: Instant::now(),
+        events_tx,
     });
 
     // ── HTTP server ────────────────────────────────────────────────────────

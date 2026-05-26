@@ -1,17 +1,32 @@
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
+use axum::http::{header, HeaderName, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use tokio::task;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::Stream;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use tokio_stream::StreamExt as _;
 
-use crate::state::AppState;
+use crate::state::{AppState, ChatEvent};
+
+// ── SSE header helper ─────────────────────────────────────────────────────────
+
+fn sse_response(sse: impl IntoResponse) -> Response {
+    let mut r = sse.into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    r.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    r
+}
 
 // ── /v1/metrics ───────────────────────────────────────────────────────────────
 
@@ -38,7 +53,7 @@ pub async fn v1_metrics(State(state): State<Arc<AppState>>) -> Json<Metrics> {
         tokens_per_sec: tps,
         ram_svm_bytes: 0,
         peers: 0,
-        phase: "lat-phase-2-l3-verbs-closed",
+        phase: "lat-phase-2-l3-sse-closed",
         session_pos,
     })
 }
@@ -66,7 +81,7 @@ struct ChatDelta {
 pub async fn v1_chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
     // Clone base session — hold Mutex only during sp_session_clone (sub-ms).
@@ -81,7 +96,11 @@ pub async fn v1_chat(
         Err(e) => {
             let _ = tx
                 .send(Ok(Event::default().data(format!("{{\"error\":\"{e}\"}}")))).await;
-            return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+            return sse_response(
+                Sse::new(ReceiverStream::new(rx)).keep_alive(
+                    KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"),
+                ),
+            );
         }
     };
 
@@ -98,6 +117,7 @@ pub async fn v1_chat(
                 let _ = tx.blocking_send(Ok(Event::default().data(
                     format!("{{\"error\":\"{e}\"}}"),
                 )));
+                let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
                 sessions.remove(chat_id);
                 return;
             }
@@ -113,8 +133,9 @@ pub async fn v1_chat(
             .unwrap_or_default();
 
             if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
-                // Client disconnected — trip cancel so L1 unwinds at next boundary.
+                // Client disconnected.
                 cancel_child.store(1, Ordering::Relaxed);
+                let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
                 sessions.remove(chat_id);
                 return;
             }
@@ -127,11 +148,22 @@ pub async fn v1_chat(
             }
         }
 
-        let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+        let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;
+        if is_cancelled {
+            let _ = tx.blocking_send(Ok(Event::default().event("cancelled").data("{}")));
+            let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
+        } else {
+            let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+            let _ = app.events_tx.send(ChatEvent { chat_id, status: "done" });
+        }
         sessions.remove(chat_id);
     });
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+    sse_response(
+        Sse::new(ReceiverStream::new(rx)).keep_alive(
+            KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"),
+        ),
+    )
 }
 
 fn argmax(logits: &[f32]) -> i32 {
@@ -171,12 +203,28 @@ pub async fn v1_peers() -> Json<serde_json::Value> {
 // ── /v1/events ────────────────────────────────────────────────────────────────
 
 /// Long-lived SSE channel for daemon-wide events.
-/// VERBS scope: keep-alive pings only; real chat_completed broadcast is L3.AUTH+ scope.
-pub async fn v1_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = futures::stream::pending::<Result<Event, Infallible>>();
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
+/// Emits `event: chat_completed` when a chat finishes or is cancelled.
+/// Keepalive comment every 15 s keeps connections alive through proxies.
+pub async fn v1_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rx = state.events_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        let ev = result.ok()?;
+        let payload = serde_json::json!({
+            "chat_id": ev.chat_id,
+            "status":  ev.status,
+        });
+        Some(Ok::<Event, Infallible>(
+            Event::default()
+                .event("chat_completed")
+                .data(payload.to_string()),
+        ))
+    });
+
+    sse_response(
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        ),
     )
 }

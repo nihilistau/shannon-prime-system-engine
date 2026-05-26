@@ -1,8 +1,15 @@
 use std::sync::{atomic::{AtomicI32, AtomicU64}, Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::broadcast;
 
 use crate::session::{SpModel, SpSession};
 use crate::sessions::Sessions;
+
+#[derive(Clone, Debug)]
+pub struct ChatEvent {
+    pub chat_id: u64,
+    pub status: &'static str,
+}
 
 /// Shared daemon state — threaded through axum via `State<Arc<AppState>>`.
 ///
@@ -25,4 +32,6 @@ pub struct AppState {
     pub tokens_decoded: AtomicU64,
     /// Daemon start time (for tps denominator).
     pub started_at: Instant,
+    /// Broadcast channel for daemon-wide events (/v1/events subscribers).
+    pub events_tx: broadcast::Sender<ChatEvent>,
 }
