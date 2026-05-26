@@ -92,7 +92,85 @@ int main(void) {
         }
     }
 
-    /* T_VNNI_1/T_VNNI_2: added in Task 4 */
+    /* T_VNNI_1: Q8 matvec 64x64 — byte-exact vs scalar */
+    if (!g_avx512_caps.has_vnni) {
+        printf("SKIP T_VNNI_1: no AVX-512VNNI\n");
+    } else {
+        enum { ROWS1 = 64, COLS1 = 64 };
+        static int8_t  w1[ROWS1*COLS1] __attribute__((aligned(64)));
+        static uint8_t act1[COLS1]     __attribute__((aligned(64)));
+        static float   sc1[ROWS1]      __attribute__((aligned(64)));
+        static int32_t bias1[ROWS1]    __attribute__((aligned(64)));
+        static float   out_avx1[ROWS1], out_ref1[ROWS1];
+        int i, k;
+
+        for (i = 0; i < ROWS1*COLS1; i++) w1[i]   = (int8_t)((i * 7 + 3) % 127);
+        for (k = 0; k < COLS1; k++)       act1[k]  = (uint8_t)((k * 13 + 5) % 255);
+        for (i = 0; i < ROWS1; i++)       sc1[i]   = 0.01f * (float)(i + 1);
+        for (i = 0; i < ROWS1; i++) {
+            int32_t s = 0;
+            for (k = 0; k < COLS1; k++) s += w1[i*COLS1 + k];
+            bias1[i] = 128 * s;
+        }
+        /* scalar ref: act_i8 = act_u8 - 128 */
+        for (i = 0; i < ROWS1; i++) {
+            int32_t acc = 0;
+            for (k = 0; k < COLS1; k++)
+                acc += (int32_t)w1[i*COLS1+k] * (int32_t)((int8_t)((int)act1[k] - 128));
+            out_ref1[i] = (float)acc * sc1[i];
+        }
+        sp_avx512_vnni_matvec(w1, act1, sc1, bias1, ROWS1, COLS1, out_avx1);
+
+        int vnni_fail = 0;
+        for (i = 0; i < ROWS1; i++) {
+            float diff = out_avx1[i] - out_ref1[i];
+            if (diff < -1e-3f || diff > 1e-3f) {
+                printf("FAIL T_VNNI_1 row %d: ref=%.6f avx=%.6f\n", i, out_ref1[i], out_avx1[i]);
+                vnni_fail = 1; fail = 1;
+            }
+        }
+        if (!vnni_fail) printf("PASS T_VNNI_1: Q8 matvec %dx%d\n", ROWS1, COLS1);
+    }
+
+    /* T_VNNI_2: Q8 matvec 64x128 — two ZMM chunks per row */
+    if (!g_avx512_caps.has_vnni) {
+        printf("SKIP T_VNNI_2: no AVX-512VNNI\n");
+    } else {
+        enum { ROWS2 = 64, COLS2 = 128 };
+        static int8_t  w2[ROWS2*COLS2] __attribute__((aligned(64)));
+        static uint8_t act2[COLS2]     __attribute__((aligned(64)));
+        static float   sc2[ROWS2]      __attribute__((aligned(64)));
+        static int32_t bias2[ROWS2]    __attribute__((aligned(64)));
+        static float   out_avx2[ROWS2], out_ref2[ROWS2];
+        int i, k;
+
+        for (i = 0; i < ROWS2*COLS2; i++) w2[i]   = (int8_t)((i * 11 + 7) % 127);
+        for (k = 0; k < COLS2; k++)       act2[k]  = (uint8_t)((k * 17 + 3) % 255);
+        for (i = 0; i < ROWS2; i++)       sc2[i]   = 0.005f * (float)(i + 1);
+        for (i = 0; i < ROWS2; i++) {
+            int32_t s = 0;
+            for (k = 0; k < COLS2; k++) s += w2[i*COLS2 + k];
+            bias2[i] = 128 * s;
+        }
+        for (i = 0; i < ROWS2; i++) {
+            int32_t acc = 0;
+            for (k = 0; k < COLS2; k++)
+                acc += (int32_t)w2[i*COLS2+k] * (int32_t)((int8_t)((int)act2[k] - 128));
+            out_ref2[i] = (float)acc * sc2[i];
+        }
+        sp_avx512_vnni_matvec(w2, act2, sc2, bias2, ROWS2, COLS2, out_avx2);
+
+        int vnni_fail2 = 0;
+        for (i = 0; i < ROWS2; i++) {
+            float diff = out_avx2[i] - out_ref2[i];
+            if (diff < -1e-3f || diff > 1e-3f) {
+                printf("FAIL T_VNNI_2 row %d: ref=%.6f avx=%.6f\n", i, out_ref2[i], out_avx2[i]);
+                vnni_fail2 = 1; fail = 1;
+            }
+        }
+        if (!vnni_fail2) printf("PASS T_VNNI_2: Q8 matvec %dx%d\n", ROWS2, COLS2);
+    }
+
     /* T_IFMA_1: added in Task 5 */
 
     return fail;
