@@ -374,6 +374,7 @@ fn protocol_c_synth(
                 step_accepted += 1;
                 total_accepted += 1;
                 total_output += 1;
+                if total_output >= 200 { break; }  // done; avoid OOB on next ki
             } else {
                 let rewind_by = K - 1 - ki;
                 if rewind_by > 0 { rewind(draft, rewind_by); }
@@ -389,6 +390,7 @@ fn protocol_c_synth(
         if step_accepted == K {
             decode(draft, draft_tokens[K - 1], &mut d_logits);
         }
+        if total_output >= 200 { break; }  // skip position check on final partial batch
         let tp = position(target);
         let dp = position(draft);
         assert_eq!(tp, dp,
