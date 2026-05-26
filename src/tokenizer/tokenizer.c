@@ -14,6 +14,7 @@
 #include "sp_engine/tokenizer.h"
 #include "unicode_ranges.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

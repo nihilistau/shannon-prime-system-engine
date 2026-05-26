@@ -54,11 +54,33 @@ if(SP_ENGINE_WITH_AVX2)
     endif()
 endif()
 if(SP_ENGINE_WITH_AVX512)
+    target_sources(sp_engine PRIVATE
+        backends/cpu/avx512/avx512_dispatch.c
+        backends/cpu/avx512/avx512_spinor.c
+        backends/cpu/avx512/avx512_vnni.c
+        backends/cpu/avx512/avx512_ifma.c
+        backends/cpu/avx512/avx512_ternlog.c
+    )
     target_compile_definitions(sp_engine PRIVATE SP_ENGINE_AVX512=1)
-    if(MSVC)
-        target_compile_options(sp_engine PRIVATE /arch:AVX512)
-    else()
-        target_compile_options(sp_engine PRIVATE -mavx512f)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            backends/cpu/avx512/avx512_dispatch.c
+            backends/cpu/avx512/avx512_spinor.c
+            backends/cpu/avx512/avx512_vnni.c
+            backends/cpu/avx512/avx512_ifma.c
+            backends/cpu/avx512/avx512_ternlog.c
+            PROPERTIES COMPILE_OPTIONS
+            "-mavx512f;-mavx512vnni;-mavx512ifma;-mavx512bw;-mavx512dq;-mavx512vpopcntdq;-mavx512vbmi2"
+        )
+    elseif(MSVC)
+        set_source_files_properties(
+            backends/cpu/avx512/avx512_dispatch.c
+            backends/cpu/avx512/avx512_spinor.c
+            backends/cpu/avx512/avx512_vnni.c
+            backends/cpu/avx512/avx512_ifma.c
+            backends/cpu/avx512/avx512_ternlog.c
+            PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
+        )
     endif()
 endif()
 
