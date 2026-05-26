@@ -63,7 +63,35 @@ int main(void) {
         }
     }
 
-    /* T_SPINOR_1 and T_SPINOR_2: stubs return 0, these will be added in Task 3 */
+    /* T_SPINOR_1: load + sentinel check — valid 0xA5 sentinel */
+    {
+        static uint8_t slot[64] __attribute__((aligned(64)));
+        int i;
+        for (i = 0; i < 63; i++) slot[i] = (uint8_t)(i + 1);
+        slot[63] = 0xA5;
+        int r = sp_avx512_spinor_load_check(slot);
+        if (r != 0) {
+            printf("FAIL T_SPINOR_1: expected 0, got %d\n", r);
+            fail = 1;
+        } else {
+            printf("PASS T_SPINOR_1: sentinel OK -> 0\n");
+        }
+    }
+
+    /* T_SPINOR_2: load + sentinel check — corrupted sentinel */
+    {
+        static uint8_t slot[64] __attribute__((aligned(64)));
+        int i;
+        for (i = 0; i < 64; i++) slot[i] = 0xFF;
+        int r = sp_avx512_spinor_load_check(slot);
+        if (r != -1) {
+            printf("FAIL T_SPINOR_2: expected -1, got %d\n", r);
+            fail = 1;
+        } else {
+            printf("PASS T_SPINOR_2: sentinel mismatch -> -1\n");
+        }
+    }
+
     /* T_VNNI_1/T_VNNI_2: added in Task 4 */
     /* T_IFMA_1: added in Task 5 */
 
