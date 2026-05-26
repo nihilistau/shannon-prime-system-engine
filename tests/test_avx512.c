@@ -92,6 +92,35 @@ int main(void) {
         }
     }
 
+    /* T_SPINOR_3: NT path — valid 0xA5 sentinel */
+    {
+        static uint8_t slot[64] __attribute__((aligned(64)));
+        int i;
+        for (i = 0; i < 63; i++) slot[i] = (uint8_t)(i + 1);
+        slot[63] = 0xA5;
+        int r = sp_avx512_spinor_nt_load_check(slot);
+        if (r != 0) {
+            printf("FAIL T_SPINOR_3: NT path, expected 0, got %d\n", r);
+            fail = 1;
+        } else {
+            printf("PASS T_SPINOR_3: NT sentinel OK -> 0\n");
+        }
+    }
+
+    /* T_SPINOR_4: NT path — corrupted sentinel */
+    {
+        static uint8_t slot[64] __attribute__((aligned(64)));
+        int i;
+        for (i = 0; i < 64; i++) slot[i] = 0xFF;
+        int r = sp_avx512_spinor_nt_load_check(slot);
+        if (r != -1) {
+            printf("FAIL T_SPINOR_4: NT path, expected -1, got %d\n", r);
+            fail = 1;
+        } else {
+            printf("PASS T_SPINOR_4: NT sentinel mismatch -> -1\n");
+        }
+    }
+
     /* T_VNNI_1: Q8 matvec 64x64 — byte-exact vs scalar */
     if (!g_avx512_caps.has_vnni) {
         printf("SKIP T_VNNI_1: no AVX-512VNNI\n");
