@@ -55,7 +55,9 @@ typedef enum {
 /* §3 arch_id enum (mirrors the engine's sp_arch_t but on the wire). */
 typedef enum {
     SP_ARCH_ID_LLAMA3 = 1, SP_ARCH_ID_QWEN3 = 2, SP_ARCH_ID_GEMMA3 = 3,
-    SP_ARCH_ID_DEEPSEEK_V4 = 4
+    SP_ARCH_ID_DEEPSEEK_V4 = 4,
+    /* 5 = SP_ARCH_ID_QWEN35 reserved (Phase 3-SSM) */
+    SP_ARCH_ID_QWEN25 = 6
 } sp_arch_id;
 
 /* §7 tokenizer type_id. */
@@ -159,6 +161,7 @@ const void            *sp_model_tokenizer_blob(const sp_model *m, uint64_t *size
  * borrows the mmap, so in practice it is self-contained). */
 struct qwen3_model;
 struct qwen3_model *sp_model_to_qwen3(const sp_model *m);
+struct qwen3_model *sp_model_to_qwen25(const sp_model *m);
 
 #ifdef __cplusplus
 }

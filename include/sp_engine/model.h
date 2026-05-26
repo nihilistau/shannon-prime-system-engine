@@ -21,7 +21,7 @@ extern "C" {
 /* Model architecture. Selects the forward pass + which optional config fields and
  * per-layer tensors are populated. Default 0 = Qwen3 (calloc-zeroed configs and
  * existing callers get the right value with no churn). */
-typedef enum { SP_ARCH_QWEN3 = 0, SP_ARCH_GEMMA3 = 1 } sp_arch_t;
+typedef enum { SP_ARCH_QWEN3 = 0, SP_ARCH_GEMMA3 = 1, SP_ARCH_QWEN25 = 2 } sp_arch_t;
 
 typedef struct {
     sp_arch_t arch;           /* SP_ARCH_QWEN3 (default) | SP_ARCH_GEMMA3 */
@@ -54,6 +54,9 @@ typedef struct {
     const gguf_tensor *ffn_up;        /* [n_embd, n_ff]                  */
     const gguf_tensor *ffn_down;      /* [n_ff, n_embd]                  */
     const gguf_tensor *post_ffw_norm; /* gemma3 post_ffw_norm; NULL on qwen3 */
+    const gguf_tensor *attn_q_bias;  /* [n_head*head_dim] qwen25; NULL otherwise */
+    const gguf_tensor *attn_k_bias;  /* [n_head_kv*head_dim] qwen25; NULL otherwise */
+    const gguf_tensor *attn_v_bias;  /* [n_head_kv*head_dim] qwen25; NULL otherwise */
 } qwen3_layer;
 
 struct sp_arena;   /* sp_engine/arena.h — packed-weight arena (Phase 1a) */
@@ -107,6 +110,13 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
  * post-ffw on the residual branch), GeGLU FFN, local/global sliding-window attn
  * with dual RoPE base, tied LM head. Correctness gate M_GEMMA3_CPU. */
 int gemma3_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
+                   float *logits);
+
+/* Qwen2.5 f32 reference forward pass (prefill, causal). Same logits layout/return
+ * as qwen3_forward. Requires a model loaded with arch == SP_ARCH_QWEN25. Deltas
+ * vs Qwen3: no embedding scale, no QK norms, QKV biases added after projection,
+ * SwiGLU FFN, no sandwich norms, no sliding-window attention. */
+int qwen25_forward(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                    float *logits);
 
 /* As qwen3_forward, but if `kv_trees` is non-NULL it additionally KSTE-encodes

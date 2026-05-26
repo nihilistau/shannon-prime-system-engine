@@ -217,3 +217,121 @@ struct qwen3_model *sp_model_to_qwen3(const sp_model *m) {
     }
     return q;
 }
+
+struct qwen3_model *sp_model_to_qwen25(const sp_model *m) {
+    if (!m) { sp_set_error("adapter25: null sp_model"); return NULL; }
+    const sp_model_header *h = sp_model_get_header(m);
+    if (h->arch_id != (uint32_t)SP_ARCH_ID_QWEN25) {
+        sp_set_error("sp_model_to_qwen25: model is not Qwen2.5"); return NULL;
+    }
+    if (h->arch_struct_size < sizeof(sp_arch_info)) {
+        sp_set_error("adapter25: arch_struct too small"); return NULL;
+    }
+
+    sp_arch_info sai; memset(&sai, 0, sizeof sai);
+    memcpy(&sai, h->arch_struct, sizeof(sp_arch_info));
+    if (sai.vocab_size != h->vocab_size) {
+        sp_set_error("adapter25: vocab mismatch arch_struct"); return NULL;
+    }
+
+    qwen3_model *q = (qwen3_model *)calloc(1, sizeof *q);
+    if (!q) { sp_set_error("adapter25: OOM model"); return NULL; }
+    q->gguf = NULL; q->released = 1;
+
+    qwen3_config *cfg = &q->cfg;
+    cfg->arch           = SP_ARCH_QWEN25;
+    cfg->n_layers       = sai.n_layers;
+    cfg->n_embd         = sai.hidden_dim;
+    cfg->n_ff           = sai.n_ff;
+    cfg->n_head         = sai.n_heads;
+    cfg->n_head_kv      = sai.n_kv_heads;
+    cfg->head_dim       = sai.head_dim;
+    cfg->n_vocab        = sai.vocab_size;
+    cfg->context_length = sai.max_context;
+    cfg->sliding_window = 0;
+    cfg->rope_freq_base = (sai.rope_freq_base != 0.0f) ? sai.rope_freq_base : 1e6f;
+    cfg->rms_eps        = (sai.rms_eps != 0.0f) ? sai.rms_eps : 1e-6f;
+    cfg->has_qk_norm    = 0;
+    cfg->tied_embedding = sai.tied_embeddings ? 1 : 0;
+    const qwen3_config *c = cfg;
+
+    int has_output_w = (sp_model_find_tensor(m, "output.weight") != NULL);
+    /* Per layer: 12 synthetic gguf_tensor entries
+     *   attn_norm(1) + q/k/v/output(4) + q_bias/k_bias/v_bias(3) + ffn_norm(1) + gate/up/down(3) */
+    const int NPL = 12;
+    int n_t = 2 + has_output_w + (int)c->n_layers * NPL;
+    gguf_tensor *T  = (gguf_tensor *)calloc((size_t)n_t, sizeof(gguf_tensor));
+    q->layers       = (qwen3_layer *)calloc(c->n_layers, sizeof(qwen3_layer));
+    /* norm_cap: output_norm + 5*NL (attn_norm + 3 biases + ffn_norm) */
+    int norm_cap = 1 + (int)c->n_layers * 5;
+    q->norm_src  = (const gguf_tensor **)malloc((size_t)norm_cap * sizeof(*q->norm_src));
+    q->norm_buf  = (float **)malloc((size_t)norm_cap * sizeof(*q->norm_buf));
+    /* arena_cap: token_embd + optional output + 7*NL */
+    int arena_cap = 1 + has_output_w + (int)c->n_layers * 7;
+    sp_arena_tensor *ats = (sp_arena_tensor *)calloc((size_t)arena_cap, sizeof(sp_arena_tensor));
+    if (!T || !q->layers || !q->norm_src || !q->norm_buf || !ats) {
+        sp_set_error("adapter25: OOM tables"); free(T); free(ats); qwen3_free(q); return NULL;
+    }
+
+    int ti = 0, ai25 = 0, ni = 0, rc = 0;
+    #define NEW_T25(nm) (snprintf(T[ti].name, sizeof T[ti].name, "%s", (nm)), &T[ti++])
+    #define ADD_NORM25(tp, nm) do { \
+        int len = 0; float *b = copy_f32(m, (nm), &len); \
+        if (!b) { rc = 1; } else { \
+            gguf_tensor *gt = NEW_T25(nm); gt->n_dims = 1; gt->dims[0] = (uint64_t)len; \
+            gt->type = 0; gt->n_elements = (uint64_t)len; \
+            (tp) = gt; q->norm_src[ni] = gt; q->norm_buf[ni] = b; ni++; } } while (0)
+    #define ADD_Q825(tp, nm) do { \
+        gguf_tensor *gt = NEW_T25(nm); \
+        if (rebuild_q8(m, (nm), &ats[ai25])) { rc = 1; } else { \
+            const sp_frob_packed_tensor *pt = &ats[ai25].pt; \
+            gt->n_dims = 2; gt->dims[0] = (uint64_t)pt->cols; gt->dims[1] = (uint64_t)pt->rows; \
+            gt->n_elements = (uint64_t)pt->cols * pt->rows; gt->type = 1; \
+            (tp) = gt; ai25++; } } while (0)
+
+    ADD_Q825(q->token_embd, "token_embd.weight");
+    ADD_NORM25(q->output_norm, "output_norm.weight");
+    if (has_output_w) {
+        ADD_Q825(q->output, "output.weight");
+        q->cfg.tied_embedding = 0;
+    } else {
+        q->output = q->token_embd; q->cfg.tied_embedding = 1;
+    }
+
+    char nm[96];
+    for (uint32_t i = 0; i < c->n_layers && rc == 0; i++) {
+        qwen3_layer *L = &q->layers[i];
+        #define LN25(suffix) (snprintf(nm, sizeof nm, "blk.%u." suffix, i), nm)
+        ADD_NORM25(L->attn_norm,    LN25("attn_norm.weight"));
+        ADD_Q825(L->attn_q,         LN25("attn_q.weight"));
+        ADD_Q825(L->attn_k,         LN25("attn_k.weight"));
+        ADD_Q825(L->attn_v,         LN25("attn_v.weight"));
+        ADD_Q825(L->attn_output,    LN25("attn_output.weight"));
+        ADD_NORM25(L->attn_q_bias,  LN25("attn_q.bias"));
+        ADD_NORM25(L->attn_k_bias,  LN25("attn_k.bias"));
+        ADD_NORM25(L->attn_v_bias,  LN25("attn_v.bias"));
+        ADD_NORM25(L->ffn_norm,     LN25("ffn_norm.weight"));
+        ADD_Q825(L->ffn_gate,       LN25("ffn_gate.weight"));
+        ADD_Q825(L->ffn_up,         LN25("ffn_up.weight"));
+        ADD_Q825(L->ffn_down,       LN25("ffn_down.weight"));
+        #undef LN25
+    }
+    q->n_norm = ni;
+    #undef NEW_T25
+    #undef ADD_NORM25
+    #undef ADD_Q825
+
+    if (rc) {
+        for (int k = 0; k < ai25; k++) sp_frob_packed_free(&ats[k].pt);
+        free(T); free(ats); qwen3_free(q); return NULL;
+    }
+
+    q->synth_tensors = T;
+    q->arena = sp_arena_from_packed(ats, ai25, 8);
+    free(ats);
+    if (!q->arena) {
+        sp_set_error("adapter25: arena build");
+        qwen3_free(q); return NULL;
+    }
+    return q;
+}

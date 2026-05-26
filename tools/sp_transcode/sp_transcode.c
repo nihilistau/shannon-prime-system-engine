@@ -244,8 +244,10 @@ static int fill_arch_struct(const char *gguf_path, uint8_t arch_struct[256],
 
     sp_arch_info ai;
     memset(&ai, 0, sizeof ai);
-    int gemma = (c->arch == SP_ARCH_GEMMA3);
-    ai.arch_id          = gemma ? (uint32_t)SP_ARCH_ID_GEMMA3 : (uint32_t)SP_ARCH_ID_QWEN3;
+    int gemma  = (c->arch == SP_ARCH_GEMMA3);
+    int qwen25 = (c->arch == SP_ARCH_QWEN25);
+    ai.arch_id          = gemma  ? (uint32_t)SP_ARCH_ID_GEMMA3 :
+                          qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 : (uint32_t)SP_ARCH_ID_QWEN3;
     ai.vocab_size       = c->n_vocab;
     ai.hidden_dim       = c->n_embd;
     ai.n_layers         = c->n_layers;
@@ -255,8 +257,8 @@ static int fill_arch_struct(const char *gguf_path, uint8_t arch_struct[256],
     ai.max_context      = c->context_length;
     ai.swa_window       = c->sliding_window;
     ai.rope_freq_base   = c->rope_freq_base;
-    ai.ffn_variant      = gemma ? 1u : 0u;   /* 1=GeGLU(gemma3), 0=SwiGLU(qwen3) */
-    ai.norm_variant     = gemma ? 1u : 0u;   /* 1=sandwich(gemma3), 0=pre-norm(qwen3) */
+    ai.ffn_variant      = gemma ? 1u : 0u;   /* 1=GeGLU(gemma3), 0=SwiGLU(qwen3/qwen25) */
+    ai.norm_variant     = gemma ? 1u : 0u;   /* 1=sandwich(gemma3), 0=pre-norm(qwen3/qwen25) */
     ai.tied_embeddings  = c->tied_embedding ? 1u : 0u;
     ai.has_qk_norm      = c->has_qk_norm ? 1u : 0u;
     ai.n_ff             = c->n_ff;
