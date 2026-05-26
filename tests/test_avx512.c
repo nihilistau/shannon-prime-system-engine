@@ -171,7 +171,41 @@ int main(void) {
         if (!vnni_fail2) printf("PASS T_VNNI_2: Q8 matvec %dx%d\n", ROWS2, COLS2);
     }
 
-    /* T_IFMA_1: added in Task 5 */
+    /* T_IFMA_1: Barrett modmul N=64 mod Q1 — byte-exact vs scalar */
+    if (!g_avx512_caps.has_ifma) {
+        printf("SKIP T_IFMA_1: no AVX-512IFMA (Zen 4 path)\n");
+    } else {
+        enum { NI = 64 };
+        static uint32_t ai[NI], bi[NI], out_avx_i[NI], out_ref_i[NI];
+        const uint32_t Q1 = 1073738753u;
+        const uint64_t MU1 = ((uint64_t)1 << 60) / (uint64_t)Q1;
+        uint32_t k;
+
+        for (k = 0; k < NI; k++) {
+            ai[k] = (uint32_t)((k * 0x9E3779B9u + 1) % Q1);
+            bi[k] = (uint32_t)((k * 0x6C62272Eu + 7) % Q1);
+        }
+        /* scalar Barrett reference */
+        for (k = 0; k < NI; k++) {
+            uint64_t x = (uint64_t)ai[k] * (uint64_t)bi[k];
+            uint64_t qhat = ((x >> 29) * MU1) >> 31;
+            uint64_t r = x - qhat * Q1;
+            if (r >= Q1) r -= Q1;
+            if (r >= Q1) r -= Q1;
+            out_ref_i[k] = (uint32_t)r;
+        }
+        sp_avx512_ifma_modmul(ai, bi, Q1, MU1, NI, out_avx_i);
+
+        int ifma_fail = 0;
+        for (k = 0; k < NI; k++) {
+            if (out_avx_i[k] != out_ref_i[k]) {
+                printf("FAIL T_IFMA_1 lane %u: ref=%u avx=%u\n",
+                       k, out_ref_i[k], out_avx_i[k]);
+                ifma_fail = 1; fail = 1;
+            }
+        }
+        if (!ifma_fail) printf("PASS T_IFMA_1: Barrett modmul N=%d mod Q1 exact\n", NI);
+    }
 
     return fail;
 }
