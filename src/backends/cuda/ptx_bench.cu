@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include "ptx_ntt.cuh"
+#include "ptx_hash.cuh"
 
 static bool gpu_available(void) {
     int n = 0;
@@ -86,6 +87,71 @@ static void bench_ntt(void) {
     cudaEventDestroy(t0); cudaEventDestroy(t1);
 }
 
+/* ── HASH throughput bench (Task 2) ─────────────────────────────────── */
+
+__global__ static void k_bench_hash_ptx(uint32_t *inout, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        uint32_t a = inout[i];
+        uint32_t b = inout[(i + 1) % n];
+        uint32_t c = inout[(i + 2) % n];
+        inout[i] = ptx_xor3(a, b, c);
+    }
+}
+
+/* C-level baseline: force compiler to emit 2 XOR instructions (not lop3) */
+__global__ __noinline__ static void k_bench_hash_baseline(uint32_t *inout, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        uint32_t a = inout[i];
+        uint32_t b = inout[(i + 1) % n];
+        uint32_t c = inout[(i + 2) % n];
+        inout[i] = a ^ b ^ c;
+    }
+}
+
+static void bench_hash(void) {
+    const int N = 10 * 1024 * 1024;  /* 10M elements */
+    uint32_t *d_buf;
+    cudaMalloc(&d_buf, N * sizeof(uint32_t));
+
+    /* warm-up */
+    k_bench_hash_ptx<<<(N + 255) / 256, 256>>>(d_buf, N);
+    cudaDeviceSynchronize();
+
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0); cudaEventCreate(&t1);
+    const int REPS = 50;
+
+    cudaEventRecord(t0);
+    for (int r = 0; r < REPS; r++)
+        k_bench_hash_ptx<<<(N + 255) / 256, 256>>>(d_buf, N);
+    cudaEventRecord(t1);
+    cudaEventSynchronize(t1);
+    float ms_ptx = 0;
+    cudaEventElapsedTime(&ms_ptx, t0, t1);
+
+    cudaEventRecord(t0);
+    for (int r = 0; r < REPS; r++)
+        k_bench_hash_baseline<<<(N + 255) / 256, 256>>>(d_buf, N);
+    cudaEventRecord(t1);
+    cudaEventSynchronize(t1);
+    float ms_base = 0;
+    cudaEventElapsedTime(&ms_base, t0, t1);
+
+    double ops       = (double)N * REPS;
+    double ops_ptx   = ops / (ms_ptx  * 1e-3);
+    double ops_base  = ops / (ms_base * 1e-3);
+    double speedup   = ops_ptx / ops_base;
+
+    printf("HASH bench: PTX xor3 %.2e ops/s  baseline %.2e ops/s  speedup=%.1fx\n",
+           ops_ptx, ops_base, speedup);
+    printf("M_PTX_2 HASH: %s (target >=1.5x)\n", speedup >= 1.5 ? "PASS" : "NEEDS_TUNING");
+
+    cudaFree(d_buf);
+    cudaEventDestroy(t0); cudaEventDestroy(t1);
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -97,7 +163,10 @@ int main(int argc, char **argv) {
         if (!gpu) printf("M_PTX_2 NTT: SKIP\n");
         else      bench_ntt();
     }
-    if (!strcmp(filter, "hash")   || !strcmp(filter, "all"))   printf("M_PTX_2 HASH: SKIP\n");
+    if (!strcmp(filter, "hash") || !strcmp(filter, "all")) {
+        if (!gpu) printf("M_PTX_2 HASH: SKIP\n");
+        else      bench_hash();
+    }
     if (!strcmp(filter, "spinor") || !strcmp(filter, "all"))  printf("M_PTX_2 SPINOR: SKIP\n");
     if (!strcmp(filter, "mma")    || !strcmp(filter, "all"))   printf("M_PTX_2 MMA: SKIP\n");
 

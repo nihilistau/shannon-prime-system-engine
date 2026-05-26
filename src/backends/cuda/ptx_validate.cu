@@ -10,8 +10,8 @@
 #include <cuda_runtime.h>
 
 #include "ptx_ntt.cuh"
+#include "ptx_hash.cuh"
 /* Sub-phase headers added progressively:
- * #include "ptx_hash.cuh"
  * #include "ptx_spinor.cuh"
  * #include "ptx_mma.cuh"
  */
@@ -120,6 +120,117 @@ static bool validate_ntt(void) {
     return ok;
 }
 
+/* ── HASH gate ───────────────────────────────────────────────────────── */
+
+__global__ static void k_hash_xor3(const uint32_t *a, const uint32_t *b,
+                                    const uint32_t *c, uint32_t *out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = ptx_xor3(a[i], b[i], c[i]);
+}
+
+__global__ static void k_hash_prmt(const uint32_t *a, const uint32_t *b,
+                                    const uint32_t *sel, uint32_t *out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = ptx_prmt(a[i], b[i], sel[i]);
+}
+
+static bool validate_hash(void) {
+    bool pass = true;
+
+    /* ── xor3 test: 1024 triples ────────────────────────────────────── */
+    const int N_XOR = 1024;
+    uint32_t *h_xa = new uint32_t[N_XOR];
+    uint32_t *h_xb = new uint32_t[N_XOR];
+    uint32_t *h_xc = new uint32_t[N_XOR];
+    uint32_t *h_xref = new uint32_t[N_XOR];
+
+    /* corners at indices 0-2 */
+    h_xa[0] = 0;          h_xb[0] = 0;          h_xc[0] = 0;
+    h_xa[1] = 0xFFFFFFFFu; h_xb[1] = 0xFFFFFFFFu; h_xc[1] = 0xFFFFFFFFu;
+    h_xa[2] = 0x55555555u; h_xb[2] = 0xAAAAAAAAu; h_xc[2] = 0xFFFFFFFFu;
+    /* LCG-generated randoms for indices 3..N-1 */
+    uint32_t lcg = 0xDEADBEEFu;
+    for (int i = 3; i < N_XOR; i++) {
+        lcg = lcg * 1664525u + 1013904223u; h_xa[i] = lcg;
+        lcg = lcg * 1664525u + 1013904223u; h_xb[i] = lcg;
+        lcg = lcg * 1664525u + 1013904223u; h_xc[i] = lcg;
+    }
+    for (int i = 0; i < N_XOR; i++) h_xref[i] = h_xa[i] ^ h_xb[i] ^ h_xc[i];
+
+    uint32_t *d_xa, *d_xb, *d_xc, *d_xout;
+    cudaMalloc(&d_xa,  N_XOR * sizeof(uint32_t));
+    cudaMalloc(&d_xb,  N_XOR * sizeof(uint32_t));
+    cudaMalloc(&d_xc,  N_XOR * sizeof(uint32_t));
+    cudaMalloc(&d_xout, N_XOR * sizeof(uint32_t));
+    cudaMemcpy(d_xa, h_xa, N_XOR * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_xb, h_xb, N_XOR * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_xc, h_xc, N_XOR * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    k_hash_xor3<<<(N_XOR + 255) / 256, 256>>>(d_xa, d_xb, d_xc, d_xout, N_XOR);
+    cudaDeviceSynchronize();
+
+    uint32_t *h_xgot = new uint32_t[N_XOR];
+    cudaMemcpy(h_xgot, d_xout, N_XOR * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    cudaFree(d_xa); cudaFree(d_xb); cudaFree(d_xc); cudaFree(d_xout);
+
+    bool xor3_pass = true;
+    for (int i = 0; i < N_XOR && xor3_pass; i++) {
+        if (h_xref[i] != h_xgot[i]) {
+            printf("M_PTX_1 HASH xor3: FAIL (idx=%d ref=0x%08X got=0x%08X)\n",
+                   i, h_xref[i], h_xgot[i]);
+            xor3_pass = false;
+        }
+    }
+    if (xor3_pass) printf("M_PTX_1 HASH xor3: PASS (%d triples)\n", N_XOR);
+    delete[] h_xa; delete[] h_xb; delete[] h_xc; delete[] h_xref; delete[] h_xgot;
+    pass &= xor3_pass;
+
+    /* ── prmt test: 256 selectors ──────────────────────────────────── */
+    const int N_PRM = 256;
+    uint32_t *h_pa  = new uint32_t[N_PRM];
+    uint32_t *h_pb  = new uint32_t[N_PRM];
+    uint32_t *h_sel = new uint32_t[N_PRM];
+    uint32_t *h_pref = new uint32_t[N_PRM];
+
+    for (int i = 0; i < N_PRM; i++) {
+        h_pa[i]  = 0x03020100u;
+        h_pb[i]  = 0x07060504u;
+        h_sel[i] = (uint32_t)i;
+        /* C emulation of prmt.b32 (host fallback; __CUDA_ARCH__ not defined) */
+        h_pref[i] = ptx_prmt(h_pa[i], h_pb[i], h_sel[i]);
+    }
+
+    uint32_t *d_pa, *d_pb, *d_psel, *d_pout;
+    cudaMalloc(&d_pa,  N_PRM * sizeof(uint32_t));
+    cudaMalloc(&d_pb,  N_PRM * sizeof(uint32_t));
+    cudaMalloc(&d_psel, N_PRM * sizeof(uint32_t));
+    cudaMalloc(&d_pout, N_PRM * sizeof(uint32_t));
+    cudaMemcpy(d_pa,  h_pa,  N_PRM * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pb,  h_pb,  N_PRM * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_psel, h_sel, N_PRM * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    k_hash_prmt<<<1, 256>>>(d_pa, d_pb, d_psel, d_pout, N_PRM);
+    cudaDeviceSynchronize();
+
+    uint32_t *h_pgot = new uint32_t[N_PRM];
+    cudaMemcpy(h_pgot, d_pout, N_PRM * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    cudaFree(d_pa); cudaFree(d_pb); cudaFree(d_psel); cudaFree(d_pout);
+
+    bool prmt_pass = true;
+    for (int i = 0; i < N_PRM && prmt_pass; i++) {
+        if (h_pref[i] != h_pgot[i]) {
+            printf("M_PTX_1 HASH prmt: FAIL (selector=0x%02X ref=0x%08X got=0x%08X)\n",
+                   i, h_pref[i], h_pgot[i]);
+            prmt_pass = false;
+        }
+    }
+    if (prmt_pass) printf("M_PTX_1 HASH prmt: PASS (%d combinations)\n", N_PRM);
+    delete[] h_pa; delete[] h_pb; delete[] h_sel; delete[] h_pref; delete[] h_pgot;
+    pass &= prmt_pass;
+
+    return pass;
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -135,7 +246,8 @@ int main(int argc, char **argv) {
     }
 
     if (!strcmp(filter, "hash") || !strcmp(filter, "all")) {
-        printf("M_PTX_1 HASH: SKIP (not yet implemented)\n"); skip++;
+        if (!gpu) { printf("M_PTX_1 HASH: SKIP\n"); skip++; }
+        else       { if (!validate_hash()) pass = 0; }
     }
 
     if (!strcmp(filter, "spinor") || !strcmp(filter, "all")) {
