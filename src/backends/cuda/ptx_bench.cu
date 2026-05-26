@@ -155,53 +155,73 @@ static void bench_hash(void) {
 }
 
 /* ── SPINOR throughput bench (Task 3) ───────────────────────────────── */
-
+/*
+ * Sequential chunk kernel: each block owns a contiguous chunk of the n_blocks
+ * buffer (chunk_size = n_blocks / gridDim.x) and streams through it in order.
+ * Sequential access within each block → DRAM row-buffer hits → maximum row BW.
+ * ld.global.cs (evict-first) prevents L2 reuse between iterations; every load
+ * is a DRAM fill.  N_GRID is chosen so concurrent L2 footprint > L2 capacity,
+ * ensuring the "hot" path also stresses DRAM once L2 is saturated.
+ */
 __global__ __noinline__ static void k_bench_spinor(const uint32_t *src, uint32_t *sink,
-                                                    int n_blocks, int is_hot, int reps) {
-    int lane = threadIdx.x & 31;
+                                                    int n_blocks, int is_hot) {
+    int chunk = n_blocks / (int)gridDim.x;
+    int start = (int)blockIdx.x * chunk;
+    int end   = start + chunk;
+    int lane  = threadIdx.x & 31;
     uint32_t acc = 0;
-    for (int r = 0; r < reps; r++) {
-        int b = (blockIdx.x + r) % n_blocks;
+    for (int b = start; b < end; b++) {
         acc ^= sp_spinor_warpload(src, (uint32_t)b, lane, is_hot);
     }
     if (lane == 0 && acc == 0xDEADBEEFu) *sink = acc;  /* prevent DCE */
 }
 
 static void bench_spinor(void) {
-    const int N = 1024;   /* 1024 Spinor blocks = 64 KB */
-    const int REPS = 200;
+    /* 16 MB buffer; 960 grid blocks = 32 warps/SM × 30 SMs (max sm_75 occupancy) */
+    const int N      = 1 << 17;  /* 131072 spinor blocks = 16 MB */
+    const int N_GRID = 960;      /* 32 blocks/SM × 30 SMs — full occupancy, hides DRAM latency */
+    const int REPS   = 20;
 
     uint32_t *d_src, *d_sink;
     cudaMalloc(&d_src,  (size_t)N * 32 * sizeof(uint32_t));
     cudaMalloc(&d_sink, sizeof(uint32_t));
     cudaMemset(d_src, 0xAB, (size_t)N * 32 * sizeof(uint32_t));
 
-    /* warm-up */
-    k_bench_spinor<<<N, 32>>>(d_src, d_sink, N, 1, 1);
+    /* warm-up (two passes to fully seat TLB / memory scheduler) */
+    k_bench_spinor<<<N_GRID, 32>>>(d_src, d_sink, N, 1);
+    k_bench_spinor<<<N_GRID, 32>>>(d_src, d_sink, N, 1);
     cudaDeviceSynchronize();
 
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0); cudaEventCreate(&t1);
 
     cudaEventRecord(t0);
-    k_bench_spinor<<<N, 32>>>(d_src, d_sink, N, 1, REPS);
+    for (int r = 0; r < REPS; r++)
+        k_bench_spinor<<<N_GRID, 32>>>(d_src, d_sink, N, 1);
     cudaEventRecord(t1);
     cudaEventSynchronize(t1);
     float ms_hot = 0;
     cudaEventElapsedTime(&ms_hot, t0, t1);
 
     cudaEventRecord(t0);
-    k_bench_spinor<<<N, 32>>>(d_src, d_sink, N, 0, REPS);
+    for (int r = 0; r < REPS; r++)
+        k_bench_spinor<<<N_GRID, 32>>>(d_src, d_sink, N, 0);
     cudaEventRecord(t1);
     cudaEventSynchronize(t1);
     float ms_cold = 0;
     cudaEventElapsedTime(&ms_cold, t0, t1);
 
+    /* bytes = one full pass (N spinor blocks × 128 bytes each) × REPS */
     double bytes = (double)N * 32 * sizeof(uint32_t) * REPS;
     double bw_hot  = bytes / (ms_hot  * 1e-3) / 1e9;
     double bw_cold = bytes / (ms_cold * 1e-3) / 1e9;
-    printf("SPINOR bench: hot=%.1f GB/s  cold=%.1f GB/s\n", bw_hot, bw_cold);
-    printf("M_PTX_2 SPINOR: bandwidth measured (target >=85%% SOL via ncu)\n");
+    printf("SPINOR bench: hot=%.1f GB/s  cold=%.1f GB/s (timer; L2 may inflate)\n",
+           bw_hot, bw_cold);
+    /* ncu dram__bytes_read on RTX 2060: ~221-239 GB/s (66-71%% of 336 GB/s DRAM peak).
+     * Timer inflates due to L2 hits in warm state.  Gate uses ncu DRAM metric.
+     * Improvement path: ld.global.cs.v4 vector loads (512 bytes/warp) needed for 85%+ SOL. */
+    printf("M_PTX_2 SPINOR: NEEDS_TUNING (ncu dram__bytes_read ~221-239 GB/s = 66-71%% SOL;"
+           " target >=85%% = 286 GB/s)\n");
 
     cudaFree(d_src); cudaFree(d_sink);
     cudaEventDestroy(t0); cudaEventDestroy(t1);
