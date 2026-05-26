@@ -234,35 +234,78 @@ static int write_tokenizer(const char *path, const gguf_ctx *g,
 }
 
 /* Populate sp_arch_info into the 256-byte arch_struct (PPT-LAT-SP-MODEL-v0 §3).
- * The frozen spec mandates arch_struct = sp_arch_info (not qwen3_config). Fields
- * are transcoded from the engine's GGUF arch detection via qwen3_load. */
-static int fill_arch_struct(const char *gguf_path, uint8_t arch_struct[256],
+ * Reads GGUF metadata directly from the already-open gguf_ctx — bypasses
+ * qwen3_load so Qwen2.5 GGUFs (which omit attention.key_length) are handled. */
+static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
                             uint32_t *arch_id, uint32_t *arch_size, uint32_t *vocab) {
-    qwen3_model *qm = qwen3_load(gguf_path);
-    if (!qm) { fprintf(stderr, "qwen3_load failed (arch detect)\n"); return 1; }
-    const qwen3_config *c = &qm->cfg;
+    const char *arch_str = gguf_get_str(g, "general.architecture");
+    if (!arch_str) { fprintf(stderr, "fill_arch_struct: missing general.architecture\n"); return 1; }
+    int is_gemma3 = (strcmp(arch_str, "gemma3") == 0);
+    int is_qwen25 = (strcmp(arch_str, "qwen2")  == 0);
+    int is_qwen3  = (strcmp(arch_str, "qwen3")  == 0);
+    if (!is_gemma3 && !is_qwen25 && !is_qwen3) {
+        fprintf(stderr, "fill_arch_struct: unsupported arch '%s'\n", arch_str); return 1;
+    }
+
+    char key[128];
+    /* ARCH_KEY: build "arch.suffix" into local `key` and return it. */
+    #define ARCH_KEY(suf) (snprintf(key, sizeof key, "%s." suf, arch_str), (const char *)key)
+
+    uint64_t n_embd = 0, n_layers = 0, n_head = 0, n_head_kv = 0;
+    uint64_t context_length = 0, n_ff = 0, head_dim = 0, swa_window = 0;
+    float rope_freq_base = 1e6f, rms_eps = 1e-5f;
+
+    if (!gguf_get_u64(g, ARCH_KEY("embedding_length"),  &n_embd)  || n_embd   == 0)
+        { fprintf(stderr, "fill_arch_struct: missing %s.embedding_length\n",  arch_str); return 1; }
+    if (!gguf_get_u64(g, ARCH_KEY("block_count"),       &n_layers) || n_layers == 0)
+        { fprintf(stderr, "fill_arch_struct: missing %s.block_count\n",       arch_str); return 1; }
+    if (!gguf_get_u64(g, ARCH_KEY("attention.head_count"), &n_head) || n_head  == 0)
+        { fprintf(stderr, "fill_arch_struct: missing %s.attention.head_count\n", arch_str); return 1; }
+    if (!gguf_get_u64(g, ARCH_KEY("attention.head_count_kv"), &n_head_kv)) n_head_kv = n_head;
+    /* head_dim optional in Qwen2.5 GGUFs — derive from hidden_dim / n_heads. */
+    if (!gguf_get_u64(g, ARCH_KEY("attention.key_length"), &head_dim) || head_dim == 0)
+        head_dim = n_embd / n_head;
+    gguf_get_u64(g, ARCH_KEY("context_length"),              &context_length);
+    gguf_get_u64(g, ARCH_KEY("attention.sliding_window"),    &swa_window);
+    gguf_get_u64(g, ARCH_KEY("feed_forward_length"),         &n_ff);
+    gguf_get_f32(g, ARCH_KEY("rope.freq_base"),              &rope_freq_base);
+    gguf_get_f32(g, ARCH_KEY("attention.layer_norm_rms_epsilon"), &rms_eps);
+    #undef ARCH_KEY
+
+    /* vocab from token_embd.weight dims[1]; fallback to tokenizer array length. */
+    uint64_t n_vocab = 0;
+    const gguf_tensor *embd = gguf_find_tensor(g, "token_embd.weight");
+    if (embd && embd->n_dims >= 2) n_vocab = embd->dims[1];
+    if (n_vocab == 0) {
+        const gguf_kv *tk = gguf_find_kv(g, "tokenizer.ggml.tokens");
+        if (tk && tk->type == GGUF_T_ARRAY) n_vocab = tk->arr_len;
+    }
+    if (n_vocab == 0) { fprintf(stderr, "fill_arch_struct: cannot determine vocab size\n"); return 1; }
+
+    /* tied embeddings: output.weight absent → tied. */
+    int tied = (gguf_find_tensor(g, "output.weight") == NULL) ? 1 : 0;
+    /* QK norms: blk.0.attn_q_norm.weight present → has_qk_norm. */
+    int has_qk_norm = (gguf_find_tensor(g, "blk.0.attn_q_norm.weight") != NULL) ? 1 : 0;
 
     sp_arch_info ai;
     memset(&ai, 0, sizeof ai);
-    int gemma  = (c->arch == SP_ARCH_GEMMA3);
-    int qwen25 = (c->arch == SP_ARCH_QWEN25);
-    ai.arch_id          = gemma  ? (uint32_t)SP_ARCH_ID_GEMMA3 :
-                          qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 : (uint32_t)SP_ARCH_ID_QWEN3;
-    ai.vocab_size       = c->n_vocab;
-    ai.hidden_dim       = c->n_embd;
-    ai.n_layers         = c->n_layers;
-    ai.n_heads          = c->n_head;
-    ai.n_kv_heads       = c->n_head_kv;
-    ai.head_dim         = c->head_dim;
-    ai.max_context      = c->context_length;
-    ai.swa_window       = c->sliding_window;
-    ai.rope_freq_base   = c->rope_freq_base;
-    ai.ffn_variant      = gemma ? 1u : 0u;   /* 1=GeGLU(gemma3), 0=SwiGLU(qwen3/qwen25) */
-    ai.norm_variant     = gemma ? 1u : 0u;   /* 1=sandwich(gemma3), 0=pre-norm(qwen3/qwen25) */
-    ai.tied_embeddings  = c->tied_embedding ? 1u : 0u;
-    ai.has_qk_norm      = c->has_qk_norm ? 1u : 0u;
-    ai.n_ff             = c->n_ff;
-    ai.rms_eps          = c->rms_eps;
+    ai.arch_id          = is_gemma3 ? (uint32_t)SP_ARCH_ID_GEMMA3 :
+                          is_qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 : (uint32_t)SP_ARCH_ID_QWEN3;
+    ai.vocab_size       = (uint32_t)n_vocab;
+    ai.hidden_dim       = (uint32_t)n_embd;
+    ai.n_layers         = (uint32_t)n_layers;
+    ai.n_heads          = (uint32_t)n_head;
+    ai.n_kv_heads       = (uint32_t)n_head_kv;
+    ai.head_dim         = (uint32_t)head_dim;
+    ai.max_context      = (uint32_t)context_length;
+    ai.swa_window       = (uint32_t)swa_window;
+    ai.rope_freq_base   = rope_freq_base;
+    ai.ffn_variant      = is_gemma3 ? 1u : 0u;   /* 1=GeGLU(gemma3), 0=SwiGLU(qwen3/qwen25) */
+    ai.norm_variant     = is_gemma3 ? 1u : 0u;   /* 1=sandwich(gemma3), 0=pre-norm(qwen3/qwen25) */
+    ai.tied_embeddings  = (uint32_t)tied;
+    ai.has_qk_norm      = (uint32_t)has_qk_norm;
+    ai.n_ff             = (uint32_t)n_ff;
+    ai.rms_eps          = rms_eps;
     ai.preferred_precision = (uint32_t)SP_PRECISION_FP16;
 
     memset(arch_struct, 0, 256);
@@ -270,7 +313,6 @@ static int fill_arch_struct(const char *gguf_path, uint8_t arch_struct[256],
     *arch_id   = ai.arch_id;
     *arch_size = (uint32_t)sizeof(sp_arch_info);
     *vocab     = ai.vocab_size;
-    qwen3_free(qm);
     return 0;
 }
 
@@ -306,9 +348,9 @@ int main(int argc, char **argv) {
     uint8_t tok_sha[32]; uint32_t tok_vocab = 0;
     if (write_tokenizer(out_tok, g, &tok_vocab, tok_sha)) { gguf_close(g); return 1; }
 
-    /* 2. arch_struct via the engine's own arch detection */
+    /* 2. arch_struct from the already-open GGUF context */
     uint8_t arch_struct[256]; uint32_t arch_id, arch_size, arch_vocab;
-    if (fill_arch_struct(in, arch_struct, &arch_id, &arch_size, &arch_vocab)) { gguf_close(g); return 1; }
+    if (fill_arch_struct(g, arch_struct, &arch_id, &arch_size, &arch_vocab)) { gguf_close(g); return 1; }
     if (arch_vocab != tok_vocab)
         fprintf(stderr, "warning: model vocab %u != tokenizer vocab %u\n", arch_vocab, tok_vocab);
 
