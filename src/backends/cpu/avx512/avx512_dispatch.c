@@ -1,5 +1,8 @@
 #include "sp_engine/avx512.h"
 #include <string.h>
+#if defined(_MSC_VER)
+#  include <intrin.h>
+#endif
 
 sp_avx512_caps g_avx512_caps;
 
