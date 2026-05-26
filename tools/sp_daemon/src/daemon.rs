@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicI32, Arc, Mutex};
+use std::sync::{atomic::{AtomicI32, AtomicU64}, Arc, Mutex};
+use std::time::Instant;
 
 use tracing::info;
 
@@ -81,6 +82,10 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
     let model = crate::session::SpModel::load(model_path, tok_path)
         .expect("sp_model_load failed — check SP_MODEL_PATH / SP_TOKENIZER_PATH");
 
+    let arch = model.arch_info().expect("sp_model_arch failed");
+    let vocab_size = arch.vocab_size as usize;
+    info!("arch: vocab={} n_layers={} hidden={}", arch.vocab_size, arch.n_layers, arch.hidden_dim);
+
     let cancel_flag = Arc::new(AtomicI32::new(0));
     let session = crate::session::SpSession::create(&model, Arc::clone(&cancel_flag))
         .expect("sp_session_create failed");
@@ -92,6 +97,10 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
         model,
         session: Mutex::new(session),
         cancel_flag,
+        sessions: crate::sessions::Sessions::new(),
+        vocab_size,
+        tokens_decoded: AtomicU64::new(0),
+        started_at: Instant::now(),
     });
 
     // ── HTTP server ────────────────────────────────────────────────────────

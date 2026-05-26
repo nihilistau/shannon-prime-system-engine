@@ -4,7 +4,8 @@
 //!   - sp_model is immutable after load → Send + Sync (many sessions per model).
 //!   - sp_session is single-thread mutable → Send but NOT Sync.
 //!   - cancel_flag storage must outlive sp_session_destroy → held in Arc.
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_int;
 use std::ptr;
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
@@ -44,6 +45,16 @@ impl SpModel {
 
     pub fn as_ptr(&self) -> *const ffi::sp_model {
         self.0 as *const _
+    }
+
+    pub fn arch_info(&self) -> Result<ffi::sp_arch_info, String> {
+        let mut info: ffi::sp_arch_info = unsafe { std::mem::zeroed() };
+        let status = unsafe { ffi::sp_model_arch(self.0, &mut info) };
+        if status == ffi::sp_status_SP_OK {
+            Ok(info)
+        } else {
+            Err(format!("sp_model_arch → status={status}"))
+        }
     }
 }
 
@@ -110,6 +121,58 @@ impl SpSession {
             Ok(pos)
         } else {
             Err(format!("sp_session_position → status={status}"))
+        }
+    }
+
+    /// Deep-copy this session into a new independent session (the spec-decode fork).
+    /// `cancel_flag` is an L2-owned atomic for the child session.
+    pub fn clone_session(&self, cancel_flag: Arc<AtomicI32>) -> Result<Self, String> {
+        let cancel_raw = cancel_flag.as_ptr() as *mut c_int;
+        let mut out: *mut ffi::sp_session = ptr::null_mut();
+        let status = unsafe { ffi::sp_session_clone(self.ptr, cancel_raw, &mut out) };
+        if status == ffi::sp_status_SP_OK {
+            Ok(SpSession { ptr: out, _cancel_flag: cancel_flag })
+        } else {
+            let detail = unsafe { CStr::from_ptr(ffi::sp_last_error()) }
+                .to_string_lossy()
+                .into_owned();
+            Err(format!("sp_session_clone → status={status}: {detail}"))
+        }
+    }
+
+    /// Prefill a chunk of tokens; writes the last token's logits into `logits`.
+    pub fn prefill_chunk(&mut self, tokens: &[i32], logits: &mut [f32]) -> Result<(), String> {
+        let status = unsafe {
+            ffi::sp_prefill_chunk(
+                self.ptr,
+                tokens.as_ptr(),
+                tokens.len(),
+                logits.as_mut_ptr(),
+                logits.len(),
+            )
+        };
+        if status == ffi::sp_status_SP_OK {
+            Ok(())
+        } else {
+            let detail = unsafe { CStr::from_ptr(ffi::sp_last_error()) }
+                .to_string_lossy()
+                .into_owned();
+            Err(format!("sp_prefill_chunk → status={status}: {detail}"))
+        }
+    }
+
+    /// Decode one token; overwrites `logits` with the next-position logits.
+    pub fn decode_step(&mut self, token: i32, logits: &mut [f32]) -> Result<(), String> {
+        let status = unsafe {
+            ffi::sp_decode_step(self.ptr, token, logits.as_mut_ptr(), logits.len())
+        };
+        if status == ffi::sp_status_SP_OK {
+            Ok(())
+        } else {
+            let detail = unsafe { CStr::from_ptr(ffi::sp_last_error()) }
+                .to_string_lossy()
+                .into_owned();
+            Err(format!("sp_decode_step → status={status}: {detail}"))
         }
     }
 }

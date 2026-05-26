@@ -3,6 +3,7 @@ mod ffi;
 mod routes;
 mod server;
 mod session;
+mod sessions;
 mod state;
 
 use clap::{Parser, Subcommand};
