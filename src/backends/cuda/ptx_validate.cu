@@ -56,7 +56,7 @@ static bool run_ntt_modmul(uint32_t q, const char *tag,
     cudaMemcpy(d_a, h_a, n * sizeof(uint32_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, h_b, n * sizeof(uint32_t), cudaMemcpyHostToDevice);
 
-    kernel<<<(n + 255) / 256, 256>>>(d_a, d_b, d_out, n);
+    kernel(d_a, d_b, d_out, n);
     cudaDeviceSynchronize();
 
     uint32_t *h_got = new uint32_t[n];
