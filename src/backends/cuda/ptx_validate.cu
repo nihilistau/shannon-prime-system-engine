@@ -12,9 +12,7 @@
 #include "ptx_ntt.cuh"
 #include "ptx_hash.cuh"
 #include "ptx_spinor.cuh"
-/* Sub-phase headers added progressively:
- * #include "ptx_mma.cuh"
- */
+#include "ptx_mma.cuh"
 
 static bool gpu_available(void) {
     int n = 0;
@@ -280,6 +278,239 @@ static bool validate_spinor(void) {
     return pass;
 }
 
+/* ── MMA gate ────────────────────────────────────────────────────────── */
+
+/*
+ * validate_mma
+ *
+ * Runs M_PTX_1 (correctness), M_PTX_3 (no malloc in hot path),
+ * and M_PTX_4 (two streams, no global sync) for the INT8 WMMA kernel.
+ *
+ * Returns true iff all three gates pass; increments pass/skip/fail counts.
+ */
+static bool validate_mma(int *p_pass_count, int *p_fail_count) {
+    bool all_ok = true;
+
+    /* ── Allocate device buffers (cudaMalloc happens HERE, not in kernel) ── */
+    /* Test A: 16x16x16 all-ones */
+    const int MA = MMA_M, KA = MMA_K, NA = MMA_N;
+    int8_t  *h_Aa = new int8_t [MA * KA];
+    int8_t  *h_Ba = new int8_t [KA * NA];
+    float   *h_sca_a = new float[MA];
+    float   *h_sca_b = new float[NA];
+    __half  *h_Ca_got = new __half[MA * NA];
+    for (int i = 0; i < MA * KA; i++) h_Aa[i] = 1;
+    for (int i = 0; i < KA * NA; i++) h_Ba[i] = 1;
+    for (int i = 0; i < MA; i++) h_sca_a[i] = 1.0f;
+    for (int i = 0; i < NA; i++) h_sca_b[i] = 1.0f;
+
+    int8_t *d_Aa, *d_Ba; float *d_sca_a, *d_sca_b; __half *d_Ca;
+    cudaMalloc(&d_Aa,    MA * KA * sizeof(int8_t));
+    cudaMalloc(&d_Ba,    KA * NA * sizeof(int8_t));
+    cudaMalloc(&d_sca_a, MA * sizeof(float));
+    cudaMalloc(&d_sca_b, NA * sizeof(float));
+    cudaMalloc(&d_Ca,    MA * NA * sizeof(__half));
+    cudaMemcpy(d_Aa,    h_Aa,    MA * KA * sizeof(int8_t),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Ba,    h_Ba,    KA * NA * sizeof(int8_t),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sca_a, h_sca_a, MA * sizeof(float),        cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sca_b, h_sca_b, NA * sizeof(float),        cudaMemcpyHostToDevice);
+
+    /* Launch on default stream (stream=0) */
+    sp_frob_matmul_q8_mma(d_Aa, d_Ba, d_sca_a, d_sca_b, d_Ca,
+                           MA, KA, NA, 0);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_Ca_got, d_Ca, MA * NA * sizeof(__half), cudaMemcpyDeviceToHost);
+
+    /* Check M_PTX_3: kernel ran without memory allocation error */
+    cudaError_t err3 = cudaGetLastError();
+    if (err3 == cudaSuccess) {
+        printf("M_PTX_3 MMA: PASS\n");
+        (*p_pass_count)++;
+    } else {
+        printf("M_PTX_3 MMA: FAIL (cuda error %s)\n", cudaGetErrorString(err3));
+        (*p_fail_count)++;
+        all_ok = false;
+    }
+
+    /* Validate Test A: all elements should be __float2half(16.0f) */
+    __half expected_a = __float2half(16.0f);
+    bool test_a_ok = true;
+    int test_a_fail_cnt = 0;
+    for (int i = 0; i < MA * NA; i++) {
+        /* Compare as uint16 for exact bit match */
+        uint16_t got_bits, exp_bits;
+        memcpy(&got_bits, &h_Ca_got[i], sizeof(uint16_t));
+        memcpy(&exp_bits, &expected_a,  sizeof(uint16_t));
+        if (got_bits != exp_bits) {
+            if (test_a_fail_cnt == 0)
+                printf("M_PTX_1 MMA TestA: FAIL (first at idx=%d exp=%.1f got=%.4f)\n",
+                       i, __half2float(expected_a), __half2float(h_Ca_got[i]));
+            test_a_fail_cnt++;
+            test_a_ok = false;
+        }
+    }
+    if (test_a_ok)
+        printf("M_PTX_1 MMA TestA: PASS (all-ones 16x16x16 -> 16.0f)\n");
+    else
+        printf("M_PTX_1 MMA TestA: %d mismatches\n", test_a_fail_cnt);
+
+    cudaFree(d_Aa); cudaFree(d_Ba); cudaFree(d_sca_a); cudaFree(d_sca_b); cudaFree(d_Ca);
+    delete[] h_Aa; delete[] h_Ba; delete[] h_sca_a; delete[] h_sca_b; delete[] h_Ca_got;
+
+    /* ── Test B: random Q8 correctness (64x64x64) ─────────────────────── */
+    const int MB = 64, KB = 64, NB = 64;
+    int8_t *h_Ab = new int8_t [MB * KB];
+    int8_t *h_Bb = new int8_t [KB * NB];
+    float  *h_scb_a = new float[MB];
+    float  *h_scb_b = new float[NB];
+    __half *h_Cb_ref = new __half[MB * NB];
+    __half *h_Cb_got = new __half[MB * NB];
+
+    /* LCG random values in [-127, 127] */
+    uint32_t lcg = 0xBEEFCAFEu;
+    for (int i = 0; i < MB * KB; i++) {
+        lcg = lcg * 1664525u + 1013904223u;
+        h_Ab[i] = (int8_t)(((int)(lcg & 0xFFu)) - 128);
+        if (h_Ab[i] < -127) h_Ab[i] = -127;
+    }
+    for (int i = 0; i < KB * NB; i++) {
+        lcg = lcg * 1664525u + 1013904223u;
+        h_Bb[i] = (int8_t)(((int)(lcg & 0xFFu)) - 128);
+        if (h_Bb[i] < -127) h_Bb[i] = -127;
+    }
+    for (int i = 0; i < MB; i++) h_scb_a[i] = 1.0f / 127.0f;
+    for (int i = 0; i < NB; i++) h_scb_b[i] = 1.0f;
+
+    /* CPU reference */
+    sp_frob_matmul_q8_ref(h_Ab, h_Bb, h_scb_a, h_scb_b, h_Cb_ref, MB, KB, NB);
+
+    /* GPU */
+    int8_t *d_Ab, *d_Bb; float *d_scb_a, *d_scb_b; __half *d_Cb;
+    cudaMalloc(&d_Ab,    MB * KB * sizeof(int8_t));
+    cudaMalloc(&d_Bb,    KB * NB * sizeof(int8_t));
+    cudaMalloc(&d_scb_a, MB * sizeof(float));
+    cudaMalloc(&d_scb_b, NB * sizeof(float));
+    cudaMalloc(&d_Cb,    MB * NB * sizeof(__half));
+    cudaMemcpy(d_Ab,    h_Ab,    MB * KB * sizeof(int8_t),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Bb,    h_Bb,    KB * NB * sizeof(int8_t),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scb_a, h_scb_a, MB * sizeof(float),        cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scb_b, h_scb_b, NB * sizeof(float),        cudaMemcpyHostToDevice);
+
+    sp_frob_matmul_q8_mma(d_Ab, d_Bb, d_scb_a, d_scb_b, d_Cb,
+                           MB, KB, NB, 0);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_Cb_got, d_Cb, MB * NB * sizeof(__half), cudaMemcpyDeviceToHost);
+
+    bool test_b_ok = true;
+    int test_b_fail_cnt = 0;
+    for (int i = 0; i < MB * NB; i++) {
+        uint16_t ref_bits, got_bits;
+        memcpy(&ref_bits, &h_Cb_ref[i], sizeof(uint16_t));
+        memcpy(&got_bits, &h_Cb_got[i], sizeof(uint16_t));
+        if (ref_bits != got_bits) {
+            if (test_b_fail_cnt == 0)
+                printf("M_PTX_1 MMA TestB: FAIL (first at idx=%d ref=%.6f got=%.6f)\n",
+                       i, __half2float(h_Cb_ref[i]), __half2float(h_Cb_got[i]));
+            test_b_fail_cnt++;
+            test_b_ok = false;
+        }
+    }
+    if (test_b_ok)
+        printf("M_PTX_1 MMA TestB: PASS (random Q8 64x64x64 bit-exact)\n");
+    else
+        printf("M_PTX_1 MMA TestB: %d mismatches out of %d\n",
+               test_b_fail_cnt, MB * NB);
+
+    cudaFree(d_Ab); cudaFree(d_Bb); cudaFree(d_scb_a); cudaFree(d_scb_b); cudaFree(d_Cb);
+    delete[] h_Ab; delete[] h_Bb; delete[] h_scb_a; delete[] h_scb_b;
+    delete[] h_Cb_ref; delete[] h_Cb_got;
+
+    if (test_a_ok && test_b_ok) {
+        printf("M_PTX_1 MMA: PASS\n");
+        (*p_pass_count)++;
+    } else {
+        printf("M_PTX_1 MMA: FAIL\n");
+        (*p_fail_count)++;
+        all_ok = false;
+    }
+
+    /* ── M_PTX_4: two streams, no global sync ─────────────────────────── */
+    /*
+     * Launch the kernel on two independent streams simultaneously.
+     * Use per-stream CUDA events to verify both complete without error.
+     * Critically: do NOT call cudaDeviceSynchronize() between launches.
+     */
+    const int M4 = 32, K4 = 16, N4 = 32;
+    int8_t  *h_A4 = new int8_t [M4 * K4];
+    int8_t  *h_B4 = new int8_t [K4 * N4];
+    float   *h_s4a = new float[M4];
+    float   *h_s4b = new float[N4];
+    for (int i = 0; i < M4 * K4; i++) h_A4[i] = 1;
+    for (int i = 0; i < K4 * N4; i++) h_B4[i] = 1;
+    for (int i = 0; i < M4; i++) h_s4a[i] = 1.0f;
+    for (int i = 0; i < N4; i++) h_s4b[i] = 1.0f;
+
+    int8_t *d_A4, *d_B4; float *d_s4a, *d_s4b;
+    __half *d_C4s0, *d_C4s1;
+    cudaMalloc(&d_A4,   M4 * K4 * sizeof(int8_t));
+    cudaMalloc(&d_B4,   K4 * N4 * sizeof(int8_t));
+    cudaMalloc(&d_s4a,  M4 * sizeof(float));
+    cudaMalloc(&d_s4b,  N4 * sizeof(float));
+    cudaMalloc(&d_C4s0, M4 * N4 * sizeof(__half));
+    cudaMalloc(&d_C4s1, M4 * N4 * sizeof(__half));
+    cudaMemcpy(d_A4,  h_A4,  M4 * K4 * sizeof(int8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B4,  h_B4,  K4 * N4 * sizeof(int8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_s4a, h_s4a, M4 * sizeof(float),        cudaMemcpyHostToDevice);
+    cudaMemcpy(d_s4b, h_s4b, N4 * sizeof(float),        cudaMemcpyHostToDevice);
+
+    cudaStream_t stream0, stream1;
+    cudaStreamCreate(&stream0);
+    cudaStreamCreate(&stream1);
+
+    cudaEvent_t ev0s, ev0e, ev1s, ev1e;
+    cudaEventCreate(&ev0s); cudaEventCreate(&ev0e);
+    cudaEventCreate(&ev1s); cudaEventCreate(&ev1e);
+
+    /* Record start, launch on stream0, record end */
+    cudaEventRecord(ev0s, stream0);
+    sp_frob_matmul_q8_mma(d_A4, d_B4, d_s4a, d_s4b, d_C4s0,
+                           M4, K4, N4, stream0);
+    cudaEventRecord(ev0e, stream0);
+
+    /* Record start, launch on stream1, record end — NO global sync in between */
+    cudaEventRecord(ev1s, stream1);
+    sp_frob_matmul_q8_mma(d_A4, d_B4, d_s4a, d_s4b, d_C4s1,
+                           M4, K4, N4, stream1);
+    cudaEventRecord(ev1e, stream1);
+
+    /* Wait on each stream independently */
+    cudaStreamSynchronize(stream0);
+    cudaStreamSynchronize(stream1);
+
+    cudaError_t e0 = cudaEventQuery(ev0e);
+    cudaError_t e1 = cudaEventQuery(ev1e);
+
+    if (e0 == cudaSuccess && e1 == cudaSuccess) {
+        printf("M_PTX_4 MMA: PASS (two streams, no global sync)\n");
+        (*p_pass_count)++;
+    } else {
+        printf("M_PTX_4 MMA: FAIL (stream0=%s stream1=%s)\n",
+               cudaGetErrorString(e0), cudaGetErrorString(e1));
+        (*p_fail_count)++;
+        all_ok = false;
+    }
+
+    cudaEventDestroy(ev0s); cudaEventDestroy(ev0e);
+    cudaEventDestroy(ev1s); cudaEventDestroy(ev1e);
+    cudaStreamDestroy(stream0); cudaStreamDestroy(stream1);
+    cudaFree(d_A4); cudaFree(d_B4); cudaFree(d_s4a); cudaFree(d_s4b);
+    cudaFree(d_C4s0); cudaFree(d_C4s1);
+    delete[] h_A4; delete[] h_B4; delete[] h_s4a; delete[] h_s4b;
+
+    return all_ok;
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -287,27 +518,37 @@ int main(int argc, char **argv) {
     bool gpu = gpu_available();
     printf("ptx_validate: GPU=%s filter=%s\n", gpu ? "YES" : "NO (SKIP)", filter);
 
-    int pass = 1, skip = 0;
+    int pass = 1, skip = 0, fail = 0;
 
     if (!strcmp(filter, "ntt") || !strcmp(filter, "all")) {
         if (!gpu) { printf("M_PTX_1 NTT: SKIP\n"); skip++; }
-        else       { if (!validate_ntt()) pass = 0; }
+        else       { if (!validate_ntt()) { pass = 0; fail++; } }
     }
 
     if (!strcmp(filter, "hash") || !strcmp(filter, "all")) {
         if (!gpu) { printf("M_PTX_1 HASH: SKIP\n"); skip++; }
-        else       { if (!validate_hash()) pass = 0; }
+        else       { if (!validate_hash()) { pass = 0; fail++; } }
     }
 
     if (!strcmp(filter, "spinor") || !strcmp(filter, "all")) {
         if (!gpu) { printf("M_PTX_1 SPINOR: SKIP\n"); skip++; }
-        else       { if (!validate_spinor()) pass = 0; }
+        else       { if (!validate_spinor()) { pass = 0; fail++; } }
     }
 
     if (!strcmp(filter, "mma") || !strcmp(filter, "all")) {
-        printf("M_PTX_1 MMA: SKIP (not yet implemented)\n"); skip++;
+        if (!gpu) {
+            printf("M_PTX_1 MMA: SKIP\n");
+            printf("M_PTX_3 MMA: SKIP\n");
+            printf("M_PTX_4 MMA: SKIP\n");
+            skip += 3;
+        } else {
+            /* pass/fail counters are updated inside validate_mma */
+            int mma_pass = 0, mma_fail = 0;
+            validate_mma(&mma_pass, &mma_fail);
+            if (mma_fail > 0) { pass = 0; fail += mma_fail; }
+        }
     }
 
-    printf("ptx_validate: %s (skip=%d)\n", pass ? "PASS" : "FAIL", skip);
-    return pass ? 0 : 1;
+    printf("ptx_validate: %s (skip=%d)\n", (pass && fail == 0) ? "PASS" : "FAIL", skip);
+    return (pass && fail == 0) ? 0 : 1;
 }

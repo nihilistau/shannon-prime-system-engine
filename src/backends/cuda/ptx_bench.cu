@@ -11,6 +11,7 @@
 #include "ptx_ntt.cuh"
 #include "ptx_hash.cuh"
 #include "ptx_spinor.cuh"
+#include "ptx_mma.cuh"
 
 static bool gpu_available(void) {
     int n = 0;
@@ -206,6 +207,145 @@ static void bench_spinor(void) {
     cudaEventDestroy(t0); cudaEventDestroy(t1);
 }
 
+/* ── MMA throughput bench (Task 4) ──────────────────────────────────── */
+
+/*
+ * Baseline: two-kernel pattern simulating k_dequant_arena + SGEMM.
+ *
+ * Kernel 1 (dequant): reads int8[M*K] + int8[K*N], writes fp32[M*K] + fp32[K*N]
+ *   to scratch buffers.  This roundtrip through global memory is the actual
+ *   cost that the WMMA path avoids.
+ *
+ * Kernel 2 (sgemm): reads fp32[M*K] + fp32[K*N], computes naive fp32 matmul,
+ *   writes fp32[M*N].
+ *
+ * WMMA path: sp_frob_matmul_q8_mma — reads int8 directly, uses tensor cores,
+ *   writes fp16[M*N].  No intermediate fp32 scratch.
+ */
+
+/* Kernel 1: dequant int8 → fp32 scratch (separate A and B passes) */
+__global__ __noinline__ static void k_dequant_a(
+    const int8_t *__restrict__ src, float *__restrict__ dst, int sz)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < sz) dst[i] = (float)src[i];
+}
+
+__global__ __noinline__ static void k_dequant_b(
+    const int8_t *__restrict__ src, float *__restrict__ dst, int sz)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < sz) dst[i] = (float)src[i];
+}
+
+/* Kernel 2: naive fp32 SGEMM over dequanted scratch */
+__global__ __noinline__ static void k_sgemm(
+    const float *__restrict__ Af,
+    const float *__restrict__ Bf,
+    const float *__restrict__ scale_a,
+    const float *__restrict__ scale_b,
+    float       *__restrict__ C,
+    int M, int K, int N)
+{
+    int row = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    int col = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (row >= M || col >= N) return;
+
+    float acc = 0.0f;
+    for (int k = 0; k < K; k++)
+        acc += Af[row * K + k] * Bf[k * N + col];
+    C[row * N + col] = acc * scale_a[row] * scale_b[col];
+}
+
+static void bench_mma(void) {
+    /* Shape: M=256, K=64, N=256 — typical attention layer scale for 0.5B model */
+    const int M = 256, K = 64, N = 256;
+    const int REPS = 50;
+
+    /* Input buffers (int8) */
+    int8_t *d_A, *d_B;
+    /* Per-vector scales */
+    float  *d_sca, *d_scb;
+    /* WMMA output (fp16) */
+    __half *d_C_wmma;
+    /* Baseline scratch (fp32 dequant) and output */
+    float  *d_Af, *d_Bf, *d_C_base;
+
+    cudaMalloc(&d_A,      (size_t)M * K * sizeof(int8_t));
+    cudaMalloc(&d_B,      (size_t)K * N * sizeof(int8_t));
+    cudaMalloc(&d_sca,    (size_t)M * sizeof(float));
+    cudaMalloc(&d_scb,    (size_t)N * sizeof(float));
+    cudaMalloc(&d_C_wmma, (size_t)M * N * sizeof(__half));
+    cudaMalloc(&d_Af,     (size_t)M * K * sizeof(float));   /* dequant scratch A */
+    cudaMalloc(&d_Bf,     (size_t)K * N * sizeof(float));   /* dequant scratch B */
+    cudaMalloc(&d_C_base, (size_t)M * N * sizeof(float));
+
+    /* Fill with non-zero data to prevent trivial DCE */
+    cudaMemset(d_A, 0x01, (size_t)M * K * sizeof(int8_t));
+    cudaMemset(d_B, 0x01, (size_t)K * N * sizeof(int8_t));
+
+    /* Initialize scales on host then copy */
+    float *h_sca = new float[M], *h_scb = new float[N];
+    for (int i = 0; i < M; i++) h_sca[i] = 1.0f / 127.0f;
+    for (int i = 0; i < N; i++) h_scb[i] = 1.0f;
+    cudaMemcpy(d_sca, h_sca, M * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scb, h_scb, N * sizeof(float), cudaMemcpyHostToDevice);
+    delete[] h_sca; delete[] h_scb;
+
+    /* Grid configs */
+    const int BLK = 256;
+    dim3 dq_grid_a((M * K + BLK - 1) / BLK);
+    dim3 dq_grid_b((K * N + BLK - 1) / BLK);
+    dim3 sg_block(16, 16);
+    dim3 sg_grid((N + 15) / 16, (M + 15) / 16);
+
+    /* Warm-up both paths */
+    sp_frob_matmul_q8_mma(d_A, d_B, d_sca, d_scb, d_C_wmma, M, K, N, 0);
+    k_dequant_a<<<dq_grid_a, BLK>>>(d_A, d_Af, M * K);
+    k_dequant_b<<<dq_grid_b, BLK>>>(d_B, d_Bf, K * N);
+    k_sgemm<<<sg_grid, sg_block>>>(d_Af, d_Bf, d_sca, d_scb, d_C_base, M, K, N);
+    cudaDeviceSynchronize();
+
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0); cudaEventCreate(&t1);
+
+    /* ── Time WMMA path ── */
+    cudaEventRecord(t0);
+    for (int r = 0; r < REPS; r++)
+        sp_frob_matmul_q8_mma(d_A, d_B, d_sca, d_scb, d_C_wmma, M, K, N, 0);
+    cudaEventRecord(t1);
+    cudaEventSynchronize(t1);
+    float ms_wmma = 0;
+    cudaEventElapsedTime(&ms_wmma, t0, t1);
+
+    /* ── Time two-kernel baseline path ── */
+    cudaEventRecord(t0);
+    for (int r = 0; r < REPS; r++) {
+        k_dequant_a<<<dq_grid_a, BLK>>>(d_A, d_Af, M * K);
+        k_dequant_b<<<dq_grid_b, BLK>>>(d_B, d_Bf, K * N);
+        k_sgemm<<<sg_grid, sg_block>>>(d_Af, d_Bf, d_sca, d_scb, d_C_base, M, K, N);
+    }
+    cudaEventRecord(t1);
+    cudaEventSynchronize(t1);
+    float ms_base = 0;
+    cudaEventElapsedTime(&ms_base, t0, t1);
+
+    /* Compute metrics */
+    double ops_per_rep  = 2.0 * M * K * N;   /* multiply-adds */
+    double wmma_tops    = (ops_per_rep * REPS) / (ms_wmma * 1e-3) / 1e12;
+    double base_gflops  = (ops_per_rep * REPS) / (ms_base * 1e-3) / 1e9;
+    double speedup      = (double)(ms_base / ms_wmma);
+
+    printf("MMA bench: WMMA=%.2f TOPS  baseline=%.2f GFLOPS  speedup=%.1fx\n",
+           wmma_tops, base_gflops, speedup);
+    printf("M_PTX_2 MMA: %s (target >=3x)\n",
+           speedup >= 3.0 ? "PASS" : "NEEDS_TUNING");
+
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_sca); cudaFree(d_scb);
+    cudaFree(d_C_wmma); cudaFree(d_Af); cudaFree(d_Bf); cudaFree(d_C_base);
+    cudaEventDestroy(t0); cudaEventDestroy(t1);
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -225,7 +365,10 @@ int main(int argc, char **argv) {
         if (!gpu) printf("M_PTX_2 SPINOR: SKIP\n");
         else      bench_spinor();
     }
-    if (!strcmp(filter, "mma")    || !strcmp(filter, "all"))   printf("M_PTX_2 MMA: SKIP\n");
+    if (!strcmp(filter, "mma") || !strcmp(filter, "all")) {
+        if (!gpu) printf("M_PTX_2 MMA: SKIP\n");
+        else      bench_mma();
+    }
 
     return 0;
 }
