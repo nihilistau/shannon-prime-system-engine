@@ -4,6 +4,7 @@ mod routes;
 mod server;
 mod session;
 mod sessions;
+mod spec;
 mod state;
 mod tokenizer;
 
