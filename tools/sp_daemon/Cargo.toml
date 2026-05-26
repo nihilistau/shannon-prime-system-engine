@@ -8,6 +8,10 @@ description = "Shannon Prime L3 HTTP/SSE daemon — wraps the frozen L1 C ABI in
 name = "sp-daemon"
 path = "src/main.rs"
 
+[[bin]]
+name = "spec_validate"
+path = "src/bin/spec_validate.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros"] }
 tokio       = { version = "1", features = ["full"] }

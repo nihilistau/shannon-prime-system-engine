@@ -186,4 +186,21 @@ impl SpSession {
             Err(format!("sp_decode_step → status={status}: {detail}"))
         }
     }
+
+    /// Roll back n_tokens positions in the KV cache (O(1) ring-pointer decrement).
+    ///
+    /// Corollary T8.1: state at P−n after rewind from P is byte-identical to
+    /// state at P−n having never visited P. Called on the draft session when the
+    /// target rejects at position k < P, with n = P − 1 − k.
+    pub fn rewind(&mut self, n_tokens: usize) -> Result<(), String> {
+        let status = unsafe { ffi::sp_session_rewind(self.ptr, n_tokens) };
+        if status == ffi::sp_status_SP_OK {
+            Ok(())
+        } else {
+            let detail = unsafe { CStr::from_ptr(ffi::sp_last_error()) }
+                .to_string_lossy()
+                .into_owned();
+            Err(format!("sp_session_rewind({n_tokens}) → status={status}: {detail}"))
+        }
+    }
 }
