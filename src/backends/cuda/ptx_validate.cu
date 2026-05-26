@@ -11,8 +11,8 @@
 
 #include "ptx_ntt.cuh"
 #include "ptx_hash.cuh"
+#include "ptx_spinor.cuh"
 /* Sub-phase headers added progressively:
- * #include "ptx_spinor.cuh"
  * #include "ptx_mma.cuh"
  */
 
@@ -231,6 +231,55 @@ static bool validate_hash(void) {
     return pass;
 }
 
+/* ── SPINOR gate ─────────────────────────────────────────────────────── */
+
+__global__ static void k_spinor_load(const uint32_t *src, uint32_t *dst,
+                                      int n_blocks, int is_hot) {
+    int b    = (int)blockIdx.x;
+    int lane = (int)threadIdx.x;   /* blockDim must be 32 */
+    if (b < n_blocks)
+        dst[b * 32 + lane] = sp_spinor_warpload(src, (uint32_t)b, lane, is_hot);
+}
+
+static bool validate_spinor(void) {
+    /* 16 blocks × 32 words src (index b*16+lane, max = 15*16+31 = 271 < 512) */
+    const int N = 16;
+    uint32_t *h_src = new uint32_t[N * 32];
+    uint32_t *h_got = new uint32_t[N * 32];
+    for (int i = 0; i < N * 32; i++)
+        h_src[i] = (uint32_t)((uint32_t)i * 2654435761u + 1u);
+
+    uint32_t *d_src, *d_dst;
+    cudaMalloc(&d_src, N * 32 * sizeof(uint32_t));
+    cudaMalloc(&d_dst, N * 32 * sizeof(uint32_t));
+    cudaMemcpy(d_src, h_src, N * 32 * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    bool pass = true;
+    const char *labels[2] = {"cold", "hot"};
+    for (int hot = 1; hot >= 0 && pass; hot--) {
+        cudaMemset(d_dst, 0, N * 32 * sizeof(uint32_t));
+        k_spinor_load<<<N, 32>>>(d_src, d_dst, N, hot);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_got, d_dst, N * 32 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        for (int b = 0; b < N && pass; b++) {
+            for (int lane = 0; lane < 32 && pass; lane++) {
+                uint32_t expected = h_src[b * 16 + lane];
+                uint32_t got      = h_got[b * 32 + lane];
+                if (expected != got) {
+                    printf("M_PTX_1 SPINOR %s: FAIL (b=%d lane=%d exp=%u got=%u)\n",
+                           labels[hot], b, lane, expected, got);
+                    pass = false;
+                }
+            }
+        }
+        if (pass) printf("M_PTX_1 SPINOR %s: PASS (%d blocks)\n", labels[hot], N);
+    }
+
+    cudaFree(d_src); cudaFree(d_dst);
+    delete[] h_src; delete[] h_got;
+    return pass;
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -251,7 +300,8 @@ int main(int argc, char **argv) {
     }
 
     if (!strcmp(filter, "spinor") || !strcmp(filter, "all")) {
-        printf("M_PTX_1 SPINOR: SKIP (not yet implemented)\n"); skip++;
+        if (!gpu) { printf("M_PTX_1 SPINOR: SKIP\n"); skip++; }
+        else       { if (!validate_spinor()) pass = 0; }
     }
 
     if (!strcmp(filter, "mma") || !strcmp(filter, "all")) {

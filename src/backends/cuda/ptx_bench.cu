@@ -10,6 +10,7 @@
 
 #include "ptx_ntt.cuh"
 #include "ptx_hash.cuh"
+#include "ptx_spinor.cuh"
 
 static bool gpu_available(void) {
     int n = 0;
@@ -152,6 +153,59 @@ static void bench_hash(void) {
     cudaEventDestroy(t0); cudaEventDestroy(t1);
 }
 
+/* ── SPINOR throughput bench (Task 3) ───────────────────────────────── */
+
+__global__ __noinline__ static void k_bench_spinor(const uint32_t *src, uint32_t *sink,
+                                                    int n_blocks, int is_hot, int reps) {
+    int lane = threadIdx.x & 31;
+    uint32_t acc = 0;
+    for (int r = 0; r < reps; r++) {
+        int b = (blockIdx.x + r) % n_blocks;
+        acc ^= sp_spinor_warpload(src, (uint32_t)b, lane, is_hot);
+    }
+    if (lane == 0 && acc == 0xDEADBEEFu) *sink = acc;  /* prevent DCE */
+}
+
+static void bench_spinor(void) {
+    const int N = 1024;   /* 1024 Spinor blocks = 64 KB */
+    const int REPS = 200;
+
+    uint32_t *d_src, *d_sink;
+    cudaMalloc(&d_src,  (size_t)N * 32 * sizeof(uint32_t));
+    cudaMalloc(&d_sink, sizeof(uint32_t));
+    cudaMemset(d_src, 0xAB, (size_t)N * 32 * sizeof(uint32_t));
+
+    /* warm-up */
+    k_bench_spinor<<<N, 32>>>(d_src, d_sink, N, 1, 1);
+    cudaDeviceSynchronize();
+
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0); cudaEventCreate(&t1);
+
+    cudaEventRecord(t0);
+    k_bench_spinor<<<N, 32>>>(d_src, d_sink, N, 1, REPS);
+    cudaEventRecord(t1);
+    cudaEventSynchronize(t1);
+    float ms_hot = 0;
+    cudaEventElapsedTime(&ms_hot, t0, t1);
+
+    cudaEventRecord(t0);
+    k_bench_spinor<<<N, 32>>>(d_src, d_sink, N, 0, REPS);
+    cudaEventRecord(t1);
+    cudaEventSynchronize(t1);
+    float ms_cold = 0;
+    cudaEventElapsedTime(&ms_cold, t0, t1);
+
+    double bytes = (double)N * 32 * sizeof(uint32_t) * REPS;
+    double bw_hot  = bytes / (ms_hot  * 1e-3) / 1e9;
+    double bw_cold = bytes / (ms_cold * 1e-3) / 1e9;
+    printf("SPINOR bench: hot=%.1f GB/s  cold=%.1f GB/s\n", bw_hot, bw_cold);
+    printf("M_PTX_2 SPINOR: bandwidth measured (target >=85%% SOL via ncu)\n");
+
+    cudaFree(d_src); cudaFree(d_sink);
+    cudaEventDestroy(t0); cudaEventDestroy(t1);
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -167,7 +221,10 @@ int main(int argc, char **argv) {
         if (!gpu) printf("M_PTX_2 HASH: SKIP\n");
         else      bench_hash();
     }
-    if (!strcmp(filter, "spinor") || !strcmp(filter, "all"))  printf("M_PTX_2 SPINOR: SKIP\n");
+    if (!strcmp(filter, "spinor") || !strcmp(filter, "all")) {
+        if (!gpu) printf("M_PTX_2 SPINOR: SKIP\n");
+        else      bench_spinor();
+    }
     if (!strcmp(filter, "mma")    || !strcmp(filter, "all"))   printf("M_PTX_2 MMA: SKIP\n");
 
     return 0;
