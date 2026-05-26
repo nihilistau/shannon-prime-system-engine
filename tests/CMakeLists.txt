@@ -441,3 +441,15 @@ if(SP_ENGINE_WITH_VULKAN)
     set_tests_properties(T_FRO_4_VK PROPERTIES LABELS "SLOW" TIMEOUT 3600
         ENVIRONMENT "SP_BACKEND=vulkan")
 endif()
+
+# ── Phase 2-CPU.AVX: AVX-512 identity tests (§18 CPU.AVX) ──
+if(SP_ENGINE_WITH_AVX512)
+    add_executable(test_avx512 test_avx512.c)
+    target_link_libraries(test_avx512 PRIVATE sp_engine)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_avx512 PRIVATE
+            -mavx512f -mavx512vpopcntdq -mavx512bw -mavx512dq -mavx512vnni -mavx512ifma)
+    elseif(MSVC)
+        target_compile_options(test_avx512 PRIVATE /arch:AVX512)
+    endif()
+endif()
