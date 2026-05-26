@@ -56,6 +56,17 @@ impl SpModel {
             Err(format!("sp_model_arch → status={status}"))
         }
     }
+
+    /// Returns a slice into the tokenizer mmap held by the model.
+    /// The slice lifetime is tied to &self — safe because SpModel owns the mmap.
+    pub fn tokenizer_blob(&self) -> Result<&[u8], String> {
+        let mut size: u64 = 0;
+        let ptr = unsafe { crate::ffi::sp_model_tokenizer_blob(self.0 as *const _, &mut size) };
+        if ptr.is_null() {
+            return Err("sp_model_tokenizer_blob returned NULL".to_string());
+        }
+        Ok(unsafe { std::slice::from_raw_parts(ptr as *const u8, size as usize) })
+    }
 }
 
 // ── SpSession ──────────────────────────────────────────────────────────────

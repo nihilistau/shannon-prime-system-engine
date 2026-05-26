@@ -4,6 +4,7 @@ use tokio::sync::broadcast;
 
 use crate::session::{SpModel, SpSession};
 use crate::sessions::Sessions;
+use crate::tokenizer::SptbTokenizer;
 
 #[derive(Clone, Debug)]
 pub struct ChatEvent {
@@ -34,4 +35,6 @@ pub struct AppState {
     pub started_at: Instant,
     /// Broadcast channel for daemon-wide events (/v1/events subscribers).
     pub events_tx: broadcast::Sender<ChatEvent>,
+    /// Tokenizer built from the .sp-tokenizer SPTB blob at startup.
+    pub tokenizer: Arc<SptbTokenizer>,
 }

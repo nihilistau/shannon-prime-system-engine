@@ -93,6 +93,10 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
     let pos = session.position().expect("sp_session_position");
     info!("L1 FFI OK — session_position={pos}");
 
+    let tokenizer = crate::tokenizer::SptbTokenizer::build(&model, arch.arch_id)
+        .expect("SptbTokenizer::build failed — check .sp-tokenizer blob");
+    info!("tokenizer built: arch_id={} eos_ids={:?}", arch.arch_id, tokenizer.eos_ids);
+
     let (events_tx, _) =
         tokio::sync::broadcast::channel::<crate::state::ChatEvent>(64);
 
@@ -105,6 +109,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
         tokens_decoded: AtomicU64::new(0),
         started_at: Instant::now(),
         events_tx,
+        tokenizer,
     });
 
     // ── HTTP server ────────────────────────────────────────────────────────

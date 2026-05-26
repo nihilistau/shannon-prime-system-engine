@@ -5,6 +5,7 @@ mod server;
 mod session;
 mod sessions;
 mod state;
+mod tokenizer;
 
 use clap::{Parser, Subcommand};
 

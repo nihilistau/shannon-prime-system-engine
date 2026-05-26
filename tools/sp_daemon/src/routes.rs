@@ -14,8 +14,9 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt as _;
 
 use crate::state::{AppState, ChatEvent};
+use crate::tokenizer::{Message, PushResult, TokenDecodeBuffer};
 
-// ── SSE header helper ─────────────────────────────────────────────────────────
+// ── SSE header helper ──────────────────────────────────────────────────────
 
 fn sse_response(sse: impl IntoResponse) -> Response {
     let mut r = sse.into_response();
@@ -28,7 +29,7 @@ fn sse_response(sse: impl IntoResponse) -> Response {
     r
 }
 
-// ── /v1/metrics ───────────────────────────────────────────────────────────────
+// ── /v1/metrics ───────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 pub(crate) struct Metrics {
@@ -53,23 +54,26 @@ pub async fn v1_metrics(State(state): State<Arc<AppState>>) -> Json<Metrics> {
         tokens_per_sec: tps,
         ram_svm_bytes: 0,
         peers: 0,
-        phase: "lat-phase-2-l3-sse-closed",
+        phase: "lat-phase-2-l3-tok-closed",
         session_pos,
     })
 }
 
-// ── /v1/chat ──────────────────────────────────────────────────────────────────
+// ── /v1/chat ──────────────────────────────────────────────────────────────
 
-/// VERBS debug request shape. Accepts raw token IDs to sidestep the BPE encoder
-/// (real text→tokens is Phase 2-L3.TOK scope; the toy fixture has vocab=48).
 #[derive(Deserialize)]
 pub struct ChatRequest {
-    pub prompt_tokens: Vec<i32>,
+    pub prompt: Option<String>,
+    pub messages: Option<Vec<Message>>,
+    pub prompt_tokens: Option<Vec<i32>>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default)]
+    pub stop: Vec<String>,
 }
+
 fn default_max_tokens() -> u32 {
-    32
+    256
 }
 
 #[derive(Serialize)]
@@ -81,7 +85,63 @@ struct ChatDelta {
 pub async fn v1_chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    // Exactly one input field required.
+    let n_inputs = req.prompt.is_some() as u8
+        + req.messages.is_some() as u8
+        + req.prompt_tokens.is_some() as u8;
+    if n_inputs == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "one of prompt / messages / prompt_tokens required"})),
+        )
+            .into_response();
+    }
+    if n_inputs > 1 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "only one of prompt / messages / prompt_tokens may be set"})),
+        )
+            .into_response();
+    }
+
+    // Tokenize input.
+    let tokenizer = state.tokenizer.clone();
+    let tokens: Vec<i32> = if let Some(ids) = req.prompt_tokens {
+        ids
+    } else if let Some(prompt_text) = req.prompt {
+        match tokenizer.encode(&prompt_text) {
+            Ok(ids) => ids,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+                    .into_response();
+            }
+        }
+    } else {
+        let messages = req.messages.unwrap();
+        let text = match tokenizer.apply_template(&messages) {
+            Ok(t) => t,
+            Err(te) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "chat_template_unavailable",
+                        "arch_id": te.arch_id,
+                        "hint": "use prompt or prompt_tokens"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        match tokenizer.encode(&text) {
+            Ok(ids) => ids,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+                    .into_response();
+            }
+        }
+    };
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
     // Clone base session — hold Mutex only during sp_session_clone (sub-ms).
@@ -97,9 +157,8 @@ pub async fn v1_chat(
             let _ = tx
                 .send(Ok(Event::default().data(format!("{{\"error\":\"{e}\"}}")))).await;
             return sse_response(
-                Sse::new(ReceiverStream::new(rx)).keep_alive(
-                    KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"),
-                ),
+                Sse::new(ReceiverStream::new(rx))
+                    .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive")),
             );
         }
     };
@@ -108,12 +167,15 @@ pub async fn v1_chat(
     let sessions = state.sessions.clone();
     let vocab_size = state.vocab_size;
     let app = state.clone();
+    let max_tokens = req.max_tokens;
+    let stop_strings = req.stop;
 
     task::spawn_blocking(move || {
         let mut logits = vec![0.0f32; vocab_size];
+        let mut dec_buf = TokenDecodeBuffer::new(stop_strings);
 
-        if !req.prompt_tokens.is_empty() {
-            if let Err(e) = child.prefill_chunk(&req.prompt_tokens, &mut logits) {
+        if !tokens.is_empty() {
+            if let Err(e) = child.prefill_chunk(&tokens, &mut logits) {
                 let _ = tx.blocking_send(Ok(Event::default().data(
                     format!("{{\"error\":\"{e}\"}}"),
                 )));
@@ -125,27 +187,59 @@ pub async fn v1_chat(
 
         let mut next_token = argmax(&logits);
 
-        for _ in 0..req.max_tokens {
-            let payload = serde_json::to_string(&ChatDelta {
-                delta: format!("<{next_token}>"),
-                chat_id,
-            })
-            .unwrap_or_default();
-
-            if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
-                // Client disconnected.
-                cancel_child.store(1, Ordering::Relaxed);
-                let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
-                sessions.remove(chat_id);
-                return;
+        'decode: for _ in 0..max_tokens {
+            // EOS check before emitting.
+            if !tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token) {
+                break 'decode;
             }
+
+            let token_bytes = tokenizer.decode_token(next_token);
+            let stop_hit = match dec_buf.push(token_bytes) {
+                PushResult::Emit(bytes) => {
+                    if !bytes.is_empty() {
+                        let text = String::from_utf8_lossy(&bytes).into_owned();
+                        let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                            .unwrap_or_default();
+                        if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
+                            // Client disconnected.
+                            cancel_child.store(1, Ordering::Relaxed);
+                            let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
+                            sessions.remove(chat_id);
+                            return;
+                        }
+                    }
+                    false
+                }
+                PushResult::Stopped(bytes) => {
+                    if !bytes.is_empty() {
+                        let text = String::from_utf8_lossy(&bytes).into_owned();
+                        let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                            .unwrap_or_default();
+                        let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+                    }
+                    true
+                }
+            };
 
             app.tokens_decoded.fetch_add(1, Ordering::Relaxed);
 
+            if stop_hit {
+                break 'decode;
+            }
+
             match child.decode_step(next_token, &mut logits) {
                 Ok(()) => next_token = argmax(&logits),
-                Err(_) => break, // SP_ECANCEL or context full
+                Err(_) => break 'decode,
             }
+        }
+
+        // Flush any bytes held back for UTF-8 / stop-string boundary detection.
+        let flushed = dec_buf.flush();
+        if !flushed.is_empty() {
+            let text = String::from_utf8_lossy(&flushed).into_owned();
+            let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                .unwrap_or_default();
+            let _ = tx.blocking_send(Ok(Event::default().data(payload)));
         }
 
         let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;
@@ -160,9 +254,8 @@ pub async fn v1_chat(
     });
 
     sse_response(
-        Sse::new(ReceiverStream::new(rx)).keep_alive(
-            KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"),
-        ),
+        Sse::new(ReceiverStream::new(rx))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive")),
     )
 }
 
@@ -175,7 +268,7 @@ fn argmax(logits: &[f32]) -> i32 {
         .unwrap_or(0)
 }
 
-// ── /v1/abort/{id} ────────────────────────────────────────────────────────────
+// ── /v1/abort/{id} ────────────────────────────────────────────────────────
 
 pub async fn v1_abort(
     State(state): State<Arc<AppState>>,
@@ -188,23 +281,22 @@ pub async fn v1_abort(
     }
 }
 
-// ── /v1/receipts ──────────────────────────────────────────────────────────────
+// ── /v1/receipts ──────────────────────────────────────────────────────────
 
 pub async fn v1_receipts() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "receipts": [], "cursor": null }))
 }
 
-// ── /v1/peers ─────────────────────────────────────────────────────────────────
+// ── /v1/peers ─────────────────────────────────────────────────────────────
 
 pub async fn v1_peers() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "peers": [] }))
 }
 
-// ── /v1/events ────────────────────────────────────────────────────────────────
+// ── /v1/events ────────────────────────────────────────────────────────────
 
 /// Long-lived SSE channel for daemon-wide events.
 /// Emits `event: chat_completed` when a chat finishes or is cancelled.
-/// Keepalive comment every 15 s keeps connections alive through proxies.
 pub async fn v1_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rx = state.events_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| {
