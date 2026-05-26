@@ -40,6 +40,27 @@ add_subdirectory(lib/shannon-prime-system)
 # ── Engine library + backend ────────────────────────────────────────────────
 add_subdirectory(src)
 
+# ── Phase 2-CU.PTX: standalone validate / bench binaries ─────────────────────
+# ptx_validate: M_PTX_1 bit-identity test for each PTX sub-phase.
+# ptx_bench:    M_PTX_2 throughput benchmark (Nsight Compute target).
+# Both compile against sm_75/80/86/90; on no-GPU hosts they print SKIP.
+if(SP_ENGINE_WITH_CUDA)
+    find_package(CUDAToolkit REQUIRED)  # idempotent — already found in src/
+    foreach(_tgt ptx_validate ptx_bench)
+        add_executable(${_tgt} src/backends/cuda/${_tgt}.cu)
+        target_link_libraries(${_tgt} PRIVATE CUDA::cudart)
+        target_include_directories(${_tgt} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/lib/shannon-prime-system/include
+        )
+        set_target_properties(${_tgt} PROPERTIES
+            CUDA_ARCHITECTURES "75;80;86;90"
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON
+        )
+    endforeach()
+endif()
+
 # ── Tools (Phase 2-FMT: the sp_transcode GGUF -> .sp-model CLI) ──────────────
 add_subdirectory(tools/sp_transcode)
 
