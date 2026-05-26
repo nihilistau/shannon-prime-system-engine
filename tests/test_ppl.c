@@ -137,13 +137,14 @@ static void T_FRO_4(void) {
      * Frobenius Q8 is ~1% lossy by design, see roadmap §8.2.x / E_CPU_3). */
     SP_CHECK((drift < 0 ? -drift : drift) < gate_q8, "per-row Q8 PPL drift within bound");
 
-    /* ── E_FP16_1: fp16 working-precision pass (§8.7.5). Reload without the arena
-     * (fp16 runs on the f16 weights), set SP_ENGINE_FP16=1 (f16 matmul activations +
-     * f16 KV/attention, f32 accumulator + f32 residual — the llama.cpp f16 scheme the
-     * oracle uses). Gate: fp16 PPL vs the f16 oracle within the same precision floor
-     * as gate (a) ("naturally tight, same precision both sides"). ── */
+    /* ── E_FP16_1: fp16 working-precision pass (§8.7.5). CPU-only gate regardless of
+     * SP_BACKEND (E_FP16_3 covers the Vulkan side). Clear SP_BACKEND so that
+     * sp_perplexity routes through the CPU forward even when running under T_FRO_4_VK
+     * (where SP_BACKEND=vulkan would otherwise silently divert to gemma3_forward_vulkan
+     * and inherit stale Q8 GPU state from the prior arena pass). ── */
     qwen3_free(m);
     clear_matmul_knobs();                 /* drops SP_ARENA so we run on f16 weights */
+    ENV_CLR("SP_BACKEND");               /* E_FP16_1 is CPU-only; E_FP16_3 re-arms it */
     ENV_SET("SP_ENGINE_FP16", "1");
     m = qwen3_load(SP_GEMMA3_GGUF);
     SP_CHECK(m != NULL, "reload model for fp16 pass");
