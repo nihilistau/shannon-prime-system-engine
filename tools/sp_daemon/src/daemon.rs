@@ -15,10 +15,16 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str) {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["--daemon-inner", "--model", model, "--tokenizer", tokenizer]);
+    cmd.args([
+        "--daemon-inner",
+        "--model", model,
+        "--tokenizer", tokenizer,
+        "--draft-model", draft_model,
+        "--draft-tokenizer", draft_tokenizer,
+    ]);
 
     // Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the child is
     // not attached to the parent's console or process group.
@@ -61,7 +67,7 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
-pub async fn run_inner(model_path: &str, tok_path: &str) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -76,9 +82,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
 
     info!("sp-daemon inner starting (model={model_path})");
 
-    // ── L1 FFI setup ──────────────────────────────────────────────────────
-    // Load the .sp-model and create a persistent session.  cancel_flag is
-    // L2-owned (Arc<AtomicI32>); raw pointer handed to L1 via sp_session_create.
+    // ── Target model ──────────────────────────────────────────────────────
     let model = crate::session::SpModel::load(model_path, tok_path)
         .expect("sp_model_load failed — check SP_MODEL_PATH / SP_TOKENIZER_PATH");
 
@@ -97,6 +101,22 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
         .expect("SptbTokenizer::build failed — check .sp-tokenizer blob");
     info!("tokenizer built: arch_id={} eos_ids={:?}", arch.arch_id, tokenizer.eos_ids);
 
+    // ── Draft model (Phase 4-SPEC) — optional ─────────────────────────────
+    let (draft_model, draft_session) = if !draft_model_path.is_empty() {
+        let dm = crate::session::SpModel::load(draft_model_path, draft_tok_path)
+            .expect("draft sp_model_load failed");
+        let draft_arch = dm.arch_info().expect("draft sp_model_arch failed");
+        info!("draft arch: vocab={} n_layers={} hidden={}",
+            draft_arch.vocab_size, draft_arch.n_layers, draft_arch.hidden_dim);
+        let d_cancel = Arc::new(AtomicI32::new(0));
+        let ds = crate::session::SpSession::create(&dm, d_cancel)
+            .expect("draft sp_session_create failed");
+        (Some(dm), Some(Mutex::new(ds)))
+    } else {
+        info!("no draft model — single-model mode");
+        (None, None)
+    };
+
     let (events_tx, _) =
         tokio::sync::broadcast::channel::<crate::state::ChatEvent>(64);
 
@@ -104,6 +124,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str) {
         model,
         session: Mutex::new(session),
         cancel_flag,
+        draft_model,
+        draft_session,
         sessions: crate::sessions::Sessions::new(),
         vocab_size,
         tokens_decoded: AtomicU64::new(0),

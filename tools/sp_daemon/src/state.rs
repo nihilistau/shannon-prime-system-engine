@@ -14,17 +14,21 @@ pub struct ChatEvent {
 
 /// Shared daemon state — threaded through axum via `State<Arc<AppState>>`.
 ///
-/// Drop order (declaration order) keeps the model alive past every session:
-/// sessions drop before model, so mmap-backed pointers in sp_session remain valid.
+/// Drop order (declaration order) keeps models alive past every session:
+/// sessions drop before models, so mmap-backed pointers in sp_session remain valid.
 pub struct AppState {
-    /// Kept alive so session mmap-backed pointers remain valid.
+    /// Target/verifier model. Kept alive so session mmap-backed pointers remain valid.
     #[allow(dead_code)]
     pub model: SpModel,
-    /// Base session, kept at position 0. Held only briefly during sp_session_clone.
+    /// Base target session at position 0. Held only briefly during sp_session_clone.
     pub session: Mutex<SpSession>,
-    /// Cancel flag for the base session (not used for per-chat cancellation).
     #[allow(dead_code)]
     pub cancel_flag: Arc<AtomicI32>,
+    /// Draft model for speculative decoding (Phase 4-SPEC). None in single-model mode.
+    #[allow(dead_code)]
+    pub draft_model: Option<SpModel>,
+    /// Base draft session at position 0. Cloned per spec-decode request.
+    pub draft_session: Option<Mutex<SpSession>>,
     /// Active chat registry — maps chat_id → per-chat cancel_flag.
     pub sessions: Arc<Sessions>,
     /// Logits buffer width for this model; set once at startup from sp_arch_info.
