@@ -1,9 +1,11 @@
 mod daemon;
 mod ffi;
+mod mining;
 mod routes;
 mod server;
 mod session;
 mod sessions;
+mod sieve_ffi;
 mod spec;
 mod state;
 mod tokenizer;

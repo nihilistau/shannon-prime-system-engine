@@ -12,6 +12,7 @@ const MODULES: &[(&str, &str)] = &[
     ("model",            "sp_model"),
     ("arena",            "sp_arena"),
     ("frobenius",        "sp_frobenius"),
+    ("sieve",            "sp_sieve"),
     ("kste",             "sp_kste"),
     ("vht2",             "sp_vht2"),
     ("poly_ring",        "sp_poly_ring"),

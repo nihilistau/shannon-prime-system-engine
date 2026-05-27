@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{atomic::{AtomicI32, AtomicU64}, Arc, Mutex};
+use std::sync::{atomic::{AtomicI32, AtomicU64, AtomicBool}, Arc, Mutex};
 use std::time::Instant;
 
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 use tracing::info;
 
 fn pid_file() -> PathBuf {
@@ -118,7 +120,16 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     };
 
     let (events_tx, _) =
-        tokio::sync::broadcast::channel::<crate::state::ChatEvent>(64);
+        tokio::sync::broadcast::channel::<crate::state::DaemonEvent>(64);
+
+    let node_signing_key = SigningKey::generate(&mut OsRng);
+    let mining_signing_key = node_signing_key.clone();
+    let pubkey_hex: String = node_signing_key.verifying_key().to_bytes()
+        .iter().fold(String::new(), |mut s, b| { use std::fmt::Write; let _ = write!(s, "{b:02x}"); s });
+    info!("node pubkey: {pubkey_hex}");
+
+    let inference_active = Arc::new(AtomicBool::new(false));
+    let receipt_store    = Arc::new(Mutex::new(Vec::new()));
 
     let state = Arc::new(crate::state::AppState {
         model,
@@ -130,9 +141,20 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         vocab_size,
         tokens_decoded: AtomicU64::new(0),
         started_at: Instant::now(),
-        events_tx,
+        events_tx: events_tx.clone(),
         tokenizer,
+        inference_active: inference_active.clone(),
+        receipt_store:    receipt_store.clone(),
+        node_signing_key,
     });
+
+    // ── Background PoUW mining task ────────────────────────────────────────
+    tokio::spawn(crate::mining::run_mining_loop(
+        mining_signing_key,
+        inference_active,
+        receipt_store,
+        events_tx,
+    ));
 
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));

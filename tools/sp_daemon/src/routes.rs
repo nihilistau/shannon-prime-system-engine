@@ -13,7 +13,8 @@ use tokio::task;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt as _;
 
-use crate::state::{AppState, ChatEvent};
+use std::sync::atomic::AtomicBool;
+use crate::state::{AppState, DaemonEvent};
 use crate::tokenizer::{Message, PushResult, TokenDecodeBuffer};
 
 // ── SSE header helper ──────────────────────────────────────────────────────
@@ -170,7 +171,19 @@ pub async fn v1_chat(
     let max_tokens = req.max_tokens;
     let stop_strings = req.stop;
 
+    // Signal the mining loop to back off for the duration of this request.
+    state.inference_active.store(true, Ordering::Relaxed);
+
+    // Guard that clears inference_active when the spawn_blocking closure exits
+    // (including early returns and panics).
+    struct InferenceGuard(Arc<AtomicBool>);
+    impl Drop for InferenceGuard {
+        fn drop(&mut self) { self.0.store(false, Ordering::Relaxed); }
+    }
+    let _guard = InferenceGuard(state.inference_active.clone());
+
     task::spawn_blocking(move || {
+        let _g = _guard; // keep guard alive for the duration of the blocking closure
         let mut logits = vec![0.0f32; vocab_size];
         let mut dec_buf = TokenDecodeBuffer::new(stop_strings);
 
@@ -179,7 +192,7 @@ pub async fn v1_chat(
                 let _ = tx.blocking_send(Ok(Event::default().data(
                     format!("{{\"error\":\"{e}\"}}"),
                 )));
-                let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
+                let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
                 sessions.remove(chat_id);
                 return;
             }
@@ -203,7 +216,7 @@ pub async fn v1_chat(
                         if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
                             // Client disconnected.
                             cancel_child.store(1, Ordering::Relaxed);
-                            let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
+                            let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
                             sessions.remove(chat_id);
                             return;
                         }
@@ -245,10 +258,10 @@ pub async fn v1_chat(
         let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;
         if is_cancelled {
             let _ = tx.blocking_send(Ok(Event::default().event("cancelled").data("{}")));
-            let _ = app.events_tx.send(ChatEvent { chat_id, status: "cancelled" });
+            let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
         } else {
             let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
-            let _ = app.events_tx.send(ChatEvent { chat_id, status: "done" });
+            let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "done" });
         }
         sessions.remove(chat_id);
     });
@@ -283,8 +296,15 @@ pub async fn v1_abort(
 
 // ── /v1/receipts ──────────────────────────────────────────────────────────
 
-pub async fn v1_receipts() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "receipts": [], "cursor": null }))
+pub async fn v1_receipts(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = state.receipt_store.lock().unwrap();
+    let receipts: Vec<_> = store.iter().map(|r| serde_json::json!({
+        "payload_hex": r.payload_hex,
+        "sig_hex":     r.sig_hex,
+        "round":       r.round,
+    })).collect();
+    drop(store);
+    Json(serde_json::json!({ "receipts": receipts, "cursor": null }))
 }
 
 // ── /v1/peers ─────────────────────────────────────────────────────────────
@@ -296,20 +316,26 @@ pub async fn v1_peers() -> Json<serde_json::Value> {
 // ── /v1/events ────────────────────────────────────────────────────────────
 
 /// Long-lived SSE channel for daemon-wide events.
-/// Emits `event: chat_completed` when a chat finishes or is cancelled.
+/// Emits `event: chat_completed` for chat lifecycle and `event: mint` for
+/// new PoUW receipts.
 pub async fn v1_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rx = state.events_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| {
         let ev = result.ok()?;
-        let payload = serde_json::json!({
-            "chat_id": ev.chat_id,
-            "status":  ev.status,
-        });
-        Some(Ok::<Event, Infallible>(
-            Event::default()
-                .event("chat_completed")
-                .data(payload.to_string()),
-        ))
+        match ev {
+            DaemonEvent::Chat { chat_id, status } => {
+                let payload = serde_json::json!({ "chat_id": chat_id, "status": status });
+                Some(Ok::<Event, Infallible>(
+                    Event::default().event("chat_completed").data(payload.to_string()),
+                ))
+            }
+            DaemonEvent::Mint { receipt_hex, sig_hex } => {
+                let payload = serde_json::json!({ "receipt_hex": receipt_hex, "sig_hex": sig_hex });
+                Some(Ok::<Event, Infallible>(
+                    Event::default().event("mint").data(payload.to_string()),
+                ))
+            }
+        }
     });
 
     sse_response(
