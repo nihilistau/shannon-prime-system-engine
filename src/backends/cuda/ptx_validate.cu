@@ -239,6 +239,23 @@ __global__ static void k_spinor_load(const uint32_t *src, uint32_t *dst,
         dst[b * 32 + lane] = sp_spinor_warpload(src, (uint32_t)b, lane, is_hot);
 }
 
+/* k_spinor_load_v4: 4 words per lane using sp_spinor_warpload4.
+ * dst layout: dst[(b * 32 + lane) * 4 + 0..3] = the four loaded words. */
+__global__ static void k_spinor_load_v4(const uint32_t *src, uint32_t *dst,
+                                         int n_blocks, int is_hot) {
+    int b    = (int)blockIdx.x;
+    int lane = (int)threadIdx.x;
+    if (b < n_blocks) {
+        uint32_t v0, v1, v2, v3;
+        sp_spinor_warpload4(src, (uint32_t)b, lane, is_hot, &v0, &v1, &v2, &v3);
+        int base = (b * 32 + lane) * 4;
+        dst[base + 0] = v0;
+        dst[base + 1] = v1;
+        dst[base + 2] = v2;
+        dst[base + 3] = v3;
+    }
+}
+
 static bool validate_spinor(void) {
     /* 16 blocks × 32 words src (index b*16+lane, max = 15*16+31 = 271 < 512) */
     const int N = 16;
@@ -275,7 +292,49 @@ static bool validate_spinor(void) {
 
     cudaFree(d_src); cudaFree(d_dst);
     delete[] h_src; delete[] h_got;
-    return pass;
+    if (!pass) return false;
+
+    /* ── v4 validate: 8 blocks × 32 lanes × 4 words ─────────────────── */
+    /* sp_spinor_warpload4 stride: 128 words/block.
+     * Source array: N4 blocks × 128 words; each [b][lane*4+0..3] = expected. */
+    const int N4 = 8;
+    const int src4_sz = N4 * 128;
+    uint32_t *h_src4 = new uint32_t[src4_sz];
+    uint32_t *h_got4 = new uint32_t[N4 * 32 * 4];
+    for (int i = 0; i < src4_sz; i++)
+        h_src4[i] = (uint32_t)((uint32_t)i * 1664525u + 1013904223u);
+
+    uint32_t *d_src4, *d_dst4;
+    cudaMalloc(&d_src4, src4_sz * sizeof(uint32_t));
+    cudaMalloc(&d_dst4, N4 * 32 * 4 * sizeof(uint32_t));
+    cudaMemcpy(d_src4, h_src4, src4_sz * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    bool v4_pass = true;
+    for (int hot = 1; hot >= 0 && v4_pass; hot--) {
+        cudaMemset(d_dst4, 0, N4 * 32 * 4 * sizeof(uint32_t));
+        k_spinor_load_v4<<<N4, 32>>>(d_src4, d_dst4, N4, hot);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_got4, d_dst4, N4 * 32 * 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        for (int b = 0; b < N4 && v4_pass; b++) {
+            for (int lane = 0; lane < 32 && v4_pass; lane++) {
+                for (int w = 0; w < 4 && v4_pass; w++) {
+                    uint32_t expected = h_src4[b * 128 + lane * 4 + w];
+                    uint32_t got      = h_got4[(b * 32 + lane) * 4 + w];
+                    if (expected != got) {
+                        printf("M_PTX_1 SPINOR_v4 %s: FAIL (b=%d lane=%d w=%d exp=%u got=%u)\n",
+                               labels[hot], b, lane, w, expected, got);
+                        v4_pass = false;
+                    }
+                }
+            }
+        }
+        if (v4_pass)
+            printf("M_PTX_1 SPINOR_v4 %s: PASS (%d blocks)\n", labels[hot], N4);
+    }
+
+    cudaFree(d_src4); cudaFree(d_dst4);
+    delete[] h_src4; delete[] h_got4;
+    return v4_pass;
 }
 
 /* ── MMA gate ────────────────────────────────────────────────────────── */
@@ -433,6 +492,136 @@ static bool validate_mma(int *p_pass_count, int *p_fail_count) {
         printf("M_PTX_1 MMA: FAIL\n");
         (*p_fail_count)++;
         all_ok = false;
+    }
+
+    /* ── Test C: INT4 all-ones (8×32×8) ──────────────────────────────── */
+    /* K=32 nibbles: expected inner product = 32 × 1 × 1 = 32 → 32.0f */
+    {
+        const int MC = MMA_M, KC = MMA_INT4_K, NC = MMA_N;
+        const int KC_bytes = KC / 2;  /* 16 */
+        uint8_t *h_Ac = new uint8_t [MC * KC_bytes];
+        uint8_t *h_Bc = new uint8_t [KC_bytes * NC];
+        float   *h_scc_a = new float[MC];
+        float   *h_scc_b = new float[NC];
+        __half  *h_Cc_got = new __half[MC * NC];
+        __half  *h_Cc_ref = new __half[MC * NC];
+        /* All nibbles = 1: packed as 0x11 per byte */
+        memset(h_Ac, 0x11, MC * KC_bytes);
+        memset(h_Bc, 0x11, KC_bytes * NC);
+        for (int i = 0; i < MC; i++) h_scc_a[i] = 1.0f;
+        for (int i = 0; i < NC; i++) h_scc_b[i] = 1.0f;
+        sp_frob_matmul_q4_ref(h_Ac, h_Bc, h_scc_a, h_scc_b, h_Cc_ref, MC, KC, NC);
+
+        uint8_t *d_Ac, *d_Bc; float *d_scc_a, *d_scc_b; __half *d_Cc;
+        cudaMalloc(&d_Ac,    MC * KC_bytes);
+        cudaMalloc(&d_Bc,    KC_bytes * NC);
+        cudaMalloc(&d_scc_a, MC * sizeof(float));
+        cudaMalloc(&d_scc_b, NC * sizeof(float));
+        cudaMalloc(&d_Cc,    MC * NC * sizeof(__half));
+        cudaMemcpy(d_Ac, h_Ac, MC * KC_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_Bc, h_Bc, KC_bytes * NC, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_scc_a, h_scc_a, MC * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_scc_b, h_scc_b, NC * sizeof(float), cudaMemcpyHostToDevice);
+        sp_frob_matmul_q4_mma(d_Ac, d_Bc, d_scc_a, d_scc_b, d_Cc, MC, KC, NC, 0);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_Cc_got, d_Cc, MC * NC * sizeof(__half), cudaMemcpyDeviceToHost);
+
+        __half exp_c = __float2half((float)KC);
+        bool test_c_ok = true;
+        int test_c_fail = 0;
+        for (int i = 0; i < MC * NC; i++) {
+            uint16_t got_bits, exp_bits;
+            memcpy(&got_bits, &h_Cc_got[i], 2);
+            memcpy(&exp_bits, &exp_c, 2);
+            if (got_bits != exp_bits) {
+                if (test_c_fail == 0)
+                    printf("M_PTX_1 MMA INT4 TestC: FAIL (idx=%d exp=%.1f got=%.1f)\n",
+                           i, __half2float(exp_c), __half2float(h_Cc_got[i]));
+                test_c_fail++;
+                test_c_ok = false;
+            }
+        }
+        if (test_c_ok)
+            printf("M_PTX_1 MMA INT4 TestC: PASS (all-ones 8x32x8 -> 32.0f)\n");
+        else
+            printf("M_PTX_1 MMA INT4 TestC: %d mismatches\n", test_c_fail);
+
+        cudaFree(d_Ac); cudaFree(d_Bc); cudaFree(d_scc_a); cudaFree(d_scc_b); cudaFree(d_Cc);
+        delete[] h_Ac; delete[] h_Bc; delete[] h_scc_a; delete[] h_scc_b;
+        delete[] h_Cc_got; delete[] h_Cc_ref;
+        if (!test_c_ok) { (*p_fail_count)++; all_ok = false; }
+        else              (*p_pass_count)++;
+    }
+
+    /* ── Test D: INT4 random Q4 (16×32×16), bit-exact vs scalar ref ──── */
+    {
+        const int MD = 16, KD = MMA_INT4_K * 2, ND = 16;  /* KD=64 nibbles */
+        const int KD_bytes = KD / 2;                        /* 32 */
+        uint8_t *h_Ad = new uint8_t [MD * KD_bytes];
+        uint8_t *h_Bd = new uint8_t [KD_bytes * ND];
+        float   *h_scd_a = new float[MD];
+        float   *h_scd_b = new float[ND];
+        __half  *h_Cd_ref = new __half[MD * ND];
+        __half  *h_Cd_got = new __half[MD * ND];
+
+        /* Nibbles in [1..7]: each byte packs two s4 values.
+         * LCG → bits[2:0] gives nibble in [0..7]; bias to [1..7] via |1 mask. */
+        uint32_t lcg = 0xCAFEBABEu;
+        for (int i = 0; i < MD * KD_bytes; i++) {
+            lcg = lcg * 1664525u + 1013904223u;
+            uint8_t lo = ((lcg >> 0) & 0x7u) | 0x1u;  /* 1..7 */
+            uint8_t hi = ((lcg >> 8) & 0x7u) | 0x1u;  /* 1..7 */
+            h_Ad[i] = (uint8_t)(lo | (hi << 4));
+        }
+        for (int i = 0; i < KD_bytes * ND; i++) {
+            lcg = lcg * 1664525u + 1013904223u;
+            uint8_t lo = ((lcg >> 0) & 0x7u) | 0x1u;
+            uint8_t hi = ((lcg >> 8) & 0x7u) | 0x1u;
+            h_Bd[i] = (uint8_t)(lo | (hi << 4));
+        }
+        for (int i = 0; i < MD; i++) h_scd_a[i] = 1.0f / 7.0f;
+        for (int i = 0; i < ND; i++) h_scd_b[i] = 1.0f;
+        sp_frob_matmul_q4_ref(h_Ad, h_Bd, h_scd_a, h_scd_b, h_Cd_ref, MD, KD, ND);
+
+        uint8_t *d_Ad, *d_Bd; float *d_scd_a, *d_scd_b; __half *d_Cd;
+        cudaMalloc(&d_Ad,    MD * KD_bytes);
+        cudaMalloc(&d_Bd,    KD_bytes * ND);
+        cudaMalloc(&d_scd_a, MD * sizeof(float));
+        cudaMalloc(&d_scd_b, ND * sizeof(float));
+        cudaMalloc(&d_Cd,    MD * ND * sizeof(__half));
+        cudaMemcpy(d_Ad, h_Ad, MD * KD_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_Bd, h_Bd, KD_bytes * ND, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_scd_a, h_scd_a, MD * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_scd_b, h_scd_b, ND * sizeof(float), cudaMemcpyHostToDevice);
+        sp_frob_matmul_q4_mma(d_Ad, d_Bd, d_scd_a, d_scd_b, d_Cd, MD, KD, ND, 0);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_Cd_got, d_Cd, MD * ND * sizeof(__half), cudaMemcpyDeviceToHost);
+
+        bool test_d_ok = true;
+        int test_d_fail = 0;
+        for (int i = 0; i < MD * ND; i++) {
+            uint16_t ref_bits, got_bits;
+            memcpy(&ref_bits, &h_Cd_ref[i], 2);
+            memcpy(&got_bits, &h_Cd_got[i], 2);
+            if (ref_bits != got_bits) {
+                if (test_d_fail == 0)
+                    printf("M_PTX_1 MMA INT4 TestD: FAIL (idx=%d ref=%.4f got=%.4f)\n",
+                           i, __half2float(h_Cd_ref[i]), __half2float(h_Cd_got[i]));
+                test_d_fail++;
+                test_d_ok = false;
+            }
+        }
+        if (test_d_ok)
+            printf("M_PTX_1 MMA INT4 TestD: PASS (random Q4 16x64x16 bit-exact)\n");
+        else
+            printf("M_PTX_1 MMA INT4 TestD: %d mismatches out of %d\n",
+                   test_d_fail, MD * ND);
+
+        cudaFree(d_Ad); cudaFree(d_Bd); cudaFree(d_scd_a); cudaFree(d_scd_b); cudaFree(d_Cd);
+        delete[] h_Ad; delete[] h_Bd; delete[] h_scd_a; delete[] h_scd_b;
+        delete[] h_Cd_ref; delete[] h_Cd_got;
+        if (!test_d_ok) { (*p_fail_count)++; all_ok = false; }
+        else              (*p_pass_count)++;
     }
 
     /* ── M_PTX_4: two streams, no global sync ─────────────────────────── */

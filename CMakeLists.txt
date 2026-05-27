@@ -48,7 +48,7 @@ if(SP_ENGINE_WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)  # idempotent — already found in src/
     foreach(_tgt ptx_validate ptx_bench)
         add_executable(${_tgt} src/backends/cuda/${_tgt}.cu)
-        target_link_libraries(${_tgt} PRIVATE CUDA::cudart)
+        target_link_libraries(${_tgt} PRIVATE CUDA::cudart CUDA::cublas)
         target_include_directories(${_tgt} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cuda
             ${CMAKE_CURRENT_SOURCE_DIR}/lib/shannon-prime-system/include
