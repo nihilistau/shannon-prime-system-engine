@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use quinn::{Connection, Endpoint};
+use quinn::{Connection, Endpoint, RecvStream};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -157,6 +157,63 @@ impl SpQuicCoordinator {
     }
 }
 
+// ── Worker ────────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct SpQuicWorker {
+    connection: Connection,
+}
+
+impl SpQuicWorker {
+    /// Dial the coordinator at `server_addr`, binding the client endpoint on
+    /// `local_addr` (use port 0 for OS-assigned port).
+    pub async fn connect(local_addr: SocketAddr, server_addr: SocketAddr) -> Result<Self> {
+        let client_config = make_client_config()?;
+        let mut endpoint = Endpoint::client(local_addr)?;
+        endpoint.set_default_client_config(client_config);
+        let conn = endpoint.connect(server_addr, "localhost")?.await?;
+        Ok(Self { connection: conn })
+    }
+
+    /// Open a fresh unidirectional stream and write `block`.
+    /// Each call to send_block opens its own stream ID — independent delivery,
+    /// no HoL coupling between blocks.
+    pub async fn send_block(&self, block: &ResidueBlock) -> Result<()> {
+        let mut send = self.connection.open_uni().await?;
+
+        send.write_all(&header_to_bytes(&block.header)).await?;
+        for r in &block.residues {
+            send.write_all(&r.to_le_bytes()).await?;
+        }
+        send.finish()?;
+        Ok(())
+    }
+}
+
+// ── Receive ───────────────────────────────────────────────────────────────────
+
+/// Read all bytes from a unidirectional stream and decode a ResidueBlock.
+/// First 64 bytes = ShardBlockHeader; remaining bytes / 4 = residues.
+/// Max payload: 64 + 512 * 4 = 2112 bytes (N ≤ 512).
+pub async fn recv_block(mut stream: RecvStream) -> Result<ResidueBlock> {
+    let bytes = stream.read_to_end(64 + 512 * 4).await?;
+
+    if bytes.len() < 64 {
+        return Err(format!("stream too short: {} bytes (need ≥ 64)", bytes.len()).into());
+    }
+    if (bytes.len() - 64) % 4 != 0 {
+        return Err("residue payload length not a multiple of 4".into());
+    }
+
+    let header = header_from_bytes(bytes[0..64].try_into().unwrap());
+    let residues = bytes[64..]
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    Ok(ResidueBlock { header, residues })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +258,53 @@ mod tests {
         let addr = coord.local_addr().expect("local_addr");
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
         assert_ne!(addr.port(), 0); // OS assigned a real port
+    }
+
+    // worker_connect_and_roundtrip is inline here (same probe linker issue
+    // blocks tests/test_quic_shard.rs for async QUIC tests — see Task 4/5).
+    #[tokio::test]
+    async fn worker_connect_and_roundtrip() {
+        use std::time::Duration;
+
+        let coord = SpQuicCoordinator::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind");
+        let coord_addr = coord.local_addr().unwrap();
+
+        let accept = tokio::spawn(async move {
+            let conn = coord.accept_connection().await.expect("accept");
+            let stream = conn.accept_uni().await.expect("uni");
+            recv_block(stream).await.expect("recv_block")
+        });
+
+        let worker = SpQuicWorker::connect(
+            "127.0.0.1:0".parse().unwrap(),
+            coord_addr,
+        )
+        .await
+        .expect("connect");
+
+        let block = ResidueBlock {
+            header: ShardBlockHeader {
+                seq_id: 99,
+                token_pos: 7,
+                layer_id: 2,
+                prime_selector: 0,
+                _pad: [0u8; 47],
+            },
+            residues: (0u32..128).collect(),
+        };
+        worker.send_block(&block).await.expect("send_block");
+
+        let received = tokio::time::timeout(Duration::from_secs(5), accept)
+            .await
+            .expect("timeout")
+            .expect("task panic");
+
+        assert_eq!(received.header.seq_id, 99);
+        assert_eq!(received.header.prime_selector, 0);
+        assert_eq!(received.residues.len(), 128);
+        assert_eq!(received.residues[0], 0);
+        assert_eq!(received.residues[127], 127);
     }
 }
