@@ -1,5 +1,8 @@
 // Phase 6-NET QUIC transport — wire types. TLS, endpoints, and loop added in Tasks 4-7.
 
+use std::sync::Arc;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 pub type ShardError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -47,6 +50,84 @@ pub fn header_from_bytes(b: &[u8; 64]) -> ShardBlockHeader {
     }
 }
 
+// ── TLS ───────────────────────────────────────────────────────────────────────
+
+/// Dev-mode TLS verifier: accepts any server certificate.
+/// INTEGRATION POINT: Replace with Phase 5 ed25519 dominance identity in a later phase.
+/// When Phase 5 identity is implemented, swap this struct for one that verifies
+/// the peer's ed25519 public key against the known lattice node registry.
+#[derive(Debug)]
+struct SkipServerVerification;
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+pub fn make_server_config() -> Result<quinn::ServerConfig> {
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+    let cert_der: CertificateDer<'static> = ck.cert.der().clone();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()));
+
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)?;
+
+    let quic_server = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_server)))
+}
+
+pub fn make_client_config() -> Result<quinn::ClientConfig> {
+    let tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        .with_no_client_auth();
+
+    let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
+    Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +152,11 @@ mod tests {
         assert_eq!(h2.token_pos,      h.token_pos);
         assert_eq!(h2.layer_id,       h.layer_id);
         assert_eq!(h2.prime_selector, h.prime_selector);
+    }
+
+    #[test]
+    fn tls_configs_construct_without_panic() {
+        make_server_config().expect("server config");
+        make_client_config().expect("client config");
     }
 }

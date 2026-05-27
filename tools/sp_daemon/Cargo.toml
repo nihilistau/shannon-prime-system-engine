@@ -32,8 +32,8 @@ ahash           = "0.8"
 ed25519-dalek   = { version = "2", features = ["rand_core"] }
 rand            = "0.8"
 quinn   = { version = "0.11", features = ["rustls"] }
-rustls  = { version = "0.23", features = ["ring"] }
-rcgen   = { version = "0.13", features = ["ring"] }
+rustls  = { version = "0.23", default-features = false, features = ["ring"] }
+rcgen   = { version = "0.13", default-features = false, features = ["ring"] }
 dashmap = "6"
 
 [target.'cfg(unix)'.dependencies]

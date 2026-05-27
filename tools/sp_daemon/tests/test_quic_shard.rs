@@ -61,3 +61,6 @@ fn ntt_ctx_handle_drop() {
         // _handle drops here — ntt_free called exactly once
     }
 }
+
+// tls_configs_construct_without_panic is an inline lib test in quic_shard.rs
+// (integration test path blocked by pre-existing probe linker issue — sp_model_load etc.)
