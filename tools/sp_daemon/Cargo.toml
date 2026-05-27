@@ -8,6 +8,10 @@ description = "Shannon Prime L3 HTTP/SSE daemon — wraps the frozen L1 C ABI in
 name = "sp-daemon"
 path = "src/main.rs"
 
+[lib]
+name = "sp_daemon"
+path = "src/lib.rs"
+
 [[bin]]
 name = "spec_validate"
 path = "src/bin/spec_validate.rs"
@@ -27,6 +31,10 @@ tokenizers      = "0.21"
 ahash           = "0.8"
 ed25519-dalek   = { version = "2", features = ["rand_core"] }
 rand            = "0.8"
+quinn   = { version = "0.11", features = ["rustls"] }
+rustls  = { version = "0.23", features = ["ring"] }
+rcgen   = { version = "0.13", features = ["ring"] }
+dashmap = "6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
