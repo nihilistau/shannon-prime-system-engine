@@ -418,6 +418,208 @@ mod tests {
         assert_eq!(received.residues[127], 127);
     }
 
+    /// M_NET_1: Three-node topology — coordinator accepts two independent worker
+    /// connections and receives one stream from each.
+    #[tokio::test]
+    async fn m_net_1_topology_scaffold() {
+        use std::time::Duration;
+
+        let coord = SpQuicCoordinator::bind("127.0.0.1:8081".parse().unwrap())
+            .await
+            .expect("coordinator bind :8081");
+
+        let accept = tokio::spawn(async move {
+            // Connection from worker A (q1)
+            let conn_a = coord.accept_connection().await.expect("accept conn_a");
+            let stream_a = conn_a.accept_uni().await.expect("uni from A");
+            let block_a = recv_block(stream_a).await.expect("block A");
+            assert_eq!(block_a.header.prime_selector, 0, "worker A must send q1");
+            assert_eq!(block_a.residues.len(), 128);
+
+            // Connection from worker B (q2)
+            let conn_b = coord.accept_connection().await.expect("accept conn_b");
+            let stream_b = conn_b.accept_uni().await.expect("uni from B");
+            let block_b = recv_block(stream_b).await.expect("block B");
+            assert_eq!(block_b.header.prime_selector, 1, "worker B must send q2");
+            assert_eq!(block_b.residues.len(), 128);
+        });
+
+        // Worker A: local :8082, connects to coord :8081
+        let worker_a = SpQuicWorker::connect(
+            "127.0.0.1:8082".parse().unwrap(),
+            "127.0.0.1:8081".parse().unwrap(),
+        ).await.expect("worker A connect");
+
+        worker_a.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 0, token_pos: 0, layer_id: 0,
+                                       prime_selector: 0, _pad: [0; 47] },
+            residues: vec![1u32; 128],
+        }).await.expect("worker A send");
+
+        // Worker B: local :8083, connects to coord :8081
+        let worker_b = SpQuicWorker::connect(
+            "127.0.0.1:8083".parse().unwrap(),
+            "127.0.0.1:8081".parse().unwrap(),
+        ).await.expect("worker B connect");
+
+        worker_b.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 0, token_pos: 0, layer_id: 0,
+                                       prime_selector: 1, _pad: [0; 47] },
+            residues: vec![2u32; 128],
+        }).await.expect("worker B send");
+
+        // Keep workers alive until acceptor completes
+        tokio::time::timeout(Duration::from_secs(10), accept)
+            .await
+            .expect("M_NET_1 timed out")
+            .expect("acceptor panicked");
+        drop(worker_a);
+        drop(worker_b);
+    }
+
+    /// M_NET_2: Garner reconstruction via QUIC must be bit-identical to local
+    /// ntt_crt_recombine reference.
+    #[tokio::test]
+    async fn m_net_2_math_identity() {
+        use crate::ntt_ffi::{ntt_crt_recombine, ntt_free, ntt_init};
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        const Q1: u32 = 1073738753;
+        const Q2: u32 = 1073732609;
+        const N: usize = 128;
+
+        let q1_residues: Vec<u32> = (0..N as u32).map(|i| i % Q1).collect();
+        let q2_residues: Vec<u32> = (0..N as u32).map(|i| i % Q2).collect();
+
+        // Scalar reference (direct FFI, no network)
+        let expected: Vec<i64> = unsafe {
+            let ctx = ntt_init(N as u32);
+            assert!(!ctx.is_null());
+            let mut out = vec![0i64; N];
+            ntt_crt_recombine(ctx, q1_residues.as_ptr(), q2_residues.as_ptr(), out.as_mut_ptr());
+            ntt_free(ctx);
+            out
+        };
+
+        // Start coordinator on :8084
+        let coord = SpQuicCoordinator::bind("127.0.0.1:8084".parse().unwrap())
+            .await
+            .expect("bind :8084");
+        let (results_tx, mut results_rx) = mpsc::channel(4);
+        tokio::spawn(run_garner_loop(coord, N as u32, results_tx));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Worker A sends q1 from :8085
+        let wa = SpQuicWorker::connect(
+            "127.0.0.1:8085".parse().unwrap(),
+            "127.0.0.1:8084".parse().unwrap(),
+        ).await.expect("worker A");
+        wa.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 42, token_pos: 10, layer_id: 5,
+                                       prime_selector: 0, _pad: [0; 47] },
+            residues: q1_residues,
+        }).await.expect("send q1");
+
+        // Worker B sends q2 from :8086
+        let wb = SpQuicWorker::connect(
+            "127.0.0.1:8086".parse().unwrap(),
+            "127.0.0.1:8084".parse().unwrap(),
+        ).await.expect("worker B");
+        wb.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 42, token_pos: 10, layer_id: 5,
+                                       prime_selector: 1, _pad: [0; 47] },
+            residues: q2_residues,
+        }).await.expect("send q2");
+
+        // Keep workers alive until result received
+        let result = tokio::time::timeout(Duration::from_secs(5), results_rx.recv())
+            .await
+            .expect("M_NET_2 timeout — no reconstruction received")
+            .expect("results channel closed");
+
+        drop(wa);
+        drop(wb);
+
+        assert_eq!(result.seq_id, 42, "seq_id mismatch");
+        assert_eq!(result.token_pos, 10);
+        assert_eq!(result.layer_id, 5);
+        assert_eq!(
+            result.coeffs, expected,
+            "M_NET_2 FAIL: Garner reconstruction via QUIC not bit-identical to scalar reference"
+        );
+    }
+
+    /// M_NET_3: HoL bypass — block 1 (sent immediately) must arrive at coordinator
+    /// within 100ms even though block 0 (independent stream) is delayed 200ms.
+    ///
+    /// Falsifiability: a buggy serialized-stream implementation would deliver block 1
+    /// at ~200ms (behind block 0's delay), failing the 100ms timeout.
+    #[tokio::test]
+    async fn m_net_3_hol_bypass() {
+        use std::time::Duration;
+
+        let coord = SpQuicCoordinator::bind("127.0.0.1:8087".parse().unwrap())
+            .await
+            .expect("bind :8087");
+
+        let accept = tokio::spawn(async move {
+            let conn = coord.accept_connection().await.expect("accept");
+
+            // Block 1 arrives first (t≈0ms); block 0 arrives second (t≈200ms)
+            let stream1 = conn.accept_uni().await.expect("first uni stream");
+            let block1 = tokio::time::timeout(
+                Duration::from_millis(100),
+                recv_block(stream1),
+            )
+            .await
+            .expect("M_NET_3 FAIL: block 1 did not arrive within 100ms — HoL blocking detected")
+            .expect("recv_block failed on block 1");
+            assert_eq!(block1.header.seq_id, 1, "first stream must be seq_id=1 (immediate)");
+
+            // Block 0 arrives after 200ms delay
+            let stream0 = conn.accept_uni().await.expect("second uni stream");
+            let block0 = tokio::time::timeout(
+                Duration::from_millis(500),
+                recv_block(stream0),
+            )
+            .await
+            .expect("M_NET_3: block 0 did not arrive within 500ms")
+            .expect("recv_block failed on block 0");
+            assert_eq!(block0.header.seq_id, 0, "second stream must be seq_id=0 (delayed)");
+        });
+
+        // Single worker on :8088
+        let worker = SpQuicWorker::connect(
+            "127.0.0.1:8088".parse().unwrap(),
+            "127.0.0.1:8087".parse().unwrap(),
+        ).await.expect("worker connect");
+
+        // Block 0 (seq_id=0): sleep 200ms then send. Stream ID opened AFTER sleep.
+        let worker_clone = worker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            worker_clone.send_block(&ResidueBlock {
+                header: ShardBlockHeader { seq_id: 0, token_pos: 0, layer_id: 0,
+                                           prime_selector: 0, _pad: [0; 47] },
+                residues: vec![0u32; 128],
+            }).await.expect("send block 0");
+        });
+
+        // Block 1 (seq_id=1): sent immediately. Own stream ID, independent.
+        worker.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 1, token_pos: 1, layer_id: 0,
+                                       prime_selector: 1, _pad: [0; 47] },
+            residues: vec![1u32; 128],
+        }).await.expect("send block 1");
+
+        tokio::time::timeout(Duration::from_secs(3), accept)
+            .await
+            .expect("M_NET_3 overall timeout")
+            .expect("acceptor panicked");
+        // keep worker alive
+    }
+
     // garner_loop_reconstructs_single_pair is inline here (same probe linker
     // issue blocks integration tests for async QUIC endpoints — see Task 4/5).
     #[tokio::test]
