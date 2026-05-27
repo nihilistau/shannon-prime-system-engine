@@ -240,7 +240,7 @@ pub async fn run_garner_loop(
     coordinator: SpQuicCoordinator,
     ntt_n: u32,
     results_tx: mpsc::Sender<GarnerResult>,
-) {
+) -> Result<()> {
     let pending: Arc<DashMap<u64, PendingBlock>> = Arc::new(DashMap::new());
 
     loop {
@@ -299,15 +299,14 @@ pub async fn run_garner_loop(
                                 unsafe {
                                     use crate::ntt_ffi::{ntt_crt_recombine, ntt_free, ntt_init};
                                     let ctx = ntt_init(ntt_n);
-                                    if !ctx.is_null() {
-                                        ntt_crt_recombine(
-                                            ctx,
-                                            q1.as_ptr(),
-                                            q2.as_ptr(),
-                                            coeffs.as_mut_ptr(),
-                                        );
-                                        ntt_free(ctx);
-                                    }
+                                    if ctx.is_null() { return; }
+                                    ntt_crt_recombine(
+                                        ctx,
+                                        q1.as_ptr(),
+                                        q2.as_ptr(),
+                                        coeffs.as_mut_ptr(),
+                                    );
+                                    ntt_free(ctx);
                                 }
                                 let _ = results_tx.send(GarnerResult {
                                     seq_id,
@@ -322,6 +321,7 @@ pub async fn run_garner_loop(
             }
         });
     }
+    Ok(())
 }
 
 #[cfg(test)]
