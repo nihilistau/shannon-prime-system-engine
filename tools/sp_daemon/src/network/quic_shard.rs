@@ -292,6 +292,9 @@ pub async fn run_garner_loop(
                         // Atomic remove — exactly one task wins if two race here.
                         if let Some((_, pb)) = pending.remove(&seq_id) {
                             if let (Some(q1), Some(q2)) = (pb.q1, pb.q2) {
+                                if q1.len() != ntt_n as usize || q2.len() != ntt_n as usize {
+                                    return;
+                                }
                                 let mut coeffs = vec![0i64; ntt_n as usize];
                                 unsafe {
                                     use crate::ntt_ffi::{ntt_crt_recombine, ntt_free, ntt_init};
