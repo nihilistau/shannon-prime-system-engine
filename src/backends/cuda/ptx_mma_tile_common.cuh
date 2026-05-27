@@ -189,24 +189,27 @@ uint32_t sp_tile_frag_b_int4(
 }
 
 /* ── Scale epilogue helper ─────────────────────────────────────────────────── */
-/* Writes one MMA output pair (d0, d1) at thread T's output coordinates:        */
-/*   row = out_row + T/4,  col0 = out_col + (T%4)*2,  col1 = col0+1            */
+/* Writes one MMA output pair (d0, d1) with per-element scale = scale_a[row]    */
+/* * scale_b[col].  Matches sp_frob_matmul_q8_ref / q4_ref scale convention.    */
+/* out_row / out_col are the 8×8 MMA tile origin (not the per-thread coords).   */
 __device__ __forceinline__
 void sp_tile_epilogue_mma(
     const int acc_d0, const int acc_d1,
     __half * __restrict__ C_global,
+    const float * __restrict__ scale_a,
+    const float * __restrict__ scale_b,
     int out_row, int out_col,
-    float row_scale, int lane,
-    int M, int N)
+    int lane, int M, int N)
 {
-    int row  = out_row  + (lane >> 2);
-    int col0 = out_col  + (lane & 3) * 2;
+    int row  = out_row + (lane >> 2);
+    int col0 = out_col + (lane & 3) * 2;
     int col1 = col0 + 1;
     if (row < M) {
+        float sa = scale_a[row];
         if (col0 < N)
-            C_global[row * N + col0] = __float2half(__int2float_rn(acc_d0) * row_scale);
+            C_global[row * N + col0] = __float2half(__int2float_rn(acc_d0) * sa * scale_b[col0]);
         if (col1 < N)
-            C_global[row * N + col1] = __float2half(__int2float_rn(acc_d1) * row_scale);
+            C_global[row * N + col1] = __float2half(__int2float_rn(acc_d1) * sa * scale_b[col1]);
     }
 }
 
