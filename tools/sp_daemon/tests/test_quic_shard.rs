@@ -64,3 +64,6 @@ fn ntt_ctx_handle_drop() {
 
 // tls_configs_construct_without_panic is an inline lib test in quic_shard.rs
 // (integration test path blocked by pre-existing probe linker issue — sp_model_load etc.)
+
+// coordinator_binds_on_loopback is an inline lib test in quic_shard.rs (Task 5)
+// (same probe linker issue blocks integration tests for QUIC endpoints)

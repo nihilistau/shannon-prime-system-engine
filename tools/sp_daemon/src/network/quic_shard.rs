@@ -1,6 +1,8 @@
 // Phase 6-NET QUIC transport — wire types. TLS, endpoints, and loop added in Tasks 4-7.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use quinn::{Connection, Endpoint};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -128,6 +130,33 @@ pub fn make_client_config() -> Result<quinn::ClientConfig> {
     Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
 }
 
+// ── Coordinator ───────────────────────────────────────────────────────────────
+
+pub struct SpQuicCoordinator {
+    endpoint: Endpoint,
+}
+
+impl SpQuicCoordinator {
+    /// Bind a QUIC server endpoint on `addr`.
+    pub async fn bind(addr: SocketAddr) -> Result<Self> {
+        let server_config = make_server_config()?;
+        let endpoint = Endpoint::server(server_config, addr)?;
+        Ok(Self { endpoint })
+    }
+
+    /// Accept the next incoming QUIC connection (blocks until one arrives).
+    pub async fn accept_connection(&self) -> Result<Connection> {
+        let incoming = self.endpoint.accept().await
+            .ok_or("coordinator endpoint closed")?;
+        let conn = incoming.await?;
+        Ok(conn)
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.endpoint.local_addr()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +187,19 @@ mod tests {
     fn tls_configs_construct_without_panic() {
         make_server_config().expect("server config");
         make_client_config().expect("client config");
+    }
+
+    // coordinator_binds_on_loopback is inline here because the integration test
+    // path (tests/test_quic_shard.rs) is blocked by a pre-existing probe.rs linker
+    // issue (same reason tls_configs_construct_without_panic is inline — see Task 4).
+    #[tokio::test]
+    async fn coordinator_binds_on_loopback() {
+        let coord = SpQuicCoordinator::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("coordinator bind failed");
+
+        let addr = coord.local_addr().expect("local_addr");
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_ne!(addr.port(), 0); // OS assigned a real port
     }
 }
