@@ -5,9 +5,11 @@
  * REPS: 5 warm-up (discarded) + 50 measured.
  * Reports: median / p90 / p99 ms and speedup vs cuBLAS HGEMM baseline.
  *
+ * B layout: cuBLAS uses dB[K][N] (FP16 dequant); PTX tile uses dB_NT[N][K]
+ * (pre-swizzled INT8) and dBq4_NT[N][K_bytes] (pre-swizzled INT4).
+ *
  * INT8 baseline: k_dequant_i8_to_f16 × 2 + cublasHgemm (FP16, TENSOR_OP_MATH)
  * INT4 baseline: k_dequant_i4_to_f16 × 2 + cublasHgemm
- * (baseline includes dequant overhead, matching ptx_bench.cu convention)
  *
  * Run under ncu for tensor-core SOL:
  *   ncu --metrics sm__inst_executed_pipe_tensor.sum,dram__bytes_read.sum.per_second
@@ -65,7 +67,7 @@ static float percentile(float *sorted, int n, float pct) {
 
 /* ── Bench bodies ──────────────────────────────────────────────────────────── */
 static int bench_int8(
-    const int8_t *dA, const int8_t *dB,
+    const int8_t *dA, const int8_t *dB, const int8_t *dB_NT,
     const float *dSA, const float *dSB,
     __half *dC_ptx, __half *dC_cbl,
     __half *dA_f16, __half *dB_f16,
@@ -84,7 +86,7 @@ static int bench_int8(
         k_dequant_i8_to_f16<<<((int)szB+BLK-1)/BLK, BLK>>>(dB, dB_f16, (int)szB);
         cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
                     &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
-        sp_frob_matmul_q8_mma_tile(dA, dB, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
+        sp_frob_matmul_q8_mma_tile(dA, dB_NT, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
     }
     cudaDeviceSynchronize();
 
@@ -102,7 +104,7 @@ static int bench_int8(
     /* Measure tiled INT8 kernel */
     for (int r = 0; r < REPS; r++) {
         cudaEventRecord(t0);
-        sp_frob_matmul_q8_mma_tile(dA, dB, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
+        sp_frob_matmul_q8_mma_tile(dA, dB_NT, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
         cudaEventRecord(t1); cudaEventSynchronize(t1);
         cudaEventElapsedTime(&ms_ptx[r], t0, t1);
     }
@@ -120,7 +122,7 @@ static int bench_int8(
 }
 
 static int bench_int4(
-    const uint8_t *dAq4, const uint8_t *dBq4,
+    const uint8_t *dAq4, const uint8_t *dBq4, const uint8_t *dBq4_NT,
     const float *dSA, const float *dSB,
     __half *dC_ptx, __half *dC_cbl,
     __half *dA_f16, __half *dB_f16,
@@ -140,7 +142,7 @@ static int bench_int4(
         k_dequant_i4_to_f16<<<(n_nib_B+BLK-1)/BLK, BLK>>>(dBq4, dB_f16, n_nib_B);
         cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
                     &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
-        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
+        sp_frob_matmul_q4_mma_tile(dAq4, dBq4_NT, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
     }
     cudaDeviceSynchronize();
 
@@ -156,7 +158,7 @@ static int bench_int4(
 
     for (int r = 0; r < REPS; r++) {
         cudaEventRecord(t0);
-        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
+        sp_frob_matmul_q4_mma_tile(dAq4, dBq4_NT, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
         cudaEventRecord(t1); cudaEventSynchronize(t1);
         cudaEventElapsedTime(&ms_ptx[r], t0, t1);
     }
@@ -190,6 +192,12 @@ int main() {
     for (int i = 0; i < BENCH_M; i++) hSA[i] = 1.0f / 128.0f;
     for (int j = 0; j < BENCH_N; j++) hSB[j] = 1.0f / 128.0f;
 
+    /* Transpose hB [K][N] → hB_NT [N][K] for PTX tile kernel */
+    int8_t *hB_NT = new int8_t[szB];
+    for (size_t k = 0; k < BENCH_K; k++)
+        for (size_t n = 0; n < BENCH_N; n++)
+            hB_NT[n * BENCH_K + k] = hB[k * BENCH_N + n];
+
     /* Pack INT4 nibbles */
     const size_t szAq4 = szA / 2, szBq4 = szB / 2;
     uint8_t *hAq4 = new uint8_t[szAq4], *hBq4 = new uint8_t[szBq4];
@@ -207,39 +215,58 @@ int main() {
             hBq4[(k/2)*BENCH_N + j] = (uint8_t)((unsigned)v0 | ((unsigned)v1 << 4));
         }
 
-    /* Allocate device buffers */
-    int8_t *dA, *dB; uint8_t *dAq4, *dBq4; float *dSA, *dSB;
-    __half *dC_ptx, *dC_cbl, *dA_f16, *dB_f16;
-    CUDA_CHECK(cudaMalloc(&dA,    szA   * sizeof(int8_t)));
-    CUDA_CHECK(cudaMalloc(&dB,    szB   * sizeof(int8_t)));
-    CUDA_CHECK(cudaMalloc(&dAq4,  szAq4 * sizeof(uint8_t)));
-    CUDA_CHECK(cudaMalloc(&dBq4,  szBq4 * sizeof(uint8_t)));
-    CUDA_CHECK(cudaMalloc(&dSA,   BENCH_M * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&dSB,   BENCH_N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&dC_ptx, szC * sizeof(__half)));
-    CUDA_CHECK(cudaMalloc(&dC_cbl, szC * sizeof(__half)));
-    CUDA_CHECK(cudaMalloc(&dA_f16, szA * sizeof(__half)));
-    CUDA_CHECK(cudaMalloc(&dB_f16, szB * sizeof(__half)));
+    /* Transpose hBq4 [K_bytes][N] → hBq4_NT [N][K_bytes] for PTX tile kernel */
+    uint8_t *hBq4_NT = new uint8_t[szBq4];
+    for (size_t k = 0; k < BENCH_K/2; k++)
+        for (size_t n = 0; n < BENCH_N; n++)
+            hBq4_NT[n * (BENCH_K/2) + k] = hBq4[k * BENCH_N + n];
 
-    CUDA_CHECK(cudaMemcpy(dA,   hA,   szA   * sizeof(int8_t),  cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dB,   hB,   szB   * sizeof(int8_t),  cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dAq4, hAq4, szAq4 * sizeof(uint8_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dBq4, hBq4, szBq4 * sizeof(uint8_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dSA,  hSA,  BENCH_M * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dSB,  hSB,  BENCH_N * sizeof(float), cudaMemcpyHostToDevice));
+    /* Allocate device buffers */
+    int8_t *dA, *dB, *dB_NT;
+    uint8_t *dAq4, *dBq4, *dBq4_NT;
+    float *dSA, *dSB;
+    __half *dC_ptx, *dC_cbl, *dA_f16, *dB_f16;
+    CUDA_CHECK(cudaMalloc(&dA,      szA   * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc(&dB,      szB   * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc(&dB_NT,   szB   * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc(&dAq4,    szAq4 * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMalloc(&dBq4,    szBq4 * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMalloc(&dBq4_NT, szBq4 * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMalloc(&dSA,     BENCH_M * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dSB,     BENCH_N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dC_ptx,  szC * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&dC_cbl,  szC * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&dA_f16,  szA * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&dB_f16,  szB * sizeof(__half)));
+
+    CUDA_CHECK(cudaMemcpy(dA,      hA,      szA   * sizeof(int8_t),  cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB,      hB,      szB   * sizeof(int8_t),  cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB_NT,   hB_NT,   szB   * sizeof(int8_t),  cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dAq4,    hAq4,    szAq4 * sizeof(uint8_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dBq4,    hBq4,    szBq4 * sizeof(uint8_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dBq4_NT, hBq4_NT, szBq4 * sizeof(uint8_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dSA,     hSA,     BENCH_M * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dSB,     hSB,     BENCH_N * sizeof(float), cudaMemcpyHostToDevice));
 
     cublasHandle_t cbl;
     CUBLAS_CHECK(cublasCreate(&cbl));
     CUBLAS_CHECK(cublasSetMathMode(cbl, CUBLAS_TENSOR_OP_MATH));
 
-    bench_int8(dA, dB, dSA, dSB, dC_ptx, dC_cbl, dA_f16, dB_f16, cbl);
-    bench_int4(dAq4, dBq4, dSA, dSB, dC_ptx, dC_cbl, dA_f16, dB_f16, cbl);
+    bench_int8(dA, dB, dB_NT, dSA, dSB, dC_ptx, dC_cbl, dA_f16, dB_f16, cbl);
+    /* Evict L2 (RTX 2060 = 4MB) between INT8 and INT4 bodies to avoid INT8
+     * warmup passes from warming the output-tile mapping and biasing INT4 cuBLAS. */
+    cudaDeviceSynchronize();
+    cudaMemset(dB_f16, 0, szB * sizeof(__half));
+    cudaDeviceSynchronize();
+    bench_int4(dAq4, dBq4, dBq4_NT, dSA, dSB, dC_ptx, dC_cbl, dA_f16, dB_f16, cbl);
 
     cublasDestroy(cbl);
-    cudaFree(dA); cudaFree(dB); cudaFree(dAq4); cudaFree(dBq4);
+    cudaFree(dA); cudaFree(dB); cudaFree(dB_NT);
+    cudaFree(dAq4); cudaFree(dBq4); cudaFree(dBq4_NT);
     cudaFree(dSA); cudaFree(dSB); cudaFree(dC_ptx); cudaFree(dC_cbl);
     cudaFree(dA_f16); cudaFree(dB_f16);
-    delete[] hA; delete[] hB; delete[] hAq4; delete[] hBq4;
+    delete[] hA; delete[] hB; delete[] hB_NT;
+    delete[] hAq4; delete[] hBq4; delete[] hBq4_NT;
     delete[] hSA; delete[] hSB;
     return 0;
 }

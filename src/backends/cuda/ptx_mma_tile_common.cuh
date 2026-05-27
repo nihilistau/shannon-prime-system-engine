@@ -3,8 +3,18 @@
  * for the 64×64 tiled INT8/INT4 MMA kernels (§17.3.TILE).
  *
  * Architecture: 64×64 block tile / 32×32 warp tile / 4×4 MMA grid / 4 warps.
- * Pipeline:     sm_75 — synchronous (no cp.async); sm_80+ upgrade path guarded
- *               by SP_TILE_SM80 (not implemented this phase).
+ * Pipeline:     sm_75 — A tile staged to smem (ld.global.cg.v4.u32 + __syncthreads);
+ *               B reads directly from global [N][K] via ld.global.nc.u32 (no smem).
+ *
+ * B-matrix contract (§17.3.TILE-2c): caller must provide B in [N][K] row-major.
+ *   Frobenius arena stores packed codes as [N][K] already (rows=out_features,
+ *   cols=in_features). CPU-side sp_transcode_b_q8/q4 handles any other source.
+ *   Thread T at fragment (block_n, warp_n, mma_n, mma_k) reads B[nc][k0..k0+3]:
+ *     nc = block_n*64 + warp_n*32 + mma_n*8 + (T>>2)
+ *     k0 = k_tile *32 + mma_k *16 + (T&3 )*4  (4-byte aligned)
+ *   Single ld.global.nc.u32 per fragment; routes through read-only cache.
+ *
+ * Assumes M, N multiples of SP_TILE_BLOCK_M/N and K multiple of SP_TILE_K_TILE.
  *
  * References:
  *   DeepEP ptx.cuh lines 1-10 (fallback macro pattern)
@@ -23,7 +33,6 @@
 #define SP_TILE_BLOCK_N  64
 #define SP_TILE_K_TILE   32     /* INT8: 32 K-elements per smem stage;   */
                                 /* INT4: 32 packed-nibble bytes = 64 nib  */
-#define SP_TILE_PAD_B    4      /* extra bytes per smem_b row (bank fix) */
 #define SP_TILE_WARPS    4
 #define SP_TILE_THREADS  128    /* SP_TILE_WARPS * 32 */
 
@@ -31,21 +40,17 @@
 #define SP_TILE_WARP_M(wid) ((wid) >> 1)      /* 0,0,1,1 */
 #define SP_TILE_WARP_N(wid) ((wid) & 1)       /* 0,1,0,1 */
 
-/* smem B row pitch including padding */
-#define SP_TILE_B_PITCH  (SP_TILE_BLOCK_N + SP_TILE_PAD_B)   /* 68 bytes */
-
-/* ── Weight-side load macro (mirrors DeepEP LD_NC_FUNC + sm_80+ guard) ────── */
-/* L1::no_allocate and L2::256B require sm_80+ (Ampere+).                       */
-/* On sm_75 (Turing) fall back to ld.global.cg (L2-cached, L1-bypassed).        */
+/* ── Weight-side load macro ────────────────────────────────────────────────── */
+/* sm_75: ld.global.nc routes B through the read-only/texture cache (non-coherent).  */
+/* sm_80+: add L1::no_allocate + L2::256B eviction hints for streaming weight access.*/
 #if !defined(DISABLE_WEIGHT_LD_NC) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   #define SP_LD_WEIGHT_FUNC "ld.global.nc.L1::no_allocate.L2::256B"
 #else
-  #define SP_LD_WEIGHT_FUNC "ld.global.cg"
+  #define SP_LD_WEIGHT_FUNC "ld.global.nc"
 #endif
 
-/* ── Shared-memory type aliases ────────────────────────────────────────────── */
+/* ── A smem layout (B is NOT staged to smem — read directly from global) ───── */
 typedef int8_t  sp_smem_a_t[SP_TILE_BLOCK_M][SP_TILE_K_TILE];
-typedef int8_t  sp_smem_b_t[SP_TILE_K_TILE][SP_TILE_B_PITCH];
 
 /* ── Cooperative A-tile load: 128 threads, 16 bytes each ──────────────────── */
 /* A is the activation side; use ld.global.cg (L2-cached).                     */
@@ -73,35 +78,6 @@ void sp_tile_load_a_int8(
     s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
 }
 
-/* ── Cooperative B-tile load: 128 threads, 16 bytes each ──────────────────── */
-/* B tile: K_TILE(32) rows × BLOCK_N(64) cols = 2048 bytes.                     */
-/* 128 threads × 16 bytes = 2048 bytes. 4 threads per 64-byte row (32 rows).    */
-/* Thread mapping: row = thr_id >> 2 (0..31), col_byte = (thr_id & 3) << 4     */
-/*   (0, 16, 32, 48 — four 16-byte chunks per row). 0 bank conflicts.           */
-__device__ __forceinline__
-void sp_tile_load_b_int8(
-    const int8_t * __restrict__ B_global,
-    int8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
-    int block_col, int k_tile,
-    int K, int N, int thr_id)
-{
-    int row      = thr_id >> 2;
-    int col_byte = (thr_id & 3) << 4;
-    int g_row    = k_tile    * SP_TILE_K_TILE  + row;
-    int g_col    = block_col * SP_TILE_BLOCK_N + col_byte;
-    uint32_t v0, v1, v2, v3;
-    if (g_row < K && (g_col + 15) < N) {
-        const uint32_t *p = (const uint32_t *)(B_global + g_row * N + g_col);
-        asm volatile (SP_LD_WEIGHT_FUNC ".v4.u32 {%0,%1,%2,%3}, [%4];"
-            : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3) : "l"(p));
-    } else {
-        v0 = v1 = v2 = v3 = 0;
-    }
-    uint32_t *s = (uint32_t *)(smem_b[row] + col_byte);
-    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
-}
-
-/* INT4 variants (packed nibble — same byte width, different element count) */
 __device__ __forceinline__
 void sp_tile_load_a_int4(
     const uint8_t * __restrict__ A_q4,
@@ -125,33 +101,7 @@ void sp_tile_load_a_int4(
     s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
 }
 
-__device__ __forceinline__
-void sp_tile_load_b_int4(
-    const uint8_t * __restrict__ B_q4,
-    uint8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
-    int block_col, int k_tile,
-    int K_bytes, int N, int thr_id)
-{
-    int row      = thr_id >> 2;           /* 0..31: 32-row K_TILE dimension */
-    int col_byte = (thr_id & 3) << 4;    /* 0,16,32,48: four 16-byte chunks */
-    int g_row    = k_tile    * SP_TILE_K_TILE  + row;
-    int g_col    = block_col * SP_TILE_BLOCK_N + col_byte;
-    uint32_t v0, v1, v2, v3;
-    if (g_row < K_bytes && (g_col + 15) < N) {
-        const uint32_t *p = (const uint32_t *)(B_q4 + g_row * N + g_col);
-        asm volatile (SP_LD_WEIGHT_FUNC ".v4.u32 {%0,%1,%2,%3}, [%4];"
-            : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3) : "l"(p));
-    } else {
-        v0 = v1 = v2 = v3 = 0;
-    }
-    uint32_t *s = (uint32_t *)(smem_b[row] + col_byte);
-    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
-}
-
-/* ── Fragment load from smem to register ──────────────────────────────────── */
-/* For m8n8k16 (INT8): thread T reads row = warp_m*32 + mma_m*8 + T/4,          */
-/*   col_byte = mma_k*16 + (T%4)*4. One uint32 = 4 packed INT8 values.           */
-/* For m8n8k32 (INT4): same byte formula; hardware interprets nibbles differently. */
+/* ── Fragment loads: A from smem, B direct from global [N][K] ─────────────── */
 __device__ __forceinline__
 uint32_t sp_tile_frag_a_int8(
     const int8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE],
@@ -163,21 +113,6 @@ uint32_t sp_tile_frag_a_int8(
 }
 
 __device__ __forceinline__
-uint32_t sp_tile_frag_b_int8(
-    const int8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
-    int warp_n, int mma_n, int mma_k, int lane)
-{
-    /* Col-major B: thread holds 4 K-adjacent values at fixed N column. */
-    int k0 = mma_k * 16 + (lane & 3) * 4;
-    int nc = warp_n * 32 + mma_n * 8  + (lane >> 2);
-    return  (uint32_t)(uint8_t)smem_b[k0    ][nc]
-          | ((uint32_t)(uint8_t)smem_b[k0 + 1][nc] <<  8)
-          | ((uint32_t)(uint8_t)smem_b[k0 + 2][nc] << 16)
-          | ((uint32_t)(uint8_t)smem_b[k0 + 3][nc] << 24);
-}
-
-/* INT4 fragment loads: same smem byte formula, INT4 K_TILE bytes identical.   */
-__device__ __forceinline__
 uint32_t sp_tile_frag_a_int4(
     const uint8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE],
     int warp_m, int mma_m, int mma_k, int lane)
@@ -187,24 +122,38 @@ uint32_t sp_tile_frag_a_int4(
     return *(const uint32_t *)(smem_a[r] + c);
 }
 
+/* B fragment: B_NT[N][K] global → ld.global.nc.u32 (read-only cache, no smem).
+ * nc = block_n*64 + warp_n*32 + mma_n*8 + (lane>>2) — absolute N column.
+ * k0 = k_tile *32 + mma_k *16 + (lane&3 )*4 — 4-byte aligned K offset.
+ * 4 threads with same nc (lanes sharing n_col) issue the same load address →
+ * hardware coalesces/broadcasts one cache-line read for the quad. */
 __device__ __forceinline__
-uint32_t sp_tile_frag_b_int4(
-    const uint8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
-    int warp_n, int mma_n, int mma_k, int lane)
+uint32_t sp_tile_frag_b_global_int8(
+    const int8_t * __restrict__ B_NT,
+    int block_n, int warp_n, int mma_n, int mma_k, int k_tile, int lane, int K)
 {
-    /* Col-major B: thread holds 4 K-adjacent bytes at fixed N column. */
-    int k0 = mma_k * 16 + (lane & 3) * 4;
-    int nc = warp_n * 32 + mma_n * 8  + (lane >> 2);
-    return  (uint32_t)smem_b[k0    ][nc]
-          | ((uint32_t)smem_b[k0 + 1][nc] <<  8)
-          | ((uint32_t)smem_b[k0 + 2][nc] << 16)
-          | ((uint32_t)smem_b[k0 + 3][nc] << 24);
+    int nc = block_n * SP_TILE_BLOCK_N + warp_n * 32 + mma_n * 8 + (lane >> 2);
+    int k0 = k_tile  * SP_TILE_K_TILE  + mma_k  * 16 + (lane & 3) * 4;
+    const uint32_t *p = (const uint32_t *)(B_NT + (ptrdiff_t)nc * K + k0);
+    uint32_t v;
+    asm volatile (SP_LD_WEIGHT_FUNC ".u32 %0, [%1];" : "=r"(v) : "l"(p));
+    return v;
+}
+
+__device__ __forceinline__
+uint32_t sp_tile_frag_b_global_int4(
+    const uint8_t * __restrict__ B_q4_NT,
+    int block_n, int warp_n, int mma_n, int mma_k, int k_tile, int lane, int K_bytes)
+{
+    int nc = block_n * SP_TILE_BLOCK_N + warp_n * 32 + mma_n * 8 + (lane >> 2);
+    int k0 = k_tile  * SP_TILE_K_TILE  + mma_k  * 16 + (lane & 3) * 4;
+    const uint32_t *p = (const uint32_t *)(B_q4_NT + (ptrdiff_t)nc * K_bytes + k0);
+    uint32_t v;
+    asm volatile (SP_LD_WEIGHT_FUNC ".u32 %0, [%1];" : "=r"(v) : "l"(p));
+    return v;
 }
 
 /* ── Scale epilogue helper ─────────────────────────────────────────────────── */
-/* Writes one MMA output pair (d0, d1) with per-element scale = scale_a[row]    */
-/* * scale_b[col].  Matches sp_frob_matmul_q8_ref / q4_ref scale convention.    */
-/* out_row / out_col are the 8×8 MMA tile origin (not the per-thread coords).   */
 __device__ __forceinline__
 void sp_tile_epilogue_mma(
     const int acc_d0, const int acc_d1,

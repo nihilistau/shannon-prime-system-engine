@@ -4,15 +4,14 @@
  * Block tile:  64(M) × 64(N), K_TILE = 32 packed-nibble bytes (= 64 nibbles)
  * Warp tile:   32(M) × 32(N) via 4×4 grid of m8n8k32 MMA ops
  * Warps/block: 4 in 2×2 arrangement
- * Pipeline:    sm_75 synchronous (same structure as INT8 tile kernel)
+ * Pipeline:    sm_75 — A to smem (ld.global.cg.v4.u32 + __syncthreads);
+ *              B direct from global [N][K_bytes] via ld.global.nc.u32 (no smem stage).
  *
- * A_q4 / B_q4 layout: uint8_t [M][K/2] / uint8_t [K/2][N]
- *   low nibble  = even K index (k*2+0)
- *   high nibble = odd  K index (k*2+1)
- *   K is nibble count (must be even; multiple of 64 for full tiles)
+ * A_q4 layout: uint8_t [M][K/2]   — low nibble = even K, high nibble = odd K
+ * B_q4 layout: uint8_t [N][K/2]   — [N][K_bytes] row-major (pre-swizzled)
+ * K is nibble count (must be even; multiple of 64 for full tiles).
  *
  * Calls mma_s4_m8n8k32() from ptx_mma.cuh — no wmma, no <mma.h>.
- * smem byte layout identical to INT8; fragment formula identical.
  */
 #pragma once
 #include "ptx_mma_tile_common.cuh"
@@ -22,7 +21,7 @@
 
 __global__ void sp_frob_matmul_q4_tile_kernel(
     const uint8_t * __restrict__ A_q4,
-    const uint8_t * __restrict__ B_q4,
+    const uint8_t * __restrict__ B_q4,   /* [N][K_bytes] row-major (pre-swizzled) */
     const float   * __restrict__ scale_a,
     const float   * __restrict__ scale_b,
     __half        * __restrict__ C,
@@ -33,7 +32,6 @@ __global__ void sp_frob_matmul_q4_tile_kernel(
     const int K_bytes = K >> 1;
 
     __shared__ uint8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE];
-    __shared__ uint8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH];
 
     const int thr   = (int)threadIdx.x;
     const int warp  = thr >> 5;
@@ -55,10 +53,8 @@ __global__ void sp_frob_matmul_q4_tile_kernel(
     const int nk = (K_bytes + SP_TILE_K_TILE - 1) / SP_TILE_K_TILE;
     for (int kt = 0; kt < nk; kt++) {
         sp_tile_load_a_int4(A_q4, smem_a, brow, kt, M, K_bytes, thr);
-        sp_tile_load_b_int4(B_q4, smem_b, bcol, kt, K_bytes, N,      thr);
-        __syncthreads();
+        __syncthreads();    /* smem_a ready */
 
-        /* Preload fragments (formula identical to INT8; hardware reads nibbles) */
         uint32_t a_frag[2][4];
         uint32_t b_frag[2][4];
         #pragma unroll
@@ -68,7 +64,7 @@ __global__ void sp_frob_matmul_q4_tile_kernel(
                 a_frag[mk][mm] = sp_tile_frag_a_int4(smem_a, wm, mm, mk, lane);
             #pragma unroll
             for (int mn = 0; mn < 4; mn++)
-                b_frag[mk][mn] = sp_tile_frag_b_int4(smem_b, wn, mn, mk, lane);
+                b_frag[mk][mn] = sp_tile_frag_b_global_int4(B_q4, bcol, wn, mn, mk, kt, lane, K_bytes);
         }
         /* 32 mma_s4_m8n8k32 calls per warp per K-tile */
         #pragma unroll
@@ -81,7 +77,7 @@ __global__ void sp_frob_matmul_q4_tile_kernel(
                                    a_frag[mk][mm], b_frag[mk][mn],
                                    acc[mm][mn][0], acc[mm][mn][1]);
 
-        __syncthreads();
+        __syncthreads();    /* smem_a safe to overwrite on next kt */
     }
 
     /* Epilogue */
@@ -101,7 +97,7 @@ __global__ void sp_frob_matmul_q4_tile_kernel(
 
 /*
  * sp_frob_matmul_q4_mma_tile — host launcher.
- * K is nibble count (A_q4 is uint8[M][K/2], B_q4 is uint8[K/2][N]).
+ * K is nibble count. B_q4 must be in [N][K/2] row-major layout.
  */
 inline cudaError_t sp_frob_matmul_q4_mma_tile(
     const uint8_t *A_q4,
