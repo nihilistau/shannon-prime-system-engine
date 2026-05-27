@@ -67,3 +67,6 @@ fn ntt_ctx_handle_drop() {
 
 // coordinator_binds_on_loopback is an inline lib test in quic_shard.rs (Task 5)
 // (same probe linker issue blocks integration tests for QUIC endpoints)
+
+// garner_loop_reconstructs_single_pair is an inline lib test in quic_shard.rs (Task 7)
+// (same probe linker issue blocks integration tests for async QUIC endpoints)

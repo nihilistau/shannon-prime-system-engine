@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use quinn::{Connection, Endpoint, RecvStream};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use dashmap::DashMap;
+use tokio::sync::mpsc;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -214,6 +216,111 @@ pub async fn recv_block(mut stream: RecvStream) -> Result<ResidueBlock> {
     Ok(ResidueBlock { header, residues })
 }
 
+// ── Garner assembly loop ──────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct PendingBlock {
+    q1:        Option<Vec<u32>>,
+    q2:        Option<Vec<u32>>,
+    token_pos: u32,
+    layer_id:  u32,
+}
+
+pub struct GarnerResult {
+    pub seq_id:    u64,
+    pub token_pos: u32,
+    pub layer_id:  u32,
+    pub coeffs:    Vec<i64>,
+}
+
+/// Accept QUIC connections and streams from shard workers. When both q1 and q2
+/// residues arrive for the same seq_id, call ntt_crt_recombine and send the
+/// result on `results_tx`. Runs until the coordinator endpoint is dropped.
+pub async fn run_garner_loop(
+    coordinator: SpQuicCoordinator,
+    ntt_n: u32,
+    results_tx: mpsc::Sender<GarnerResult>,
+) {
+    let pending: Arc<DashMap<u64, PendingBlock>> = Arc::new(DashMap::new());
+
+    loop {
+        let conn = match coordinator.accept_connection().await {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+
+        let pending = Arc::clone(&pending);
+        let results_tx = results_tx.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let stream = match conn.accept_uni().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                let pending = Arc::clone(&pending);
+                let results_tx = results_tx.clone();
+
+                tokio::spawn(async move {
+                    let block = match recv_block(stream).await {
+                        Ok(b) => b,
+                        Err(_) => return,
+                    };
+
+                    let seq_id = block.header.seq_id;
+                    let prime_sel = block.header.prime_selector;
+
+                    // Insert residue; check atomically if both primes arrived.
+                    // DashMap entry() holds a shard lock for the duration of the block.
+                    let both_arrived = {
+                        let mut entry = pending.entry(seq_id).or_insert_with(|| PendingBlock {
+                            q1: None,
+                            q2: None,
+                            token_pos: block.header.token_pos,
+                            layer_id:  block.header.layer_id,
+                        });
+                        if prime_sel == 0 {
+                            entry.q1 = Some(block.residues);
+                        } else {
+                            entry.q2 = Some(block.residues);
+                        }
+                        entry.q1.is_some() && entry.q2.is_some()
+                    }; // shard lock released here
+
+                    if both_arrived {
+                        // Atomic remove — exactly one task wins if two race here.
+                        if let Some((_, pb)) = pending.remove(&seq_id) {
+                            if let (Some(q1), Some(q2)) = (pb.q1, pb.q2) {
+                                let mut coeffs = vec![0i64; ntt_n as usize];
+                                unsafe {
+                                    use crate::ntt_ffi::{ntt_crt_recombine, ntt_free, ntt_init};
+                                    let ctx = ntt_init(ntt_n);
+                                    if !ctx.is_null() {
+                                        ntt_crt_recombine(
+                                            ctx,
+                                            q1.as_ptr(),
+                                            q2.as_ptr(),
+                                            coeffs.as_mut_ptr(),
+                                        );
+                                        ntt_free(ctx);
+                                    }
+                                }
+                                let _ = results_tx.send(GarnerResult {
+                                    seq_id,
+                                    token_pos: pb.token_pos,
+                                    layer_id:  pb.layer_id,
+                                    coeffs,
+                                }).await;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +413,66 @@ mod tests {
         assert_eq!(received.residues.len(), 128);
         assert_eq!(received.residues[0], 0);
         assert_eq!(received.residues[127], 127);
+    }
+
+    // garner_loop_reconstructs_single_pair is inline here (same probe linker
+    // issue blocks integration tests for async QUIC endpoints — see Task 4/5).
+    #[tokio::test]
+    async fn garner_loop_reconstructs_single_pair() {
+        use crate::ntt_ffi::{ntt_crt_recombine, ntt_free, ntt_init};
+        use std::time::Duration;
+
+        const Q1: u32 = 1073738753;
+        const Q2: u32 = 1073732609;
+        const N: usize = 128;
+
+        let q1: Vec<u32> = (0..N as u32).map(|i| i % Q1).collect();
+        let q2: Vec<u32> = (0..N as u32).map(|i| i % Q2).collect();
+
+        // Scalar reference (direct FFI, no network)
+        let expected: Vec<i64> = unsafe {
+            let ctx = ntt_init(N as u32);
+            let mut out = vec![0i64; N];
+            ntt_crt_recombine(ctx, q1.as_ptr(), q2.as_ptr(), out.as_mut_ptr());
+            ntt_free(ctx);
+            out
+        };
+
+        let coord = SpQuicCoordinator::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind");
+        let coord_addr = coord.local_addr().unwrap();
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tokio::spawn(run_garner_loop(coord, N as u32, tx));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let wa = SpQuicWorker::connect("127.0.0.1:0".parse().unwrap(), coord_addr)
+            .await.expect("wa connect");
+        wa.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 7, token_pos: 0, layer_id: 0,
+                                       prime_selector: 0, _pad: [0; 47] },
+            residues: q1,
+        }).await.expect("send q1");
+
+        let wb = SpQuicWorker::connect("127.0.0.1:0".parse().unwrap(), coord_addr)
+            .await.expect("wb connect");
+        wb.send_block(&ResidueBlock {
+            header: ShardBlockHeader { seq_id: 7, token_pos: 0, layer_id: 0,
+                                       prime_selector: 1, _pad: [0; 47] },
+            residues: q2,
+        }).await.expect("send q2");
+
+        // Keep wa, wb alive until result received — prevents FIN loss
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("garner loop timeout")
+            .expect("channel closed");
+
+        drop(wa);
+        drop(wb);
+
+        assert_eq!(result.seq_id, 7);
+        assert_eq!(result.coeffs, expected, "Garner reconstruction not bit-identical");
     }
 }
