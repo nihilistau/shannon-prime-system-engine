@@ -496,4 +496,17 @@ if(SP_ENGINE_WITH_AVX512)
         target_compile_options(bench_avx_spinor_sweep PRIVATE /arch:AVX512 /O2)
     endif()
     add_test(NAME M_AVX_3 COMMAND bench_avx_spinor_sweep)
+
+    # M_POUW_2: AVX-512 ternlog throughput vs scalar sp_sieve_evaluate.
+    # Gate: ternlog candidate-mixing rate >= 5x sieve evaluation rate.
+    # DISABLED path exits 0 with REQUIRES_LIVE_MODE when AVX-512F is masked.
+    add_executable(bench_sieve_hw bench_sieve_hw.c)
+    target_link_libraries(bench_sieve_hw PRIVATE sp_engine sp_sieve)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(bench_sieve_hw PRIVATE
+            -mavx512f -mavx512bw -O3)
+    elseif(MSVC)
+        target_compile_options(bench_sieve_hw PRIVATE /arch:AVX512 /O2)
+    endif()
+    add_test(NAME M_POUW_2 COMMAND bench_sieve_hw)
 endif()

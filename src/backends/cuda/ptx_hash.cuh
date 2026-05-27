@@ -93,3 +93,20 @@ __host__ __device__ __forceinline__
 uint32_t ptx_xxh3_mix3(uint32_t a, uint32_t b, uint32_t c) {
     return ptx_xor3(a, b, c);
 }
+
+/* ── sp_sieve_hash_ptx ───────────────────────────────────────────────────── *
+ * KSTE sieve mixing round — GPU analog of sp_avx512_ternlog_kste_round.     *
+ * Applies the XOR3 step (imm8=0x96) to one lane of the 16-lane KSTE state:  *
+ *   result = state[lane] ^ state[(lane+1)%16] ^ state[(lane+5)%16]          *
+ *                                                                             *
+ * Launch with 16 threads per KSTE tree.  Caller gathers lane_plus1_val and  *
+ * lane_plus5_val via __shfl_sync or shared memory before calling.           *
+ *                                                                             *
+ * CPU equivalent: sp_avx512_ternlog_kste_round (§18.4, imm8=0x96).          *
+ * Phase 5 PoUW gate: M_POUW_2 / bench_sieve_hw.c.                           */
+__host__ __device__ __forceinline__
+uint32_t sp_sieve_hash_ptx(uint32_t lane_val,
+                            uint32_t lane_plus1_val,
+                            uint32_t lane_plus5_val) {
+    return ptx_xor3(lane_val, lane_plus1_val, lane_plus5_val);
+}
