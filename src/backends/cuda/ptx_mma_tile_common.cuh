@@ -47,12 +47,29 @@ typedef int8_t  sp_smem_b_t[SP_TILE_K_TILE][SP_TILE_B_PITCH];
 
 /* ── Cooperative A-tile load: 128 threads, 16 bytes each ──────────────────── */
 /* A is the activation side; use ld.global.cg (L2-cached).                     */
+/* Thread T: row = T>>1, col_byte = (T&1)<<4 (0 or 16). 2 threads per row.     */
 __device__ __forceinline__
 void sp_tile_load_a_int8(
     const int8_t * __restrict__ A_global,
     int8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE],
     int block_row, int k_tile,
-    int M, int K, int thr_id);
+    int M, int K, int thr_id)
+{
+    int row      = thr_id >> 1;
+    int col_byte = (thr_id & 1) << 4;
+    int g_row    = block_row * SP_TILE_BLOCK_M + row;
+    int g_col    = k_tile   * SP_TILE_K_TILE  + col_byte;
+    uint32_t v0, v1, v2, v3;
+    if (g_row < M && (g_col + 15) < K) {
+        const uint32_t *p = (const uint32_t *)(A_global + g_row * K + g_col);
+        asm volatile ("ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%4];"
+            : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3) : "l"(p));
+    } else {
+        v0 = v1 = v2 = v3 = 0;
+    }
+    uint32_t *s = (uint32_t *)(smem_a[row] + col_byte);
+    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
+}
 
 /* ── Cooperative B-tile load: 128 threads, 16 bytes each ──────────────────── */
 /* B is the weight side; use SP_LD_WEIGHT_FUNC (L1 non-allocating).             */
@@ -61,7 +78,23 @@ void sp_tile_load_b_int8(
     const int8_t * __restrict__ B_global,
     int8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
     int block_col, int k_tile,
-    int K, int N, int thr_id);
+    int K, int N, int thr_id)
+{
+    int row      = thr_id >> 1;
+    int col_byte = (thr_id & 1) << 4;
+    int g_row    = k_tile    * SP_TILE_K_TILE  + row;
+    int g_col    = block_col * SP_TILE_BLOCK_N + col_byte;
+    uint32_t v0, v1, v2, v3;
+    if (g_row < K && (g_col + 15) < N) {
+        const uint32_t *p = (const uint32_t *)(B_global + g_row * N + g_col);
+        asm volatile (SP_LD_WEIGHT_FUNC ".v4.u32 {%0,%1,%2,%3}, [%4];"
+            : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3) : "l"(p));
+    } else {
+        v0 = v1 = v2 = v3 = 0;
+    }
+    uint32_t *s = (uint32_t *)(smem_b[row] + col_byte);
+    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
+}
 
 /* INT4 variants (packed nibble — same byte width, different element count) */
 __device__ __forceinline__
@@ -69,14 +102,46 @@ void sp_tile_load_a_int4(
     const uint8_t * __restrict__ A_q4,
     uint8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE],
     int block_row, int k_tile,
-    int M, int K_bytes, int thr_id);
+    int M, int K_bytes, int thr_id)
+{
+    int row      = thr_id >> 1;
+    int col_byte = (thr_id & 1) << 4;
+    int g_row    = block_row * SP_TILE_BLOCK_M + row;
+    int g_col    = k_tile   * SP_TILE_K_TILE  + col_byte;
+    uint32_t v0, v1, v2, v3;
+    if (g_row < M && (g_col + 15) < K_bytes) {
+        const uint32_t *p = (const uint32_t *)(A_q4 + g_row * K_bytes + g_col);
+        asm volatile ("ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%4];"
+            : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3) : "l"(p));
+    } else {
+        v0 = v1 = v2 = v3 = 0;
+    }
+    uint32_t *s = (uint32_t *)(smem_a[row] + col_byte);
+    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
+}
 
 __device__ __forceinline__
 void sp_tile_load_b_int4(
     const uint8_t * __restrict__ B_q4,
     uint8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
     int block_col, int k_tile,
-    int K_bytes, int N, int thr_id);
+    int K_bytes, int N, int thr_id)
+{
+    int row      = thr_id >> 1;
+    int col_byte = (thr_id & 1) << 4;
+    int g_row    = k_tile    * SP_TILE_K_TILE  + row;
+    int g_col    = block_col * SP_TILE_BLOCK_N + col_byte;
+    uint32_t v0, v1, v2, v3;
+    if (g_row < K_bytes && (g_col + 15) < N) {
+        const uint32_t *p = (const uint32_t *)(B_q4 + g_row * N + g_col);
+        asm volatile (SP_LD_WEIGHT_FUNC ".v4.u32 {%0,%1,%2,%3}, [%4];"
+            : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3) : "l"(p));
+    } else {
+        v0 = v1 = v2 = v3 = 0;
+    }
+    uint32_t *s = (uint32_t *)(smem_b[row] + col_byte);
+    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
+}
 
 /* ── Fragment load from smem to register ──────────────────────────────────── */
 __device__ __forceinline__
