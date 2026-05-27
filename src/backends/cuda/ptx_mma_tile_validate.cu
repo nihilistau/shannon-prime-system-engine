@@ -32,17 +32,6 @@ static void fill_int8(int8_t *p, int n, uint32_t &seed) {
     for (int i = 0; i < n; i++) p[i] = (int8_t)((lcg(seed) & 0xFF) - 128);
 }
 
-static void pack_nibbles(const int8_t *src, uint8_t *dst, int n_nibbles) {
-    /* src[k] in [-7,7], pack to low/high nibble pairs */
-    for (int k = 0; k < n_nibbles; k++) {
-        int8_t v = src[k];
-        if (v > 7) v = 7; if (v < -7) v = -7;
-        unsigned nib = (unsigned)(v < 0 ? (v + 16) : v) & 0xFu;
-        if (k & 1) dst[k >> 1] = (uint8_t)((dst[k >> 1] & 0x0Fu) | (nib << 4));
-        else       dst[k >> 1] = (uint8_t)((dst[k >> 1] & 0xF0u) | nib);
-    }
-}
-
 static bool half_match(const __half *a, const __half *b, int n, float *max_diff) {
     *max_diff = 0.0f;
     for (int i = 0; i < n; i++) {
@@ -238,3 +227,5 @@ int main() {
     printf("\n%s\n", fail ? "FAIL" : "ALL PASS");
     return fail;
 }
+
+#endif /* __CUDACC__ */

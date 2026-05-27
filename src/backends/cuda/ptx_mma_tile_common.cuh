@@ -34,8 +34,10 @@
 /* smem B row pitch including padding */
 #define SP_TILE_B_PITCH  (SP_TILE_BLOCK_N + SP_TILE_PAD_B)   /* 68 bytes */
 
-/* ── Weight-side load macro (L1 non-allocating, mirrors DeepEP LD_NC_FUNC) ── */
-#ifndef DISABLE_WEIGHT_LD_NC
+/* ── Weight-side load macro (mirrors DeepEP LD_NC_FUNC + sm_80+ guard) ────── */
+/* L1::no_allocate and L2::256B require sm_80+ (Ampere+).                       */
+/* On sm_75 (Turing) fall back to ld.global.cg (L2-cached, L1-bypassed).        */
+#if !defined(DISABLE_WEIGHT_LD_NC) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   #define SP_LD_WEIGHT_FUNC "ld.global.nc.L1::no_allocate.L2::256B"
 #else
   #define SP_LD_WEIGHT_FUNC "ld.global.cg"
@@ -72,7 +74,10 @@ void sp_tile_load_a_int8(
 }
 
 /* ── Cooperative B-tile load: 128 threads, 16 bytes each ──────────────────── */
-/* B is the weight side; use SP_LD_WEIGHT_FUNC (L1 non-allocating).             */
+/* B tile: K_TILE(32) rows × BLOCK_N(64) cols = 2048 bytes.                     */
+/* 128 threads × 16 bytes = 2048 bytes. 4 threads per 64-byte row (32 rows).    */
+/* Thread mapping: row = thr_id >> 2 (0..31), col_byte = (thr_id & 3) << 4     */
+/*   (0, 16, 32, 48 — four 16-byte chunks per row). 0 bank conflicts.           */
 __device__ __forceinline__
 void sp_tile_load_b_int8(
     const int8_t * __restrict__ B_global,
@@ -80,8 +85,8 @@ void sp_tile_load_b_int8(
     int block_col, int k_tile,
     int K, int N, int thr_id)
 {
-    int row      = thr_id >> 1;
-    int col_byte = (thr_id & 1) << 4;
+    int row      = thr_id >> 2;
+    int col_byte = (thr_id & 3) << 4;
     int g_row    = k_tile    * SP_TILE_K_TILE  + row;
     int g_col    = block_col * SP_TILE_BLOCK_N + col_byte;
     uint32_t v0, v1, v2, v3;
@@ -127,8 +132,8 @@ void sp_tile_load_b_int4(
     int block_col, int k_tile,
     int K_bytes, int N, int thr_id)
 {
-    int row      = thr_id >> 1;
-    int col_byte = (thr_id & 1) << 4;
+    int row      = thr_id >> 2;           /* 0..31: 32-row K_TILE dimension */
+    int col_byte = (thr_id & 3) << 4;    /* 0,16,32,48: four 16-byte chunks */
     int g_row    = k_tile    * SP_TILE_K_TILE  + row;
     int g_col    = block_col * SP_TILE_BLOCK_N + col_byte;
     uint32_t v0, v1, v2, v3;
@@ -162,9 +167,13 @@ uint32_t sp_tile_frag_b_int8(
     const int8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
     int warp_n, int mma_n, int mma_k, int lane)
 {
-    int r = mma_k  * 16 + (lane & 3) * 4;
-    int c = warp_n * 32 + mma_n * 8  + (lane >> 2);
-    return *(const uint32_t *)(smem_b[r] + c);
+    /* Col-major B: thread holds 4 K-adjacent values at fixed N column. */
+    int k0 = mma_k * 16 + (lane & 3) * 4;
+    int nc = warp_n * 32 + mma_n * 8  + (lane >> 2);
+    return  (uint32_t)(uint8_t)smem_b[k0    ][nc]
+          | ((uint32_t)(uint8_t)smem_b[k0 + 1][nc] <<  8)
+          | ((uint32_t)(uint8_t)smem_b[k0 + 2][nc] << 16)
+          | ((uint32_t)(uint8_t)smem_b[k0 + 3][nc] << 24);
 }
 
 /* INT4 fragment loads: same smem byte formula, INT4 K_TILE bytes identical.   */
@@ -183,9 +192,13 @@ uint32_t sp_tile_frag_b_int4(
     const uint8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
     int warp_n, int mma_n, int mma_k, int lane)
 {
-    int r = mma_k  * 16 + (lane & 3) * 4;
-    int c = warp_n * 32 + mma_n * 8  + (lane >> 2);
-    return *(const uint32_t *)(smem_b[r] + c);
+    /* Col-major B: thread holds 4 K-adjacent bytes at fixed N column. */
+    int k0 = mma_k * 16 + (lane & 3) * 4;
+    int nc = warp_n * 32 + mma_n * 8  + (lane >> 2);
+    return  (uint32_t)smem_b[k0    ][nc]
+          | ((uint32_t)smem_b[k0 + 1][nc] <<  8)
+          | ((uint32_t)smem_b[k0 + 2][nc] << 16)
+          | ((uint32_t)smem_b[k0 + 3][nc] << 24);
 }
 
 /* ── Scale epilogue helper ─────────────────────────────────────────────────── */

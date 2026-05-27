@@ -140,8 +140,7 @@ static int bench_int4(
         k_dequant_i4_to_f16<<<(n_nib_B+BLK-1)/BLK, BLK>>>(dBq4, dB_f16, n_nib_B);
         cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
                     &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
-        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx,
-                                   BENCH_M, BENCH_K * 2, BENCH_N, 0);
+        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
     }
     cudaDeviceSynchronize();
 
@@ -157,8 +156,7 @@ static int bench_int4(
 
     for (int r = 0; r < REPS; r++) {
         cudaEventRecord(t0);
-        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx,
-                                   BENCH_M, BENCH_K * 2, BENCH_N, 0);
+        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
         cudaEventRecord(t1); cudaEventSynchronize(t1);
         cudaEventElapsedTime(&ms_ptx[r], t0, t1);
     }
@@ -169,7 +167,7 @@ static int bench_int4(
     float ptx_p90 = percentile(ms_ptx, REPS, 90);
     float ptx_p99 = percentile(ms_ptx, REPS, 99);
     printf("INT4 (%dx%dx%d): cuBLAS=%.2fms  tile_med=%.2fms p90=%.2fms p99=%.2fms  speedup=%.2fx\n",
-           BENCH_M, BENCH_K * 2, BENCH_N, cbl_med, ptx_med, ptx_p90, ptx_p99, cbl_med / ptx_med);
+           BENCH_M, BENCH_K, BENCH_N, cbl_med, ptx_med, ptx_p90, ptx_p99, cbl_med / ptx_med);
     printf("  gate: >=4x (achievable at ~75%% INT4 TC utilization on sm_75)\n");
     cudaEventDestroy(t0); cudaEventDestroy(t1);
     return 0;
@@ -245,3 +243,5 @@ int main() {
     delete[] hSA; delete[] hSB;
     return 0;
 }
+
+#endif /* __CUDACC__ */
