@@ -56,6 +56,25 @@ void sp_avx512_ternlog_kste_round(uint32_t *state);
 /* §18.4 TERNLOG: sieve popcount — number of set bits across 8 uint64 lanes. */
 uint64_t sp_avx512_ternlog_popcnt512(const uint64_t *v8);
 
+/* §18.5 PERSIST: UMONITOR/UMWAIT sentinel for zero-OS-overhead thread wakeup.
+ * The sentinel lives on a VirtualLock'd page (requires SeLockMemoryPrivilege).
+ * WAITPKG hardware uses _umonitor+_umwait (C0.2); Zen 4 / no-WAITPKG falls
+ * back to _mm_pause spin. Gate: M_AVX_PERSIST_1 (median wakeup ≤200ns),
+ *                               M_AVX_PERSIST_2 (cycle ratio idle/busy <0.05). */
+typedef struct sp_avx512_persist_sentinel sp_avx512_persist_sentinel;
+
+/* Allocate a page-locked sentinel. Returns NULL if VirtualLock fails (missing
+ * SeLockMemoryPrivilege) — caller must handle this case. */
+sp_avx512_persist_sentinel *sp_avx512_persist_alloc(void);
+void sp_avx512_persist_free(sp_avx512_persist_sentinel *s);
+
+/* Block until sp_avx512_persist_wake() is called or timeout_ns elapses.
+ * Call sp_avx512_init() before first use. Not re-entrant on the same sentinel. */
+void sp_avx512_persist_wait(sp_avx512_persist_sentinel *s, uint64_t timeout_ns);
+
+/* Write to the sentinel cache-line, waking a UMWAIT/spin waiter. */
+void sp_avx512_persist_wake(sp_avx512_persist_sentinel *s);
+
 #ifdef __cplusplus
 }
 #endif

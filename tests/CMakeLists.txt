@@ -462,4 +462,16 @@ if(SP_ENGINE_WITH_AVX512)
     elseif(MSVC)
         target_compile_options(bench_avx512 PRIVATE /arch:AVX512 /O2)
     endif()
+
+    # §18.5 PERSIST: M_AVX_PERSIST_1 (wakeup ≤200ns) + M_AVX_PERSIST_2 (idle CPU).
+    add_executable(test_avx512_persist test_avx512_persist.c)
+    target_link_libraries(test_avx512_persist PRIVATE sp_engine)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_avx512_persist PRIVATE
+            -mavx512f -mwaitpkg -O2)
+    elseif(MSVC)
+        target_compile_options(test_avx512_persist PRIVATE /arch:AVX512 /O2)
+    endif()
+    add_test(NAME M_AVX_PERSIST_1 COMMAND test_avx512_persist)
+    add_test(NAME M_AVX_PERSIST_2 COMMAND test_avx512_persist)
 endif()

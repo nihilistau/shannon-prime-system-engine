@@ -60,6 +60,7 @@ if(SP_ENGINE_WITH_AVX512)
         backends/cpu/avx512/avx512_vnni.c
         backends/cpu/avx512/avx512_ifma.c
         backends/cpu/avx512/avx512_ternlog.c
+        backends/cpu/avx512/avx512_persist.c
     )
     target_compile_definitions(sp_engine PRIVATE SP_ENGINE_AVX512=1)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -72,6 +73,12 @@ if(SP_ENGINE_WITH_AVX512)
             PROPERTIES COMPILE_OPTIONS
             "-mavx512f;-mavx512vnni;-mavx512ifma;-mavx512bw;-mavx512dq;-mavx512vpopcntdq;-mavx512vbmi2"
         )
+        # avx512_persist.c uses the waitpkg function attribute internally; the TU
+        # itself only needs -mavx512f (for __rdtsc / _mm_pause / _mm_lfence / _mm_sfence).
+        set_source_files_properties(
+            backends/cpu/avx512/avx512_persist.c
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mwaitpkg"
+        )
     elseif(MSVC)
         set_source_files_properties(
             backends/cpu/avx512/avx512_dispatch.c
@@ -79,6 +86,7 @@ if(SP_ENGINE_WITH_AVX512)
             backends/cpu/avx512/avx512_vnni.c
             backends/cpu/avx512/avx512_ifma.c
             backends/cpu/avx512/avx512_ternlog.c
+            backends/cpu/avx512/avx512_persist.c
             PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
         )
     endif()
