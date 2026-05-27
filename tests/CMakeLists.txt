@@ -485,4 +485,15 @@ if(SP_ENGINE_WITH_AVX512)
         target_compile_options(test_avx512_zen4_mock PRIVATE /arch:AVX512 /O2)
     endif()
     add_test(NAME T_ZEN4_DISPATCH COMMAND test_avx512_zen4_mock)
+
+    # M_AVX_3: NT cache-bypass gate — PARITY (>=0.95) + SPINOR correctness.
+    add_executable(bench_avx_spinor_sweep bench_avx_spinor_sweep.c)
+    target_link_libraries(bench_avx_spinor_sweep PRIVATE sp_engine)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(bench_avx_spinor_sweep PRIVATE
+            -mavx512f -mavx512bw -mavx512dq -O3)
+    elseif(MSVC)
+        target_compile_options(bench_avx_spinor_sweep PRIVATE /arch:AVX512 /O2)
+    endif()
+    add_test(NAME M_AVX_3 COMMAND bench_avx_spinor_sweep)
 endif()
