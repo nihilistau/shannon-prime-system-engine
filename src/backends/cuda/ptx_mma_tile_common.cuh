@@ -144,35 +144,70 @@ void sp_tile_load_b_int4(
 }
 
 /* ── Fragment load from smem to register ──────────────────────────────────── */
+/* For m8n8k16 (INT8): thread T reads row = warp_m*32 + mma_m*8 + T/4,          */
+/*   col_byte = mma_k*16 + (T%4)*4. One uint32 = 4 packed INT8 values.           */
+/* For m8n8k32 (INT4): same byte formula; hardware interprets nibbles differently. */
 __device__ __forceinline__
 uint32_t sp_tile_frag_a_int8(
     const int8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE],
-    int warp_m, int mma_m, int mma_k, int lane);
+    int warp_m, int mma_m, int mma_k, int lane)
+{
+    int r = warp_m * 32 + mma_m * 8 + (lane >> 2);
+    int c = mma_k  * 16 + (lane & 3) * 4;
+    return *(const uint32_t *)(smem_a[r] + c);
+}
 
 __device__ __forceinline__
 uint32_t sp_tile_frag_b_int8(
     const int8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
-    int warp_n, int mma_n, int mma_k, int lane);
+    int warp_n, int mma_n, int mma_k, int lane)
+{
+    int r = mma_k  * 16 + (lane & 3) * 4;
+    int c = warp_n * 32 + mma_n * 8  + (lane >> 2);
+    return *(const uint32_t *)(smem_b[r] + c);
+}
 
+/* INT4 fragment loads: same smem byte formula, INT4 K_TILE bytes identical.   */
 __device__ __forceinline__
 uint32_t sp_tile_frag_a_int4(
     const uint8_t smem_a[SP_TILE_BLOCK_M][SP_TILE_K_TILE],
-    int warp_m, int mma_m, int mma_k, int lane);
+    int warp_m, int mma_m, int mma_k, int lane)
+{
+    int r = warp_m * 32 + mma_m * 8 + (lane >> 2);
+    int c = mma_k  * 16 + (lane & 3) * 4;
+    return *(const uint32_t *)(smem_a[r] + c);
+}
 
 __device__ __forceinline__
 uint32_t sp_tile_frag_b_int4(
     const uint8_t smem_b[SP_TILE_K_TILE][SP_TILE_B_PITCH],
-    int warp_n, int mma_n, int mma_k, int lane);
+    int warp_n, int mma_n, int mma_k, int lane)
+{
+    int r = mma_k  * 16 + (lane & 3) * 4;
+    int c = warp_n * 32 + mma_n * 8  + (lane >> 2);
+    return *(const uint32_t *)(smem_b[r] + c);
+}
 
 /* ── Scale epilogue helper ─────────────────────────────────────────────────── */
-/* acc[8][2]: row-major 4×4 MMA grid accumulators for one mma_m × mma_n step.  */
-/* Writes scaled FP16 to C_global.                                              */
+/* Writes one MMA output pair (d0, d1) at thread T's output coordinates:        */
+/*   row = out_row + T/4,  col0 = out_col + (T%4)*2,  col1 = col0+1            */
 __device__ __forceinline__
 void sp_tile_epilogue_mma(
     const int acc_d0, const int acc_d1,
     __half * __restrict__ C_global,
     int out_row, int out_col,
     float row_scale, int lane,
-    int M, int N);
+    int M, int N)
+{
+    int row  = out_row  + (lane >> 2);
+    int col0 = out_col  + (lane & 3) * 2;
+    int col1 = col0 + 1;
+    if (row < M) {
+        if (col0 < N)
+            C_global[row * N + col0] = __float2half(__int2float_rn(acc_d0) * row_scale);
+        if (col1 < N)
+            C_global[row * N + col1] = __float2half(__int2float_rn(acc_d1) * row_scale);
+    }
+}
 
 #endif /* __CUDACC__ */
