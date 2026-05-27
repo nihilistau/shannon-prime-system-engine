@@ -63,20 +63,117 @@ static float percentile(float *sorted, int n, float pct) {
     return sorted[idx];
 }
 
-/* ── Bench declarations (bodies follow in edit) ───────────────────────────── */
+/* ── Bench bodies ──────────────────────────────────────────────────────────── */
 static int bench_int8(
     const int8_t *dA, const int8_t *dB,
     const float *dSA, const float *dSB,
     __half *dC_ptx, __half *dC_cbl,
     __half *dA_f16, __half *dB_f16,
-    cublasHandle_t cbl);
+    cublasHandle_t cbl)
+{
+    const __half alpha_h = __float2half(1.0f), beta_h = __float2half(0.0f);
+    const int BLK = 256;
+    const size_t szA = (size_t)BENCH_M * BENCH_K, szB = (size_t)BENCH_K * BENCH_N;
+
+    cudaEvent_t t0, t1; cudaEventCreate(&t0); cudaEventCreate(&t1);
+    float ms_cbl[REPS], ms_ptx[REPS];
+
+    /* Warm-up */
+    for (int r = 0; r < WARMUP; r++) {
+        k_dequant_i8_to_f16<<<((int)szA+BLK-1)/BLK, BLK>>>(dA, dA_f16, (int)szA);
+        k_dequant_i8_to_f16<<<((int)szB+BLK-1)/BLK, BLK>>>(dB, dB_f16, (int)szB);
+        cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
+                    &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
+        sp_frob_matmul_q8_mma_tile(dA, dB, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
+    }
+    cudaDeviceSynchronize();
+
+    /* Measure baseline: dequant + cublasHgemm */
+    for (int r = 0; r < REPS; r++) {
+        cudaEventRecord(t0);
+        k_dequant_i8_to_f16<<<((int)szA+BLK-1)/BLK, BLK>>>(dA, dA_f16, (int)szA);
+        k_dequant_i8_to_f16<<<((int)szB+BLK-1)/BLK, BLK>>>(dB, dB_f16, (int)szB);
+        cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
+                    &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
+        cudaEventRecord(t1); cudaEventSynchronize(t1);
+        cudaEventElapsedTime(&ms_cbl[r], t0, t1);
+    }
+
+    /* Measure tiled INT8 kernel */
+    for (int r = 0; r < REPS; r++) {
+        cudaEventRecord(t0);
+        sp_frob_matmul_q8_mma_tile(dA, dB, dSA, dSB, dC_ptx, BENCH_M, BENCH_K, BENCH_N, 0);
+        cudaEventRecord(t1); cudaEventSynchronize(t1);
+        cudaEventElapsedTime(&ms_ptx[r], t0, t1);
+    }
+
+    std::sort(ms_cbl, ms_cbl + REPS); std::sort(ms_ptx, ms_ptx + REPS);
+    float cbl_med = percentile(ms_cbl, REPS, 50);
+    float ptx_med = percentile(ms_ptx, REPS, 50);
+    float ptx_p90 = percentile(ms_ptx, REPS, 90);
+    float ptx_p99 = percentile(ms_ptx, REPS, 99);
+    printf("INT8 (%dx%dx%d): cuBLAS=%.2fms  tile_med=%.2fms p90=%.2fms p99=%.2fms  speedup=%.2fx\n",
+           BENCH_M, BENCH_K, BENCH_N, cbl_med, ptx_med, ptx_p90, ptx_p99, cbl_med / ptx_med);
+    printf("  gate: >=3x (physical ceiling ~2.8x on sm_75; see SESSION-PLAN ceiling table)\n");
+    cudaEventDestroy(t0); cudaEventDestroy(t1);
+    return 0;
+}
 
 static int bench_int4(
     const uint8_t *dAq4, const uint8_t *dBq4,
     const float *dSA, const float *dSB,
     __half *dC_ptx, __half *dC_cbl,
     __half *dA_f16, __half *dB_f16,
-    cublasHandle_t cbl);
+    cublasHandle_t cbl)
+{
+    const __half alpha_h = __float2half(1.0f), beta_h = __float2half(0.0f);
+    const int BLK = 256;
+    /* INT4 nibble count = 2*K; for dequant we expand BENCH_M*2*BENCH_K nibbles */
+    const int n_nib_A = BENCH_M * BENCH_K;   /* nibble count for A */
+    const int n_nib_B = BENCH_K * BENCH_N;
+
+    cudaEvent_t t0, t1; cudaEventCreate(&t0); cudaEventCreate(&t1);
+    float ms_cbl[REPS], ms_ptx[REPS];
+
+    for (int r = 0; r < WARMUP; r++) {
+        k_dequant_i4_to_f16<<<(n_nib_A+BLK-1)/BLK, BLK>>>(dAq4, dA_f16, n_nib_A);
+        k_dequant_i4_to_f16<<<(n_nib_B+BLK-1)/BLK, BLK>>>(dBq4, dB_f16, n_nib_B);
+        cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
+                    &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
+        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx,
+                                   BENCH_M, BENCH_K * 2, BENCH_N, 0);
+    }
+    cudaDeviceSynchronize();
+
+    for (int r = 0; r < REPS; r++) {
+        cudaEventRecord(t0);
+        k_dequant_i4_to_f16<<<(n_nib_A+BLK-1)/BLK, BLK>>>(dAq4, dA_f16, n_nib_A);
+        k_dequant_i4_to_f16<<<(n_nib_B+BLK-1)/BLK, BLK>>>(dBq4, dB_f16, n_nib_B);
+        cublasHgemm(cbl, CUBLAS_OP_N, CUBLAS_OP_N, BENCH_N, BENCH_M, BENCH_K,
+                    &alpha_h, dB_f16, BENCH_N, dA_f16, BENCH_K, &beta_h, dC_cbl, BENCH_N);
+        cudaEventRecord(t1); cudaEventSynchronize(t1);
+        cudaEventElapsedTime(&ms_cbl[r], t0, t1);
+    }
+
+    for (int r = 0; r < REPS; r++) {
+        cudaEventRecord(t0);
+        sp_frob_matmul_q4_mma_tile(dAq4, dBq4, dSA, dSB, dC_ptx,
+                                   BENCH_M, BENCH_K * 2, BENCH_N, 0);
+        cudaEventRecord(t1); cudaEventSynchronize(t1);
+        cudaEventElapsedTime(&ms_ptx[r], t0, t1);
+    }
+
+    std::sort(ms_cbl, ms_cbl + REPS); std::sort(ms_ptx, ms_ptx + REPS);
+    float cbl_med = percentile(ms_cbl, REPS, 50);
+    float ptx_med = percentile(ms_ptx, REPS, 50);
+    float ptx_p90 = percentile(ms_ptx, REPS, 90);
+    float ptx_p99 = percentile(ms_ptx, REPS, 99);
+    printf("INT4 (%dx%dx%d): cuBLAS=%.2fms  tile_med=%.2fms p90=%.2fms p99=%.2fms  speedup=%.2fx\n",
+           BENCH_M, BENCH_K * 2, BENCH_N, cbl_med, ptx_med, ptx_p90, ptx_p99, cbl_med / ptx_med);
+    printf("  gate: >=4x (achievable at ~75%% INT4 TC utilization on sm_75)\n");
+    cudaEventDestroy(t0); cudaEventDestroy(t1);
+    return 0;
+}
 
 /* ── Main ──────────────────────────────────────────────────────────────────── */
 int main() {
