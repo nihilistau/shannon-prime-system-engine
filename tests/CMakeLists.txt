@@ -474,4 +474,15 @@ if(SP_ENGINE_WITH_AVX512)
     endif()
     add_test(NAME M_AVX_PERSIST_1 COMMAND test_avx512_persist)
     add_test(NAME M_AVX_PERSIST_2 COMMAND test_avx512_persist)
+
+    # Deliverable D: CPUID-mock Zen 4 dispatch + three-way bit-identity.
+    add_executable(test_avx512_zen4_mock test_avx512_zen4_mock.c)
+    target_link_libraries(test_avx512_zen4_mock PRIVATE sp_engine)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_avx512_zen4_mock PRIVATE
+            -mavx512f -mavx512ifma -mavx512bw -mavx512dq -O2)
+    elseif(MSVC)
+        target_compile_options(test_avx512_zen4_mock PRIVATE /arch:AVX512 /O2)
+    endif()
+    add_test(NAME T_ZEN4_DISPATCH COMMAND test_avx512_zen4_mock)
 endif()
