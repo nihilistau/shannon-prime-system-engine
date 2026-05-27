@@ -41,12 +41,14 @@ add_subdirectory(lib/shannon-prime-system)
 add_subdirectory(src)
 
 # ── Phase 2-CU.PTX: standalone validate / bench binaries ─────────────────────
-# ptx_validate: M_PTX_1 bit-identity test for each PTX sub-phase.
-# ptx_bench:    M_PTX_2 throughput benchmark (Nsight Compute target).
-# Both compile against sm_75/80/86/90; on no-GPU hosts they print SKIP.
+# ptx_validate:           M_PTX_1 bit-identity test for each PTX sub-phase.
+# ptx_bench:              M_PTX_2 throughput benchmark (Nsight Compute target).
+# ptx_mma_tile_validate:  M_PTX_MMA_TILE_1 three-way correctness across shapes.
+# ptx_mma_tile_bench:     M_PTX_MMA_TILE_2 throughput vs cuBLAS HGEMM baseline.
+# All compile against sm_75/80/86/90; on no-GPU hosts they print SKIP.
 if(SP_ENGINE_WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)  # idempotent — already found in src/
-    foreach(_tgt ptx_validate ptx_bench)
+    foreach(_tgt ptx_validate ptx_bench ptx_mma_tile_validate ptx_mma_tile_bench)
         add_executable(${_tgt} src/backends/cuda/${_tgt}.cu)
         target_link_libraries(${_tgt} PRIVATE CUDA::cudart CUDA::cublas)
         target_include_directories(${_tgt} PRIVATE
