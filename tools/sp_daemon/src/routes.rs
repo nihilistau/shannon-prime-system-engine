@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
+use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::http::{header, HeaderName, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -307,12 +308,6 @@ pub async fn v1_receipts(State(state): State<Arc<AppState>>) -> Json<serde_json:
     Json(serde_json::json!({ "receipts": receipts, "cursor": null }))
 }
 
-// ── /v1/peers ─────────────────────────────────────────────────────────────
-
-pub async fn v1_peers() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "peers": [] }))
-}
-
 // ── /v1/events ────────────────────────────────────────────────────────────
 
 /// Long-lived SSE channel for daemon-wide events.
@@ -345,4 +340,116 @@ pub async fn v1_events(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                 .text("keepalive"),
         ),
     )
+}
+
+// ── /v1/node/telemetry (WS) — migrated from console.rs ───────────────────
+
+#[derive(Serialize)]
+struct NodeTelemetry {
+    node_id: String,
+    cpu_temp_c: f32,
+    svm_mem_gb: f32,
+    dht_peers_active: u32,
+    dht_peers_total: u32,
+    pouw_frontier: u64,
+}
+
+pub async fn v1_node_telemetry(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| telemetry_loop(socket, state))
+}
+
+async fn telemetry_loop(mut socket: WebSocket, state: Arc<AppState>) {
+    loop {
+        let peers_active = state.peer_map.len() as u32;
+        let pouw_frontier = {
+            let store = state.receipt_store.lock().unwrap();
+            store.len() as u64
+        };
+        let payload = NodeTelemetry {
+            node_id: "q3-beast-canyon".to_string(),
+            cpu_temp_c: 58.5,
+            svm_mem_gb: 2.4,
+            dht_peers_active: peers_active,
+            dht_peers_total: 32,
+            pouw_frontier,
+        };
+        let json = serde_json::to_string(&payload).expect("NodeTelemetry serializable");
+        if socket.send(WsMessage::Text(json)).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
+}
+
+// ── /v1/mesh/peers — migrated from console.rs ────────────────────────────
+
+#[derive(Serialize)]
+struct PeerInfo {
+    node_id:    String,
+    address:    String,
+    shard_id:   String,
+    latency_ms: u32,
+}
+
+pub async fn v1_mesh_peers(State(state): State<Arc<AppState>>) -> axum::Json<serde_json::Value> {
+    let peers: Vec<PeerInfo> = state.peer_map.iter().map(|entry| {
+        let addr     = *entry.key();
+        let shard_id = entry.value().shard_id;
+        PeerInfo {
+            node_id:    addr.to_string(),
+            address:    addr.to_string(),
+            shard_id:   if shard_id == 0 { "q1".into() } else { "q2".into() },
+            latency_ms: 45,
+        }
+    }).collect();
+    axum::Json(serde_json::json!({
+        "peers":  peers,
+        "active": peers.len(),
+        "total":  32,
+    }))
+}
+
+// ── /v1/pouw/ledger — migrated from console.rs ───────────────────────────
+
+pub async fn v1_pouw_ledger(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rx = state.events_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        let ev = result.ok()?;
+        match ev {
+            DaemonEvent::Mint { receipt_hex, .. } => {
+                let line = format_kste_receipt(&receipt_hex);
+                Some(Ok::<Event, Infallible>(Event::default().data(line)))
+            }
+            _ => None,
+        }
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+}
+
+fn format_kste_receipt(receipt_hex: &str) -> String {
+    if receipt_hex.len() < 288 {
+        return format!("[KSTE] <malformed receipt len={}>", receipt_hex.len());
+    }
+    let round = decode_le_u64_hex(&receipt_hex[272..288]);
+    let nonce = &receipt_hex[16..24];
+    let hash  = &receipt_hex[144..152];
+    format!("[KSTE] Round: {round} | Nonce: 0x{nonce}... | Z_q Hash: 0x{hash}...")
+}
+
+fn decode_le_u64_hex(hex16: &str) -> u64 {
+    let mut bytes = [0u8; 8];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex16[i * 2..i * 2 + 2], 16).unwrap_or(0);
+    }
+    u64::from_le_bytes(bytes)
+}
+
+// ── /v1/chat/stream stub — migrated from console.rs ─────────────────────
+
+pub async fn v1_chat_stream_stub() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({"status": "stub", "stream": "sse-legacy"}))
 }

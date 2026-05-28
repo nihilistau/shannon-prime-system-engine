@@ -25,11 +25,10 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str, peers: &str) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     let exe = std::env::current_exe().expect("current_exe");
-    let quic_port_s    = quic_port.to_string();
-    let http_port_s    = http_port.to_string();
-    let console_port_s = console_port.to_string();
+    let quic_port_s = quic_port.to_string();
+    let http_port_s = http_port.to_string();
     let mut cmd = std::process::Command::new(&exe);
     cmd.args([
         "--daemon-inner",
@@ -39,7 +38,6 @@ pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenize
         "--draft-tokenizer", draft_tokenizer,
         "--quic-port",       &quic_port_s,
         "--port",            &http_port_s,
-        "--console-port",    &console_port_s,
         "--peer",            peer,
         "--peers",           peers,
     ]);
@@ -85,7 +83,7 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
-pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str, peers: &str) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -172,9 +170,6 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         receipt_store,
         events_tx,
     ));
-
-    // ── Operator Console ──────────────────────────────────────────────────────
-    tokio::spawn(crate::console::start_operator_console(Arc::clone(&state), console_port));
 
     // ── QUIC DHT Coordinator ───────────────────────────────────────────────
     // Binds on 0.0.0.0:<quic_port> (LAN-accessible, unlike the HTTP server
