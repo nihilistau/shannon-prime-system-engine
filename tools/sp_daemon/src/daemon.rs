@@ -25,7 +25,7 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str, peers: &str) {
     let exe = std::env::current_exe().expect("current_exe");
     let quic_port_s    = quic_port.to_string();
     let http_port_s    = http_port.to_string();
@@ -41,6 +41,7 @@ pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenize
         "--port",            &http_port_s,
         "--console-port",    &console_port_s,
         "--peer",            peer,
+        "--peers",           peers,
     ]);
 
     // Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the child is
@@ -84,7 +85,7 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
-pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str, peers: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -201,29 +202,12 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         info!("QUIC mesh disabled (quic_port=0); pass --quic-port <N> or SP_QUIC_PORT=<N> to enable");
     }
 
-    // ── Outbound peer dial (--peer <addr>) ────────────────────────────────
-    // Spawns a QUIC worker that dials the named peer's coordinator.  Keeps the
-    // connection alive so the remote peer_map retains this node's entry.
-    if !peer.is_empty() {
-        let peer_str = peer.to_string();
-        tokio::spawn(async move {
-            match peer_str.parse::<std::net::SocketAddr>() {
-                Ok(peer_addr) => {
-                    let local: std::net::SocketAddr = ([0u8, 0, 0, 0], 0u16).into();
-                    match SpQuicWorker::connect(local, peer_addr).await {
-                        Ok(worker) => {
-                            info!("SP_INFO: QUIC connected to peer {peer_addr}");
-                            loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                                let _ = &worker;
-                            }
-                        }
-                        Err(e) => tracing::warn!("QUIC --peer connect to {peer_addr} failed: {e}"),
-                    }
-                }
-                Err(e) => tracing::warn!("--peer: invalid address {peer_str}: {e}"),
-            }
-        });
+    // ── Outbound peer dials (--peer / --peers) ────────────────────────────
+    // --peer is the back-compat single-address form (F4); --peers is the
+    // comma-separated bootstrap list (F5).  Both are dialed at startup.
+    spawn_peer_dial(peer);
+    for addr in peers.split(',').filter(|s| !s.is_empty()) {
+        spawn_peer_dial(addr);
     }
 
     // ── HTTP server ────────────────────────────────────────────────────────
@@ -246,6 +230,32 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Spawn a background task that dials `addr_str` as a QUIC peer and keeps
+/// the connection alive via a 60s sleep loop.  On parse or dial failure:
+/// logs a warning and exits silently — does NOT crash the daemon.
+fn spawn_peer_dial(addr_str: &str) {
+    if addr_str.is_empty() { return; }
+    let addr_str = addr_str.to_string();
+    tokio::spawn(async move {
+        match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(peer_addr) => {
+                let local: std::net::SocketAddr = ([0u8, 0, 0, 0], 0u16).into();
+                match SpQuicWorker::connect(local, peer_addr).await {
+                    Ok(worker) => {
+                        info!("SP_INFO: QUIC connected to peer {peer_addr}");
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            let _ = &worker;
+                        }
+                    }
+                    Err(e) => tracing::warn!("SP_WARN: QUIC dial to {peer_addr} failed: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("SP_WARN: invalid peer address {addr_str}: {e}"),
+        }
+    });
+}
 
 /// Resolves on SIGTERM (Unix) or Ctrl-C (all platforms).
 async fn shutdown_signal() {
