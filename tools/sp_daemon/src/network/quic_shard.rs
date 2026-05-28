@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use quinn::{Connection, Endpoint, RecvStream};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use dashmap::DashMap;
@@ -131,7 +132,14 @@ pub fn make_server_config() -> Result<quinn::ServerConfig> {
         .with_single_cert(vec![cert_der], key_der)?;
 
     let quic_server = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_server)))
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(Duration::from_secs(30)));
+    transport.max_idle_timeout(Some(quinn::VarInt::from_u32(120_000).into()));
+    server_config.transport_config(Arc::new(transport));
+
+    Ok(server_config)
 }
 
 pub fn make_client_config() -> Result<quinn::ClientConfig> {
@@ -141,7 +149,14 @@ pub fn make_client_config() -> Result<quinn::ClientConfig> {
         .with_no_client_auth();
 
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client));
+
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(Duration::from_secs(30)));
+    transport.max_idle_timeout(Some(quinn::VarInt::from_u32(120_000).into()));
+    client_config.transport_config(Arc::new(transport));
+
+    Ok(client_config)
 }
 
 // ── Coordinator ───────────────────────────────────────────────────────────────
@@ -270,6 +285,18 @@ pub async fn run_garner_loop(
         let remote_addr = conn.remote_address();
         // Register immediately; shard_id unknown until first block arrives.
         peer_map.insert(remote_addr, ConnectedPeer { shard_id: u8::MAX });
+
+        // Explicit close-watcher: fires as soon as the connection terminates
+        // (graceful or otherwise), regardless of whether any streams were opened.
+        // The accept_uni loop below also calls remove on break — both are safe
+        // because DashMap::remove is idempotent on already-absent keys.
+        let peer_map_cleanup = Arc::clone(&peer_map);
+        let conn_for_close = conn.clone();
+        tokio::spawn(async move {
+            conn_for_close.closed().await;
+            peer_map_cleanup.remove(&remote_addr);
+            tracing::info!("SP_INFO: QUIC peer disconnected: {remote_addr}");
+        });
 
         let pending     = Arc::clone(&pending);
         let results_tx  = results_tx.clone();
