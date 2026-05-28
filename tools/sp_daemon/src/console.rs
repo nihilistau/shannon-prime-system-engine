@@ -21,12 +21,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::sleep;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use tokio_stream::StreamExt as _;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::info;
 
 use crate::spec::{argmax, spec_step};
-use crate::state::AppState;
+use crate::state::{AppState, DaemonEvent};
 use crate::tokenizer::{Message as TokMessage, PushResult, TokenDecodeBuffer};
 
 // ── Telemetry WS ──────────────────────────────────────────────────────────────
@@ -279,6 +280,60 @@ fn mk_sse(rx: mpsc::Receiver<Result<Event, Infallible>>) -> Sse<ReceiverStream<R
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
 }
 
+// ── PoUW Receipts Ledger (GET /v1/pouw/ledger) ───────────────────────────────
+//
+// Subscribes to the existing events_tx broadcast channel (DaemonEvent::Mint is
+// already emitted by run_mining_loop on every sieve-fold event) and re-formats
+// each receipt as a human-readable KSTE display line.
+//
+// Receipt wire format (152 bytes, hex-encoded):
+//   [  0.. 7] magic "SPRCPT01"
+//   [  8..72] kste_sig  (64 B) — bytes 8..12 → "nonce" display
+//   [ 72..104] seq_hash  (32 B) — bytes 72..76 → Z_q hash display
+//   [104..136] pubkey    (32 B)
+//   [136..144] round     (u64 LE)
+//   [144..152] minted_at_ns (u64 LE)
+
+async fn pouw_ledger(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rx = state.events_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        let ev = result.ok()?; // drop Lagged errors silently
+        match ev {
+            DaemonEvent::Mint { receipt_hex, .. } => {
+                let line = format_kste_receipt(&receipt_hex);
+                Some(Ok::<Event, Infallible>(Event::default().data(line)))
+            }
+            _ => None,
+        }
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+}
+
+/// Decode a packed receipt hex string into a UI display line.
+/// Returns a fallback string if the hex is malformed or too short.
+fn format_kste_receipt(receipt_hex: &str) -> String {
+    // Minimum length for all fields we read.
+    if receipt_hex.len() < 288 {
+        return format!("[KSTE] <malformed receipt len={}>", receipt_hex.len());
+    }
+    let round = decode_le_u64_hex(&receipt_hex[272..288]);
+    // kste_sig first 4 bytes → "nonce" shorthand for the UI.
+    let nonce = &receipt_hex[16..24];
+    // seq_hash first 4 bytes → Z_q hash shorthand.
+    let hash  = &receipt_hex[144..152];
+    format!("[KSTE] Round: {round} | Nonce: 0x{nonce}... | Z_q Hash: 0x{hash}...")
+}
+
+/// Decode 16 hex chars (8 bytes) as a little-endian u64.
+fn decode_le_u64_hex(hex16: &str) -> u64 {
+    let mut bytes = [0u8; 8];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex16[i * 2..i * 2 + 2], 16).unwrap_or(0);
+    }
+    u64::from_le_bytes(bytes)
+}
+
 // ── Stub ──────────────────────────────────────────────────────────────────────
 
 async fn chat_stream_stub() -> axum::Json<serde_json::Value> {
@@ -292,6 +347,7 @@ fn build_console_router(state: Arc<AppState>) -> Router {
         .route("/v1/chat", post(chat_handler))
         .route("/v1/chat/stream", get(chat_stream_stub))
         .route("/v1/node/telemetry", get(node_telemetry))
+        .route("/v1/pouw/ledger", get(pouw_ledger))
         .fallback_service(ServeDir::new("frontend_mockups"))
         .layer(CorsLayer::permissive())
         .with_state(state)
