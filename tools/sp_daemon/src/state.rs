@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::{atomic::{AtomicI32, AtomicU64, AtomicBool}, Arc, Mutex};
 use std::time::Instant;
+use dashmap::DashMap;
 use tokio::sync::broadcast;
 
 use ed25519_dalek::SigningKey;
@@ -27,6 +29,15 @@ pub struct ReceiptRecord {
     pub sig_hex:     String,
     /// Global sieve-fold counter at mint time.
     pub round:       u64,
+}
+
+/// A QUIC peer currently connected to the SpQuicCoordinator.
+/// Populated by run_garner_loop when a connection is accepted;
+/// cleared on connection close. Key = remote SocketAddr.
+#[derive(Clone, Debug)]
+pub struct ConnectedPeer {
+    /// 0 = q1 shard (prime 1073738753), 1 = q2 shard (prime 1073732609).
+    pub shard_id: u8,
 }
 
 /// Shared daemon state — threaded through axum via `State<Arc<AppState>>`.
@@ -65,4 +76,8 @@ pub struct AppState {
     pub receipt_store: Arc<Mutex<Vec<ReceiptRecord>>>,
     /// ed25519 node keypair used to sign PoUW receipts.
     pub node_signing_key: SigningKey,
+    /// Active QUIC peers indexed by remote SocketAddr.
+    /// Populated by run_garner_loop on accept; cleared on connection close.
+    /// Empty until the coordinator is wired into daemon startup.
+    pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
 }

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicI32, AtomicU64, AtomicBool}, Arc, Mutex};
 use std::time::Instant;
+use dashmap::DashMap;
 
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -146,6 +147,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         inference_active: inference_active.clone(),
         receipt_store:    receipt_store.clone(),
         node_signing_key,
+        peer_map: Arc::new(DashMap::new()),
     });
 
     // ── Background PoUW mining task ────────────────────────────────────────
@@ -157,7 +159,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     ));
 
     // ── Operator Console (127.0.0.1:3000) ─────────────────────────────────
-    tokio::spawn(crate::console::start_operator_console());
+    tokio::spawn(crate::console::start_operator_console(Arc::clone(&state)));
 
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));

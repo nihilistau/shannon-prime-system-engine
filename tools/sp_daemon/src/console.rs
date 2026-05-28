@@ -42,19 +42,27 @@ struct NodeTelemetry {
     pouw_frontier: u64,
 }
 
-async fn node_telemetry(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(telemetry_loop)
+async fn node_telemetry(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| telemetry_loop(socket, state))
 }
 
-async fn telemetry_loop(mut socket: WebSocket) {
+async fn telemetry_loop(mut socket: WebSocket, state: Arc<AppState>) {
     loop {
+        let peers_active = state.peer_map.len() as u32;
+        let pouw_frontier = {
+            let store = state.receipt_store.lock().unwrap();
+            store.len() as u64
+        };
         let payload = NodeTelemetry {
             node_id: "q3-beast-canyon".to_string(),
-            cpu_temp_c: 58.5,
-            svm_mem_gb: 2.4,
-            dht_peers_active: 14,
-            dht_peers_total: 32,
-            pouw_frontier: 1_048_576,
+            cpu_temp_c: 58.5,   // mocked: C-FFI thermal API not yet exposed
+            svm_mem_gb: 2.4,    // mocked: session memory API not yet exposed
+            dht_peers_active: peers_active,
+            dht_peers_total: 32, // static: dev topology ceiling
+            pouw_frontier,
         };
         let json = serde_json::to_string(&payload).expect("NodeTelemetry is always serializable");
         if socket.send(WsMessage::Text(json)).await.is_err() {
@@ -280,6 +288,35 @@ fn mk_sse(rx: mpsc::Receiver<Result<Event, Infallible>>) -> Sse<ReceiverStream<R
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
 }
 
+// ── DHT Mesh peers (GET /v1/mesh/peers) ──────────────────────────────────────
+
+#[derive(Serialize)]
+struct PeerInfo {
+    node_id:    String,
+    address:    String,
+    shard_id:   String,
+    latency_ms: u32,
+}
+
+async fn mesh_peers(State(state): State<Arc<AppState>>) -> axum::Json<serde_json::Value> {
+    // DashMap::iter() holds one shard lock per entry briefly — no long lock.
+    let peers: Vec<PeerInfo> = state.peer_map.iter().map(|entry| {
+        let addr     = *entry.key();
+        let shard_id = entry.value().shard_id;
+        PeerInfo {
+            node_id:    addr.to_string(), // TODO: replace with TLS identity once wired
+            address:    addr.to_string(),
+            shard_id:   if shard_id == 0 { "q1".into() } else { "q2".into() },
+            latency_ms: 45, // mocked: RTT tracking not yet implemented
+        }
+    }).collect();
+    axum::Json(serde_json::json!({
+        "peers": peers,
+        "active": peers.len(),
+        "total": 32,
+    }))
+}
+
 // ── PoUW Receipts Ledger (GET /v1/pouw/ledger) ───────────────────────────────
 //
 // Subscribes to the existing events_tx broadcast channel (DaemonEvent::Mint is
@@ -347,6 +384,7 @@ fn build_console_router(state: Arc<AppState>) -> Router {
         .route("/v1/chat", post(chat_handler))
         .route("/v1/chat/stream", get(chat_stream_stub))
         .route("/v1/node/telemetry", get(node_telemetry))
+        .route("/v1/mesh/peers", get(mesh_peers))
         .route("/v1/pouw/ledger", get(pouw_ledger))
         .fallback_service(ServeDir::new("frontend_mockups"))
         .layer(CorsLayer::permissive())
