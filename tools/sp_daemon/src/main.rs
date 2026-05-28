@@ -1,3 +1,4 @@
+mod console;
 mod daemon;
 mod ffi;
 mod mining;

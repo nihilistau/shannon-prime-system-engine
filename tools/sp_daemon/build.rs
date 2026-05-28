@@ -90,10 +90,22 @@ fn main() {
             engine_root.join("build-cpu/lib/shannon-prime-system")
         });
 
+    // CARGO_CFG_TARGET_ENV differentiates MSVC ("msvc") from MinGW/Linux ("gnu"/"").
+    // On MSVC, cargo:rustc-link-lib=static stops propagating to [[bin]] targets when
+    // the [lib] in this package (lib.rs) does not itself reference the C FFI symbols.
+    // cargo:rustc-link-arg bypasses that boundary and reaches the binary link step
+    // directly with a full absolute path — no /LIBPATH lookup required.
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+
     for (module_dir, lib_name) in MODULES {
         let search = build_dir.join("core").join(module_dir);
         println!("cargo:rustc-link-search=native={}", search.display());
-        println!("cargo:rustc-link-lib=static={}", lib_name);
+        if target_env == "msvc" {
+            let lib_path = search.join(format!("{lib_name}.lib"));
+            println!("cargo:rustc-link-arg={}", lib_path.display());
+        } else {
+            println!("cargo:rustc-link-lib=static={lib_name}");
+        }
     }
 
     if target_os == "linux" {

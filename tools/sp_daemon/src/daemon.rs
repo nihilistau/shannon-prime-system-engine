@@ -156,6 +156,9 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         events_tx,
     ));
 
+    // ── Operator Console (127.0.0.1:3000) ─────────────────────────────────
+    tokio::spawn(crate::console::start_operator_console());
+
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));
 
