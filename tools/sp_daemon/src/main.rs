@@ -36,6 +36,8 @@ struct Cli {
     draft_model: String,
     #[arg(long, default_value = "", hide = true)]
     draft_tokenizer: String,
+    #[arg(long, default_value = "0", hide = true)]
+    quic_port: u16,
 }
 
 #[derive(Subcommand)]
@@ -54,6 +56,9 @@ enum Cmd {
         /// Path to draft .sp-tokenizer (optional, required if --draft-model is set).
         #[arg(long, env = "SP_DRAFT_TOKENIZER_PATH", default_value = "")]
         draft_tokenizer: String,
+        /// UDP port for the QUIC DHT mesh coordinator (set SP_QUIC_PORT or 0 to disable).
+        #[arg(long, env = "SP_QUIC_PORT", default_value = "0")]
+        quic_port: u16,
     },
     /// Stop the running daemon (sends SIGTERM / taskkill).
     Stop,
@@ -66,13 +71,17 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.daemon_inner {
-        daemon::run_inner(&cli.model, &cli.tokenizer, &cli.draft_model, &cli.draft_tokenizer).await;
+        daemon::run_inner(
+            &cli.model, &cli.tokenizer,
+            &cli.draft_model, &cli.draft_tokenizer,
+            cli.quic_port,
+        ).await;
         return;
     }
 
     match cli.command {
-        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer }) =>
-            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer),
+        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, quic_port }) =>
+            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, quic_port),
         Some(Cmd::Stop) => daemon::cmd_stop(),
         Some(Cmd::Reload) => daemon::cmd_reload(),
         None => {

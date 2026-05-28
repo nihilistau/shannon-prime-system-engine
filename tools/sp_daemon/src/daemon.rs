@@ -3,10 +3,17 @@ use std::path::PathBuf;
 use std::sync::{atomic::{AtomicI32, AtomicU64, AtomicBool}, Arc, Mutex};
 use std::time::Instant;
 use dashmap::DashMap;
+use tokio::sync::mpsc;
 
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use tracing::info;
+
+use sp_daemon::network::quic_shard::{run_garner_loop, SpQuicCoordinator};
+
+/// NTT transform size for CRT residue reconstruction.
+/// Matches the test topology (N=128). Tuned to model layer width in BLOCK-SYNC phase.
+const QUIC_NTT_N: u32 = 128;
 
 fn pid_file() -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -18,15 +25,17 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16) {
     let exe = std::env::current_exe().expect("current_exe");
+    let quic_port_s = quic_port.to_string();
     let mut cmd = std::process::Command::new(&exe);
     cmd.args([
         "--daemon-inner",
-        "--model", model,
-        "--tokenizer", tokenizer,
-        "--draft-model", draft_model,
+        "--model",         model,
+        "--tokenizer",     tokenizer,
+        "--draft-model",   draft_model,
         "--draft-tokenizer", draft_tokenizer,
+        "--quic-port",     &quic_port_s,
     ]);
 
     // Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the child is
@@ -70,7 +79,7 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
-pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -160,6 +169,32 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
 
     // ── Operator Console (127.0.0.1:3000) ─────────────────────────────────
     tokio::spawn(crate::console::start_operator_console(Arc::clone(&state)));
+
+    // ── QUIC DHT Coordinator ───────────────────────────────────────────────
+    // Binds on 0.0.0.0:<quic_port> (LAN-accessible, unlike the HTTP server
+    // which is loopback-only).  quic_port=0 disables the coordinator.
+    if quic_port != 0 {
+        let quic_addr: std::net::SocketAddr = ([0, 0, 0, 0], quic_port).into();
+        match SpQuicCoordinator::bind(quic_addr).await {
+            Ok(coordinator) => {
+                info!("SP_INFO: QUIC Coordinator listening on {quic_addr}");
+                // Garner results channel: receiver intentionally discarded here.
+                // Results will be consumed by the inference pipeline in BLOCK-SYNC phase.
+                let (garner_tx, _garner_rx) = mpsc::channel(64);
+                tokio::spawn(run_garner_loop(
+                    coordinator,
+                    QUIC_NTT_N,
+                    garner_tx,
+                    Arc::clone(&state.peer_map),
+                ));
+            }
+            Err(e) => {
+                tracing::warn!("QUIC coordinator bind failed on {quic_addr}: {e} — DHT mesh disabled");
+            }
+        }
+    } else {
+        info!("QUIC mesh disabled (quic_port=0); pass --quic-port <N> or SP_QUIC_PORT=<N> to enable");
+    }
 
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));
