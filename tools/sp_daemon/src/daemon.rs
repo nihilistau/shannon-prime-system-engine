@@ -9,7 +9,7 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use tracing::info;
 
-use sp_daemon::network::quic_shard::{run_garner_loop, SpQuicCoordinator};
+use sp_daemon::network::quic_shard::{run_garner_loop, SpQuicCoordinator, SpQuicWorker};
 
 /// NTT transform size for CRT residue reconstruction.
 /// Matches the test topology (N=128). Tuned to model layer width in BLOCK-SYNC phase.
@@ -25,17 +25,22 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str) {
     let exe = std::env::current_exe().expect("current_exe");
-    let quic_port_s = quic_port.to_string();
+    let quic_port_s    = quic_port.to_string();
+    let http_port_s    = http_port.to_string();
+    let console_port_s = console_port.to_string();
     let mut cmd = std::process::Command::new(&exe);
     cmd.args([
         "--daemon-inner",
-        "--model",         model,
-        "--tokenizer",     tokenizer,
-        "--draft-model",   draft_model,
+        "--model",           model,
+        "--tokenizer",       tokenizer,
+        "--draft-model",     draft_model,
         "--draft-tokenizer", draft_tokenizer,
-        "--quic-port",     &quic_port_s,
+        "--quic-port",       &quic_port_s,
+        "--port",            &http_port_s,
+        "--console-port",    &console_port_s,
+        "--peer",            peer,
     ]);
 
     // Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the child is
@@ -79,7 +84,7 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
-pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, console_port: u16, peer: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -167,8 +172,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         events_tx,
     ));
 
-    // ── Operator Console (127.0.0.1:3000) ─────────────────────────────────
-    tokio::spawn(crate::console::start_operator_console(Arc::clone(&state)));
+    // ── Operator Console ──────────────────────────────────────────────────────
+    tokio::spawn(crate::console::start_operator_console(Arc::clone(&state), console_port));
 
     // ── QUIC DHT Coordinator ───────────────────────────────────────────────
     // Binds on 0.0.0.0:<quic_port> (LAN-accessible, unlike the HTTP server
@@ -196,16 +201,38 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         info!("QUIC mesh disabled (quic_port=0); pass --quic-port <N> or SP_QUIC_PORT=<N> to enable");
     }
 
+    // ── Outbound peer dial (--peer <addr>) ────────────────────────────────
+    // Spawns a QUIC worker that dials the named peer's coordinator.  Keeps the
+    // connection alive so the remote peer_map retains this node's entry.
+    if !peer.is_empty() {
+        let peer_str = peer.to_string();
+        tokio::spawn(async move {
+            match peer_str.parse::<std::net::SocketAddr>() {
+                Ok(peer_addr) => {
+                    let local: std::net::SocketAddr = ([0u8, 0, 0, 0], 0u16).into();
+                    match SpQuicWorker::connect(local, peer_addr).await {
+                        Ok(worker) => {
+                            info!("SP_INFO: QUIC connected to peer {peer_addr}");
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                let _ = &worker;
+                            }
+                        }
+                        Err(e) => tracing::warn!("QUIC --peer connect to {peer_addr} failed: {e}"),
+                    }
+                }
+                Err(e) => tracing::warn!("--peer: invalid address {peer_str}: {e}"),
+            }
+        });
+    }
+
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));
 
-    // Bind only to loopback. 0.0.0.0 is explicitly forbidden:
-    // single-user developer-device assumption (PPT-LAT-Roadmap §14.3.1).
-    // LAN exposure and TLS are v1+ scope (Phase 2-L3.AUTH onwards).
-    let addr: std::net::SocketAddr = ([127, 0, 0, 1], 8080).into();
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], http_port).into();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .expect("bind 127.0.0.1:8080 — is another instance already running?");
+        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     info!("listening on {addr}");
 
     axum::serve(listener, app)

@@ -38,6 +38,12 @@ struct Cli {
     draft_tokenizer: String,
     #[arg(long, default_value = "0", hide = true)]
     quic_port: u16,
+    #[arg(long, default_value = "8080", hide = true)]
+    port: u16,
+    #[arg(long, default_value = "3000", hide = true)]
+    console_port: u16,
+    #[arg(long, default_value = "", hide = true)]
+    peer: String,
 }
 
 #[derive(Subcommand)]
@@ -59,6 +65,15 @@ enum Cmd {
         /// UDP port for the QUIC DHT mesh coordinator (set SP_QUIC_PORT or 0 to disable).
         #[arg(long, env = "SP_QUIC_PORT", default_value = "0")]
         quic_port: u16,
+        /// TCP port for the main HTTP API server (set SP_HTTP_PORT).
+        #[arg(long, env = "SP_HTTP_PORT", default_value = "8080")]
+        port: u16,
+        /// TCP port for the operator console HTTP server (set SP_CONSOLE_PORT).
+        #[arg(long, env = "SP_CONSOLE_PORT", default_value = "3000")]
+        console_port: u16,
+        /// Dial this QUIC peer address on startup (e.g. 127.0.0.1:5000).
+        #[arg(long, default_value = "")]
+        peer: String,
     },
     /// Stop the running daemon (sends SIGTERM / taskkill).
     Stop,
@@ -74,14 +89,14 @@ async fn main() {
         daemon::run_inner(
             &cli.model, &cli.tokenizer,
             &cli.draft_model, &cli.draft_tokenizer,
-            cli.quic_port,
+            cli.quic_port, cli.port, cli.console_port, &cli.peer,
         ).await;
         return;
     }
 
     match cli.command {
-        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, quic_port }) =>
-            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, quic_port),
+        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, quic_port, port, console_port, peer }) =>
+            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, quic_port, port, console_port, &peer),
         Some(Cmd::Stop) => daemon::cmd_stop(),
         Some(Cmd::Reload) => daemon::cmd_reload(),
         None => {

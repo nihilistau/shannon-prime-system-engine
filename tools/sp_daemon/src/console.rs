@@ -391,12 +391,12 @@ fn build_console_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-pub async fn start_operator_console(state: Arc<AppState>) {
+pub async fn start_operator_console(state: Arc<AppState>, console_port: u16) {
     let app = build_console_router(state);
-    let addr: std::net::SocketAddr = ([127, 0, 0, 1], 3000).into();
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], console_port).into();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .expect("bind 127.0.0.1:3000 — is another console instance running?");
+        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     info!("operator console listening on {addr}");
     axum::serve(listener, app)
         .await
