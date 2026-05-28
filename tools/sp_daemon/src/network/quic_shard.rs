@@ -7,6 +7,18 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 
+// ── Peer registry ─────────────────────────────────────────────────────────────
+
+/// A QUIC peer registered in the DHT mesh.
+/// Defined here (lib) so run_garner_loop can write it without depending on the
+/// binary's state module.  Re-exported and used by AppState (binary side).
+#[derive(Clone, Debug)]
+pub struct ConnectedPeer {
+    /// 0 = q1 shard (prime 1073738753), 1 = q2 shard (prime 1073732609).
+    /// u8::MAX = shard unknown (connection accepted, no block received yet).
+    pub shard_id: u8,
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 pub type ShardError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -236,10 +248,16 @@ pub struct GarnerResult {
 /// Accept QUIC connections and streams from shard workers. When both q1 and q2
 /// residues arrive for the same seq_id, call ntt_crt_recombine and send the
 /// result on `results_tx`. Runs until the coordinator endpoint is dropped.
+///
+/// `peer_map` is updated on every connection event:
+///   accept → insert ConnectedPeer { shard_id: u8::MAX }
+///   first block → refine shard_id from block.header.prime_selector
+///   close/error → remove entry (no ghost nodes in the UI)
 pub async fn run_garner_loop(
     coordinator: SpQuicCoordinator,
     ntt_n: u32,
     results_tx: mpsc::Sender<GarnerResult>,
+    peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
 ) -> Result<()> {
     let pending: Arc<DashMap<u64, PendingBlock>> = Arc::new(DashMap::new());
 
@@ -249,8 +267,13 @@ pub async fn run_garner_loop(
             Err(_) => break,
         };
 
-        let pending = Arc::clone(&pending);
-        let results_tx = results_tx.clone();
+        let remote_addr = conn.remote_address();
+        // Register immediately; shard_id unknown until first block arrives.
+        peer_map.insert(remote_addr, ConnectedPeer { shard_id: u8::MAX });
+
+        let pending     = Arc::clone(&pending);
+        let results_tx  = results_tx.clone();
+        let peer_map_c  = Arc::clone(&peer_map);
 
         tokio::spawn(async move {
             loop {
@@ -259,8 +282,9 @@ pub async fn run_garner_loop(
                     Err(_) => break,
                 };
 
-                let pending = Arc::clone(&pending);
+                let pending    = Arc::clone(&pending);
                 let results_tx = results_tx.clone();
+                let peer_map_s = Arc::clone(&peer_map_c);
 
                 tokio::spawn(async move {
                     let block = match recv_block(stream).await {
@@ -268,7 +292,14 @@ pub async fn run_garner_loop(
                         Err(_) => return,
                     };
 
-                    let seq_id = block.header.seq_id;
+                    // Refine shard_id from the first block seen from this peer.
+                    peer_map_s.entry(remote_addr).and_modify(|p| {
+                        if p.shard_id == u8::MAX {
+                            p.shard_id = block.header.prime_selector;
+                        }
+                    });
+
+                    let seq_id    = block.header.seq_id;
                     let prime_sel = block.header.prime_selector;
 
                     // Insert residue; check atomically if both primes arrived.
@@ -319,6 +350,9 @@ pub async fn run_garner_loop(
                     }
                 });
             }
+            // Connection closed or errored — remove from the active peer map
+            // so the UI doesn't display ghost nodes.
+            peer_map_c.remove(&remote_addr);
         });
     }
     Ok(())
@@ -507,7 +541,7 @@ mod tests {
             .await
             .expect("bind :8084");
         let (results_tx, mut results_rx) = mpsc::channel(4);
-        tokio::spawn(run_garner_loop(coord, N as u32, results_tx));
+        tokio::spawn(run_garner_loop(coord, N as u32, results_tx, Arc::new(DashMap::new())));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Worker A sends q1 from :8085
@@ -649,7 +683,7 @@ mod tests {
         let coord_addr = coord.local_addr().unwrap();
 
         let (tx, mut rx) = mpsc::channel(4);
-        tokio::spawn(run_garner_loop(coord, N as u32, tx));
+        tokio::spawn(run_garner_loop(coord, N as u32, tx, Arc::new(DashMap::new())));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let wa = SpQuicWorker::connect("127.0.0.1:0".parse().unwrap(), coord_addr)

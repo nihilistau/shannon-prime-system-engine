@@ -4,6 +4,10 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 
+// ConnectedPeer lives in the lib (quic_shard) so run_garner_loop can write it
+// without creating a lib→binary dependency.
+pub use sp_daemon::network::quic_shard::ConnectedPeer;
+
 use ed25519_dalek::SigningKey;
 use serde::Serialize;
 
@@ -29,15 +33,6 @@ pub struct ReceiptRecord {
     pub sig_hex:     String,
     /// Global sieve-fold counter at mint time.
     pub round:       u64,
-}
-
-/// A QUIC peer currently connected to the SpQuicCoordinator.
-/// Populated by run_garner_loop when a connection is accepted;
-/// cleared on connection close. Key = remote SocketAddr.
-#[derive(Clone, Debug)]
-pub struct ConnectedPeer {
-    /// 0 = q1 shard (prime 1073738753), 1 = q2 shard (prime 1073732609).
-    pub shard_id: u8,
 }
 
 /// Shared daemon state — threaded through axum via `State<Arc<AppState>>`.
