@@ -145,6 +145,23 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     let inference_active = Arc::new(AtomicBool::new(false));
     let receipt_store    = Arc::new(Mutex::new(Vec::new()));
 
+    // §3-HX Sprint C — try to open the cDSP echo session at startup.
+    // On non-android targets this is None (the FastRPC FFI is gated out).
+    // On android, a failed open logs a warning and degrades to None — the
+    // /v1/dsp/echo endpoint then returns 501 rather than crashing the daemon.
+    #[cfg(target_os = "android")]
+    let dsp_session = {
+        const SKEL_URI: &str =
+            "file:///libsp_echo_skel.so?sp_echo_skel_handle_invoke&_modver=1.0&_dom=cdsp";
+        match crate::dsp_rpc::FastRpcSession::new(SKEL_URI) {
+            Ok(s) => { info!("§3-HX Sprint C: cDSP echo session open"); Some(Mutex::new(s)) }
+            Err(e) => {
+                tracing::warn!("§3-HX Sprint C: FastRpcSession::new failed: {e:?} — /v1/dsp/echo will 501");
+                None
+            }
+        }
+    };
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -161,6 +178,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         receipt_store:    receipt_store.clone(),
         node_signing_key,
         peer_map: Arc::new(DashMap::new()),
+        #[cfg(target_os = "android")]
+        dsp_session,
     });
 
     // ── Background PoUW mining task ────────────────────────────────────────

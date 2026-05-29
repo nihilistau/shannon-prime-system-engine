@@ -1,4 +1,6 @@
 mod daemon;
+#[cfg(target_os = "android")]
+mod dsp_rpc;
 mod ffi;
 mod mining;
 mod routes;

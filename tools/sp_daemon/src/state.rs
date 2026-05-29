@@ -75,4 +75,12 @@ pub struct AppState {
     /// Populated by run_garner_loop on accept; cleared on connection close.
     /// Empty until the coordinator is wired into daemon startup.
     pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
+    /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel.
+    /// Populated only on `target_os = "android"`; `None` on host x86 builds
+    /// (the daemon's bindgen chain doesn't currently cross-compile to
+    /// aarch64-android, so this field is structural-ready and activates
+    /// when the build is unblocked).  Per-request Mutex serializes the
+    /// FFI invoke since FastRPC per-handle thread-safety is single-thread.
+    #[cfg(target_os = "android")]
+    pub dsp_session: Option<Mutex<crate::dsp_rpc::FastRpcSession>>,
 }

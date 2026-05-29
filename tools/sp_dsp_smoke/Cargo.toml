@@ -8,5 +8,15 @@ description = "§3-HX Sprint A smoke test for the FastRpcSession bridge. Cross-c
 name = "test_dsp_rpc"
 path = "src/main.rs"
 
+# §3-HX Sprint C — minimal axum server binding FastRpcSession + DmaBuffer
+# to POST /v1/dsp/echo on aarch64-android.  Verified end-to-end on device
+# via `adb forward tcp:8081 tcp:8081 + curl`.
+[[bin]]
+name = "dsp_axum_server"
+path = "src/axum_server.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
+axum       = "0.7"
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+bytes      = "1"

@@ -453,3 +453,85 @@ fn decode_le_u64_hex(hex16: &str) -> u64 {
 pub async fn v1_chat_stream_stub() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"status": "stub", "stream": "sse-legacy"}))
 }
+
+// ── POST /v1/dsp/echo — §3-HX Sprint C ───────────────────────────────────
+//
+// Routes a raw octet-stream body through the V69 cDSP echo skel via
+// FastRpcSession + DmaBuffer.  On non-android target_os, returns 501 (the
+// FastRPC FFI is gated out at compile time).  On android with no admitted
+// session (alloc failure, missing skel on device), also returns 501.
+//
+// Max body size: 8 MB (Phase 3-HX Sprint C contract; verified end-to-end
+// via the parallel `sp_dsp_smoke/src/axum_server.rs` aarch64-android binary).
+
+const DSP_ECHO_MAX_PAYLOAD: usize = 8 * 1024 * 1024;
+
+#[cfg(target_os = "android")]
+pub async fn v1_dsp_echo(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    use crate::dsp_rpc::{make_scalars, DmaBuffer, RemoteArg, RemoteBuf, SpErr};
+    use std::ffi::c_void;
+
+    let n = body.len();
+    if n == 0 {
+        return (StatusCode::BAD_REQUEST, "empty body").into_response();
+    }
+    if n > DSP_ECHO_MAX_PAYLOAD {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+                format!("body {n} > {DSP_ECHO_MAX_PAYLOAD}")).into_response();
+    }
+    let Some(sess_mu) = state.dsp_session.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "cDSP session not admitted").into_response();
+    };
+
+    // Wrap the blocking FFI in spawn_blocking so we don't stall the tokio runtime.
+    // The session Mutex serializes concurrent requests at the FFI boundary
+    // (FastRPC per-handle thread-safety is single-thread).
+    let body = body.to_vec();
+    let state2 = state.clone();
+    let result: Result<Vec<u8>, SpErr> = task::spawn_blocking(move || {
+        let sess_mu = state2.dsp_session.as_ref().expect("checked above");
+        let sess = sess_mu.lock().expect("dsp session mutex poisoned");
+        let mut in_buf:  DmaBuffer = sess.alloc_dma(n)?;
+        let mut out_buf: DmaBuffer = sess.alloc_dma(n)?;
+        in_buf.as_mut_slice().copy_from_slice(&body);
+        for b in out_buf.as_mut_slice().iter_mut() { *b = 0; }
+
+        let mut prim_in: [u32; 2] = [n as u32, n as u32];
+        let mut args = [
+            RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr() as *mut c_void, nlen: 8 }},
+            RemoteArg { buf: RemoteBuf { pv: in_buf.as_mut_ptr() as *mut c_void,  nlen: n }},
+            RemoteArg { buf: RemoteBuf { pv: out_buf.as_mut_ptr() as *mut c_void, nlen: n }},
+        ];
+        sess.invoke(make_scalars(2, 2, 1), &mut args)?;
+        Ok(out_buf.as_slice().to_vec())
+    })
+    .await
+    .unwrap_or_else(|e| Err(SpErr::HandleOpen(-(format!("join: {e}").len() as i32))));
+    let _ = sess_mu;
+
+    match result {
+        Ok(out) => (StatusCode::OK, out).into_response(),
+        Err(e)  => (StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("dsp_rpc: {e:?}")).into_response(),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub async fn v1_dsp_echo(
+    State(_state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let n = body.len();
+    if n > DSP_ECHO_MAX_PAYLOAD {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+                format!("body {n} > {DSP_ECHO_MAX_PAYLOAD}")).into_response();
+    }
+    // Host build: FastRPC FFI is gated out.  The route exists so the daemon
+    // exposes a uniform surface across host/dev and android/prod; clients
+    // get a clear 501 instead of a 404 (which would suggest the route is
+    // not deployed at all).
+    (StatusCode::NOT_IMPLEMENTED, "v1/dsp/echo requires target_os=android").into_response()
+}
