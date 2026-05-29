@@ -742,6 +742,48 @@ fn main() {
         }
     }
 
+    // T_HALIDE_FFN_BISECT_QBITS — fix shape (B=8 D_in=128 H=128 D_out=128,
+    // TINY-shape known to pass at q=14), sweep q_bits ∈ {12, 13, 14, 15, 16}.
+    // Per the diag instrument result, divergence is in matmul-2, so we report
+    // both hidden[0..4] and y[0] to confirm the boundary is in stage 2 only.
+    {
+        let (batch, d_in, h_dim, d_out, b_term) = (8usize, 128usize, 128usize, 128usize, 16i32);
+        let x:  Vec<i16> = (0..batch*d_in).map(|i| ((i as i32 * 37 + 11) & 0x7FFF) as i16 - 16384).collect();
+        let w1: Vec<i16> = (0..h_dim*d_in).map(|i| ((i as i32 * 41 + 7)  & 0x7F)   as i16 - 64).collect();
+        let w2: Vec<i16> = (0..d_out*h_dim).map(|i| ((i as i32 * 53 + 3) & 0x7F)   as i16 - 64).collect();
+        eprintln!("\n[hvx] ═══ T_HALIDE_FFN_BISECT_QBITS (fixed shape B=8 D=H=Dout=128 b=16) ═══");
+        eprintln!("[hvx]  q_bits | matmul-1 (hidden[0..2]) | matmul-2 (y[0])              | verdict");
+        eprintln!("[hvx] --------+-------------------------+------------------------------+---------");
+        for q_bits in [12i32, 13, 14, 15, 16] {
+            let (exp_y, exp_h) = ffn_2stage_ref_with_hidden(&x, &w1, &w2, batch, d_in, h_dim, d_out, b_term, q_bits);
+            match invoke_ffn_diag(&sess, &x, &w1, &w2,
+                                  batch as i32, d_in as i32, h_dim as i32, d_out as i32, b_term, q_bits) {
+                Ok((got_y, got_h, _vtcm, _pcyc)) => {
+                    let h_match = got_h[..2] == exp_h[..2];
+                    let y_match = got_y[0] == exp_y[0];
+                    let h_str = if h_match {
+                        format!("{:?} OK", &got_h[..2])
+                    } else {
+                        format!("got={:?} exp={:?}", &got_h[..2], &exp_h[..2])
+                    };
+                    let y_str = if y_match {
+                        format!("got={} exp={} OK", got_y[0], exp_y[0])
+                    } else {
+                        format!("got={} exp={} DIVERGE", got_y[0], exp_y[0])
+                    };
+                    let verdict = if h_match && y_match { "PASS" }
+                                  else if h_match && !y_match { "FAIL mm-2" }
+                                  else { "FAIL mm-1" };
+                    eprintln!("[hvx]    {:>2}   | {:<23} | {:<28} | {}", q_bits, h_str, y_str, verdict);
+                }
+                Err(e) => {
+                    eprintln!("[hvx]    {:>2}   | (invoke failed: {:?})", q_bits, e);
+                    fails += 1;
+                }
+            }
+        }
+    }
+
     drop(sess);
     eprintln!("[hvx] session closed cleanly");
 
