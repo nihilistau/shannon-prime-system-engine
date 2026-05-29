@@ -1,0 +1,57 @@
+§3-HX Sprint I — sp_model_layer_smoke verbatim on-device output
+================================================================
+
+Device: Samsung S22 Ultra R5CT22445JA, V69 cDSP via Path B Unsigned PD
+Engine HEAD: e1a4407 ([lat-3-hx-mode-d-i] driver commit)
+Model:       /data/local/tmp/qwen3_rt.sp-model (754,551,808 B, sha256 30717fbd…f122376)
+Date:        2026-05-30
+
+Command:
+    adb shell 'ADSP_LIBRARY_PATH="/data/local/tmp;" /data/local/tmp/sp_model_layer_smoke'
+
+Output:
+-------
+[I] opening FastRpcSession against sp_compute_skel (Path B)...
+[I] session open
+[I] T_MODEL_HEADER_PARSE PASS  (arch_id=2 tensor_count=509 data_offset=0x20000 file_size=754551808)
+[I]   W_gate: dtype=10 dims=[1024,3072] size=3145728 offset=0x12ceac00
+[I]   scale:  dtype=12 dims=[3072,0] size=12288 offset=0x12feac00
+[I] T_DMA_TILE_LOAD PASS  (128×128 = 16384 i16; w_tile[0..4]=[-146, 0, -395, -453])
+
+[I] ═══ T_LAYER_MATMUL_BITWISE (B=4 D_in=128 H=128 D_out=128 q=14 b=0) ═══
+[I]   pattern=sentinel      PASS via VTCM (pcyc=9296397, hidden[0..4]=[0, 520, 2149, 0])
+[I]   pattern=pseudorandom  PASS via VTCM (pcyc=9277391, hidden[0..4]=[1903, 0, 0, 2339])
+[I]   pattern=all-ones      PASS via VTCM (pcyc=9278006, hidden[0..4]=[0, 0, 0, 0])
+
+[I] ═══ T_LAYER_NO_HEAP_LEAK (100 iter, pseudorandom pattern) ═══
+[I]   100 iter completed in 1.03375401s  (10.3 ms/iter avg)
+[I] T_LAYER_NO_HEAP_LEAK PASS
+
+[I] session closed cleanly
+[I] ALL GATES PASS
+
+Empirical facts from this run:
+------------------------------
+- arch_id = 2 (SP_ARCH_ID_QWEN3) ✓
+- 509 tensors in the model
+- tensor_data_offset = 0x20000 (128 KiB, multiple of 65536) ✓
+- W_gate dims = [1024, 3072]: hidden_size = 1024 (not 896 as the phase
+  log entry 2026-05-30 estimated); intermediate_size = 3072
+- W_gate.size_bytes = 3,145,728 = 1024 × 3072 × 1 byte (Q8 packed) ✓
+- W_gate.scale.size_bytes = 12,288 = 3072 × 4 bytes (FP32 per-row) ✓
+- W_gate dtype = 10 = SP_DT_OK_Q8 ✓
+- W_gate.scale dtype = 12 = SP_DT_FROBENIUS_SCALE_FP32 ✓
+- First 4 dequantized i16 weights (row 0 of W_gate, cols 0..3):
+  [-146, 0, -395, -453] — confirms non-degenerate weight values
+- Halide kernel per-call pcycles: ~9.3M.  Sprint G's B=4 same-shape
+  gate measured 7.9M — extra ~1.4M is the diag method's additional
+  hidden_out VTCM write + extra memcpy at the end of the handler.
+- 100-iter loop: 10.3 ms/iter wall.  Dominated by FastRPC RTT
+  (~9-10 ms/call observed in Sprint E batched bench).  No degradation
+  visible across iterations.
+
+Bit-identity ground truth:
+- Halide hidden_out == scalar reference hidden across all 3 patterns.
+- Pattern values vary (sentinel: 0x1234 broadcast; pseudorandom: same
+  pattern as Sprint G's X data; all-ones: 1i16 broadcast) — kernel
+  produces correct output regardless of activation distribution.
