@@ -290,8 +290,15 @@ pub async fn run_inner(model_path: &str, _tok_path: &str, _draft_model_path: &st
     // without a self-referential struct. The echo `dsp_session` above is left
     // owned + Mutex-serialized (verified Sprint C path, untouched).
     // Any failure degrades to None → /v1/dsp/model_info returns 501.
+    // Model session uses the COMPUTE skel — matching Sprint J's proven
+    // sp_full_load_smoke load path (the echo skel above is for /v1/dsp/echo).
+    // Two distinct skels → two distinct handles, sidestepping any same-skel
+    // double-open constraint. The loader never invokes the skel (alloc_dma is
+    // handle-independent rpcmem), so the choice only needs to open cleanly.
+    const MODEL_SKEL_URI: &str =
+        "file:///libsp_compute_skel.so?sp_compute_skel_handle_invoke&_modver=1.0&_dom=cdsp";
     const CTX_MAX: usize = 4096;
-    let (dsp_model, kv_cache) = match crate::dsp_rpc::FastRpcSession::new(SKEL_URI) {
+    let (dsp_model, kv_cache) = match crate::dsp_rpc::FastRpcSession::new(MODEL_SKEL_URI) {
         Ok(s) => {
             let sess: &'static crate::dsp_rpc::FastRpcSession = Box::leak(Box::new(s));
             match crate::dsp_model::DspModel::load(sess, model_path) {

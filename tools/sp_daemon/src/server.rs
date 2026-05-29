@@ -9,8 +9,8 @@ use crate::state::AppState;
 #[cfg(not(target_os = "android"))]
 pub fn build_router(state: Arc<AppState>) -> Router {
     use crate::routes::{
-        v1_abort, v1_chat, v1_chat_stream_stub, v1_dsp_echo, v1_events, v1_mesh_peers,
-        v1_metrics, v1_node_telemetry, v1_pouw_ledger, v1_receipts,
+        v1_abort, v1_chat, v1_chat_stream_stub, v1_dsp_echo, v1_dsp_model_info, v1_events,
+        v1_mesh_peers, v1_metrics, v1_node_telemetry, v1_pouw_ledger, v1_receipts,
     };
     Router::new()
         .route("/v1/metrics",        get(v1_metrics))
@@ -23,6 +23,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/mesh/peers",     get(v1_mesh_peers))
         .route("/v1/pouw/ledger",    get(v1_pouw_ledger))
         .route("/v1/dsp/echo",       post(v1_dsp_echo))
+        .route("/v1/dsp/model_info", get(v1_dsp_model_info))
         .fallback_service(ServeDir::new("frontend_mockups"))
         .layer(CorsLayer::permissive())
         .with_state(state)

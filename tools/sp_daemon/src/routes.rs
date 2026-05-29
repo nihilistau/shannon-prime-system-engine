@@ -552,6 +552,13 @@ pub async fn v1_dsp_echo(
     (StatusCode::NOT_IMPLEMENTED, "v1/dsp/echo requires target_os=android").into_response()
 }
 
+// Host build: no DSP-resident model (the loader is android-only). Returns 501
+// rather than 404 so the /v1/dsp surface is uniform across host and android.
+#[cfg(not(target_os = "android"))]
+pub async fn v1_dsp_model_info() -> Response {
+    (StatusCode::NOT_IMPLEMENTED, "v1/dsp/model_info requires target_os=android").into_response()
+}
+
 // ── §3-HX Sprint J.5 — android-only handlers ─────────────────────────────────
 //
 // The android binary host-gates the L1 C-ABI forward path, so /v1/chat and
