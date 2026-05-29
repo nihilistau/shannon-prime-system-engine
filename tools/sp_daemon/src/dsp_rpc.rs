@@ -111,6 +111,9 @@ pub enum SpErr {
     Invoke(c_int),
     /// `rpcmem_alloc(...)` returned NULL for the requested size.
     RpcMemAlloc(usize),
+    /// Diagnostic error from a higher-level consumer (Sprint J model
+    /// loader: missing tensor, dtype mismatch, file IO, etc.).
+    Other(String),
 }
 
 // ── Scalars helper (REMOTE_SCALARS_MAKE — remote.h:113) ────────────────────
