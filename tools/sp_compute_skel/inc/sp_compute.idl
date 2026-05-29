@@ -101,4 +101,41 @@ interface sp_compute : remote_handle64 {
                          in  sequence<octet> x_buf,
                          rout sequence<octet> y_buf,
                          rout long vtcm_used);
+
+    // ────────────────────────────────────────────────────────────────────
+    // ffn_2stage_halide — §3-HX Sprint G; 2-stage matmul FFN via Halide AOT
+    //                     with dual-VTCM staging
+    //
+    // Math:
+    //   hidden[b, h] = clamp((Σ_d X[b, d] * W1[h, d] + b) >> q_bits, 0, 32767)
+    //   Y[b, c]      = sat_i16((Σ_h hidden[b, h] * W2[c, h] + b) >> q_bits)
+    //
+    // Shapes (row-major i16):
+    //   X:  [batch, d_in]    (batch × d_in × 2 B)
+    //   W1: [h_dim, d_in]    (h_dim × d_in × 2 B)
+    //   W2: [d_out, h_dim]   (d_out × h_dim × 2 B)
+    //   Y:  [batch, d_out]   (batch × d_out × 2 B)
+    //
+    // Constraints (return -1 if violated):
+    //   d_in, h_dim, d_out all multiples of 128 (Halide tile width)
+    //   batch ≥ 1 multiple of 4 (Halide tile depth)
+    //   0 ≤ q_bits ≤ 30
+    //
+    // Dual-VTCM staging:
+    //   External (skel-allocated):  X, W1, W2, Y  hot-copied DDR→VTCM
+    //   Internal (Halide-allocated): hidden  via .store_in(MemoryType::VTCM)
+    //     in the generator schedule (per-batch-stripe)
+    //
+    // Reports vtcm_used (1 = VTCM admitted; 0 = DDR fallback if denied) and
+    // kernel_pcycles (delta of HAP_perf_get_pcycles around the Halide call).
+    long ffn_2stage_halide(in long batch, in long d_in,
+                           in long h_dim, in long d_out,
+                           in long b_term, in long q_bits,
+                           in  sequence<octet> x_buf,
+                           in  sequence<octet> w1_buf,
+                           in  sequence<octet> w2_buf,
+                           rout sequence<octet> y_buf,
+                           rout long vtcm_used,
+                           rout long kernel_pcycles_lo,
+                           rout long kernel_pcycles_hi);
 };

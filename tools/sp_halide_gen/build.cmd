@@ -46,12 +46,32 @@ set "PATH=%HALIDE_ROOT%\bin;%PATH%"
     target=hexagon-32-noos-no_bounds_query-no_asserts-hvx_128
 if errorlevel 1 goto :aot_failed
 
-echo [sp_halide_gen] === Stage 3: stage HalideRuntime.h for the skel build ===
+echo [sp_halide_gen] === Stage 1b: build FFN generator ===
+cl.exe /EHsc /nologo /std:c++17 ^
+    /I "%HALIDE_ROOT%\include" ^
+    "%SCRIPT_DIR%\sp_ffn_2stage_gen.cpp" ^
+    "%HALIDE_ROOT%\tools\GenGen.cpp" ^
+    /link /libpath:"%HALIDE_ROOT%\lib" Halide.lib ^
+    /OUT:"%BUILD_DIR%\sp_ffn_2stage_gen.exe"
+if errorlevel 1 goto :cl_failed
+
+echo [sp_halide_gen] === Stage 2b: AOT-emit FFN Hexagon .o + .h ===
+"%BUILD_DIR%\sp_ffn_2stage_gen.exe" ^
+    -g sp_ffn_2stage ^
+    -f sp_ffn_2stage_halide ^
+    -e o,h,assembly ^
+    -o "%OUT_DIR%" ^
+    target=hexagon-32-noos-no_bounds_query-no_asserts-hvx_128
+if errorlevel 1 goto :aot_failed
+
+echo [sp_halide_gen] === Stage 3: stage HalideRuntime.h + HalideRuntimeHexagonHost.h ===
 copy /Y "%HALIDE_ROOT%\include\HalideRuntime.h" "%OUT_DIR%\HalideRuntime.h" >nul
+if errorlevel 1 goto :stage_failed
+copy /Y "%HALIDE_ROOT%\include\HalideRuntimeHexagonHost.h" "%OUT_DIR%\HalideRuntimeHexagonHost.h" >nul
 if errorlevel 1 goto :stage_failed
 
 echo [sp_halide_gen] === Emit summary ===
-dir /b "%OUT_DIR%\sp_axpby_2d_halide.*" "%OUT_DIR%\HalideRuntime.h"
+dir /b "%OUT_DIR%\sp_*_halide.*" "%OUT_DIR%\HalideRuntime*.h"
 echo [sp_halide_gen] DONE
 endlocal
 exit /b 0
