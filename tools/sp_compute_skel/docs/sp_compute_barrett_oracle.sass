@@ -1,0 +1,263 @@
+
+00006510 <sp_compute_barrett_oracle>:
+    6510:	06 42 23 f1	f1234206 { 	r6 = or(r3,r2)
+    6514:	f0 7f df 78	78df7ff0   	r16 = #-1
+    6518:	60 1c f4 eb	ebf41c60   	memd(r29+#-16) = r17:16; 	allocframe(#48) } 
+    651c:	4e 61 16 11	1116614e { 	p0 = cmp.gtu(r6,#1); if (p0.new) jump:t 0x67b8 <sp_compute_barrett_oracle+0x2a8>
+    6520:	04 d2 dd a1	a1ddd204   	memd(r29+#32) = r19:18 } 
+    6524:	00 43 a5 85	85a54300 { 	p0 = !bitsclr(r5,#3)
+    6528:	4a e8 00 5c	5c00e84a   	if (p0.new) jump:nt 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    652c:	26 42 9d 91	919d4226 { 	r6 = memw(r29+#68)
+    6530:	0a 40 00 00	0000400a   	immext(#640)
+    6534:	18 c5 42 20	2042c518   	if (!cmp.eq(r6.new,r5)) jump:nt 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6538:	e6 41 9d 91	919d41e6 { 	r6 = memw(r29+#60)
+    653c:	40 c5 52 20	2052c540   	if (!cmp.eq(r6.new,r5)) jump:nt 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6540:	3c c0 14 10	1014c03c { 	p0 = cmp.eq(r4,#0); if (p0.new) jump:nt 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6544:	c8 41 9d 91	919d41c8 { 	r8 = memw(r29+#56)
+    6548:	3a c0 12 24	2412c03a   	if (cmp.eq(r8.new,#0)) jump:nt 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    654c:	09 5f 05 8c	8c055f09 { 	r9 = asr(r5,#31)
+    6550:	07 42 9d 91	919d4207   	r7 = memw(r29+#64)
+    6554:	36 c0 12 24	2412c036   	if (cmp.eq(r7.new,#0)) jump:nt 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6558:	30 39 56 30	30563930 { 	r6 = r5; 	p0 = cmp.eq(r3,#0) } 
+    655c:	a6 5e 09 8e	8e095ea6 { 	r6 += lsr(r9,#30)
+    6560:	2f 40 00 04	0400402f   	immext(#1073744832)
+    6564:	e3 c7 00 78	7800c7e3   	r3 = ##1073744895 } 
+    6568:	06 42 06 8c	8c064206 { 	r6 = asr(r6,#2)
+    656c:	2f 42 00 0c	0c00422f   	immext(#3221261248)
+    6570:	c9 47 00 7e	7e0047c9   	if (p0) r9 = ##-1073705986
+    6574:	3c c0 00 5c	5c00c03c   	if (p0) jump:nt 0x65e0 <sp_compute_barrett_oracle+0xd0> } 
+    6578:	00 c0 0e 68	680ec000 { 	r1:0 = c15:14 } 
+    657c:	00 5f a6 85	85a65f00 { 	p0 = !bitsclr(r6,#31)
+    6580:	ec 4f 00 78	78004fec   	r12 = #127
+    6584:	14 d8 00 5c	5c00d814   	if (p0.new) jump:t 0x65a4 <sp_compute_barrett_oracle+0x94> } 
+    6588:	00 4c a4 c7	c7a44c00 { 	p0 = !bitsclr(r4,r12)
+    658c:	0e d8 00 5c	5c00d80e   	if (p0.new) jump:t 0x65a4 <sp_compute_barrett_oracle+0x94> } 
+    6590:	00 4c a8 c7	c7a84c00 { 	p0 = !bitsclr(r8,r12)
+    6594:	ec 6f 80 7e	7e806fec   	if (!p0.new) r12 = #127
+    6598:	0a d8 00 5c	5c00d80a   	if (p0.new) jump:t 0x65a4 <sp_compute_barrett_oracle+0x94> } 
+    659c:	00 4c a7 c7	c7a74c00 { 	p0 = !bitsclr(r7,r12)
+    65a0:	14 e8 20 5c	5c20e814   	if (!p0.new) jump:nt 0x67c4 <sp_compute_barrett_oracle+0x2b4> } 
+    65a4:	00 c0 0e 68	680ec000 { 	r1:0 = c15:14 } 
+    65a8:	cb 46 00 00	000046cb { 	immext(#111296)
+    65ac:	02 cc 49 6a	6a49cc02   	r2 = add(pc,##111320) } 
+    65b0:	fe 7f ff 0f	0fff7ffe { 	immext(#4294967168)
+    65b4:	03 40 82 91	91824003   	r3 = memw(r2+##-128)
+    65b8:	5e e0 42 24	2442e05e   	if (!cmp.eq(r3.new,#0)) jump:t 0x666c <sp_compute_barrett_oracle+0x15c> } 
+    65bc:	7d 45 00 00	0000457d { 	immext(#89920)
+    65c0:	83 49 49 6a	6a494983   	r3 = add(pc,##89939)
+    65c4:	60 44 00 78	78004460   	r0 = #35
+    65c8:	22 d9 00 78	7800d922   	r2 = #201 } 
+    65cc:	03 47 9d a1	a19d4703 { 	memw(r29+#12) = r7
+    65d0:	02 c8 9d a1	a19dc802   	memw(r29+#8) = r8 } 
+    65d4:	a6 41 00 5a	5a0041a6 { 	call 0x6920 <_HAP_debug_v2>
+    65d8:	06 08 14 e8	e8140806   	memw(r29+#4) = r4; 	memw(r29+#0) = r6 } 
+    65dc:	ee c0 00 58	5800c0ee { 	jump 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    65e0:	62 c0 02 10	1002c062 { 	p0 = cmp.eq(r2,#0); if (p0.new) jump:nt 0x66a4 <sp_compute_barrett_oracle+0x194> } 
+    65e4:	03 40 83 b1	b1834003 { 	r3 = add(r3,#6144)
+    65e8:	0d 60 00 7e	7e00600d   	if (p0.new) r13 = #0
+    65ec:	a2 e3 c5 10	10c5e3a2   	p0 = cmp.gt(r5,#3); if (!p0.new) jump:t 0x6728 <sp_compute_barrett_oracle+0x218> } 
+    65f0:	25 40 89 b9	b9894025 { 	r5 = add(r9,#-26623)
+    65f4:	e9 7f df 78	78df7fe9   	r9 = #-1
+    65f8:	0e c0 67 70	7067c00e   	r14 = r7 } 
+    65fc:	70 7f ff 03	03ff7f70 { 	immext(#1073732608)
+    6600:	01 28 10 28	28102801   	r0 = ##1073732609; 	r1 = #0 } 
+    6604:	08 c0 06 60	6006c008 { 	loop0(0x6608,r6) } 
+    6608:	2c 40 84 9b	9b84402c { 	r12 = memw(r4++#4)
+    660c:	2f c0 88 9b	9b88c02f   	r15 = memw(r8++#4) } 
+    6610:	0a cc 4f e5	e54fcc0a { 	r11:10 = mpyu(r15,r12) } 
+    6614:	10 cb 0a f5	f50acb10 { 	r17:16 = combine(r10,r11) } 
+    6618:	30 dd 50 80	8050dd30 { 	r17:16 = vlsrw(r17:16,#29) } 
+    661c:	71 dd 0b 8f	8f0bdd71 { 	r17 = insert(r11,#29,#3) } 
+    6620:	12 c3 51 e5	e551c312 { 	r19:18 = mpyu(r17,r3) } 
+    6624:	13 d0 03 ef	ef03d013 { 	r19 += mpyi(r3,r16) } 
+    6628:	10 d3 12 f5	f512d310 { 	r17:16 = combine(r18,r19) } 
+    662c:	30 df 50 80	8050df30 { 	r17:16 = vlsrw(r17:16,#31) } 
+    6630:	31 df 13 8f	8f13df31 { 	r17 = insert(r19,#31,#1) } 
+    6634:	12 c5 51 e5	e551c512 { 	r19:18 = mpyu(r17,r5) } 
+    6638:	33 c0 91 e1	e191c033 { 	r19 -= mpyi(r17,#1) } 
+    663c:	13 d0 05 ef	ef05d013 { 	r19 += mpyi(r5,r16) } 
+    6640:	ea ca 12 d3	d312caea { 	r11:10 = add(r19:18,r11:10) } 
+    6644:	80 ca 80 d2	d280ca80 { 	p0 = cmp.gtu(r1:0,r11:10) } 
+    6648:	10 45 0d f4	f40d4510 { 	r16 = mux(p0,r13,r5)
+    664c:	11 c9 0d f4	f40dc911   	r17 = mux(p0,r13,r9) } 
+    6650:	ea ca 10 d3	d310caea { 	r11:10 = add(r17:16,r11:10) } 
+    6654:	80 ca 80 d2	d280ca80 { 	p0 = cmp.gtu(r1:0,r11:10) } 
+    6658:	0c c5 0d f4	f40dc50c { 	r12 = mux(p0,r13,r5) } 
+    665c:	ea ca 0c d3	d30ccaea { 	r11:10 = add(r13:12,r11:10) } 
+    6660:	00 80 00 7f	7f008000 { 	nop
+    6664:	08 ca 8e ab	ab8eca08   	memw(r14++#4) = r10 }  :endloop0
+    6668:	60 c0 00 58	5800c060 { 	jump 0x6728 <sp_compute_barrett_oracle+0x218> } 
+    666c:	fe 7f ff 0f	0fff7ffe { 	immext(#4294967168)
+    6670:	82 40 82 91	91824082   	r2 = memw(r2+##-124)
+    6674:	a6 e0 02 24	2402e0a6   	if (cmp.eq(r2.new,#0)) jump:t 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6678:	78 45 00 00	00004578 { 	immext(#89600)
+    667c:	81 5c 49 6a	6a495c81   	r1 = add(pc,##89657)
+    6680:	60 40 00 78	78004060   	r0 = #3
+    6684:	22 d9 00 78	7800d922   	r2 = #201 } 
+    6688:	7a 45 00 00	0000457a { 	immext(#89728)
+    668c:	83 43 49 6a	6a494383   	r3 = add(pc,##89735)
+    6690:	03 47 9d a1	a19d4703   	memw(r29+#12) = r7
+    6694:	02 c8 9d a1	a19dc802   	memw(r29+#8) = r8 } 
+    6698:	ec 6b ff 5b	5bff6bec { 	call 0x3e70 <HAP_debug_runtime@plt>
+    669c:	06 08 14 e8	e8140806   	memw(r29+#4) = r4; 	memw(r29+#0) = r6 } 
+    66a0:	8c c0 00 58	5800c08c { 	jump 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    66a4:	d0 7f ff 03	03ff7fd0 { 	immext(#1073738752)
+    66a8:	20 60 00 7e	7e006020   	if (p0.new) r0 = ##1073738753
+    66ac:	42 e3 c5 10	10c5e342   	p0 = cmp.gt(r5,#3); if (!p0.new) jump:t 0x6728 <sp_compute_barrett_oracle+0x218> } 
+    66b0:	25 40 09 b8	b8094025 { 	r5 = add(r9,#-32767)
+    66b4:	e9 7f df 78	78df7fe9   	r9 = #-1
+    66b8:	01 40 00 78	78004001   	r1 = #0
+    66bc:	0d c0 00 78	7800c00d   	r13 = #0 } 
+    66c0:	10 40 06 60	60064010 { 	loop0(0x66c8,r6)
+    66c4:	0e c0 67 70	7067c00e   	r14 = r7 } 
+    66c8:	2c 40 84 9b	9b84402c { 	r12 = memw(r4++#4)
+    66cc:	2f c0 88 9b	9b88c02f   	r15 = memw(r8++#4) } 
+    66d0:	0a cc 4f e5	e54fcc0a { 	r11:10 = mpyu(r15,r12) } 
+    66d4:	10 cb 0a f5	f50acb10 { 	r17:16 = combine(r10,r11) } 
+    66d8:	30 dd 50 80	8050dd30 { 	r17:16 = vlsrw(r17:16,#29) } 
+    66dc:	71 dd 0b 8f	8f0bdd71 { 	r17 = insert(r11,#29,#3) } 
+    66e0:	12 c3 51 e5	e551c312 { 	r19:18 = mpyu(r17,r3) } 
+    66e4:	13 d0 03 ef	ef03d013 { 	r19 += mpyi(r3,r16) } 
+    66e8:	10 d3 12 f5	f512d310 { 	r17:16 = combine(r18,r19) } 
+    66ec:	30 df 50 80	8050df30 { 	r17:16 = vlsrw(r17:16,#31) } 
+    66f0:	31 df 13 8f	8f13df31 { 	r17 = insert(r19,#31,#1) } 
+    66f4:	12 c5 51 e5	e551c512 { 	r19:18 = mpyu(r17,r5) } 
+    66f8:	33 c0 91 e1	e191c033 { 	r19 -= mpyi(r17,#1) } 
+    66fc:	13 d0 05 ef	ef05d013 { 	r19 += mpyi(r5,r16) } 
+    6700:	ea ca 12 d3	d312caea { 	r11:10 = add(r19:18,r11:10) } 
+    6704:	80 ca 80 d2	d280ca80 { 	p0 = cmp.gtu(r1:0,r11:10) } 
+    6708:	10 45 0d f4	f40d4510 { 	r16 = mux(p0,r13,r5)
+    670c:	11 c9 0d f4	f40dc911   	r17 = mux(p0,r13,r9) } 
+    6710:	ea ca 10 d3	d310caea { 	r11:10 = add(r17:16,r11:10) } 
+    6714:	80 ca 80 d2	d280ca80 { 	p0 = cmp.gtu(r1:0,r11:10) } 
+    6718:	0c c5 0d f4	f40dc50c { 	r12 = mux(p0,r13,r5) } 
+    671c:	ea ca 0c d3	d30ccaea { 	r11:10 = add(r13:12,r11:10) } 
+    6720:	00 80 00 7f	7f008000 { 	nop
+    6724:	08 ca 8e ab	ab8eca08   	memw(r14++#4) = r10 }  :endloop0
+    6728:	c5 46 00 00	000046c5 { 	immext(#110912)
+    672c:	03 cc 49 6a	6a49cc03   	r3 = add(pc,##110936) } 
+    6730:	fe 7f ff 0f	0fff7ffe { 	immext(#4294967168)
+    6734:	04 40 83 91	91834004   	r4 = memw(r3+##-128)
+    6738:	20 e0 42 24	2442e020   	if (!cmp.eq(r4.new,#0)) jump:t 0x6770 <sp_compute_barrett_oracle+0x260> } 
+    673c:	79 45 00 00	00004579 { 	immext(#89664)
+    6740:	83 5c 49 6a	6a495c83   	r3 = add(pc,##89721)
+    6744:	75 00 64 53	53640075   	r4 = add(r6,#-1); 	r5 = memw(r7+#0) } 
+    6748:	40 44 00 78	78004440 { 	r0 = #34
+    674c:	82 5a 00 78	78005a82   	r2 = #212
+    6750:	07 64 87 3a	3a876407   	r7 = memw(r7+r4<<#2)
+    6754:	00 c2 9d a1	a19dc200   	memw(r29+#0) = r2 } 
+    6758:	02 46 9d a1	a19d4602 { 	memw(r29+#8) = r6
+    675c:	80 c0 5d 3c	3c5dc080   	memw(r29+#4) = #0 } 
+    6760:	44 08 57 e8	e8570844 { 	memw(r29+#20) = r7; 	memw(r29+#16) = r4 } 
+    6764:	de 40 00 5a	5a0040de { 	call 0x6920 <_HAP_debug_v2>
+    6768:	35 28 08 68	68082835   	r16 = #0; 	memw(r29+#12) = r5 } 
+    676c:	26 c0 00 58	5800c026 { 	jump 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6770:	10 40 00 78	78004010 { 	r16 = #0
+    6774:	fe 7f ff 0f	0fff7ffe   	immext(#4294967168)
+    6778:	83 40 83 91	91834083   	r3 = memw(r3+##-124)
+    677c:	24 e0 02 24	2402e024   	if (cmp.eq(r3.new,#0)) jump:t 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6780:	74 45 00 00	00004574 { 	immext(#89344)
+    6784:	81 58 49 6a	6a495881   	r1 = add(pc,##89393)
+    6788:	75 00 64 53	53640075   	r4 = add(r6,#-1); 	r5 = memw(r7+#0) } 
+    678c:	78 45 00 00	00004578 { 	immext(#89600)
+    6790:	83 54 49 6a	6a495483   	r3 = add(pc,##89641)
+    6794:	00 64 87 3a	3a876400   	r0 = memw(r7+r4<<#2)
+    6798:	00 c2 9d a1	a19dc200   	memw(r29+#0) = r2 } 
+    679c:	82 5a 00 78	78005a82 { 	r2 = #212
+    67a0:	40 40 00 78	78004040   	r0 = #2
+    67a4:	26 08 50 e8	e8500826   	memw(r29+#20) = r0; 	memw(r29+#8) = r6 } 
+    67a8:	04 44 9d a1	a19d4404 { 	memw(r29+#16) = r4
+    67ac:	80 c0 5d 3c	3c5dc080   	memw(r29+#4) = #0 } 
+    67b0:	60 6b ff 5b	5bff6b60 { 	call 0x3e70 <HAP_debug_runtime@plt>
+    67b4:	03 c5 9d a1	a19dc503   	memw(r29+#12) = r5 } 
+    67b8:	00 40 70 70	70704000 { 	r0 = r16
+    67bc:	25 1e 2c 3e	3e2c1e25   	r17:16 = memd(r29+#40); 	r19:18 = memd(r29+#32) } 
+    67c0:	1e c0 1e 96	961ec01e { 	dealloc_return } 
+    67c4:	e0 4f 45 75	75454fe0 { 	p0 = cmp.gt(r5,#127)
+    67c8:	54 d8 20 5c	5c20d854   	if (!p0.new) jump:t 0x686c <sp_compute_barrett_oracle+0x35c> } 
+    67cc:	a5 59 09 8e	8e0959a5 { 	r5 += lsr(r9,#25)
+    67d0:	00 40 02 75	75024000   	p0 = cmp.eq(r2,#0)
+    67d4:	a9 c3 00 78	7800c3a9   	r9 = #29 } 
+    67d8:	05 47 05 8c	8c054705 { 	r5 = asr(r5,#7)
+    67dc:	d0 7f ff 03	03ff7fd0   	immext(#1073738752)
+    67e0:	2d c0 00 7e	7e00c02d   	if (p0) r13 = ##1073738753 } 
+    67e4:	40 7f ff 0f	0fff7f40 { 	immext(#4294955008)
+    67e8:	4d 40 83 74	7483404d   	if (!p0) r13 = add(r3,##-12286)
+    67ec:	60 40 00 00	00004060   	immext(#6144)
+    67f0:	03 c0 83 74	7483c003   	if (!p0) r3 = add(r3,##6144) } 
+    67f4:	00 42 05 60	60054200 { 	loop0(0x6814,r5)
+    67f8:	20 40 ad 19	19ad4020   	v0 = vsplat(r13)
+    67fc:	e5 43 00 78	780043e5   	r5 = #31
+    6800:	ee ff ed bf	bfedffee   	r14 = add(r13,#-1) } 
+    6804:	21 40 a3 19	19a34021 { 	v1 = vsplat(r3)
+    6808:	22 40 ae 19	19ae4022   	v2 = vsplat(r14)
+    680c:	2c 60 01 7c	7c01602c   	r13:12 = combine(#1,#3)
+    6810:	03 c0 67 70	7067c003   	r3 = r7 } 
+    6814:	03 c1 04 29	2904c103 { 	v3 = vmem(r4++#1) } 
+    6818:	c6 43 a4 1e	1ea443c6 { 	v7:6 = vmpye(v3.w,v4.uh)
+    681c:	24 c1 08 29	2908c124   	v4.cur = vmem(r8++#1) } 
+    6820:	66 e3 24 1c	1c24e366 { 	v7:6 += vmpyo(v3.w,v4.h) } 
+    6824:	25 c6 89 19	1989c625 { 	v5.uw = vlsr(v6.uw,r9) } 
+    6828:	e7 c7 6c 19	196cc7e7 { 	v7.w = vasl(v7.w,r12) } 
+    682c:	c8 c5 27 1c	1c27c5c8 { 	v8 = vor(v5,v7) } 
+    6830:	c4 c8 a1 1e	1ea1c8c4 { 	v5:4 = vmpye(v8.w,v1.uh) } 
+    6834:	64 e8 21 1c	1c21e864 { 	v5:4 += vmpyo(v8.w,v1.h) } 
+    6838:	29 c4 85 19	1985c429 { 	v9.uw = vlsr(v4.uw,r5) } 
+    683c:	ea c5 6d 19	196dc5ea { 	v10.w = vasl(v5.w,r13) } 
+    6840:	cb c9 2a 1c	1c2ac9cb { 	v11 = vor(v9,v10) } 
+    6844:	c8 cb a0 1e	1ea0cbc8 { 	v9:8 = vmpye(v11.w,v0.uh) } 
+    6848:	68 eb 20 1c	1c20eb68 { 	v9:8 += vmpyo(v11.w,v0.h) } 
+    684c:	e6 c6 48 1c	1c48c6e6 { 	v6.w = vsub(v6.w,v8.w) } 
+    6850:	28 46 82 1f	1f824628 { 	q0 = vcmp.gt(v6.uw,v2.uw)
+    6854:	ec c6 40 1c	1c40c6ec   	v12.w = vsub(v6.w,v0.w) } 
+    6858:	0d ec e6 1e	1ee6ec0d { 	v13 = vmux(q0,v12,v6) } 
+    685c:	29 4d 82 1f	1f824d29 { 	q1 = vcmp.gt(v13.uw,v2.uw)
+    6860:	ee cd 40 1c	1c40cdee   	v14.w = vsub(v13.w,v0.w) } 
+    6864:	2f ae ed 1e	1eedae2f { 	v15 = vmux(q1,v14,v13)
+    6868:	22 c1 23 29	2923c122   	vmem(r3++#1) = v15.new }  :endloop0
+    686c:	04 c0 0e 68	680ec004 { 	r5:4 = c15:14 } 
+    6870:	c0 46 00 00	000046c0 { 	immext(#110592)
+    6874:	03 c8 49 6a	6a49c803   	r3 = add(pc,##110608) } 
+    6878:	fe 7f ff 0f	0fff7ffe { 	immext(#4294967168)
+    687c:	08 40 83 91	91834008   	r8 = memw(r3+##-128)
+    6880:	24 e0 42 24	2442e024   	if (!cmp.eq(r8.new,#0)) jump:t 0x68c0 <sp_compute_barrett_oracle+0x3b0> } 
+    6884:	e4 44 20 d3	d32044e4 { 	r5:4 = sub(r5:4,r1:0)
+    6888:	e8 7f e6 bf	bfe67fe8   	r8 = add(r6,#-1)
+    688c:	09 c0 87 91	9187c009   	r9 = memw(r7+#0) } 
+    6890:	73 45 00 00	00004573 { 	immext(#89280)
+    6894:	83 4b 49 6a	6a494b83   	r3 = add(pc,##89303)
+    6898:	07 68 87 3a	3a876807   	r7 = memw(r7+r8<<#2)
+    689c:	00 c2 9d a1	a19dc200   	memw(r29+#0) = r2 } 
+    68a0:	40 44 00 78	78004440 { 	r0 = #34
+    68a4:	c2 59 00 78	780059c2   	r2 = #206
+    68a8:	47 08 16 e8	e8160847   	memw(r29+#4) = r6; 	memw(r29+#16) = r7 } 
+    68ac:	03 48 9d a1	a19d4803 { 	memw(r29+#12) = r8
+    68b0:	02 c9 9d a1	a19dc902   	memw(r29+#8) = r9 } 
+    68b4:	36 40 00 5a	5a004036 { 	call 0x6920 <_HAP_debug_v2>
+    68b8:	1a 2a 08 68	68082a1a   	r16 = #0; 	memd(r29+#24) = r5:4 } 
+    68bc:	7e ff ff 59	59ffff7e { 	jump 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    68c0:	10 40 00 78	78004010 { 	r16 = #0
+    68c4:	fe 7f ff 0f	0fff7ffe   	immext(#4294967168)
+    68c8:	83 40 83 91	91834083   	r3 = memw(r3+##-124)
+    68cc:	7c e0 32 24	2432e07c   	if (cmp.eq(r3.new,#0)) jump:t 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    68d0:	e4 44 20 d3	d32044e4 { 	r5:4 = sub(r5:4,r1:0)
+    68d4:	e8 7f e6 bf	bfe67fe8   	r8 = add(r6,#-1)
+    68d8:	09 c0 87 91	9187c009   	r9 = memw(r7+#0) } 
+    68dc:	6f 45 00 00	0000456f { 	immext(#89024)
+    68e0:	81 4a 49 6a	6a494a81   	r1 = add(pc,##89045)
+    68e4:	07 68 87 3a	3a876807   	r7 = memw(r7+r8<<#2)
+    68e8:	00 c2 9d a1	a19dc200   	memw(r29+#0) = r2 } 
+    68ec:	71 45 00 00	00004571 { 	immext(#89152)
+    68f0:	83 5d 49 6a	6a495d83   	r3 = add(pc,##89211)
+    68f4:	40 40 00 78	78004040   	r0 = #2
+    68f8:	c2 d9 00 78	7800d9c2   	r2 = #206 } 
+    68fc:	47 08 16 e8	e8160847 { 	memw(r29+#4) = r6; 	memw(r29+#16) = r7 } 
+    6900:	03 48 9d a1	a19d4803 { 	memw(r29+#12) = r8
+    6904:	02 c9 9d a1	a19dc902   	memw(r29+#8) = r9 } 
+    6908:	b4 6a ff 5b	5bff6ab4 { 	call 0x3e70 <HAP_debug_runtime@plt>
+    690c:	03 c4 dd a1	a1ddc403   	memd(r29+#24) = r5:4 } 
+    6910:	54 ff ff 59	59ffff54 { 	jump 0x67b8 <sp_compute_barrett_oracle+0x2a8> } 
+    6914:	00 40 00 7f	7f004000 { 	nop
+    6918:	00 40 00 7f	7f004000   	nop
+    691c:	00 c0 00 7f	7f00c000   	nop } 
+

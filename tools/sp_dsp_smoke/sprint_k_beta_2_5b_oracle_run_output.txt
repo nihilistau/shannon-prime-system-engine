@@ -1,0 +1,34 @@
+[K-β-2.5b] opening FastRpcSession (Path B)...
+[K-β-2.5b] session open
+
+[K-β-2.5b] ═══ Stage 2.5a — scalar Barrett (mode=0) ═══
+[K-β-2.5b] T_BARRETT_SCALAR_ORACLE_q1 PASS  (1024 vectors / q=1073738753 mu=1073744895)
+[K-β-2.5b]   sample: a[0]=0 b[0]=0 r[0]=0; a[5]=1073738751 b[5]=1073738745 r[5]=16
+[K-β-2.5b] T_BARRETT_SCALAR_ORACLE_q2 PASS  (1024 vectors / q=1073732609 mu=1073751039)
+[K-β-2.5b]   sample: a[0]=0 b[0]=0 r[0]=0; a[5]=1073732607 b[5]=1073732601 r[5]=16
+
+[K-β-2.5b] ═══ Stage 2.5b — HVX vector Barrett (mode=1) ═══
+[K-β-2.5b]   M_K_beta_MATH_IDENTITY     = vector == Rust scalar reference
+[K-β-2.5b]   M_K_beta_BARRETT_CORRECTNESS = vector result satisfies r≡a·b (mod q) AND 0≤r<q
+[K-β-2.5b]   plus cross-mode invariant   = mode=0 == mode=1
+[K-β-2.5b] T_BARRETT_VECTOR_ORACLE_q1 PASS  (1024 vectors / q=1073738753 mu=1073744895)
+[K-β-2.5b]   sample: a[0]=0 b[0]=0 r[0]=0; a[5]=1073738751 b[5]=1073738745 r[5]=16
+[K-β-2.5b] T_BARRETT_VECTOR_ORACLE_q2 PASS  (1024 vectors / q=1073732609 mu=1073751039)
+[K-β-2.5b]   sample: a[0]=0 b[0]=0 r[0]=0; a[5]=1073732607 b[5]=1073732601 r[5]=16
+
+[K-β-2.5b] ═══ Aggregate substantive-gate report ═══
+[K-β-2.5b] M_K_beta_MATH_IDENTITY:
+[K-β-2.5b]   samples_compared    = 2048
+[K-β-2.5b]   divergence_count    = 0
+[K-β-2.5b]   max_lane_diff       = 0
+[K-β-2.5b]   PASS
+[K-β-2.5b] BARRETT_CORRECTNESS:
+[K-β-2.5b]   samples_correct     = 2048
+[K-β-2.5b]   samples_total       = 2048
+[K-β-2.5b]   PASS
+[K-β-2.5b] cross-mode invariant (mode=0 == mode=1):
+[K-β-2.5b]   divergences         = 0
+[K-β-2.5b]   PASS
+
+[K-β-2.5b] session closed cleanly
+[K-β-2.5b] T_BARRETT_*_ORACLE — Stage 2.5a + 2.5b primitive gates PASS

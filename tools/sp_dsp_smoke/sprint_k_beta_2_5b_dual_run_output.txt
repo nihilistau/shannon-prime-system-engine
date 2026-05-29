@@ -1,0 +1,40 @@
+[K-β-2.5b dual] opening FastRpcSession (Path B)...
+[K-β-2.5b dual] session open
+
+[K-β-2.5b dual] ═══ Sequential baseline (mode=1, n_per_prime=65536) ═══
+[K-β-2.5b dual]   q_1 invoke wall = 1644 μs
+[K-β-2.5b dual]   q_2 invoke wall = 1324 μs
+[K-β-2.5b dual]   sequential total = 4881 μs
+
+[K-β-2.5b dual] ═══ Concurrent dual-dispatch (Arc<FastRpcSession>) ═══
+[K-β-2.5b dual]   q_1 thread invoke wall = 1833 μs
+[K-β-2.5b dual]   q_2 thread invoke wall = 1436 μs
+[K-β-2.5b dual]   concurrent total wall  = 4853 μs
+[K-β-2.5b dual]   overlap window         = 949 μs
+
+[K-β-2.5b dual] ═══ Functional check (concurrent == sequential) ═══
+[K-β-2.5b dual]   PASS  (both prime threads produce bitwise-identical output to sequential)
+
+[K-β-2.5b dual] ═══ M_K_beta_DUAL_DISPATCH_SPEEDUP ═══
+[K-β-2.5b dual]   sequential_wall_us  = 4881
+[K-β-2.5b dual]   concurrent_wall_us  = 4853
+[K-β-2.5b dual]   speedup             = 1.006× (sequential / concurrent)
+[K-β-2.5b dual]   overlap_fraction    = 0.1955
+[K-β-2.5b dual]   single_invoke_avg   = 1484 μs
+[K-β-2.5b dual]   K v0.alpha baseline = 1.935× (engine cdaaf15, 128x128/B=8 saturating matmul)
+[K-β-2.5b dual]   threshold ≥ 1.5×    : FAIL
+
+[K-β-2.5b dual] ═══ M_K_beta_LEAK_FREE (10000-iter dual-invoke cycle) ═══
+[K-β-2.5b dual]   VmRSS @ iter 0     = 8348 KB
+[K-β-2.5b dual]   VmRSS @ iter 5000  = 10448 KB
+[K-β-2.5b dual]   VmRSS @ iter 10000 = 10452 KB
+[K-β-2.5b dual]   cycles_run         = 10000
+[K-β-2.5b dual]   wall time          = 78.02 s (7.80 ms/iter)
+[K-β-2.5b dual]   vmrss_delta_kb     = 2104
+[K-β-2.5b dual]   leaked_dma_bufs    = (rough proxy — VmRSS delta)
+[K-β-2.5b dual]   leaked_vtcm_chunks = (n/a for Barrett primitive — no VTCM allocs)
+[K-β-2.5b dual]   leaked_remote_handles = 0 (sess Arc retained for whole run; no per-iter open/close)
+[K-β-2.5b dual]   FAIL
+
+[K-β-2.5b dual] session closed cleanly
+[K-β-2.5b dual] 2 gate(s) FAILED
