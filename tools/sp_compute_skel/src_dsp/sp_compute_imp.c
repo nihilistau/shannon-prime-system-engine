@@ -395,36 +395,66 @@ int sp_compute_axpby_2d_halide(remote_handle64 h,
     if ((size_t)a_bufLen < (size_t)cols * 2) return -1;
     if ((size_t)x_bufLen < n_xy || (size_t)y_bufLen < n_xy) return -1;
 
-    /* Sprint F finding (documented in SESSION-CLOSED-lat-3-hx-mode-f):
-     * VTCM litmus on Path B Unsigned PD is PASS — HAP_request_VTCM admits
-     * up to 4 MB (see sp_compute_vtcm_probe).  BUT the C-side "hot-copy
-     * inputs to VTCM, run Halide against VTCM host pointers, copy out"
-     * pattern crashes the Halide-emitted kernel: the AOT code uses `vmemu`
-     * loads expecting DDR semantics, and re-pointing halide_buffer_t.host
-     * at the 0xff000000 VTCM region traps inside the inner HVX loop.
-     *
-     * Canonical Halide+VTCM pattern is `.store_in(MemoryType::VTCM)` on an
-     * intermediate Func in the generator schedule — the runtime allocates
-     * VTCM internally and the input/output buffers stay on DDR.  That's a
-     * Sprint G follow-on (current axpby kernel has no intermediates to
-     * stage; would need an FFN-shaped pipeline first).
-     *
-     * For Sprint F: always use DDR for Halide; vtcm_used reports 0. */
-    int16_t *x_dev = (int16_t *)x_buf;
-    int16_t *y_dev = (int16_t *)y_buf;
-    const int16_t *a_arr = (const int16_t *)a_buf;
-    *vtcm_used = 0;
+    /* Sprint F.1 retry: VTCM hot-copy now that the generator emits
+     * set_host_alignment(128) and .prefetch.  Allocate x+a+y in VTCM,
+     * memcpy DDR→VTCM, run Halide, memcpy VTCM→DDR.  Falls back to DDR
+     * if VTCM admission denied (won't happen on this S22U per litmus). */
+    size_t n_a   = (size_t)cols * 2;
+    /* Round each region up to 128-byte alignment so adjacent offsets in
+     * VTCM remain 128-byte aligned (vmem precondition + Halide host_align). */
+    size_t n_a_a  = (n_a   + 127) & ~(size_t)127;
+    size_t n_xy_a = (n_xy + 127) & ~(size_t)127;
+    size_t need   = n_a_a + n_xy_a + n_xy_a;
+
+    int16_t *x_dev, *y_dev, *a_dev;
+    void *vtcm = HAP_request_VTCM((unsigned)need, 0);
+    if (vtcm) {
+        a_dev = (int16_t *)vtcm;
+        x_dev = (int16_t *)((unsigned char *)vtcm + n_a_a);
+        y_dev = (int16_t *)((unsigned char *)vtcm + n_a_a + n_xy_a);
+        /* Advisor's alignment guard — every host pointer Halide sees must be
+         * 128-byte aligned per the new set_host_alignment(128) declaration. */
+        if (((uintptr_t)a_dev | (uintptr_t)x_dev | (uintptr_t)y_dev) & 127) {
+            FARF(RUNTIME_ERROR,
+                 "axpby_2d_halide: VTCM offset alignment FAIL a=%p x=%p y=%p",
+                 a_dev, x_dev, y_dev);
+            HAP_release_VTCM(vtcm);
+            return -1;
+        }
+        memcpy(a_dev, a_buf, n_a);
+        memcpy(x_dev, x_buf, n_xy);
+        *vtcm_used = 1;
+        FARF(RUNTIME_HIGH,
+             "axpby_2d_halide: VTCM staging a=%p x=%p y=%p need=%zu",
+             a_dev, x_dev, y_dev, need);
+    } else {
+        a_dev = (int16_t *)a_buf;
+        x_dev = (int16_t *)x_buf;
+        y_dev = (int16_t *)y_buf;
+        *vtcm_used = 0;
+        FARF(RUNTIME_HIGH, "axpby_2d_halide: VTCM denied — DDR fallback");
+    }
 
     halide_buffer_t hx, ha, hy;
     halide_dimension_t hx_dims[2], hy_dims[2], ha_dim;
     hbuf2_i16_init(&hx, hx_dims, x_dev, cols, rows);
     hbuf2_i16_init(&hy, hy_dims, y_dev, cols, rows);
-    hbuf1_i16_init(&ha, &ha_dim, (int16_t *)a_arr, cols);
+    hbuf1_i16_init(&ha, &ha_dim, a_dev, cols);
+
+    /* Mark host_dirty since we wrote to host (matches Halide ABI for buffers
+     * that may also have device handles; harmless when device=0). */
+    hx.flags |= halide_buffer_flag_host_dirty;
+    ha.flags |= halide_buffer_flag_host_dirty;
 
     int rc = sp_axpby_2d_halide(&hx, &ha, b, (uint8_t)q_bits, &hy);
     FARF(RUNTIME_HIGH,
-         "axpby_2d_halide: rc=%d rows=%d cols=%d (DDR-only — see closure note)",
-         rc, rows, cols);
+         "axpby_2d_halide: rc=%d rows=%d cols=%d vtcm_used=%d",
+         rc, rows, cols, *vtcm_used);
+
+    if (vtcm) {
+        memcpy(y_buf, y_dev, n_xy);
+        HAP_release_VTCM(vtcm);
+    }
     return rc;
 }
 #endif  /* SP_HAVE_HALIDE */

@@ -410,6 +410,22 @@ fn main() {
         Ok((y, prim_out[0] as i32))
     }
 
+    // ─── §3-HX Sprint F.1 perf gate: VTCM vs DDR head-to-head ───────────
+    {
+        const ROWS: usize = 64; const COLS: usize = 512; const ITERS: u32 = 200;
+        let x: Vec<i16> = (0..ROWS*COLS).map(|i| ((i as i32 * 37 + 11) & 0x7FFF) as i16 - 16384).collect();
+        let a: Vec<i16> = (0..COLS).map(|i| ((i as i32 * 41 + 7) & 0x3FF) as i16 - 256).collect();
+        let t0 = Instant::now();
+        let mut ok_count = 0;
+        for _ in 0..ITERS {
+            if let Ok((_, used)) = invoke_axpby_2d_halide(&sess, &x, &a, ROWS as i32, COLS as i32, 0, 8) {
+                if used == 1 { ok_count += 1; }
+            }
+        }
+        let elapsed = t0.elapsed();
+        eprintln!("[hvx] T_HALIDE_VTCM_PERF ({ROWS}×{COLS}, {ITERS} iter): {elapsed:?} (vtcm_admitted={ok_count}/{ITERS})");
+    }
+
     for (label, rows, cols, b_in, q_in) in [
         ("T_HALIDE_AXPBY_2D_8x128",    8usize,  128usize,  1024i32, 10i32),
         ("T_HALIDE_AXPBY_2D_16x256",   16,      256,      -512,     12),

@@ -35,6 +35,15 @@ public:
         y.dim(0).set_min(0);
         y.dim(1).set_min(0);
 
+        // §3-HX Sprint F.1: tell Halide the host pointers are 128-byte aligned
+        // (matches HVX vector width). This lets codegen emit aligned `vmem`
+        // instead of unaligned `vmemu`, which is the load-bearing change for
+        // running against VTCM-backed buffers (the Sprint F unviability finding).
+        // The C-side handler enforces the 128-byte offset constraint.
+        x.set_host_alignment(128);
+        a.set_host_alignment(128);
+        y.set_host_alignment(128);
+
         if (get_target().has_feature(Target::HVX)) {
             // HVX vector width: 128 bytes = 64 i16 lanes.
             // Tile to 128×4 = 64 lanes × 2 (= 128 cols) × 4 rows; vectorize the
@@ -42,7 +51,8 @@ public:
             y.hexagon()
              .tile(c, r, ci, ri, 128, 4)
              .vectorize(ci, 64)
-             .unroll(ri);
+             .unroll(ri)
+             .prefetch(x, r, 2);     // Sprint F.1: hardware prefetch hint
         } else {
             y.tile(c, r, ci, ri, 64, 4)
              .vectorize(ci, 16)
