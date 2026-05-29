@@ -68,17 +68,50 @@ echo [echo-skel] Step 1: qaic.exe IDL -^> stub + skel + header
 if errorlevel 1 ( echo [ERROR] qaic failed && popd && exit /b 1 )
 
 echo [echo-skel] Step 2: hexagon-clang -mv69 -^> libshannonprime_echo_skel.so
+::
+:: PIC shared link flags per SDK hexagon_toolchain.cmake:150-166 (canonical
+:: V69 skel template). Missing any one of these → cDSP loader rejects with
+:: AEE_EUNABLETOLOAD (0x80000406).
+::
+:: Required libs (inside --start-group / --end-group):
+::   rtld_init.a   registers the skel's invoke entry with FastRPC
+::   rtld.a        runtime dynamic loader stubs
+::   atomic.a      atomic primitives (pulled by every skel)
+::
+:: For SDK 5.5.6.0 + HEXAGON_Tools 8.7.06:
+::   rtld   at SDK\ipc\fastrpc\rtld\ship\hexagon_toolv87_v69\
+::   atomic at SDK\libs\atomic\prebuilt\hexagon_toolv87_v65\  (no v69 variant —
+::          v65 is binary-compatible for atomic prims)
+::   v69 G0/pic libs (libc etc.) at HEXAGON_Tools\.../target/hexagon/lib/v69/G0/pic
+::
+set "RTLD_DIR=%HEXAGON_SDK_ROOT%\ipc\fastrpc\rtld\ship\hexagon_toolv87_v69"
+set "ATOMIC_DIR=%HEXAGON_SDK_ROOT%\libs\atomic\prebuilt\hexagon_toolv87_v65"
+set "HEXAGON_TARGET_LIB=%HEXAGON_SDK_ROOT%\tools\HEXAGON_Tools\%HEXAGON_TOOLS_VER%\Tools\target\hexagon\lib"
 "%HEXAGON_CLANG%" ^
-    -O3 -mv69 -G0 -shared -fPIC ^
+    -mv69 -G0 -fpic ^
     -I "%HEXAGON_SDK_ROOT%\incs" ^
     -I "%HEXAGON_SDK_ROOT%\incs\stddef" ^
     -I "%HEXAGON_SDK_ROOT%\incs\fastrpc" ^
     -I "%BUILD_DIR%" ^
     -I "%SCRIPT_DIR%" ^
+    -Wl,-Bsymbolic ^
+    -Wl,-L"%HEXAGON_TARGET_LIB%\v69\G0\pic" ^
+    -Wl,-L"%HEXAGON_TARGET_LIB%" ^
+    -Wl,--no-threads ^
+    -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=free ^
+    -Wl,--wrap=realloc -Wl,--wrap=memalign ^
+    -shared ^
+    -o "%BUILD_DIR%\libshannonprime_echo_skel.so" ^
     "%BUILD_DIR%\echo_skel.c" ^
     "%SCRIPT_DIR%\echo_imp.c" ^
-    -o "%BUILD_DIR%\libshannonprime_echo_skel.so" ^
-    -lhexagon
+    -Wl,--whole-archive ^
+    "%RTLD_DIR%\rtld_init.a" ^
+    -Wl,--no-whole-archive ^
+    -Wl,--start-group ^
+    "%RTLD_DIR%\rtld.a" ^
+    "%ATOMIC_DIR%\atomic.a" ^
+    -Wl,--end-group ^
+    -lc
 if errorlevel 1 ( echo [ERROR] hexagon-clang failed && popd && exit /b 1 )
 
 echo [echo-skel] Step 3: adb push to /data/local/tmp/
