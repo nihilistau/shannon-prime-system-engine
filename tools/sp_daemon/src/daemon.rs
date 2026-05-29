@@ -258,7 +258,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
 /// The DSP-resident model + KV cache are loaded in the appstate commit; this
 /// host-gating commit only proves the android binary compiles and serves.
 #[cfg(target_os = "android")]
-pub async fn run_inner(_model_path: &str, _tok_path: &str, _draft_model_path: &str, _draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
+pub async fn run_inner(model_path: &str, _tok_path: &str, _draft_model_path: &str, _draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     #[cfg(unix)]
     unsafe { libc::setsid() };
 
@@ -283,6 +283,48 @@ pub async fn run_inner(_model_path: &str, _tok_path: &str, _draft_model_path: &s
         }
     };
 
+    // §3-HX Sprint J.5 — load the DSP-resident model into rpcmem DmaBuffers.
+    // Uses a SEPARATE FastRpcSession, leaked to `&'static` so the model's
+    // DmaBuffer<'sess> borrows (≈1.4 GB of weights) live for the process
+    // lifetime — required to store DspModel/KvCache in the long-lived AppState
+    // without a self-referential struct. The echo `dsp_session` above is left
+    // owned + Mutex-serialized (verified Sprint C path, untouched).
+    // Any failure degrades to None → /v1/dsp/model_info returns 501.
+    const CTX_MAX: usize = 4096;
+    let (dsp_model, kv_cache) = match crate::dsp_rpc::FastRpcSession::new(SKEL_URI) {
+        Ok(s) => {
+            let sess: &'static crate::dsp_rpc::FastRpcSession = Box::leak(Box::new(s));
+            match crate::dsp_model::DspModel::load(sess, model_path) {
+                Ok(model) => {
+                    info!("J.5: model loaded — {} layers, {} MB DMA, {} ms",
+                        model.header.n_layers,
+                        model.total_dma_bytes / (1024 * 1024),
+                        model.load_wall_ms);
+                    let kv = match crate::kv_cache::KvCache::alloc(sess, &model.header, CTX_MAX) {
+                        Ok(kv) => {
+                            info!("J.5: KV cache — {} MB, {} ms",
+                                kv.total_bytes() / (1024 * 1024), kv.alloc_wall_ms);
+                            Some(std::sync::Arc::new(Mutex::new(crate::state::KvCacheHandle(kv))))
+                        }
+                        Err(e) => {
+                            tracing::warn!("J.5: KvCache::alloc failed: {e:?}");
+                            None
+                        }
+                    };
+                    (Some(std::sync::Arc::new(crate::state::ModelHandle(model))), kv)
+                }
+                Err(e) => {
+                    tracing::warn!("J.5: DspModel::load({model_path}) failed: {e:?} — /v1/dsp/model_info will 501");
+                    (None, None)
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("J.5: model FastRpcSession::new failed: {e:?} — /v1/dsp/model_info will 501");
+            (None, None)
+        }
+    };
+
     let (events_tx, _) =
         tokio::sync::broadcast::channel::<crate::state::DaemonEvent>(64);
     let peer_map = Arc::new(DashMap::new());
@@ -294,6 +336,8 @@ pub async fn run_inner(_model_path: &str, _tok_path: &str, _draft_model_path: &s
         events_tx,
         peer_map,
         dsp_session,
+        dsp_model,
+        kv_cache,
     });
 
     // ── HTTP server ──────────────────────────────────────────────────────────

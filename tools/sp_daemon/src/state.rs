@@ -81,6 +81,32 @@ pub struct AppState {
     pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
 }
 
+/// §3-HX Sprint J.5 — `Send + Sync` wrapper for the DSP-resident model.
+///
+/// `DspModel<'static>` holds `Vec<DmaBuffer>`, and `DmaBuffer` wraps a raw
+/// rpcmem `*mut u8` → `!Send + !Sync`. axum's `State<Arc<AppState>>` requires
+/// `Send + Sync`. The unsafe impls are sound for J.5 because the model is
+/// **load-and-read-only**: after `DspModel::load` returns on the startup
+/// thread, only plain metadata (`header`, `total_dma_bytes`) is read via
+/// `/v1/dsp/model_info`; the rpcmem pointers are never dereferenced or invoked
+/// across threads. Sprint K, which drives FastRPC invokes against these
+/// buffers, must add per-invoke serialization (the deferred `Mutex`).
+#[cfg(target_os = "android")]
+pub struct ModelHandle(pub crate::dsp_model::DspModel<'static>);
+#[cfg(target_os = "android")]
+unsafe impl Send for ModelHandle {}
+#[cfg(target_os = "android")]
+unsafe impl Sync for ModelHandle {}
+
+/// `Send + Sync` wrapper for the DSP-resident KV cache. Same soundness
+/// argument as [`ModelHandle`]: J.5 reads only `total_bytes()`.
+#[cfg(target_os = "android")]
+pub struct KvCacheHandle(pub crate::kv_cache::KvCache<'static>);
+#[cfg(target_os = "android")]
+unsafe impl Send for KvCacheHandle {}
+#[cfg(target_os = "android")]
+unsafe impl Sync for KvCacheHandle {}
+
 /// §3-HX Sprint J.5 — android daemon state.
 ///
 /// The android binary host-gates the entire L1 C-ABI inference path (model,
@@ -105,4 +131,12 @@ pub struct AppState {
     /// `/v1/dsp/echo` then returns 501.  Per-request Mutex serializes the FFI
     /// invoke since FastRPC per-handle thread-safety is single-thread.
     pub dsp_session: Option<Mutex<crate::dsp_rpc::FastRpcSession>>,
+    /// §3-HX Sprint J.5 — DSP-resident Qwen3 model, loaded at startup via the
+    /// sp_dsp_smoke loader into per-tensor rpcmem DmaBuffers. Backed by a
+    /// process-lifetime (leaked `&'static`) FastRpcSession separate from
+    /// `dsp_session`. `None` if the load failed → `/v1/dsp/model_info` 501s.
+    pub dsp_model: Option<Arc<ModelHandle>>,
+    /// Per-layer K/V DmaBuffers allocated at ctx_max=4096. `Mutex` is for
+    /// Sprint K's decode-time mutation; J.5 only reads `total_bytes()`.
+    pub kv_cache: Option<Arc<Mutex<KvCacheHandle>>>,
 }

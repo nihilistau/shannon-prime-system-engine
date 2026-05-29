@@ -1,6 +1,17 @@
 mod daemon;
 #[cfg(target_os = "android")]
 mod dsp_rpc;
+// §3-HX Sprint J.5 — import (not move) the Sprint J loader from sp_dsp_smoke.
+// #[path] keeps the loader files in their crate; `use crate::dsp_rpc::…` inside
+// them resolves to this crate's dsp_rpc (signatures verified identical), so no
+// duplicate FastRpcSession type and no smoke [lib] target. Tech-debt: the
+// cross-tree path marks the loader's eventual real home (a shared crate).
+#[cfg(target_os = "android")]
+#[path = "../../sp_dsp_smoke/src/dsp_model.rs"]
+mod dsp_model;
+#[cfg(target_os = "android")]
+#[path = "../../sp_dsp_smoke/src/kv_cache.rs"]
+mod kv_cache;
 // §3-HX Sprint J.5 — the L1 C-ABI inference path (ffi/session/forward) and the
 // sieve-backed mining/spec/tokenizer modules do not cross-compile or link for
 // aarch64-android (build.rs sets sp_no_link; the math-core C ABI is Phase

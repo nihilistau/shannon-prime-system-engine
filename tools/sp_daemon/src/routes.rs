@@ -575,9 +575,28 @@ pub async fn v1_pouw_ledger() -> Response {
 }
 
 // /v1/dsp/model_info — reports the DSP-resident model's layer count + total
-// DmaBuffer footprint.  Wired in the appstate commit; in this host-gating
-// commit no model is loaded, so it returns 501.
+// DmaBuffer footprint (T_APPSTATE_INTEGRATION). 501 if the model failed to
+// load (FastRpcSession unavailable / skel not admitted / bad model path).
 #[cfg(target_os = "android")]
-pub async fn v1_dsp_model_info(State(_state): State<Arc<AppState>>) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "model not loaded").into_response()
+pub async fn v1_dsp_model_info(State(state): State<Arc<AppState>>) -> Response {
+    let Some(model) = state.dsp_model.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "model not loaded").into_response();
+    };
+    let hdr = &model.0.header;
+    let kv_cache_bytes = state
+        .kv_cache
+        .as_ref()
+        .map(|k| k.lock().unwrap().0.total_bytes())
+        .unwrap_or(0);
+    Json(serde_json::json!({
+        "n_layers":         hdr.n_layers,
+        "hidden_size":      hdr.hidden_size,
+        "n_heads":          hdr.n_heads,
+        "n_kv_heads":       hdr.n_kv_heads,
+        "vocab_size":       hdr.vocab_size,
+        "total_dma_bytes":  model.0.total_dma_bytes,
+        "load_wall_ms":     model.0.load_wall_ms,
+        "kv_cache_bytes":   kv_cache_bytes,
+    }))
+    .into_response()
 }
