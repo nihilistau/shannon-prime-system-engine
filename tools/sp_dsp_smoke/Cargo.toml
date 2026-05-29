@@ -30,6 +30,16 @@ path = "src/test_hvx.rs"
 name = "sp_model_layer_smoke"
 path = "src/sp_model_layer_smoke.rs"
 
+# §3-HX Sprint J (Path A1) — full-model load + KV cache + layer-N bitwise.
+# Loads all 28 layers + globals into per-tensor DmaBuffers; allocates KV cache
+# at ctx=4096; runs Sprint H diag-method bitwise gate on layer 14's W_gate
+# (catches per-layer offset arithmetic bugs the layer-0 case might mask).
+# T_APPSTATE_INTEGRATION deferred to Sprint J.5 (sp_daemon cross-compile
+# blocker — see lattice closure for the explicit deferral rationale).
+[[bin]]
+name = "sp_full_load_smoke"
+path = "src/sp_full_load_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
