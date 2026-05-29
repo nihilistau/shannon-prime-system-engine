@@ -16,6 +16,7 @@ use tokio_stream::StreamExt as _;
 
 use std::sync::atomic::AtomicBool;
 use crate::state::{AppState, DaemonEvent};
+#[cfg(not(target_os = "android"))]
 use crate::tokenizer::{Message, PushResult, TokenDecodeBuffer};
 
 // ── SSE header helper ──────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ fn sse_response(sse: impl IntoResponse) -> Response {
 
 // ── /v1/metrics ───────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 #[derive(Serialize)]
 pub(crate) struct Metrics {
     tokens_per_sec: f64,
@@ -42,6 +44,7 @@ pub(crate) struct Metrics {
     session_pos: u64,
 }
 
+#[cfg(not(target_os = "android"))]
 pub async fn v1_metrics(State(state): State<Arc<AppState>>) -> Json<Metrics> {
     let session_pos = {
         let guard = state.session.lock().unwrap();
@@ -63,6 +66,7 @@ pub async fn v1_metrics(State(state): State<Arc<AppState>>) -> Json<Metrics> {
 
 // ── /v1/chat ──────────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 pub struct ChatRequest {
     pub prompt: Option<String>,
@@ -74,16 +78,19 @@ pub struct ChatRequest {
     pub stop: Vec<String>,
 }
 
+#[cfg(not(target_os = "android"))]
 fn default_max_tokens() -> u32 {
     256
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Serialize)]
 struct ChatDelta {
     delta: String,
     chat_id: u64,
 }
 
+#[cfg(not(target_os = "android"))]
 pub async fn v1_chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
@@ -273,6 +280,7 @@ pub async fn v1_chat(
     )
 }
 
+#[cfg(not(target_os = "android"))]
 fn argmax(logits: &[f32]) -> i32 {
     logits
         .iter()
@@ -284,6 +292,7 @@ fn argmax(logits: &[f32]) -> i32 {
 
 // ── /v1/abort/{id} ────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 pub async fn v1_abort(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
@@ -297,6 +306,7 @@ pub async fn v1_abort(
 
 // ── /v1/receipts ──────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 pub async fn v1_receipts(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let store = state.receipt_store.lock().unwrap();
     let receipts: Vec<_> = store.iter().map(|r| serde_json::json!({
@@ -344,6 +354,7 @@ pub async fn v1_events(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 // ── /v1/node/telemetry (WS) — migrated from console.rs ───────────────────
 
+#[cfg(not(target_os = "android"))]
 #[derive(Serialize)]
 struct NodeTelemetry {
     node_id: String,
@@ -354,6 +365,7 @@ struct NodeTelemetry {
     pouw_frontier: u64,
 }
 
+#[cfg(not(target_os = "android"))]
 pub async fn v1_node_telemetry(
     State(state): State<Arc<AppState>>,
     ws: WebSocketUpgrade,
@@ -361,6 +373,7 @@ pub async fn v1_node_telemetry(
     ws.on_upgrade(move |socket| telemetry_loop(socket, state))
 }
 
+#[cfg(not(target_os = "android"))]
 async fn telemetry_loop(mut socket: WebSocket, state: Arc<AppState>) {
     loop {
         let peers_active = state.peer_map.len() as u32;
@@ -414,6 +427,7 @@ pub async fn v1_mesh_peers(State(state): State<Arc<AppState>>) -> axum::Json<ser
 
 // ── /v1/pouw/ledger — migrated from console.rs ───────────────────────────
 
+#[cfg(not(target_os = "android"))]
 pub async fn v1_pouw_ledger(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rx = state.events_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| {
@@ -430,6 +444,7 @@ pub async fn v1_pouw_ledger(State(state): State<Arc<AppState>>) -> impl IntoResp
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
 }
 
+#[cfg(not(target_os = "android"))]
 fn format_kste_receipt(receipt_hex: &str) -> String {
     if receipt_hex.len() < 288 {
         return format!("[KSTE] <malformed receipt len={}>", receipt_hex.len());
@@ -440,6 +455,7 @@ fn format_kste_receipt(receipt_hex: &str) -> String {
     format!("[KSTE] Round: {round} | Nonce: 0x{nonce}... | Z_q Hash: 0x{hash}...")
 }
 
+#[cfg(not(target_os = "android"))]
 fn decode_le_u64_hex(hex16: &str) -> u64 {
     let mut bytes = [0u8; 8];
     for (i, b) in bytes.iter_mut().enumerate() {
@@ -534,4 +550,34 @@ pub async fn v1_dsp_echo(
     // get a clear 501 instead of a 404 (which would suggest the route is
     // not deployed at all).
     (StatusCode::NOT_IMPLEMENTED, "v1/dsp/echo requires target_os=android").into_response()
+}
+
+// ── §3-HX Sprint J.5 — android-only handlers ─────────────────────────────────
+//
+// The android binary host-gates the L1 C-ABI forward path, so /v1/chat and
+// /v1/pouw/ledger return an explicit 501 (not 404) — the routes are deployed
+// but their compute backend (forward / sieve C ABI) is Phase 2-L3.FG scope.
+// Same-name handlers so server.rs imports them unconditionally; the host
+// variants above carry #[cfg(not(target_os = "android"))].
+
+#[cfg(target_os = "android")]
+pub async fn v1_chat() -> Response {
+    (StatusCode::NOT_IMPLEMENTED,
+     "v1/chat requires the L1 forward C ABI (host build; android pending Phase 2-L3.FG)")
+        .into_response()
+}
+
+#[cfg(target_os = "android")]
+pub async fn v1_pouw_ledger() -> Response {
+    (StatusCode::NOT_IMPLEMENTED,
+     "v1/pouw/ledger requires the sieve C ABI (host build; android pending Phase 2-L3.FG)")
+        .into_response()
+}
+
+// /v1/dsp/model_info — reports the DSP-resident model's layer count + total
+// DmaBuffer footprint.  Wired in the appstate commit; in this host-gating
+// commit no model is loaded, so it returns 501.
+#[cfg(target_os = "android")]
+pub async fn v1_dsp_model_info(State(_state): State<Arc<AppState>>) -> Response {
+    (StatusCode::NOT_IMPLEMENTED, "model not loaded").into_response()
 }

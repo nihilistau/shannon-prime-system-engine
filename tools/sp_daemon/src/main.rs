@@ -1,15 +1,27 @@
 mod daemon;
 #[cfg(target_os = "android")]
 mod dsp_rpc;
+// §3-HX Sprint J.5 — the L1 C-ABI inference path (ffi/session/forward) and the
+// sieve-backed mining/spec/tokenizer modules do not cross-compile or link for
+// aarch64-android (build.rs sets sp_no_link; the math-core C ABI is Phase
+// 2-L3.FG scope). They are host-only; the android binary serves the DSP-loader
+// surface instead (see daemon::run_inner android variant).
+#[cfg(not(target_os = "android"))]
 mod ffi;
+#[cfg(not(target_os = "android"))]
 mod mining;
 mod routes;
 mod server;
+#[cfg(not(target_os = "android"))]
 mod session;
+#[cfg(not(target_os = "android"))]
 mod sessions;
+#[cfg(not(target_os = "android"))]
 mod sieve_ffi;
+#[cfg(not(target_os = "android"))]
 mod spec;
 mod state;
+#[cfg(not(target_os = "android"))]
 mod tokenizer;
 
 use clap::{Parser, Subcommand};

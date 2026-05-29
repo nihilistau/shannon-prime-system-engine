@@ -3,13 +3,15 @@ use std::sync::Arc;
 use axum::{routing::{get, post}, Router};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
-use crate::routes::{
-    v1_abort, v1_chat, v1_chat_stream_stub, v1_dsp_echo, v1_events, v1_mesh_peers,
-    v1_metrics, v1_node_telemetry, v1_pouw_ledger, v1_receipts,
-};
 use crate::state::AppState;
 
+// ── Host router — full L1-backed inference + PoUW + mesh surface ─────────────
+#[cfg(not(target_os = "android"))]
 pub fn build_router(state: Arc<AppState>) -> Router {
+    use crate::routes::{
+        v1_abort, v1_chat, v1_chat_stream_stub, v1_dsp_echo, v1_events, v1_mesh_peers,
+        v1_metrics, v1_node_telemetry, v1_pouw_ledger, v1_receipts,
+    };
     Router::new()
         .route("/v1/metrics",        get(v1_metrics))
         .route("/v1/chat",           post(v1_chat))
@@ -22,6 +24,28 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/pouw/ledger",    get(v1_pouw_ledger))
         .route("/v1/dsp/echo",       post(v1_dsp_echo))
         .fallback_service(ServeDir::new("frontend_mockups"))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
+// ── §3-HX Sprint J.5 — android router ────────────────────────────────────────
+//
+// The L1 C-ABI forward path is host-gated out of the android build, so this
+// router serves only the DSP-loader + mesh surface. /v1/chat and
+// /v1/pouw/ledger are wired to explicit 501 stubs (deployed-but-unbacked)
+// rather than omitted, so clients get 501 not 404 (T_ENDPOINT_REGRESSION_ANDROID).
+#[cfg(target_os = "android")]
+pub fn build_router(state: Arc<AppState>) -> Router {
+    use crate::routes::{
+        v1_chat, v1_dsp_echo, v1_dsp_model_info, v1_events, v1_mesh_peers, v1_pouw_ledger,
+    };
+    Router::new()
+        .route("/v1/events",         get(v1_events))
+        .route("/v1/mesh/peers",     get(v1_mesh_peers))
+        .route("/v1/dsp/echo",       post(v1_dsp_echo))
+        .route("/v1/dsp/model_info", get(v1_dsp_model_info))
+        .route("/v1/chat",           post(v1_chat))
+        .route("/v1/pouw/ledger",    get(v1_pouw_ledger))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

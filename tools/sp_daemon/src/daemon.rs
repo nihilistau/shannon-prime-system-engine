@@ -9,10 +9,16 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use tracing::info;
 
+// The QUIC DHT garner loop performs NTT-CRT shard recombination via the
+// network::ntt_ffi C ABI, which does not link on aarch64-android (Phase
+// 2-L3.FG scope). It is host-only; the android daemon serves the mesh surface
+// from an empty peer_map (no inference cluster on a single on-device node).
+#[cfg(not(target_os = "android"))]
 use sp_daemon::network::quic_shard::{run_garner_loop, SpQuicCoordinator, SpQuicWorker};
 
 /// NTT transform size for CRT residue reconstruction.
 /// Matches the test topology (N=128). Tuned to model layer width in BLOCK-SYNC phase.
+#[cfg(not(target_os = "android"))]
 const QUIC_NTT_N: u32 = 128;
 
 fn pid_file() -> PathBuf {
@@ -83,6 +89,7 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
+#[cfg(not(target_os = "android"))]
 pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
@@ -243,11 +250,74 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     info!("sp-daemon inner stopped");
 }
 
+/// §3-HX Sprint J.5 — android inner daemon.
+///
+/// The L1 C-ABI forward path is host-gated out, so this variant skips
+/// SpModel/SpSession/tokenizer/mining entirely and serves the DSP-loader +
+/// mesh surface. The cDSP echo session is opened best-effort (None → 501).
+/// The DSP-resident model + KV cache are loaded in the appstate commit; this
+/// host-gating commit only proves the android binary compiles and serves.
+#[cfg(target_os = "android")]
+pub async fn run_inner(_model_path: &str, _tok_path: &str, _draft_model_path: &str, _draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
+    #[cfg(unix)]
+    unsafe { libc::setsid() };
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "sp_daemon=info".into()),
+        )
+        .init();
+
+    info!("sp-daemon (android) inner starting");
+
+    // §3-HX Sprint C — best-effort cDSP echo session at startup.
+    // A failed open degrades to None — /v1/dsp/echo then returns 501.
+    const SKEL_URI: &str =
+        "file:///libsp_echo_skel.so?sp_echo_skel_handle_invoke&_modver=1.0&_dom=cdsp";
+    let dsp_session = match crate::dsp_rpc::FastRpcSession::new(SKEL_URI) {
+        Ok(s) => { info!("§3-HX Sprint C: cDSP echo session open"); Some(Mutex::new(s)) }
+        Err(e) => {
+            tracing::warn!("§3-HX Sprint C: FastRpcSession::new failed: {e:?} — /v1/dsp/echo will 501");
+            None
+        }
+    };
+
+    let (events_tx, _) =
+        tokio::sync::broadcast::channel::<crate::state::DaemonEvent>(64);
+    let peer_map = Arc::new(DashMap::new());
+
+    let _ = (quic_port, peer, peers); // QUIC mesh is host-only on android (see import note)
+
+    let state = Arc::new(crate::state::AppState {
+        started_at: Instant::now(),
+        events_tx,
+        peer_map,
+        dsp_session,
+    });
+
+    // ── HTTP server ──────────────────────────────────────────────────────────
+    let app = crate::server::build_router(Arc::clone(&state));
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], http_port).into();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
+    info!("listening on {addr}");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+
+    info!("sp-daemon (android) inner stopped");
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Spawn a background task that dials `addr_str` as a QUIC peer and keeps
 /// the connection alive via a 60s sleep loop.  On parse or dial failure:
 /// logs a warning and exits silently — does NOT crash the daemon.
+#[cfg(not(target_os = "android"))]
 fn spawn_peer_dial(addr_str: &str) {
     if addr_str.is_empty() { return; }
     let addr_str = addr_str.to_string();

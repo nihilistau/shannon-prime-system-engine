@@ -11,8 +11,11 @@ pub use sp_daemon::network::quic_shard::ConnectedPeer;
 use ed25519_dalek::SigningKey;
 use serde::Serialize;
 
+#[cfg(not(target_os = "android"))]
 use crate::session::{SpModel, SpSession};
+#[cfg(not(target_os = "android"))]
 use crate::sessions::Sessions;
+#[cfg(not(target_os = "android"))]
 use crate::tokenizer::SptbTokenizer;
 
 /// Events broadcast on the /v1/events SSE channel.
@@ -39,6 +42,7 @@ pub struct ReceiptRecord {
 ///
 /// Drop order (declaration order) keeps models alive past every session:
 /// sessions drop before models, so mmap-backed pointers in sp_session remain valid.
+#[cfg(not(target_os = "android"))]
 pub struct AppState {
     /// Target/verifier model. Kept alive so session mmap-backed pointers remain valid.
     #[allow(dead_code)]
@@ -75,12 +79,30 @@ pub struct AppState {
     /// Populated by run_garner_loop on accept; cleared on connection close.
     /// Empty until the coordinator is wired into daemon startup.
     pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
+}
+
+/// §3-HX Sprint J.5 — android daemon state.
+///
+/// The android binary host-gates the entire L1 C-ABI inference path (model,
+/// session, tokenizer, mining) out of the build, so this is a deliberately
+/// minimal `AppState` carrying only the pure-Rust mesh surface plus the cDSP
+/// FastRPC session + DSP-resident model. Field names overlap the host struct
+/// (`started_at`, `events_tx`, `peer_map`) so handlers that read only those
+/// fields compile against both variants without `cfg`.
+///
+/// `dsp_model` / `kv_cache` are wired in the appstate commit; in this
+/// host-gating commit they are absent and `/v1/dsp/model_info` returns 501.
+#[cfg(target_os = "android")]
+pub struct AppState {
+    /// Daemon start time (for uptime / metrics denominators).
+    pub started_at: Instant,
+    /// Broadcast channel for daemon-wide events (/v1/events subscribers).
+    pub events_tx: broadcast::Sender<DaemonEvent>,
+    /// Active QUIC peers indexed by remote SocketAddr.
+    pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel.
-    /// Populated only on `target_os = "android"`; `None` on host x86 builds
-    /// (the daemon's bindgen chain doesn't currently cross-compile to
-    /// aarch64-android, so this field is structural-ready and activates
-    /// when the build is unblocked).  Per-request Mutex serializes the
-    /// FFI invoke since FastRPC per-handle thread-safety is single-thread.
-    #[cfg(target_os = "android")]
+    /// `None` if the skel could not be admitted (alloc failure / missing skel);
+    /// `/v1/dsp/echo` then returns 501.  Per-request Mutex serializes the FFI
+    /// invoke since FastRPC per-handle thread-safety is single-thread.
     pub dsp_session: Option<Mutex<crate::dsp_rpc::FastRpcSession>>,
 }
