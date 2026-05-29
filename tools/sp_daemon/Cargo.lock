@@ -1877,6 +1877,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "libc",
+ "libloading",
  "quinn",
  "rand 0.8.6",
  "rcgen",
