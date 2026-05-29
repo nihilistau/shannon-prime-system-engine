@@ -608,7 +608,10 @@ int sp_compute_ffn_2stage_diag_halide(remote_handle64 h,
     (void)h;
     if (batch < 1 || (batch % 4) != 0)        return -1;
     if (d_in  < 128 || (d_in  % 128) != 0)    return -1;
-    if (h_dim < 128 || (h_dim % 128) != 0)    return -1;
+    /* Diag-only: accept arbitrary h_dim >= 1 so T_HALIDE_FFN_BISECT_DIM
+     * can probe Halide's behavior at non-multiples of 128.  The production
+     * sp_compute_ffn_2stage_halide handler keeps the strict constraint. */
+    if (h_dim < 1)                            return -1;
     if (d_out < 128 || (d_out % 128) != 0)    return -1;
     if (q_bits < 0 || q_bits > 30)            return -1;
     if (!x_buf || !w1_buf || !w2_buf || !y_buf || !hidden_buf) return -1;

@@ -784,6 +784,58 @@ fn main() {
         }
     }
 
+    // T_HALIDE_FFN_BISECT_DIM — fix q_bits=14 (known to pass at H=128) and
+    // sweep H ∈ {128, 160, 192, 224, 256}.  Discriminates:
+    //   - 160, 192, 224 are non-multiples of 128 (tail-loop predication test)
+    //   - 256 is a multiple but not 128 (multi-tile codegen test)
+    //
+    // Note: H is W1.dim(1).extent() and W2.dim(0).extent().  The skel handler
+    // currently requires h_dim % 128 == 0; non-multiples will be rejected
+    // with rc=-1 (and the bisection records that as data — see the row).
+    {
+        let (batch, d_in, d_out, b_term, q_bits) = (8usize, 128usize, 128usize, 0i32, 14i32);
+        let x:  Vec<i16> = (0..batch*d_in).map(|i| ((i as i32 * 37 + 11) & 0x7FFF) as i16 - 16384).collect();
+        eprintln!("\n[hvx] ═══ T_HALIDE_FFN_BISECT_DIM (fixed q=14 B=8 D_in=128 D_out=128 b=0) ═══");
+        eprintln!("[hvx]   H   | matmul-1 (hidden[0..2]) | matmul-2 (y[0])              | verdict");
+        eprintln!("[hvx] ------+-------------------------+------------------------------+---------");
+        for h_dim in [128usize, 160, 192, 224, 256] {
+            let w1: Vec<i16> = (0..h_dim*d_in).map(|i| ((i as i32 * 41 + 7) & 0x7F) as i16 - 64).collect();
+            let w2: Vec<i16> = (0..d_out*h_dim).map(|i| ((i as i32 * 53 + 3) & 0x7F) as i16 - 64).collect();
+            let (exp_y, exp_h) = ffn_2stage_ref_with_hidden(&x, &w1, &w2, batch, d_in, h_dim, d_out, b_term, q_bits);
+            match invoke_ffn_diag(&sess, &x, &w1, &w2,
+                                  batch as i32, d_in as i32, h_dim as i32, d_out as i32, b_term, q_bits) {
+                Ok((got_y, got_h, _vtcm, _pcyc)) => {
+                    let h_match = got_h[..2] == exp_h[..2];
+                    let y_match = got_y[0] == exp_y[0];
+                    let h_str = if h_match {
+                        format!("{:?} OK", &got_h[..2])
+                    } else {
+                        format!("got={:?} exp={:?}", &got_h[..2], &exp_h[..2])
+                    };
+                    let y_str = if y_match {
+                        format!("got={} exp={} OK", got_y[0], exp_y[0])
+                    } else {
+                        format!("got={} exp={} DIVERGE", got_y[0], exp_y[0])
+                    };
+                    let verdict = if h_match && y_match { "PASS" }
+                                  else if h_match && !y_match { "FAIL mm-2" }
+                                  else { "FAIL mm-1" };
+                    eprintln!("[hvx]   {:>3} | {:<23} | {:<28} | {}", h_dim, h_str, y_str, verdict);
+                }
+                Err(SpErr::Invoke(rc)) if rc == -1 => {
+                    // Skel handler rejects non-multiple-of-128 H — record as a
+                    // separate verdict so the data is honest about why no
+                    // observation is available for these rows.
+                    eprintln!("[hvx]   {:>3} | (skel handler rejected: h_dim % 128 != 0; constraint applies BEFORE codegen) | REJECTED", h_dim);
+                }
+                Err(e) => {
+                    eprintln!("[hvx]   {:>3} | (invoke failed: {:?})", h_dim, e);
+                    fails += 1;
+                }
+            }
+        }
+    }
+
     drop(sess);
     eprintln!("[hvx] session closed cleanly");
 
