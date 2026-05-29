@@ -52,10 +52,20 @@ path = "src/sp_dual_dispatch_smoke.rs"
 # Drives ~1024 (a, b) test vectors per prime through skel-side scalar
 # Barrett (sp_compute_barrett_oracle method 10, mode=0); per-element
 # bitwise vs Rust scalar reference.  Mirrors engine 63d7e2d:ptx_ntt.cuh
-# barrett_reduce32_ref math.
+# barrett_reduce32_ref math.  In Stage 2.5b, this bin is EXTENDED to also
+# exercise mode=1 (HVX vector) and cross-validate mode=0 == mode=1.
 [[bin]]
 name = "sp_barrett_oracle_smoke"
 path = "src/sp_barrett_oracle_smoke.rs"
+
+# §3-HX Sprint K v0.beta Stage 2.5b — dual-dispatch + leak-free gates.
+# Composes barrett_oracle(mode=1, q_idx={0,1}) with Arc<FastRpcSession>
+# concurrent invoke pattern (per reference-fastrpc-concurrent-dispatch).
+# Runs M_K_beta_DUAL_DISPATCH_SPEEDUP and M_K_beta_LEAK_FREE per Stage 0
+# substantive-gate plan.
+[[bin]]
+name = "sp_barrett_dual_smoke"
+path = "src/sp_barrett_dual_smoke.rs"
 
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
