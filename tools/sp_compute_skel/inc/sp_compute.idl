@@ -1,0 +1,37 @@
+// sp_compute.idl — §3-HX Sprint D HVX compute skel IDL.
+// Inherits remote_handle64 (multi-domain) per SDK S22U pattern — qaic emits
+// "sp_compute_skel_handle_invoke" symbol + canonical URI macro.
+
+#include "AEEStdDef.idl"
+#include "remote.idl"
+
+interface sp_compute : remote_handle64 {
+    // ────────────────────────────────────────────────────────────────────
+    // axpby — fixed-point AXPBY kernel (scalar Hexagon pipelined loop)
+    //
+    //   y[i] = saturate_i16((a * x[i] + b) >> q_bits)
+    //
+    // Auto-vec at -O3 produces a scalar Hexagon `loop0` (pipelined, not HVX
+    // V-registers) for this pattern — the 32-bit accumulation through a
+    // variable shift doesn't trigger HVX auto-vectorization.  Bitwise correct;
+    // a vectorized fixed-point AXPBY using explicit HVX intrinsics is filed as
+    // Sprint E follow-on.
+    long axpby(in long n,
+               in long a,
+               in long b,
+               in long q_bits,
+               in  sequence<octet> x_buf,
+               rout sequence<octet> y_buf);
+
+    // ────────────────────────────────────────────────────────────────────
+    // scale_i16 — Sprint D HVX-vectorized i16 scale, the canonical HVX proof
+    //
+    //   y[i] = saturate_i16(x[i] + a_h)   // a_h: i16 scalar
+    //
+    // Uses explicit HVX intrinsics (Q6_Vh_vadd_VhRh_sat) for predictable
+    // V-register SASS.  Bitwise verifiable against scalar reference.
+    long scale_i16(in long n,
+                   in long a_h,
+                   in  sequence<octet> x_buf,
+                   rout sequence<octet> y_buf);
+};

@@ -15,6 +15,12 @@ path = "src/main.rs"
 name = "dsp_axum_server"
 path = "src/axum_server.rs"
 
+# §3-HX Sprint D — HVX-vectorized i16 scale via sp_compute_skel.
+# Verifies bitwise correctness vs scalar reference; objdump confirms HVX SASS.
+[[bin]]
+name = "test_hvx"
+path = "src/test_hvx.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"

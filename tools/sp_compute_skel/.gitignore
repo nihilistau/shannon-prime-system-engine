@@ -1,0 +1,6 @@
+hexagon_Debug_toolv87_v69/
+hexagon_Release_toolv87_v69/
+android_Debug_aarch64/
+android_Release_aarch64/
+*.o
+*.obj
