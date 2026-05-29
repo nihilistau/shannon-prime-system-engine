@@ -40,6 +40,14 @@ path = "src/sp_model_layer_smoke.rs"
 name = "sp_full_load_smoke"
 path = "src/sp_full_load_smoke.rs"
 
+# §3-HX Sprint K v0.alpha — dispatch-parallelism premise smoke.
+# Arc<FastRpcSession> shared across 2 ARM threads each calling Sprint H
+# diag method 9 concurrently.  Measures ARM-side overlap fraction; decision
+# rule: ≥ 0.5 → K v0.beta authorized; < 0.5 → pivot to K.2 (NPU/Mode B/D).
+[[bin]]
+name = "sp_dual_dispatch_smoke"
+path = "src/sp_dual_dispatch_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
