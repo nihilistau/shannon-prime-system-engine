@@ -1,0 +1,80 @@
+§3-HX Sprint J (Path A1) — sp_full_load_smoke verbatim on-device output
+========================================================================
+
+Device:      Samsung S22 Ultra R5CT22445JA, V69 cDSP via Path B Unsigned PD
+Engine HEAD: 78fd394 ([lat-3-hx-mode-d-j] bin commit)
+Model:       /data/local/tmp/qwen3_rt.sp-model (754,551,808 B, sha256 30717fbd…f122376)
+Date:        2026-05-30
+
+Command:
+    adb shell 'ADSP_LIBRARY_PATH="/data/local/tmp;" /data/local/tmp/sp_full_load_smoke'
+
+Output:
+-------
+[J] opening FastRpcSession against sp_compute_skel (Path B)...
+[J] session open
+[J] T_BUDGET_FITS  (pre-recorded ceiling=2800 MB; live load below)
+
+[J] ═══ T_FULL_LOAD_SUCCESS (load all 28 layers + globals) ═══
+[J]   loaded 28 layers + embedding + output_norm + untied output_proj
+[J]   arch_struct: n_layers=28 hidden=1024 ffn=3072 n_heads=16 n_kv_heads=8 head_dim=128 vocab=151936
+[J]   total DMA bytes: 1503367168 (1433.7 MB)
+[J]   wall time: 985 ms (0.98 sec)
+[J] T_FULL_LOAD_SUCCESS PASS
+
+[J] ═══ T_KV_CACHE_ALLOC (ctx_max=4096, GQA n_kv_heads=8) ═══
+[J]   28 K-buffers + 28 V-buffers allocated
+[J]   per-layer bytes: 8388608 (8.0 MB each K+V same)
+[J]   total KV bytes: 469762048 (448.0 MB)
+[J]   alloc wall: 52 ms
+[J] T_KV_CACHE_ALLOC PASS
+
+[J] ═══ T_LAYER_N_MATMUL (layer 14, W_gate 128×128 tile) ═══
+[J]   layer 14 W_gate tile[0..4] = [36, -9, 13, -564]
+[J] T_LAYER_N_MATMUL PASS via VTCM (layer=14, pcyc=9305133)
+[J]   hidden[0..4] = [0, 0, 0, 651]
+
+[J] ═══ T_PARTIAL_LOAD_CLEANUP (negative-path; Drop chain unwind) ═══
+[J]   nonexistent-file path: clean Err  (Other("open /data/local/tmp/this_file_does_not_exist.sp-model: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }"))
+[J]   re-load + drop 1433.7 MB clean; session still usable
+[J] T_PARTIAL_LOAD_CLEANUP PASS
+
+[J] session closed cleanly
+[J] T_APPSTATE_INTEGRATION deferred to Sprint J.5 (sp_daemon cross-compile blocker)
+[J] ALL 5 SUBSTANTIVE GATES PASS
+
+
+Empirical facts from this run:
+------------------------------
+- arch_id = 2 (SP_ARCH_ID_QWEN3) ✓
+- Decoded arch_struct: n_layers=28, hidden_size=1024, intermediate_size=3072,
+  n_heads=16, n_kv_heads=8 (GQA), head_dim=128, vocab_size=151,936
+- output.weight EXISTS as a separate tensor — embedding is **UNTIED**
+  (contradicts the +40-offset "tied" flag I read in the Sprint J plan §0.B;
+  the flag at that offset doesn't mean tied_embedding).  Empirical: untied.
+  Adds ~150 MB vs the tied-case estimate.
+- Total DMA footprint: 1,433.7 MB (50% over the plan's 825-975 MB estimate).
+  Drivers:
+    1. Q8→i16 dequant doubles each weight (1 B → 2 B)
+    2. Untied output_proj adds ~150 MB vs the tied estimate
+    3. Embedding 151936 × 1024 × 2 B = 296.9 MB (Q8 = 148.4 MB, dequant ×2)
+  Result still well under the 2800 MB ceiling (~52% utilization).
+- Load wall: 985 ms for 1.4 GB.  ~1.46 GB/s effective throughput.
+  Far below the 30-sec budget — Sprint J.2 (per-layer-packed
+  DmaBuffer optimization) is NOT warranted at this latency.
+- KV cache: 448 MB, allocated in 52 ms (~8.6 GB/s alloc throughput).
+- Layer 14 W_gate tile[0..4] = [36, -9, 13, -564] — confirms we read from
+  the right offset (different from layer 0's [-146, 0, -395, -453]).
+- Layer 14 hidden[0..4] = [0, 0, 0, 651] — bitwise PASS against the
+  saturating-arithmetic scalar reference; matmul kernel works on
+  real-layer weights at q=14.
+- Partial cleanup test: nonexistent-file path errors with SpErr::Other
+  carrying the std::io::Error context — clean diagnostic, no zombies.
+  Re-load + drop + reuse cycle works: 1.4 GB allocated/freed, session
+  still usable for subsequent operations.
+
+T_APPSTATE_INTEGRATION explicitly deferred to Sprint J.5 (sp_daemon
+cross-compile blocker; see lattice closure for the explicit deferral
+rationale).  Sprint K (manifesto Trick #1, internal CRT split) does NOT
+gate on J.5 — it gates on this run's DspModel + KvCache + cDSP-resident
+DmaBuffers, which are all proven working.
