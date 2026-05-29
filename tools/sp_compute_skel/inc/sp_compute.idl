@@ -65,4 +65,40 @@ interface sp_compute : remote_handle64 {
                            in  sequence<octet> a_h_buf,
                            in  sequence<octet> x_buf,
                            rout sequence<octet> y_buf);
+
+    // ────────────────────────────────────────────────────────────────────
+    // vtcm_probe — §3-HX Sprint F litmus test, BEFORE Halide AOT lands
+    //
+    // Attempts HAP_request_VTCM(size_bytes, single_page_flag) and reports:
+    //   - admitted: returns 1, vtcm_addr = low-32 of returned pointer (non-zero)
+    //   - denied:   returns 0, vtcm_addr = 0
+    // Either is PASS; the result tells us whether VTCM is available under
+    // DSPRPC_CONTROL_UNSIGNED_MODULE (Path B) admission on this device.
+    // FARF logs "vtcm_probe size=%d single=%d result=%p" to adsprpc logcat.
+    long vtcm_probe(in long size_bytes,
+                    in long single_page_flag,
+                    rout long vtcm_addr_lo);
+
+    // ────────────────────────────────────────────────────────────────────
+    // axpby_2d_halide — §3-HX Sprint F; Halide-AOT 2D axpby with VTCM hot-copy
+    //
+    //   y[r,c] = sat_i16((a[c] * x[r,c] + b) >> q_bits)
+    //
+    // Buffers laid out row-major: shape [rows, cols], stride [cols, 1].
+    // Skel calls HAP_request_VTCM(rows*cols*4, 0) for x+y; on admission,
+    // memcpy DDR→VTCM, run Halide-generated kernel via halide_buffer_t,
+    // memcpy VTCM→DDR, HAP_release_VTCM.  On denial, kernel runs against
+    // DDR pointers directly (zero-copy fallback).  vtcm_used reports the
+    // branch taken (1=VTCM, 0=DDR fallback).
+    //
+    // Constraints (returns -1 if violated):
+    //   rows ≥ 1, cols ≥ 1, cols multiple of 64 (HVX vector lane count)
+    //   |a[c]| ≤ 32767; 0 ≤ q_bits ≤ 30
+    //   buffer sizes match rows*cols*2 (x, y) and cols*2 (a)
+    long axpby_2d_halide(in long rows, in long cols,
+                         in long b, in long q_bits,
+                         in  sequence<octet> a_buf,
+                         in  sequence<octet> x_buf,
+                         rout sequence<octet> y_buf,
+                         rout long vtcm_used);
 };

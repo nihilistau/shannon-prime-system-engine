@@ -1,0 +1,2 @@
+# Assembly listing is a build artifact; .o + .h are needed for the skel build.
+*.s

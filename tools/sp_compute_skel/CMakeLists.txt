@@ -30,4 +30,17 @@ else()
     add_library(sp_compute_skel SHARED ${srcs})
     include_directories(${common_incs})
     build_idl("inc/sp_compute.idl" sp_compute_skel incs)
+
+    # §3-HX Sprint F: link the Halide AOT-emitted kernel.  The .o is built by
+    # tools/sp_halide_gen/build.cmd (host MSVC + Halide.lib → Hexagon ELF .o)
+    # and lives under halide_gen/.  The generated header lives next to it and is
+    # included by sp_compute_imp.c via include_directories below.
+    set(HALIDE_GEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/halide_gen)
+    if(EXISTS ${HALIDE_GEN_DIR}/sp_axpby_2d_halide.o)
+        include_directories(${HALIDE_GEN_DIR})
+        target_link_libraries(sp_compute_skel PRIVATE ${HALIDE_GEN_DIR}/sp_axpby_2d_halide.o)
+        target_compile_definitions(sp_compute_skel PRIVATE SP_HAVE_HALIDE=1)
+    else()
+        message(WARNING "sp_compute_skel: halide_gen/sp_axpby_2d_halide.o missing — Sprint F Halide kernel disabled (run tools/sp_halide_gen/build.cmd first)")
+    endif()
 endif()

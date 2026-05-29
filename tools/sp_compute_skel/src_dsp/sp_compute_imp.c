@@ -252,3 +252,179 @@ int sp_compute_scale_i16_batched(remote_handle64 h,
          n_per_batch, n_batches);
     return 0;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * sp_compute_vtcm_probe — §3-HX Sprint F VTCM litmus test (PRE-Halide).
+ *
+ * Attempts HAP_request_VTCM at the requested size + single-page flag and
+ * reports the result through a rout parameter + FARF log.  Either outcome
+ * is informational — does Unsigned PD (Path B) on this device admit VTCM?
+ *
+ *   admitted: vtcm_addr_lo = low-32 bits of pointer (non-zero); we release
+ *             before return so this probe never leaks VTCM.
+ *   denied:   vtcm_addr_lo = 0.
+ *
+ * V69 VTCM caps at ~4 MB; caller picks size_bytes.
+ * single_page_flag=0 = multi-page OK, =1 = single-page (required for HVX
+ * scatter/gather).
+ * ───────────────────────────────────────────────────────────────────────── */
+#include "HAP_vtcm_mgr.h"
+
+int sp_compute_vtcm_probe(remote_handle64 h,
+                          int size_bytes, int single_page_flag,
+                          int *vtcm_addr_lo)
+{
+    (void)h;
+    if (size_bytes < 0 || vtcm_addr_lo == 0) return -1;
+
+    void *p = HAP_request_VTCM((unsigned)size_bytes,
+                               (unsigned)(single_page_flag ? 1 : 0));
+    *vtcm_addr_lo = (int)(uintptr_t)p;
+
+    FARF(RUNTIME_HIGH,
+         "sp_compute_vtcm_probe size=%d single=%d result=%p admitted=%d",
+         size_bytes, single_page_flag, p, p != 0);
+
+    if (p) {
+        int rel = HAP_release_VTCM(p);
+        FARF(RUNTIME_HIGH, "sp_compute_vtcm_probe release rc=%d", rel);
+    }
+    return 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * sp_compute_axpby_2d_halide — §3-HX Sprint F; Halide AOT + VTCM hot-copy.
+ *
+ * The Halide-generated kernel `sp_axpby_2d_halide` (see halide_gen/sp_axpby_2d_halide.h)
+ * is called with halide_buffer_t descriptors for x[rows,cols], a[cols], y[rows,cols].
+ *
+ * VTCM litmus branching:
+ *   admitted → memcpy x_buf → VTCM_x; run kernel against VTCM pointers;
+ *              memcpy VTCM_y → y_buf; release VTCM.  vtcm_used=1.
+ *   denied   → run kernel against the incoming DDR pointers (the FastRPC
+ *              SMMU mapping makes them DSP-addressable, Sprint B's zero-copy).
+ *              vtcm_used=0.
+ * ───────────────────────────────────────────────────────────────────────── */
+#if SP_HAVE_HALIDE
+#include "sp_axpby_2d_halide.h"
+#include "HalideRuntime.h"
+
+/* Halide runtime hooks the AOT-emitted kernel expects from the host.
+ * The standalone-simulator stubs.c (Examples/standalone/simulator/utils/stubs.c)
+ * provides these against the simulator's printf; for in-skel use we route to
+ * FARF so the messages land in adsprpc logcat. */
+extern void halide_print(void *user_context, const char *str);
+extern void halide_error(void *user_context, const char *msg);
+
+void halide_print(void *user_context, const char *str) {
+    (void)user_context;
+    FARF(RUNTIME_HIGH, "halide_print: %s", str);
+}
+void halide_error(void *user_context, const char *msg) {
+    (void)user_context;
+    FARF(RUNTIME_ERROR, "halide_error: %s", msg);
+}
+
+/* Override Halide's weak halide_qurt_hvx_lock/unlock/unlock_as_destructor.
+ *
+ * Reason: the FastRPC remote thread that dispatches into our skel already
+ * holds an HVX context (Sprint D's scale_i16 runs HVX without needing to
+ * call qurt_hvx_lock).  Halide's wrapper calls qurt_hvx_lock(QURT_HVX_MODE_128B)
+ * which on the V69 cdsp under Path B FastRPC thread crashes with a stack
+ * trace at sp_axpby_2d_halide+0x2C (the call site itself), because the
+ * QuRT context-switch path expects a calling thread that isn't already
+ * inside an HVX-protected region.  Defining strong symbols here replaces
+ * the weak ones in the Halide .o and makes the lock/unlock no-ops. */
+int halide_qurt_hvx_lock(int mode) {
+    (void)mode;
+    return 0;
+}
+int halide_qurt_hvx_unlock(void) {
+    return 0;
+}
+void halide_qurt_hvx_unlock_as_destructor(void *user_context, void *p) {
+    (void)user_context; (void)p;
+}
+
+static void hbuf2_i16_init(halide_buffer_t *hb, halide_dimension_t *dims,
+                           int16_t *host, int cols, int rows)
+{
+    hb->device = 0;
+    hb->device_interface = 0;
+    hb->host = (uint8_t *)host;
+    hb->flags = 0;
+    hb->type.code = halide_type_int;
+    hb->type.bits = 16;
+    hb->type.lanes = 1;
+    hb->dimensions = 2;
+    hb->dim = dims;
+    hb->padding = 0;
+    dims[0].min = 0; dims[0].extent = cols; dims[0].stride = 1;     dims[0].flags = 0;
+    dims[1].min = 0; dims[1].extent = rows; dims[1].stride = cols;  dims[1].flags = 0;
+}
+
+static void hbuf1_i16_init(halide_buffer_t *hb, halide_dimension_t *dim,
+                           int16_t *host, int cols)
+{
+    hb->device = 0;
+    hb->device_interface = 0;
+    hb->host = (uint8_t *)host;
+    hb->flags = 0;
+    hb->type.code = halide_type_int;
+    hb->type.bits = 16;
+    hb->type.lanes = 1;
+    hb->dimensions = 1;
+    hb->dim = dim;
+    hb->padding = 0;
+    dim->min = 0; dim->extent = cols; dim->stride = 1; dim->flags = 0;
+}
+
+int sp_compute_axpby_2d_halide(remote_handle64 h,
+                               int rows, int cols, int b, int q_bits,
+                               const unsigned char *a_buf, int a_bufLen,
+                               const unsigned char *x_buf, int x_bufLen,
+                               unsigned char       *y_buf, int y_bufLen,
+                               int *vtcm_used)
+{
+    (void)h;
+    /* cols must be ≥ Halide tile width (128) for the generator's schedule */
+    if (rows < 1 || cols < 128 || (cols % 128) != 0)         return -1;
+    if (q_bits < 0 || q_bits > 30)                            return -1;
+    if (a_buf == 0 || x_buf == 0 || y_buf == 0 || vtcm_used == 0) return -1;
+    size_t n_xy = (size_t)rows * cols * 2;
+    if ((size_t)a_bufLen < (size_t)cols * 2) return -1;
+    if ((size_t)x_bufLen < n_xy || (size_t)y_bufLen < n_xy) return -1;
+
+    /* Sprint F finding (documented in SESSION-CLOSED-lat-3-hx-mode-f):
+     * VTCM litmus on Path B Unsigned PD is PASS — HAP_request_VTCM admits
+     * up to 4 MB (see sp_compute_vtcm_probe).  BUT the C-side "hot-copy
+     * inputs to VTCM, run Halide against VTCM host pointers, copy out"
+     * pattern crashes the Halide-emitted kernel: the AOT code uses `vmemu`
+     * loads expecting DDR semantics, and re-pointing halide_buffer_t.host
+     * at the 0xff000000 VTCM region traps inside the inner HVX loop.
+     *
+     * Canonical Halide+VTCM pattern is `.store_in(MemoryType::VTCM)` on an
+     * intermediate Func in the generator schedule — the runtime allocates
+     * VTCM internally and the input/output buffers stay on DDR.  That's a
+     * Sprint G follow-on (current axpby kernel has no intermediates to
+     * stage; would need an FFN-shaped pipeline first).
+     *
+     * For Sprint F: always use DDR for Halide; vtcm_used reports 0. */
+    int16_t *x_dev = (int16_t *)x_buf;
+    int16_t *y_dev = (int16_t *)y_buf;
+    const int16_t *a_arr = (const int16_t *)a_buf;
+    *vtcm_used = 0;
+
+    halide_buffer_t hx, ha, hy;
+    halide_dimension_t hx_dims[2], hy_dims[2], ha_dim;
+    hbuf2_i16_init(&hx, hx_dims, x_dev, cols, rows);
+    hbuf2_i16_init(&hy, hy_dims, y_dev, cols, rows);
+    hbuf1_i16_init(&ha, &ha_dim, (int16_t *)a_arr, cols);
+
+    int rc = sp_axpby_2d_halide(&hx, &ha, b, (uint8_t)q_bits, &hy);
+    FARF(RUNTIME_HIGH,
+         "axpby_2d_halide: rc=%d rows=%d cols=%d (DDR-only — see closure note)",
+         rc, rows, cols);
+    return rc;
+}
+#endif  /* SP_HAVE_HALIDE */
