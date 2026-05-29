@@ -1,0 +1,12 @@
+[package]
+name = "sp-dsp-smoke"
+version = "0.1.0"
+edition = "2021"
+description = "§3-HX Sprint A smoke test for the FastRpcSession bridge. Cross-compiles for aarch64-linux-android and runs against the echo skel on the device."
+
+[[bin]]
+name = "test_dsp_rpc"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+libloading = "0.8"

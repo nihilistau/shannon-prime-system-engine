@@ -43,5 +43,10 @@ dashmap = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# §3-HX Sprint A: dynamic FastRPC bridge (libcdsprpc.so on the device).
+# Android-only — host x86 builds skip the dsp_rpc module via cfg.
+[target.'cfg(target_os = "android")'.dependencies]
+libloading = "0.8"
+
 [build-dependencies]
 bindgen = "0.70"

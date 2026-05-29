@@ -42,6 +42,17 @@ fn main() {
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_model.h").display());
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_status.h").display());
 
+    // Skip bindgen + link on Android cross-compile.
+    // The Android target is the §3-HX Sprint A FastRPC bridge (dsp_rpc.rs),
+    // which does NOT depend on the L1 ABI bindings. Lib-side files (network,
+    // ntt_ffi, dsp_rpc) verified to not include!(sp_bindings.rs).
+    // Engine-on-Android (full forward path) is Phase 2-L3.FG scope.
+    let target_os_early = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os_early == "android" {
+        println!("cargo:rustc-cfg=sp_no_link");
+        return;
+    }
+
     // ── bindgen ────────────────────────────────────────────────────────────
     // Bindgen the frozen L1 header. sp_l1.h includes sp_model.h + sp_status.h
     // transitively; bindgen sees all three through -I.
