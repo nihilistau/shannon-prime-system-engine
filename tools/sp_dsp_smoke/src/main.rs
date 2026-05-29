@@ -33,11 +33,13 @@ fn main() {
     use dsp_rpc::{make_scalars, FastRpcSession, RemoteArg, RemoteBuf, SpErr};
     use std::ffi::c_void;
 
-    // URI for the echo skel. qaic generates `<iface>_URI` macro from the .idl;
-    // we hardcode the equivalent string here so this smoke binary doesn't link
-    // the qaic-generated stub (which would require sp-daemon's build chain).
-    // The "?_dom=cdsp" suffix selects the cDSP domain (remote.h:142).
-    let skel_uri = "file:///libshannonprime_echo_skel.so?_dom=cdsp";
+    // URI for the echo skel. qaic emits `<iface>_URI` in the generated header
+    // as `"file:///lib<name>_skel.so?<iface>_skel_invoke&_modver=1.0"` (see
+    // prior cohort `sp_hex.h:274`). We hardcode the equivalent so this smoke
+    // binary doesn't link the qaic-generated stub (which would require
+    // sp-daemon's full build chain). `&_dom=cdsp` selects the cDSP domain
+    // (remote.h:142).
+    let skel_uri = "file:///libshannonprime_echo_skel.so?echo_skel_invoke&_modver=1.0&_dom=cdsp";
 
     eprintln!("[sp-dsp-smoke] opening FastRpcSession (Unsigned PD admission, Path B)...");
     let session = match FastRpcSession::new(skel_uri) {

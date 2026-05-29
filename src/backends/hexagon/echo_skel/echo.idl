@@ -1,0 +1,26 @@
+/* §3-HX Sprint A echo skel IDL.
+ *
+ * Minimum-viable handshake: caller passes an input byte buffer, DSP echoes
+ * those bytes verbatim into a caller-provided output buffer. No HVX, no VTCM,
+ * no Halide — just enough to verify FastRpc + Unsigned PD admission.
+ *
+ * Compile (Knack's host, Hexagon_SDK 5.5.6.0):
+ *   set HEXAGON_SDK_ROOT=C:\Qualcomm\Hexagon_SDK\5.5.6.0
+ *   set PATH=%PROGRAMFILES%\Git\bin;%PROGRAMFILES%\Git\usr\bin;%PATH%
+ *   "%HEXAGON_SDK_ROOT%\ipc\fastrpc\qaic\bin\qaic.exe" -mdll ^
+ *       -I "%HEXAGON_SDK_ROOT%\incs\stddef" echo.idl
+ * Produces: echo.h, echo_stub.c, echo_skel.c
+ *
+ * Method index 0 = ping (the only method).
+ */
+#include "AEEStdDef.idl"
+
+interface echo {
+    /* Echo `in_buf` bytes into `out_buf`. Copies min(in_len, out_len) bytes.
+     * `out_lenWritten` returns the number of bytes copied.
+     * `in`   = ARM → DSP (read-only on DSP)
+     * `rout` = DSP → ARM (write-only on DSP; FastRPC skips the copy-in
+     *           initial state — saves marshal bandwidth)
+     */
+    long ping(in sequence<octet> in_buf, rout sequence<octet> out_buf);
+};
