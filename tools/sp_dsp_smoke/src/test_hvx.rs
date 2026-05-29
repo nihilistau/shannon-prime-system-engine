@@ -614,6 +614,134 @@ fn main() {
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // §3-HX Sprint H diagnostic — instrumented FFN with hidden teed out
+    // ═════════════════════════════════════════════════════════════════════
+    //
+    // Method 9 = sp_compute_ffn_2stage_diag_halide; layout per qaic stub:
+    //   primIn[11]  = [batch, d_in, h_dim, d_out, b_term, q_bits,
+    //                  x_bufLen, w1_bufLen, w2_bufLen, y_bufLen, hidden_bufLen]  (44 B)
+    //   primROut[3] = [vtcm_used, kernel_pcycles_lo, kernel_pcycles_hi]          (12 B)
+    //   pra[0..3]   = primIn, x, w1, w2  (in)
+    //   pra[4..6]   = primROut, y, hidden  (out)
+    //   scalars     = MAKEX(0, 9, 4, 3, 0, 0)
+    eprintln!("\n[hvx] ═══ Sprint H diagnostic: FFN with hidden teed out ═══");
+
+    fn invoke_ffn_diag(sess: &FastRpcSession,
+                       x: &[i16], w1: &[i16], w2: &[i16],
+                       batch: i32, d_in: i32, h_dim: i32, d_out: i32,
+                       b_term: i32, q_bits: i32)
+        -> Result<(Vec<i16> /*y*/, Vec<i16> /*hidden*/, i32 /*vtcm*/, u64 /*pcyc*/), SpErr>
+    {
+        let n_x  = (batch * d_in)  as usize * 2;
+        let n_w1 = (h_dim * d_in)  as usize * 2;
+        let n_w2 = (d_out * h_dim) as usize * 2;
+        let n_y  = (batch * d_out) as usize * 2;
+        let n_h  = (batch * h_dim) as usize * 2;
+        let mut prim_in: [u32; 11] = [
+            batch as u32, d_in as u32, h_dim as u32, d_out as u32,
+            b_term as u32, q_bits as u32,
+            n_x as u32, n_w1 as u32, n_w2 as u32, n_y as u32, n_h as u32,
+        ];
+        let mut prim_out: [u32; 3] = [0, 0, 0];
+        let mut x_bytes  = Vec::with_capacity(n_x);  for v in x  { x_bytes.extend_from_slice(&v.to_le_bytes());  }
+        let mut w1_bytes = Vec::with_capacity(n_w1); for v in w1 { w1_bytes.extend_from_slice(&v.to_le_bytes()); }
+        let mut w2_bytes = Vec::with_capacity(n_w2); for v in w2 { w2_bytes.extend_from_slice(&v.to_le_bytes()); }
+        let mut y_bytes  = vec![0u8; n_y];
+        let mut h_bytes  = vec![0u8; n_h];
+        let mut args = [
+            RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr()  as *mut c_void, nlen: 44 }},
+            RemoteArg { buf: RemoteBuf { pv: x_bytes.as_mut_ptr()  as *mut c_void, nlen: n_x }},
+            RemoteArg { buf: RemoteBuf { pv: w1_bytes.as_mut_ptr() as *mut c_void, nlen: n_w1 }},
+            RemoteArg { buf: RemoteBuf { pv: w2_bytes.as_mut_ptr() as *mut c_void, nlen: n_w2 }},
+            RemoteArg { buf: RemoteBuf { pv: prim_out.as_mut_ptr() as *mut c_void, nlen: 12 }},
+            RemoteArg { buf: RemoteBuf { pv: y_bytes.as_mut_ptr()  as *mut c_void, nlen: n_y }},
+            RemoteArg { buf: RemoteBuf { pv: h_bytes.as_mut_ptr()  as *mut c_void, nlen: n_h }},
+        ];
+        sess.invoke(make_scalars(9, 4, 3), &mut args)?;
+        let y: Vec<i16> = y_bytes.chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let hi: Vec<i16> = h_bytes.chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let pcyc = ((prim_out[2] as u64) << 32) | (prim_out[1] as u64);
+        Ok((y, hi, prim_out[0] as i32, pcyc))
+    }
+
+    /// Scalar reference that also returns the hidden intermediate, so the
+    /// harness can compare Halide-hidden vs reference-hidden directly.
+    /// Matches Sprint G's saturating-arithmetic reference (matches Halide's
+    /// vmpy.h:sat); only added the hidden output.
+    fn ffn_2stage_ref_with_hidden(x: &[i16], w1: &[i16], w2: &[i16],
+                                  batch: usize, d_in: usize, h_dim: usize, d_out: usize,
+                                  b_term: i32, q_bits: i32) -> (Vec<i16> /*y*/, Vec<i16> /*hidden*/) {
+        let mut y = vec![0i16; batch * d_out];
+        let mut hidden = vec![0i16; batch * h_dim];
+        for b in 0..batch {
+            for h in 0..h_dim {
+                let mut acc: i32 = 0;
+                for d in 0..d_in {
+                    let prod = (x[b * d_in + d] as i32) * (w1[h * d_in + d] as i32);
+                    acc = acc.saturating_add(prod);
+                }
+                let s = (acc.saturating_add(b_term) >> q_bits).clamp(0, 32767);
+                hidden[b * h_dim + h] = s as i16;
+            }
+        }
+        for b in 0..batch {
+            for c in 0..d_out {
+                let mut acc: i32 = 0;
+                for h in 0..h_dim {
+                    let prod = (hidden[b * h_dim + h] as i32) * (w2[c * h_dim + h] as i32);
+                    acc = acc.saturating_add(prod);
+                }
+                let s = (acc.saturating_add(b_term) >> q_bits).clamp(-32768, 32767);
+                y[b * d_out + c] = s as i16;
+            }
+        }
+        (y, hidden)
+    }
+
+    // T_HALIDE_FFN_DIAG_INSTRUMENT — run the diag kernel on the simplest
+    // Sprint G failing config (B=8 D_in=128 H=256 D_out=128 q=16 b=16) and
+    // identify whether matmul-1 or matmul-2 is the divergence site.
+    {
+        let (batch, d_in, h_dim, d_out, b_term, q_bits) = (8usize, 128usize, 256usize, 128usize, 16i32, 16i32);
+        let x:  Vec<i16> = (0..batch*d_in).map(|i| ((i as i32 * 37 + 11) & 0x7FFF) as i16 - 16384).collect();
+        let w1: Vec<i16> = (0..h_dim*d_in).map(|i| ((i as i32 * 41 + 7)  & 0x7F)   as i16 - 64).collect();
+        let w2: Vec<i16> = (0..d_out*h_dim).map(|i| ((i as i32 * 53 + 3) & 0x7F)   as i16 - 64).collect();
+        let (exp_y, exp_h) = ffn_2stage_ref_with_hidden(&x, &w1, &w2, batch, d_in, h_dim, d_out, b_term, q_bits);
+        match invoke_ffn_diag(&sess, &x, &w1, &w2,
+                              batch as i32, d_in as i32, h_dim as i32, d_out as i32, b_term, q_bits) {
+            Ok((got_y, got_h, vtcm_used, pcyc)) => {
+                let h_idx = got_h.iter().zip(exp_h.iter()).position(|(a, c)| a != c);
+                let y_idx = got_y.iter().zip(exp_y.iter()).position(|(a, c)| a != c);
+                eprintln!("[hvx] T_HALIDE_FFN_DIAG_INSTRUMENT (B={batch} D_in={d_in} H={h_dim} D_out={d_out} b={b_term} q={q_bits}, vtcm={vtcm_used}, pcyc={pcyc}):");
+                match (h_idx, y_idx) {
+                    (None, None) => {
+                        eprintln!("[hvx]   hidden MATCHES, y MATCHES — config does not reproduce divergence");
+                        eprintln!("[hvx]   hidden[0..8] = {:?}", &got_h[..8.min(got_h.len())]);
+                        eprintln!("[hvx]   y[0..8]      = {:?}", &got_y[..8.min(got_y.len())]);
+                    }
+                    (None, Some(i)) => {
+                        eprintln!("[hvx]   hidden MATCHES, y diverges at [{i}]: got={} exp={}", got_y[i], exp_y[i]);
+                        eprintln!("[hvx]   → matmul-2 is the divergence site (stage 1 OK, stage 2 wrong)");
+                        eprintln!("[hvx]   hidden[0..8] = {:?}  (identical between Halide and ref)", &got_h[..8.min(got_h.len())]);
+                    }
+                    (Some(i), _) => {
+                        eprintln!("[hvx]   hidden diverges at [{i}]: got={} exp={}", got_h[i], exp_h[i]);
+                        eprintln!("[hvx]   → matmul-1 is the divergence site (stage 1 wrong, stage 2 propagates)");
+                        eprintln!("[hvx]   got_h[{i}..{}] = {:?}", (i+8).min(got_h.len()), &got_h[i..(i+8).min(got_h.len())]);
+                        eprintln!("[hvx]   exp_h[{i}..{}] = {:?}", (i+8).min(exp_h.len()), &exp_h[i..(i+8).min(exp_h.len())]);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[hvx] T_HALIDE_FFN_DIAG_INSTRUMENT FAIL invoke: {e:?}");
+                fails += 1;
+            }
+        }
+    }
+
     drop(sess);
     eprintln!("[hvx] session closed cleanly");
 

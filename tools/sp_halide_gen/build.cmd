@@ -64,6 +64,24 @@ echo [sp_halide_gen] === Stage 2b: AOT-emit FFN Hexagon .o + .h ===
     target=hexagon-32-noos-no_bounds_query-no_asserts-hvx_128
 if errorlevel 1 goto :aot_failed
 
+echo [sp_halide_gen] === Stage 1c: build FFN diag generator (Sprint H) ===
+cl.exe /EHsc /nologo /std:c++17 ^
+    /I "%HALIDE_ROOT%\include" ^
+    "%SCRIPT_DIR%\sp_ffn_2stage_diag_gen.cpp" ^
+    "%HALIDE_ROOT%\tools\GenGen.cpp" ^
+    /link /libpath:"%HALIDE_ROOT%\lib" Halide.lib ^
+    /OUT:"%BUILD_DIR%\sp_ffn_2stage_diag_gen.exe"
+if errorlevel 1 goto :cl_failed
+
+echo [sp_halide_gen] === Stage 2c: AOT-emit FFN diag Hexagon .o + .h ===
+"%BUILD_DIR%\sp_ffn_2stage_diag_gen.exe" ^
+    -g sp_ffn_2stage_diag ^
+    -f sp_ffn_2stage_diag_halide ^
+    -e o,h,assembly ^
+    -o "%OUT_DIR%" ^
+    target=hexagon-32-noos-no_bounds_query-no_asserts-hvx_128
+if errorlevel 1 goto :aot_failed
+
 echo [sp_halide_gen] === Stage 3: stage HalideRuntime.h + HalideRuntimeHexagonHost.h ===
 copy /Y "%HALIDE_ROOT%\include\HalideRuntime.h" "%OUT_DIR%\HalideRuntime.h" >nul
 if errorlevel 1 goto :stage_failed

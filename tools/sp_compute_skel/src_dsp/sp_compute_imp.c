@@ -582,4 +582,118 @@ int sp_compute_ffn_2stage_halide(remote_handle64 h,
     #undef ALIGN128
     return rc;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * sp_compute_ffn_2stage_diag_halide — §3-HX Sprint H diagnostic.
+ *
+ * Same dual-VTCM staging as ffn_2stage_halide, plus an extra VTCM region
+ * for the hidden_out Output buffer.  Lets the Rust harness read Halide's
+ * mid-pipeline `hidden` values directly so it can compare against the
+ * scalar reference's hidden — isolating which matmul (1 or 2) is the
+ * divergence site for the G.1 constraints.
+ * ───────────────────────────────────────────────────────────────────────── */
+#include "sp_ffn_2stage_diag_halide.h"
+
+int sp_compute_ffn_2stage_diag_halide(remote_handle64 h,
+        int batch, int d_in, int h_dim, int d_out,
+        int b_term, int q_bits,
+        const unsigned char *x_buf,    int x_bufLen,
+        const unsigned char *w1_buf,   int w1_bufLen,
+        const unsigned char *w2_buf,   int w2_bufLen,
+        unsigned char       *y_buf,    int y_bufLen,
+        unsigned char       *hidden_buf, int hidden_bufLen,
+        int *vtcm_used,
+        int *kernel_pcycles_lo, int *kernel_pcycles_hi)
+{
+    (void)h;
+    if (batch < 1 || (batch % 4) != 0)        return -1;
+    if (d_in  < 128 || (d_in  % 128) != 0)    return -1;
+    if (h_dim < 128 || (h_dim % 128) != 0)    return -1;
+    if (d_out < 128 || (d_out % 128) != 0)    return -1;
+    if (q_bits < 0 || q_bits > 30)            return -1;
+    if (!x_buf || !w1_buf || !w2_buf || !y_buf || !hidden_buf) return -1;
+    if (!vtcm_used || !kernel_pcycles_lo || !kernel_pcycles_hi) return -1;
+
+    size_t n_x  = (size_t)batch * d_in  * 2;
+    size_t n_w1 = (size_t)h_dim * d_in  * 2;
+    size_t n_w2 = (size_t)d_out * h_dim * 2;
+    size_t n_y  = (size_t)batch * d_out * 2;
+    size_t n_h  = (size_t)batch * h_dim * 2;
+    if ((size_t)x_bufLen      < n_x  ||
+        (size_t)w1_bufLen     < n_w1 ||
+        (size_t)w2_bufLen     < n_w2 ||
+        (size_t)y_bufLen      < n_y  ||
+        (size_t)hidden_bufLen < n_h) return -1;
+
+    #define ALIGN128(x)  (((size_t)(x) + 127) & ~(size_t)127)
+    size_t r_x  = ALIGN128(n_x);
+    size_t r_w1 = ALIGN128(n_w1);
+    size_t r_w2 = ALIGN128(n_w2);
+    size_t r_y  = ALIGN128(n_y);
+    size_t r_h  = ALIGN128(n_h);
+    size_t need = r_x + r_w1 + r_w2 + r_y + r_h;
+
+    /* Plus Halide's internal hidden allocation (separate from the teed
+     * hidden_out we expose here). */
+    size_t internal_hidden = ALIGN128(n_h);
+    if (need + internal_hidden > (4u * 1024u * 1024u)) {
+        FARF(RUNTIME_ERROR,
+             "ffn_diag: total VTCM budget %zu exceeds V69 cap",
+             need + internal_hidden);
+        return -1;
+    }
+
+    int16_t *x_dev, *w1_dev, *w2_dev, *y_dev, *h_dev;
+    void *vtcm = HAP_request_VTCM((unsigned)need, 0);
+    if (vtcm) {
+        unsigned char *p = (unsigned char *)vtcm;
+        x_dev  = (int16_t *)(p);
+        w1_dev = (int16_t *)(p + r_x);
+        w2_dev = (int16_t *)(p + r_x + r_w1);
+        y_dev  = (int16_t *)(p + r_x + r_w1 + r_w2);
+        h_dev  = (int16_t *)(p + r_x + r_w1 + r_w2 + r_y);
+        if (((uintptr_t)x_dev | (uintptr_t)w1_dev | (uintptr_t)w2_dev |
+             (uintptr_t)y_dev | (uintptr_t)h_dev) & 127) {
+            HAP_release_VTCM(vtcm);
+            return -1;
+        }
+        memcpy(x_dev,  x_buf,  n_x);
+        memcpy(w1_dev, w1_buf, n_w1);
+        memcpy(w2_dev, w2_buf, n_w2);
+        *vtcm_used = 1;
+    } else {
+        x_dev  = (int16_t *)x_buf;
+        w1_dev = (int16_t *)w1_buf;
+        w2_dev = (int16_t *)w2_buf;
+        y_dev  = (int16_t *)y_buf;
+        h_dev  = (int16_t *)hidden_buf;
+        *vtcm_used = 0;
+    }
+
+    halide_buffer_t hx, hw1, hw2, hy, hh;
+    halide_dimension_t dx[2], dw1[2], dw2[2], dy[2], dh[2];
+    hbuf2_i16_init(&hx,  dx,  x_dev,  d_in,  batch);
+    hbuf2_i16_init(&hw1, dw1, w1_dev, d_in,  h_dim);
+    hbuf2_i16_init(&hw2, dw2, w2_dev, h_dim, d_out);
+    hbuf2_i16_init(&hy,  dy,  y_dev,  d_out, batch);
+    hbuf2_i16_init(&hh,  dh,  h_dev,  h_dim, batch);
+    hx.flags  |= halide_buffer_flag_host_dirty;
+    hw1.flags |= halide_buffer_flag_host_dirty;
+    hw2.flags |= halide_buffer_flag_host_dirty;
+
+    uint64_t pcyc_before = HAP_perf_get_pcycles();
+    int rc = sp_ffn_2stage_diag_halide(&hx, &hw1, &hw2, b_term,
+                                       (uint8_t)q_bits, &hy, &hh);
+    uint64_t pcyc_delta = HAP_perf_get_pcycles() - pcyc_before;
+    *kernel_pcycles_lo = (int)(pcyc_delta & 0xFFFFFFFFu);
+    *kernel_pcycles_hi = (int)(pcyc_delta >> 32);
+
+    if (vtcm) {
+        memcpy(y_buf,      y_dev, n_y);
+        memcpy(hidden_buf, h_dev, n_h);
+        HAP_release_VTCM(vtcm);
+    }
+    #undef ALIGN128
+    return rc;
+}
 #endif  /* SP_HAVE_HALIDE */

@@ -138,4 +138,25 @@ interface sp_compute : remote_handle64 {
                            rout long vtcm_used,
                            rout long kernel_pcycles_lo,
                            rout long kernel_pcycles_hi);
+
+    // ────────────────────────────────────────────────────────────────────
+    // ffn_2stage_diag_halide — §3-HX Sprint H diagnostic; tees hidden alongside Y
+    //
+    // Same math as ffn_2stage_halide but the Halide kernel also writes
+    // the post-stage-1 intermediate `hidden` to a caller-provided buffer.
+    // Lets the Rust harness isolate matmul-1 vs matmul-2 as the divergence
+    // site for the G.1 constraints documented in Sprint G's closure.
+    //
+    // hidden_buf shape: [batch, h_dim] (row-major i16, total batch*h_dim*2 B).
+    long ffn_2stage_diag_halide(in long batch, in long d_in,
+                                in long h_dim, in long d_out,
+                                in long b_term, in long q_bits,
+                                in  sequence<octet> x_buf,
+                                in  sequence<octet> w1_buf,
+                                in  sequence<octet> w2_buf,
+                                rout sequence<octet> y_buf,
+                                rout sequence<octet> hidden_buf,
+                                rout long vtcm_used,
+                                rout long kernel_pcycles_lo,
+                                rout long kernel_pcycles_hi);
 };
