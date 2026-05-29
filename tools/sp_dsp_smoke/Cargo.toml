@@ -21,6 +21,15 @@ path = "src/axum_server.rs"
 name = "test_hvx"
 path = "src/test_hvx.rs"
 
+# §3-HX Sprint I — single-layer FFN W_gate matmul smoke.
+# Loads ONE 128×128 Q8 tile from build-cpu/tests/qwen3_rt.sp-model, runs
+# through the Sprint G ffn_2stage_diag_halide kernel (Sprint H IDL method 9)
+# at q_bits=14, verifies bitwise vs inline scalar reference across 3
+# activation patterns + 100-iter leak gate.
+[[bin]]
+name = "sp_model_layer_smoke"
+path = "src/sp_model_layer_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"

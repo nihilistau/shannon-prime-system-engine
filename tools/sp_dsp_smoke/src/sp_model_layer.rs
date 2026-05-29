@@ -12,8 +12,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 
-pub const SP_MODEL_MAGIC: u32 = 0x4444_4D44_53u32 & 0xFFFF_FFFF;  // "SPMD" LE
-// Note: literal "SPMD" little-endian bytes are 0x53 0x50 0x4D 0x44 → u32 0x444D5053.
+// "SPMD" little-endian bytes are 0x53 0x50 0x4D 0x44 → u32 0x444D_5053.
 pub const SP_MODEL_MAGIC_LE: u32 = 0x444D_5053;
 pub const SP_HEADER_SIZE: usize = 512;
 pub const SP_TENSOR_ENTRY_SIZE: usize = 256;
