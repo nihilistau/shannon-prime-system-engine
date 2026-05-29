@@ -70,6 +70,22 @@ type FnHandleInvoke = unsafe extern "C" fn(h: u64,
 
 type FnHandleClose = unsafe extern "C" fn(h: u64) -> c_int;
 
+// rpcmem_* from libcdsprpc.so (rpcmem.h:186,216,223).
+// `int size` per the header; max single allocation is 2 GB. For >2 GB use
+// rpcmem_alloc2 (not wired in Sprint B).
+type FnRpcMemAlloc = unsafe extern "C" fn(heapid: c_int, flags: u32, size: c_int) -> *mut c_void;
+type FnRpcMemFree  = unsafe extern "C" fn(p: *mut c_void);
+
+// ── rpcmem constants (rpcmem.h) ────────────────────────────────────────────
+
+/// V69 cDSP via SMMU (non-contiguous physical memory). rpcmem.h:89.
+pub const RPCMEM_HEAP_ID_SYSTEM: c_int = 25;
+/// ION_FLAG_CACHED equivalent. rpcmem.h:52.
+pub const RPCMEM_DEFAULT_FLAGS:  u32 = 1;
+/// Pre-map at allocation time; recommended for latency-critical FastRPC calls.
+/// rpcmem.h:62.
+pub const RPCMEM_TRY_MAP_STATIC: u32 = 0x0400_0000;
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -93,6 +109,8 @@ pub enum SpErr {
     HandleOpen(c_int),
     /// `remote_handle_invoke(...)` returned non-zero.
     Invoke(c_int),
+    /// `rpcmem_alloc(...)` returned NULL for the requested size.
+    RpcMemAlloc(usize),
 }
 
 // ── Scalars helper (REMOTE_SCALARS_MAKE — remote.h:113) ────────────────────
@@ -122,6 +140,8 @@ pub struct FastRpcSession {
     _lib:           Library,
     fn_invoke:      FnHandleInvoke,
     fn_close:       FnHandleClose,
+    fn_rpcmem_alloc: FnRpcMemAlloc,
+    fn_rpcmem_free:  FnRpcMemFree,
     handle:         u64,
 }
 
@@ -160,19 +180,35 @@ impl FastRpcSession {
             lib.get(b"remote_handle64_close\0")
                 .map_err(|_| SpErr::Symbol("remote_handle64_close"))?
         };
+        // rpcmem_* are exported from libcdsprpc.so — no separate librpcmem on
+        // the device.  Per rpcmem.h:127, when linked to libcdsprpc.so the
+        // rpcmem_init/_deinit calls are not required (the .so initializes on
+        // first use), so we resolve only alloc + free.
+        let fn_rpcmem_alloc: Symbol<FnRpcMemAlloc> = unsafe {
+            lib.get(b"rpcmem_alloc\0")
+                .map_err(|_| SpErr::Symbol("rpcmem_alloc"))?
+        };
+        let fn_rpcmem_free: Symbol<FnRpcMemFree> = unsafe {
+            lib.get(b"rpcmem_free\0")
+                .map_err(|_| SpErr::Symbol("rpcmem_free"))?
+        };
 
         // Bind the resolved symbols to raw fn pointers we can store past
         // the `Symbol` scope.
-        let fn_session_raw: FnSessionControl = *fn_session;
-        let fn_open_raw:    FnHandleOpen     = *fn_open;
-        let fn_invoke_raw:  FnHandleInvoke   = *fn_invoke;
-        let fn_close_raw:   FnHandleClose    = *fn_close;
+        let fn_session_raw:      FnSessionControl = *fn_session;
+        let fn_open_raw:         FnHandleOpen     = *fn_open;
+        let fn_invoke_raw:       FnHandleInvoke   = *fn_invoke;
+        let fn_close_raw:        FnHandleClose    = *fn_close;
+        let fn_rpcmem_alloc_raw: FnRpcMemAlloc    = *fn_rpcmem_alloc;
+        let fn_rpcmem_free_raw:  FnRpcMemFree     = *fn_rpcmem_free;
         // Drop the Symbol wrappers; raw pointers stay valid as long as
         // `lib` is held (and lib moves into Self below).
         drop(fn_session);
         drop(fn_open);
         drop(fn_invoke);
         drop(fn_close);
+        drop(fn_rpcmem_alloc);
+        drop(fn_rpcmem_free);
 
         // 3. Enable Unsigned PD on CDSP. Path B admission gate.
         let mut ctrl = RemoteRpcControlUnsignedModule {
@@ -205,8 +241,10 @@ impl FastRpcSession {
 
         Ok(FastRpcSession {
             _lib: lib,
-            fn_invoke: fn_invoke_raw,
-            fn_close:  fn_close_raw,
+            fn_invoke:        fn_invoke_raw,
+            fn_close:         fn_close_raw,
+            fn_rpcmem_alloc:  fn_rpcmem_alloc_raw,
+            fn_rpcmem_free:   fn_rpcmem_free_raw,
             handle,
         })
     }
@@ -216,6 +254,69 @@ impl FastRpcSession {
     pub fn invoke(&self, scalars: u32, args: &mut [RemoteArg]) -> Result<(), SpErr> {
         let rc = unsafe { (self.fn_invoke)(self.handle, scalars, args.as_mut_ptr()) };
         if rc == 0 { Ok(()) } else { Err(SpErr::Invoke(rc)) }
+    }
+
+    /// §3-HX Sprint B — allocate a zero-copy `DmaBuffer` of exactly `size`
+    /// bytes from heap `RPCMEM_HEAP_ID_SYSTEM` (V69 cDSP via SMMU).
+    /// Flags = `RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC` (cached +
+    /// pre-mapped for low-latency FastRPC calls).
+    ///
+    /// CRITICAL CONTRACT: the `size` passed here must EXACTLY equal the
+    /// IDL `Len` parameter when this buffer is later passed to `invoke`.
+    /// Off-by-one (allocating extra "safety pad") → `AEE_EUNSUPPORTED`
+    /// silent failure at invoke time per
+    /// `reference-hexagon-working-setup` §"Exact rpcmem size MATCH".
+    pub fn alloc_dma(&self, size: usize) -> Result<DmaBuffer<'_>, SpErr> {
+        if size == 0 || size > i32::MAX as usize {
+            return Err(SpErr::RpcMemAlloc(size));
+        }
+        let flags = RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC;
+        let p = unsafe {
+            (self.fn_rpcmem_alloc)(RPCMEM_HEAP_ID_SYSTEM, flags, size as c_int)
+        };
+        if p.is_null() {
+            return Err(SpErr::RpcMemAlloc(size));
+        }
+        Ok(DmaBuffer {
+            ptr:      p as *mut u8,
+            len:      size,
+            fn_free:  self.fn_rpcmem_free,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+}
+
+/// §3-HX Sprint B — RPC-memory backed buffer. Backing is an ION dma-buf
+/// allocated by `libcdsprpc.so::rpcmem_alloc` — zero-copy across the
+/// ARM/DSP boundary (FastRPC sees these as an ION fd and skips the
+/// marshal copy).
+///
+/// Drop calls `rpcmem_free`. The owning `FastRpcSession`'s `Library` MUST
+/// outlive any `DmaBuffer` it issued — `DmaBuffer` borrows the
+/// `rpcmem_free` fn ptr from the session via `PhantomData<&FastRpcSession>`.
+pub struct DmaBuffer<'sess> {
+    ptr:      *mut u8,
+    len:      usize,
+    fn_free:  FnRpcMemFree,
+    _phantom: std::marker::PhantomData<&'sess FastRpcSession>,
+}
+
+impl<'sess> DmaBuffer<'sess> {
+    pub fn as_ptr(&self) -> *const u8 { self.ptr }
+    pub fn as_mut_ptr(&mut self) -> *mut u8 { self.ptr }
+    pub fn len(&self) -> usize { self.len }
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<'sess> Drop for DmaBuffer<'sess> {
+    fn drop(&mut self) {
+        unsafe { (self.fn_free)(self.ptr as *mut c_void) };
     }
 }
 
