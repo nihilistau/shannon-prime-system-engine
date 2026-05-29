@@ -89,7 +89,11 @@ pub fn cmd_reload() {
 
 /// The actual long-lived server. Called when the process is the child spawned
 /// by `cmd_start` (detected via `--daemon-inner` argv flag in main.rs).
-#[cfg(not(target_os = "android"))]
+///
+/// Phase 2-L3.FG: unified across host + android. The L1 forward (chat) + sieve
+/// mining (ledger) run on both (the C ABI links on android now). The cDSP DSP
+/// model + echo session load in a `cfg(android)` block; the QUIC garner mesh
+/// stays host-only (NTT-CRT cluster, out of scope — android serves empty peers).
 pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
@@ -152,21 +156,56 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     let inference_active = Arc::new(AtomicBool::new(false));
     let receipt_store    = Arc::new(Mutex::new(Vec::new()));
 
-    // §3-HX Sprint C — try to open the cDSP echo session at startup.
-    // On non-android targets this is None (the FastRPC FFI is gated out).
-    // On android, a failed open logs a warning and degrades to None — the
-    // /v1/dsp/echo endpoint then returns 501 rather than crashing the daemon.
+    // §3-HX cDSP bridge (android-only): open the echo session + load the
+    // DSP-resident model at startup. Any failure degrades to None (the
+    // corresponding /v1/dsp/* endpoint returns 501) — never crashes the daemon.
     #[cfg(target_os = "android")]
-    let dsp_session = {
-        const SKEL_URI: &str =
+    let (dsp_session, dsp_model, kv_cache) = {
+        const ECHO_SKEL_URI: &str =
             "file:///libsp_echo_skel.so?sp_echo_skel_handle_invoke&_modver=1.0&_dom=cdsp";
-        match crate::dsp_rpc::FastRpcSession::new(SKEL_URI) {
+        const MODEL_SKEL_URI: &str =
+            "file:///libsp_compute_skel.so?sp_compute_skel_handle_invoke&_modver=1.0&_dom=cdsp";
+        const CTX_MAX: usize = 4096;
+
+        let dsp_session = match crate::dsp_rpc::FastRpcSession::new(ECHO_SKEL_URI) {
             Ok(s) => { info!("§3-HX Sprint C: cDSP echo session open"); Some(Mutex::new(s)) }
             Err(e) => {
                 tracing::warn!("§3-HX Sprint C: FastRpcSession::new failed: {e:?} — /v1/dsp/echo will 501");
                 None
             }
-        }
+        };
+
+        // Model session is a SEPARATE FastRpcSession leaked to 'static so the
+        // ~1.4 GB DmaBuffer<'sess> borrows live for the process lifetime.
+        let (dsp_model, kv_cache) = match crate::dsp_rpc::FastRpcSession::new(MODEL_SKEL_URI) {
+            Ok(s) => {
+                let sess: &'static crate::dsp_rpc::FastRpcSession = Box::leak(Box::new(s));
+                match crate::dsp_model::DspModel::load(sess, model_path) {
+                    Ok(m) => {
+                        info!("L3.FG: DSP model loaded — {} layers, {} MB DMA, {} ms",
+                            m.header.n_layers, m.total_dma_bytes / (1024 * 1024), m.load_wall_ms);
+                        let kv = match crate::kv_cache::KvCache::alloc(sess, &m.header, CTX_MAX) {
+                            Ok(kv) => {
+                                info!("L3.FG: KV cache — {} MB, {} ms",
+                                    kv.total_bytes() / (1024 * 1024), kv.alloc_wall_ms);
+                                Some(std::sync::Arc::new(Mutex::new(crate::state::KvCacheHandle(kv))))
+                            }
+                            Err(e) => { tracing::warn!("L3.FG: KvCache::alloc failed: {e:?}"); None }
+                        };
+                        (Some(std::sync::Arc::new(crate::state::ModelHandle(m))), kv)
+                    }
+                    Err(e) => {
+                        tracing::warn!("L3.FG: DspModel::load failed: {e:?} — /v1/dsp/model_info will 501");
+                        (None, None)
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("L3.FG: model FastRpcSession::new failed: {e:?} — /v1/dsp/model_info will 501");
+                (None, None)
+            }
+        };
+        (dsp_session, dsp_model, kv_cache)
     };
 
     let state = Arc::new(crate::state::AppState {
@@ -187,6 +226,10 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         peer_map: Arc::new(DashMap::new()),
         #[cfg(target_os = "android")]
         dsp_session,
+        #[cfg(target_os = "android")]
+        dsp_model,
+        #[cfg(target_os = "android")]
+        kv_cache,
     });
 
     // ── Background PoUW mining task ────────────────────────────────────────
@@ -197,39 +240,42 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         events_tx,
     ));
 
-    // ── QUIC DHT Coordinator ───────────────────────────────────────────────
-    // Binds on 0.0.0.0:<quic_port> (LAN-accessible, unlike the HTTP server
-    // which is loopback-only).  quic_port=0 disables the coordinator.
-    if quic_port != 0 {
-        let quic_addr: std::net::SocketAddr = ([0, 0, 0, 0], quic_port).into();
-        match SpQuicCoordinator::bind(quic_addr).await {
-            Ok(coordinator) => {
-                info!("SP_INFO: QUIC Coordinator listening on {quic_addr}");
-                // Garner results channel: receiver intentionally discarded here.
-                // Results will be consumed by the inference pipeline in BLOCK-SYNC phase.
-                let (garner_tx, _garner_rx) = mpsc::channel(64);
-                tokio::spawn(run_garner_loop(
-                    coordinator,
-                    QUIC_NTT_N,
-                    garner_tx,
-                    Arc::clone(&state.peer_map),
-                ));
+    // ── QUIC DHT Coordinator + peer dials (host-only) ──────────────────────
+    // The garner loop does NTT-CRT shard recombination for the inference
+    // cluster — out of L3.FG scope (android serves an empty peer_map on a
+    // single on-device node). Binds 0.0.0.0:<quic_port>; quic_port=0 disables.
+    #[cfg(not(target_os = "android"))]
+    {
+        if quic_port != 0 {
+            let quic_addr: std::net::SocketAddr = ([0, 0, 0, 0], quic_port).into();
+            match SpQuicCoordinator::bind(quic_addr).await {
+                Ok(coordinator) => {
+                    info!("SP_INFO: QUIC Coordinator listening on {quic_addr}");
+                    // Garner results channel: receiver intentionally discarded here.
+                    let (garner_tx, _garner_rx) = mpsc::channel(64);
+                    tokio::spawn(run_garner_loop(
+                        coordinator,
+                        QUIC_NTT_N,
+                        garner_tx,
+                        Arc::clone(&state.peer_map),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!("QUIC coordinator bind failed on {quic_addr}: {e} — DHT mesh disabled");
+                }
             }
-            Err(e) => {
-                tracing::warn!("QUIC coordinator bind failed on {quic_addr}: {e} — DHT mesh disabled");
-            }
+        } else {
+            info!("QUIC mesh disabled (quic_port=0); pass --quic-port <N> or SP_QUIC_PORT=<N> to enable");
         }
-    } else {
-        info!("QUIC mesh disabled (quic_port=0); pass --quic-port <N> or SP_QUIC_PORT=<N> to enable");
-    }
 
-    // ── Outbound peer dials (--peer / --peers) ────────────────────────────
-    // --peer is the back-compat single-address form (F4); --peers is the
-    // comma-separated bootstrap list (F5).  Both are dialed at startup.
-    spawn_peer_dial(peer);
-    for addr in peers.split(',').filter(|s| !s.is_empty()) {
-        spawn_peer_dial(addr);
+        // Outbound peer dials (--peer single F4 form; --peers F5 bootstrap list).
+        spawn_peer_dial(peer);
+        for addr in peers.split(',').filter(|s| !s.is_empty()) {
+            spawn_peer_dial(addr);
+        }
     }
+    #[cfg(target_os = "android")]
+    let _ = (quic_port, peer, peers); // QUIC mesh is host-only (garner = NTT-CRT cluster)
 
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));
@@ -248,119 +294,6 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     // Drop order: session → model (fields drop in declaration order in AppState).
     // sp_session_destroy runs, then sp_model_unload. Both are synchronous.
     info!("sp-daemon inner stopped");
-}
-
-/// §3-HX Sprint J.5 — android inner daemon.
-///
-/// The L1 C-ABI forward path is host-gated out, so this variant skips
-/// SpModel/SpSession/tokenizer/mining entirely and serves the DSP-loader +
-/// mesh surface. The cDSP echo session is opened best-effort (None → 501).
-/// The DSP-resident model + KV cache are loaded in the appstate commit; this
-/// host-gating commit only proves the android binary compiles and serves.
-#[cfg(target_os = "android")]
-pub async fn run_inner(model_path: &str, _tok_path: &str, _draft_model_path: &str, _draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
-    #[cfg(unix)]
-    unsafe { libc::setsid() };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sp_daemon=info".into()),
-        )
-        .init();
-
-    info!("sp-daemon (android) inner starting");
-
-    // §3-HX Sprint C — best-effort cDSP echo session at startup.
-    // A failed open degrades to None — /v1/dsp/echo then returns 501.
-    const SKEL_URI: &str =
-        "file:///libsp_echo_skel.so?sp_echo_skel_handle_invoke&_modver=1.0&_dom=cdsp";
-    let dsp_session = match crate::dsp_rpc::FastRpcSession::new(SKEL_URI) {
-        Ok(s) => { info!("§3-HX Sprint C: cDSP echo session open"); Some(Mutex::new(s)) }
-        Err(e) => {
-            tracing::warn!("§3-HX Sprint C: FastRpcSession::new failed: {e:?} — /v1/dsp/echo will 501");
-            None
-        }
-    };
-
-    // §3-HX Sprint J.5 — load the DSP-resident model into rpcmem DmaBuffers.
-    // Uses a SEPARATE FastRpcSession, leaked to `&'static` so the model's
-    // DmaBuffer<'sess> borrows (≈1.4 GB of weights) live for the process
-    // lifetime — required to store DspModel/KvCache in the long-lived AppState
-    // without a self-referential struct. The echo `dsp_session` above is left
-    // owned + Mutex-serialized (verified Sprint C path, untouched).
-    // Any failure degrades to None → /v1/dsp/model_info returns 501.
-    // Model session uses the COMPUTE skel — matching Sprint J's proven
-    // sp_full_load_smoke load path (the echo skel above is for /v1/dsp/echo).
-    // Two distinct skels → two distinct handles, sidestepping any same-skel
-    // double-open constraint. The loader never invokes the skel (alloc_dma is
-    // handle-independent rpcmem), so the choice only needs to open cleanly.
-    const MODEL_SKEL_URI: &str =
-        "file:///libsp_compute_skel.so?sp_compute_skel_handle_invoke&_modver=1.0&_dom=cdsp";
-    const CTX_MAX: usize = 4096;
-    let (dsp_model, kv_cache) = match crate::dsp_rpc::FastRpcSession::new(MODEL_SKEL_URI) {
-        Ok(s) => {
-            let sess: &'static crate::dsp_rpc::FastRpcSession = Box::leak(Box::new(s));
-            match crate::dsp_model::DspModel::load(sess, model_path) {
-                Ok(model) => {
-                    info!("J.5: model loaded — {} layers, {} MB DMA, {} ms",
-                        model.header.n_layers,
-                        model.total_dma_bytes / (1024 * 1024),
-                        model.load_wall_ms);
-                    let kv = match crate::kv_cache::KvCache::alloc(sess, &model.header, CTX_MAX) {
-                        Ok(kv) => {
-                            info!("J.5: KV cache — {} MB, {} ms",
-                                kv.total_bytes() / (1024 * 1024), kv.alloc_wall_ms);
-                            Some(std::sync::Arc::new(Mutex::new(crate::state::KvCacheHandle(kv))))
-                        }
-                        Err(e) => {
-                            tracing::warn!("J.5: KvCache::alloc failed: {e:?}");
-                            None
-                        }
-                    };
-                    (Some(std::sync::Arc::new(crate::state::ModelHandle(model))), kv)
-                }
-                Err(e) => {
-                    tracing::warn!("J.5: DspModel::load({model_path}) failed: {e:?} — /v1/dsp/model_info will 501");
-                    (None, None)
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("J.5: model FastRpcSession::new failed: {e:?} — /v1/dsp/model_info will 501");
-            (None, None)
-        }
-    };
-
-    let (events_tx, _) =
-        tokio::sync::broadcast::channel::<crate::state::DaemonEvent>(64);
-    let peer_map = Arc::new(DashMap::new());
-
-    let _ = (quic_port, peer, peers); // QUIC mesh is host-only on android (see import note)
-
-    let state = Arc::new(crate::state::AppState {
-        started_at: Instant::now(),
-        events_tx,
-        peer_map,
-        dsp_session,
-        dsp_model,
-        kv_cache,
-    });
-
-    // ── HTTP server ──────────────────────────────────────────────────────────
-    let app = crate::server::build_router(Arc::clone(&state));
-    let addr: std::net::SocketAddr = ([127, 0, 0, 1], http_port).into();
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    info!("listening on {addr}");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
-
-    info!("sp-daemon (android) inner stopped");
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

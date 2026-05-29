@@ -11,11 +11,8 @@ pub use sp_daemon::network::quic_shard::ConnectedPeer;
 use ed25519_dalek::SigningKey;
 use serde::Serialize;
 
-#[cfg(not(target_os = "android"))]
 use crate::session::{SpModel, SpSession};
-#[cfg(not(target_os = "android"))]
 use crate::sessions::Sessions;
-#[cfg(not(target_os = "android"))]
 use crate::tokenizer::SptbTokenizer;
 
 /// Events broadcast on the /v1/events SSE channel.
@@ -42,7 +39,10 @@ pub struct ReceiptRecord {
 ///
 /// Drop order (declaration order) keeps models alive past every session:
 /// sessions drop before models, so mmap-backed pointers in sp_session remain valid.
-#[cfg(not(target_os = "android"))]
+///
+/// Phase 2-L3.FG: unified across host + android (the L1 C ABI now links on
+/// android). The cDSP DSP-bridge fields at the end are `cfg(android)` additions;
+/// host builds are byte-identical to pre-L3.FG (the cfg(android) fields vanish).
 pub struct AppState {
     /// Target/verifier model. Kept alive so session mmap-backed pointers remain valid.
     #[allow(dead_code)]
@@ -79,6 +79,22 @@ pub struct AppState {
     /// Populated by run_garner_loop on accept; cleared on connection close.
     /// Empty until the coordinator is wired into daemon startup.
     pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
+
+    // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
+    /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the
+    /// skel could not be admitted; `/v1/dsp/echo` then returns 501. Per-request
+    /// Mutex serializes the FFI invoke (FastRPC per-handle is single-thread).
+    #[cfg(target_os = "android")]
+    pub dsp_session: Option<Mutex<crate::dsp_rpc::FastRpcSession>>,
+    /// §3-HX Sprint J.5 — DSP-resident Qwen3 model, loaded at startup into
+    /// per-tensor rpcmem DmaBuffers, backed by a leaked `&'static` FastRpcSession
+    /// separate from `dsp_session`. `None` → `/v1/dsp/model_info` 501s.
+    #[cfg(target_os = "android")]
+    pub dsp_model: Option<Arc<ModelHandle>>,
+    /// Per-layer K/V DmaBuffers at ctx_max=4096. `Mutex` is for Sprint K's
+    /// decode-time mutation; L3.FG only reads `total_bytes()`.
+    #[cfg(target_os = "android")]
+    pub kv_cache: Option<Arc<Mutex<KvCacheHandle>>>,
 }
 
 /// §3-HX Sprint J.5 — `Send + Sync` wrapper for the DSP-resident model.
@@ -106,37 +122,3 @@ pub struct KvCacheHandle(pub crate::kv_cache::KvCache<'static>);
 unsafe impl Send for KvCacheHandle {}
 #[cfg(target_os = "android")]
 unsafe impl Sync for KvCacheHandle {}
-
-/// §3-HX Sprint J.5 — android daemon state.
-///
-/// The android binary host-gates the entire L1 C-ABI inference path (model,
-/// session, tokenizer, mining) out of the build, so this is a deliberately
-/// minimal `AppState` carrying only the pure-Rust mesh surface plus the cDSP
-/// FastRPC session + DSP-resident model. Field names overlap the host struct
-/// (`started_at`, `events_tx`, `peer_map`) so handlers that read only those
-/// fields compile against both variants without `cfg`.
-///
-/// `dsp_model` / `kv_cache` are wired in the appstate commit; in this
-/// host-gating commit they are absent and `/v1/dsp/model_info` returns 501.
-#[cfg(target_os = "android")]
-pub struct AppState {
-    /// Daemon start time (for uptime / metrics denominators).
-    pub started_at: Instant,
-    /// Broadcast channel for daemon-wide events (/v1/events subscribers).
-    pub events_tx: broadcast::Sender<DaemonEvent>,
-    /// Active QUIC peers indexed by remote SocketAddr.
-    pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
-    /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel.
-    /// `None` if the skel could not be admitted (alloc failure / missing skel);
-    /// `/v1/dsp/echo` then returns 501.  Per-request Mutex serializes the FFI
-    /// invoke since FastRPC per-handle thread-safety is single-thread.
-    pub dsp_session: Option<Mutex<crate::dsp_rpc::FastRpcSession>>,
-    /// §3-HX Sprint J.5 — DSP-resident Qwen3 model, loaded at startup via the
-    /// sp_dsp_smoke loader into per-tensor rpcmem DmaBuffers. Backed by a
-    /// process-lifetime (leaked `&'static`) FastRpcSession separate from
-    /// `dsp_session`. `None` if the load failed → `/v1/dsp/model_info` 501s.
-    pub dsp_model: Option<Arc<ModelHandle>>,
-    /// Per-layer K/V DmaBuffers allocated at ctx_max=4096. `Mutex` is for
-    /// Sprint K's decode-time mutation; J.5 only reads `total_bytes()`.
-    pub kv_cache: Option<Arc<Mutex<KvCacheHandle>>>,
-}

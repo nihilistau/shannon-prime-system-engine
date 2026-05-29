@@ -48,6 +48,15 @@ path = "src/sp_full_load_smoke.rs"
 name = "sp_dual_dispatch_smoke"
 path = "src/sp_dual_dispatch_smoke.rs"
 
+# §3-HX Sprint K v0.beta Stage 2.5a — scalar Barrett oracle gate.
+# Drives ~1024 (a, b) test vectors per prime through skel-side scalar
+# Barrett (sp_compute_barrett_oracle method 10, mode=0); per-element
+# bitwise vs Rust scalar reference.  Mirrors engine 63d7e2d:ptx_ntt.cuh
+# barrett_reduce32_ref math.
+[[bin]]
+name = "sp_barrett_oracle_smoke"
+path = "src/sp_barrett_oracle_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"

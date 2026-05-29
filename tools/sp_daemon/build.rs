@@ -42,16 +42,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_model.h").display());
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_status.h").display());
 
-    // Skip bindgen + link on Android cross-compile.
-    // The Android target is the §3-HX Sprint A FastRPC bridge (dsp_rpc.rs),
-    // which does NOT depend on the L1 ABI bindings. Lib-side files (network,
-    // ntt_ffi, dsp_rpc) verified to not include!(sp_bindings.rs).
-    // Engine-on-Android (full forward path) is Phase 2-L3.FG scope.
-    let target_os_early = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os_early == "android" {
-        println!("cargo:rustc-cfg=sp_no_link");
-        return;
-    }
+    // Phase 2-L3.FG: android now bindgens + links the math-core C ABI (the
+    // early sp_no_link skip is removed). bindgen runs on the host but targets
+    // aarch64 via BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android (--target +
+    // --sysroot, set in .cargo/config.toml).
 
     // ── bindgen ────────────────────────────────────────────────────────────
     // Bindgen the frozen L1 header. sp_l1.h includes sp_model.h + sp_status.h
@@ -74,31 +68,29 @@ fn main() {
         .expect("could not write sp_bindings.rs");
 
     // ── Link ───────────────────────────────────────────────────────────────
-    // aarch64-android cross-compile: no pre-built device libs for CORE.
-    // Type-check passes; link is Phase 2-L3.FG scope.
+    // Phase 2-L3.FG: aarch64-android now links the cross-compiled math-core
+    // (build-android-libs.bat → build-android-libs/core/<m>/libsp_<m>.a). The
+    // old sp_no_link skip is gone; android falls through to the link loop below.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "android" {
-        println!("cargo:rustc-cfg=sp_no_link");
-        return;
-    }
 
-    // SP_SYSTEM_BUILD_DIR: root of the math-core CMake build directory.
-    //
-    //   Standalone math-core (Linux / MinGW GCC):
-    //     /path/to/shannon-prime-system/build/
-    //     → libs at {dir}/core/{module}/libsp_{module}.a
+    // SP_SYSTEM_BUILD_DIR: root of the math-core build directory.
     //
     //   Engine-embedded (Windows MinGW / MSVC, engine build-cpu):
-    //     /path/to/shannon-prime-system-engine/build-cpu/lib/shannon-prime-system/
-    //     → libs at {dir}/core/{module}/sp_{module}.lib
+    //     {engine}/build-cpu/lib/shannon-prime-system/  → core/{m}/sp_{m}.lib
+    //   aarch64-android (Phase 2-L3.FG, build-android-libs.bat):
+    //     {engine}/build-android-libs/                   → core/{m}/libsp_{m}.a
     //
-    // Both follow the same core/{module}/ sub-path — only the lib file
-    // prefix/extension differs, and Cargo resolves that from the target.
+    // Both resolve libs under the same core/{module}/ sub-path; only the file
+    // prefix/extension differs, which Cargo derives from the target.
     let build_dir = env::var("SP_SYSTEM_BUILD_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            // Default: engine's MinGW build-cpu embedded submodule (Windows).
-            engine_root.join("build-cpu/lib/shannon-prime-system")
+            if target_os == "android" {
+                engine_root.join("build-android-libs")
+            } else {
+                // Default: engine's MinGW build-cpu embedded submodule (Windows).
+                engine_root.join("build-cpu/lib/shannon-prime-system")
+            }
         });
 
     // CARGO_CFG_TARGET_ENV differentiates MSVC ("msvc") from MinGW/Linux ("gnu"/"").
@@ -119,7 +111,7 @@ fn main() {
         }
     }
 
-    if target_os == "linux" {
+    if target_os == "linux" || target_os == "android" {
         println!("cargo:rustc-link-lib=m");
     }
 }

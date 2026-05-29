@@ -1,0 +1,56 @@
+§3-HX Sprint K v0.beta Stage 2.5a — sp_barrett_oracle_smoke verbatim output
+=============================================================================
+
+Device:      Samsung S22 Ultra R5CT22445JA, V69 cDSP via Path B Unsigned PD
+Date:        2026-05-30
+Skel:        libsp_compute_skel.so 161,192 B (Sprint G/H/I/J skel + new
+              sp_compute_crt_imp.c scalar Barrett primitives linked in)
+Reference:   engine 63d7e2d:src/backends/cuda/ptx_ntt.cuh
+              barrett_reduce32_ref byte-for-byte algorithm
+
+Command:
+    adb shell 'ADSP_LIBRARY_PATH="/data/local/tmp;" /data/local/tmp/sp_barrett_oracle_smoke'
+
+Output:
+-------
+[K-β-2.5a] opening FastRpcSession (Path B)...
+[K-β-2.5a] session open
+[K-β-2.5a] T_BARRETT_SCALAR_ORACLE_q1 PASS  (1024 vectors / q=1073738753 mu=1073744895)
+[K-β-2.5a]   sample: a[0]=0 b[0]=0 r[0]=0; a[5]=1073738751 b[5]=1073738745 r[5]=16
+[K-β-2.5a] T_BARRETT_SCALAR_ORACLE_q2 PASS  (1024 vectors / q=1073732609 mu=1073751039)
+[K-β-2.5a]   sample: a[0]=0 b[0]=0 r[0]=0; a[5]=1073732607 b[5]=1073732601 r[5]=16
+[K-β-2.5a]   note: mode=1 (HVX, Stage 2.5b) returns Err as expected: Invoke(78)
+[K-β-2.5a] session closed cleanly
+[K-β-2.5a] T_BARRETT_SCALAR_ORACLE_C_SCALAR ALL GATES PASS
+
+
+Math verification (worst-case vector idx=5):
+--------------------------------------------
+a[5] = q - 2, b[5] = q - 8 (both primes; worst-case bracket of plan §3).
+Expected: (q-2) * (q-8) mod q = (-2) * (-8) mod q = 16 mod q = 16.
+Halide-skel returned 16 for BOTH primes — independent of q value, consistent
+with the math.  Confirms the Barrett identity collapses to the small-integer
+result regardless of which prime is selected.
+
+Edge cases (idx 0..3):
+  (0, 0)         → 0   ✓
+  (0, q-1)       → 0   ✓
+  (q-1, 0)       → 0   ✓
+  (q-1, q-1)     → 1   ✓ for both primes  (since (q-1)² mod q = 1)
+
+
+Empirical facts from this run:
+------------------------------
+- 1024 test vectors × 2 primes = 2048 (a, b, r) triples, all per-element
+  bitwise-equal between Rust u64 scalar reference and skel-side C uint64_t
+  scalar.  No divergence.
+- Mode=1 (HVX vector Barrett, Stage 2.5b) returns Invoke(78) as expected
+  (skel-side returns -1 with the "Stage 2.5b reserved" FARF log).
+- The C scalar Barrett primitive `sp_barrett_reduce32_scalar(x, q, mu)`
+  in sp_compute_crt_imp.c produces bitwise-identical output to the Rust
+  `barrett_reduce32(x: u64, q: u32, mu: u32) -> u32` reference for all
+  tested (a, b) pairs across (q_1, μ_q1) and (q_2, μ_q2).
+
+T_BARRETT_SCALAR_ORACLE_C_SCALAR PASS.  Foundation gate established;
+HVX vector path (Stage 2.5b) layers on top with diagnostic isolation
+intact.

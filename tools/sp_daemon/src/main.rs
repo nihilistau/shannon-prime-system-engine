@@ -12,27 +12,19 @@ mod dsp_model;
 #[cfg(target_os = "android")]
 #[path = "../../sp_dsp_smoke/src/kv_cache.rs"]
 mod kv_cache;
-// §3-HX Sprint J.5 — the L1 C-ABI inference path (ffi/session/forward) and the
-// sieve-backed mining/spec/tokenizer modules do not cross-compile or link for
-// aarch64-android (build.rs sets sp_no_link; the math-core C ABI is Phase
-// 2-L3.FG scope). They are host-only; the android binary serves the DSP-loader
-// surface instead (see daemon::run_inner android variant).
-#[cfg(not(target_os = "android"))]
+// Phase 2-L3.FG: the L1 C-ABI inference path + sieve-backed mining/tokenizer now
+// cross-compile and link on aarch64-android (build.rs links build-android-libs),
+// so these modules are unconditional again. The J.5 host-gating is removed; the
+// android-only surface is just the cDSP bridge (dsp_rpc/dsp_model/kv_cache).
 mod ffi;
-#[cfg(not(target_os = "android"))]
 mod mining;
 mod routes;
 mod server;
-#[cfg(not(target_os = "android"))]
 mod session;
-#[cfg(not(target_os = "android"))]
 mod sessions;
-#[cfg(not(target_os = "android"))]
 mod sieve_ffi;
-#[cfg(not(target_os = "android"))]
 mod spec;
 mod state;
-#[cfg(not(target_os = "android"))]
 mod tokenizer;
 
 use clap::{Parser, Subcommand};

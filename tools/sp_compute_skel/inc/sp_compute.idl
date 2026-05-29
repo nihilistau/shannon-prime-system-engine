@@ -159,4 +159,18 @@ interface sp_compute : remote_handle64 {
                                 rout long vtcm_used,
                                 rout long kernel_pcycles_lo,
                                 rout long kernel_pcycles_hi);
+
+    // ────────────────────────────────────────────────────────────────────
+    // barrett_oracle — §3-HX Sprint K v0.beta Stage 2.5 T_BARRETT_SCALAR_ORACLE
+    //
+    // Drives N test (a, b) u32 pairs through modular multiply mod q_{1,2}.
+    //   q_idx=0 → q_1=1073738753, μ=1073744895
+    //   q_idx=1 → q_2=1073732609, μ=1073751039
+    //   mode=0 → scalar Barrett (Stage 2.5a; this commit)
+    //   mode=1 → HVX vector Barrett (Stage 2.5b; reserved, returns -1)
+    // Buffers are little-endian u32; a, b, r each n*4 bytes.
+    long barrett_oracle(in long q_idx, in long mode,
+                        in  sequence<octet> a_buf,
+                        in  sequence<octet> b_buf,
+                        rout sequence<octet> r_buf);
 };

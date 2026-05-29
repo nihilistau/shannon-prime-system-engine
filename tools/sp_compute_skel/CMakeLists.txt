@@ -26,6 +26,7 @@ else()
     set(srcs
         ${CMAKE_CURRENT_BINARY_DIR}/sp_compute_skel
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_imp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_crt_imp
     )
     add_library(sp_compute_skel SHARED ${srcs})
     include_directories(${common_incs})

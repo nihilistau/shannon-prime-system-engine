@@ -12,3 +12,10 @@ ar     = "D:\\Files\\Android\\android-ndk-r27d\\toolchains\\llvm\\prebuilt\\wind
 CC_aarch64_linux_android  = "D:\\Files\\Android\\android-ndk-r27d\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\aarch64-linux-android21-clang.cmd"
 CXX_aarch64_linux_android = "D:\\Files\\Android\\android-ndk-r27d\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\aarch64-linux-android21-clang++.cmd"
 AR_aarch64_linux_android  = "D:\\Files\\Android\\android-ndk-r27d\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\llvm-ar.exe"
+# Phase 2-L3.FG — bindgen runs on the host but must parse sp_l1.h's <stdint.h>/
+# <stddef.h> against the android sysroot for the aarch64 target. bindgen auto-
+# reads BINDGEN_EXTRA_CLANG_ARGS_<triple>; this supplies the target + sysroot.
+# -isystem points at clang's builtin headers (stddef.h etc.) which live in the
+# NDK clang resource dir, NOT the sysroot — the host libclang doesn't know the
+# NDK's resource path, so stdint.h's #include <stddef.h> fails without this.
+BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android = "--target=aarch64-linux-android21 --sysroot=D:/Files/Android/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem D:/Files/Android/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include"
