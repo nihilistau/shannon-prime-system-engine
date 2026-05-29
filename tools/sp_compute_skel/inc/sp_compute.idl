@@ -34,4 +34,35 @@ interface sp_compute : remote_handle64 {
                    in long a_h,
                    in  sequence<octet> x_buf,
                    rout sequence<octet> y_buf);
+
+    // ────────────────────────────────────────────────────────────────────
+    // axpby_hvx — §3-HX Sprint E F1; explicit HVX intrinsics for full axpby
+    //
+    //   y[i] = saturate_i16((a_h * x[i] + b) >> q_bits)
+    //
+    // Constraints (returns -1 if violated):
+    //   |a_h| ≤ 32767   (must fit in i16 for Q6_Ww_vmpy_VhRh)
+    //   0 ≤ q_bits ≤ 30
+    //
+    // HVX chain per 64-element block: vmpy widening → vadd word → vasr →
+    //   vpack_VwVw_sat → store.  SASS verifiable.
+    long axpby_hvx(in long n,
+                   in long a_h,
+                   in long b,
+                   in long q_bits,
+                   in  sequence<octet> x_buf,
+                   rout sequence<octet> y_buf);
+
+    // ────────────────────────────────────────────────────────────────────
+    // scale_i16_batched — §3-HX Sprint E F2; amortize FastRPC per-call overhead
+    //
+    // Runs sp_compute_scale_i16 inline n_batches times in one FastRPC call.
+    // a_h_buf:  n_batches × i16 LE
+    // x_buf:    n_batches × n_per_batch × i16 LE
+    // y_buf:    same shape as x_buf
+    long scale_i16_batched(in long n_per_batch,
+                           in long n_batches,
+                           in  sequence<octet> a_h_buf,
+                           in  sequence<octet> x_buf,
+                           rout sequence<octet> y_buf);
 };

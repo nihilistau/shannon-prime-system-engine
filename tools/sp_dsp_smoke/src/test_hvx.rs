@@ -144,6 +144,167 @@ fn main() {
         // measured per-byte at larger sizes + Sprint E batching.
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // §3-HX Sprint E tests — explicit HVX intrinsics axpby + batched dispatch
+    // ═════════════════════════════════════════════════════════════════════
+    eprintln!("\n[hvx] ═══ Sprint E: explicit-intrinsic axpby + batched dispatch ═══");
+
+    // Scalar reference for axpby_hvx
+    fn axpby_ref(x: &[i16], a_h: i16, b: i32, q_bits: i32) -> Vec<i16> {
+        x.iter().map(|&v| {
+            ((((a_h as i32) * (v as i32)) + b) >> q_bits).clamp(-32768, 32767) as i16
+        }).collect()
+    }
+
+    /// Method 4 = sp_compute_axpby_hvx; layout per qaic stub:
+    ///   primIn[6] = [n, a_h, b, q_bits, x_bufLen, y_bufLen]   (24 B)
+    ///   pra[0/1/2] same shape as axpby
+    fn invoke_axpby_hvx(sess: &FastRpcSession, x: &[i16],
+                        a_h: i16, b: i32, q_bits: i32) -> Result<Vec<i16>, SpErr> {
+        let n = x.len();
+        let n_bytes = n * 2;
+        let mut prim_in: [u32; 6] = [
+            n as u32, a_h as u32, b as u32, q_bits as u32,
+            n_bytes as u32, n_bytes as u32,
+        ];
+        let mut x_bytes = Vec::with_capacity(n_bytes);
+        for v in x { x_bytes.extend_from_slice(&v.to_le_bytes()); }
+        let mut y_bytes = vec![0u8; n_bytes];
+        let mut args = [
+            RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr() as *mut c_void, nlen: 24 }},
+            RemoteArg { buf: RemoteBuf { pv: x_bytes.as_mut_ptr() as *mut c_void, nlen: n_bytes }},
+            RemoteArg { buf: RemoteBuf { pv: y_bytes.as_mut_ptr() as *mut c_void, nlen: n_bytes }},
+        ];
+        sess.invoke(make_scalars(4, 2, 1), &mut args)?;
+        Ok(y_bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect())
+    }
+
+    for (name, n, a_h, b, q_bits) in [
+        ("T_HVX_AXPBY_INTRIN_64",     64usize,   100i16, 0,     8),
+        ("T_HVX_AXPBY_INTRIN_1024",   1024,     -200,    1024,  10),
+        ("T_HVX_AXPBY_INTRIN_65536",  65536,    1234,    -1024, 12),
+    ] {
+        let x: Vec<i16> = (0..n).map(|i| ((i as i32 * 37 + 11) & 0x7FFF) as i16 - 16384).collect();
+        let exp = axpby_ref(&x, a_h, b, q_bits);
+        match invoke_axpby_hvx(&sess, &x, a_h, b, q_bits) {
+            Ok(got) if got == exp => eprintln!("[hvx] {name} (n={n}, a_h={a_h}, b={b}, q_bits={q_bits}) PASS"),
+            Ok(got) => {
+                let idx = got.iter().zip(exp.iter()).position(|(a, c)| a != c);
+                eprintln!("[hvx] {name} FAIL: diverge at {idx:?}, got={:?} exp={:?}",
+                    idx.and_then(|i| got.get(i)), idx.and_then(|i| exp.get(i)));
+                fails += 1;
+            }
+            Err(e) => { eprintln!("[hvx] {name} FAIL invoke: {e:?}"); fails += 1; }
+        }
+    }
+
+    // Saturation: a_h * x might overflow → after shift, exceeds i16 range
+    {
+        let x: Vec<i16> = vec![10000; 128];   // 10000 × 30000 + 0 = 3 × 10^8
+        let exp = axpby_ref(&x, 30000, 0, 4); // >> 4 = 1.875 × 10^7 → saturated
+        match invoke_axpby_hvx(&sess, &x, 30000, 0, 4) {
+            Ok(got) if got == exp && got.iter().all(|&v| v == 32767) => {
+                eprintln!("[hvx] T_HVX_AXPBY_INTRIN_SATURATE PASS");
+            }
+            Ok(got) => { eprintln!("[hvx] T_HVX_AXPBY_INTRIN_SATURATE FAIL: got[0]={}", got[0]); fails += 1; }
+            Err(e) => { eprintln!("[hvx] T_HVX_AXPBY_INTRIN_SATURATE FAIL invoke: {e:?}"); fails += 1; }
+        }
+    }
+
+    // ── F2: batched dispatch ──────────────────────────────────────────────
+    //
+    // Method 5 = sp_compute_scale_i16_batched; layout per qaic stub:
+    //   primIn[5] = [n_per_batch, n_batches, a_h_bufLen, x_bufLen, y_bufLen]  (20 B)
+    //   pra[0]    = primIn
+    //   pra[1]    = a_h_buf (n_batches × i16)
+    //   pra[2]    = x_buf
+    //   pra[3]    = y_buf
+    //   scalars   = MAKEX(0, 5, 3, 1, 0, 0)
+    fn invoke_scale_batched(sess: &FastRpcSession, n_per_batch: i32,
+                            a_h_arr: &[i16], x: &[i16]) -> Result<Vec<i16>, SpErr> {
+        let n_batches = a_h_arr.len();
+        let total = n_per_batch as usize * n_batches;
+        assert_eq!(x.len(), total);
+        let a_h_bytes_len = n_batches * 2;
+        let xy_bytes_len  = total * 2;
+
+        let mut prim_in: [u32; 5] = [
+            n_per_batch as u32, n_batches as u32,
+            a_h_bytes_len as u32, xy_bytes_len as u32, xy_bytes_len as u32,
+        ];
+        let mut a_h_bytes = Vec::with_capacity(a_h_bytes_len);
+        for v in a_h_arr { a_h_bytes.extend_from_slice(&v.to_le_bytes()); }
+        let mut x_bytes = Vec::with_capacity(xy_bytes_len);
+        for v in x { x_bytes.extend_from_slice(&v.to_le_bytes()); }
+        let mut y_bytes = vec![0u8; xy_bytes_len];
+
+        let mut args = [
+            RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr() as *mut c_void, nlen: 20 }},
+            RemoteArg { buf: RemoteBuf { pv: a_h_bytes.as_mut_ptr() as *mut c_void, nlen: a_h_bytes_len }},
+            RemoteArg { buf: RemoteBuf { pv: x_bytes.as_mut_ptr() as *mut c_void, nlen: xy_bytes_len }},
+            RemoteArg { buf: RemoteBuf { pv: y_bytes.as_mut_ptr() as *mut c_void, nlen: xy_bytes_len }},
+        ];
+        sess.invoke(make_scalars(5, 3, 1), &mut args)?;
+        Ok(y_bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect())
+    }
+
+    // T_BATCH_BITWISE: 8 batches × 4 K elements
+    {
+        const N_PER: usize = 4096;
+        const N_BAT: usize = 8;
+        let a_h_arr: Vec<i16> = (0..N_BAT).map(|i| (i as i16 * 100 - 350)).collect();
+        let x: Vec<i16> = (0..N_PER * N_BAT).map(|i| ((i as i32 * 17 + 5) & 0x7FFF) as i16 - 16384).collect();
+        let mut exp: Vec<i16> = Vec::with_capacity(N_PER * N_BAT);
+        for b in 0..N_BAT {
+            for i in 0..N_PER {
+                let v = x[b * N_PER + i] as i32 + a_h_arr[b] as i32;
+                exp.push(v.clamp(-32768, 32767) as i16);
+            }
+        }
+        match invoke_scale_batched(&sess, N_PER as i32, &a_h_arr, &x) {
+            Ok(got) if got == exp => eprintln!("[hvx] T_BATCH_BITWISE (8 × 4 KB i16) PASS"),
+            Ok(_) => { eprintln!("[hvx] T_BATCH_BITWISE FAIL: diverge"); fails += 1; }
+            Err(e) => { eprintln!("[hvx] T_BATCH_BITWISE FAIL invoke: {e:?}"); fails += 1; }
+        }
+    }
+
+    // T_BATCH_VS_UNBATCHED: same total work — batched (1 call) vs unbatched (8 calls)
+    {
+        const N_PER: usize = 4096;
+        const N_BAT: usize = 8;
+        const ITERS: u32   = 200;
+
+        let a_h_arr: Vec<i16> = (0..N_BAT).map(|_| 42i16).collect();
+        let x: Vec<i16> = (0..N_PER * N_BAT).map(|i| (i & 0xFF) as i16).collect();
+
+        // Unbatched: ITERS × N_BAT calls
+        let t0 = Instant::now();
+        for _ in 0..ITERS {
+            for b in 0..N_BAT {
+                let _ = invoke_scale(&sess,
+                    &x[b * N_PER..(b+1) * N_PER],
+                    a_h_arr[b]).expect("invoke");
+            }
+        }
+        let unbatched = t0.elapsed();
+
+        // Batched: ITERS × 1 call (but each call does N_BAT batches)
+        let t0 = Instant::now();
+        for _ in 0..ITERS {
+            let _ = invoke_scale_batched(&sess, N_PER as i32, &a_h_arr, &x).expect("invoke");
+        }
+        let batched = t0.elapsed();
+
+        let ratio = batched.as_secs_f64() / unbatched.as_secs_f64();
+        eprintln!("[hvx] T_BATCH_VS_UNBATCHED ({ITERS}×{N_BAT}×{N_PER} i16): \
+                   unbatched {unbatched:?}  batched {batched:?}  ratio {ratio:.3}× (<1.0 = batched faster)");
+        if ratio < 0.95 {
+            eprintln!("[hvx]   batched-faster gate: PASS (>5% improvement)");
+        } else {
+            eprintln!("[hvx]   batched-faster gate: WEAK ({ratio:.3}× — overhead not measurable at this size)");
+        }
+    }
+
     drop(sess);
     eprintln!("[hvx] session closed cleanly");
 
