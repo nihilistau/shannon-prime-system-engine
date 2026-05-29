@@ -58,14 +58,17 @@ type FnSessionControl = unsafe extern "C" fn(req: u32,
                                               data: *mut c_void,
                                               datalen: u32) -> c_int;
 
+// Sprint A uses remote_handle64 (multi-domain) per SDK S22U pattern —
+// matches the qaic-emitted "<iface>_skel_handle_invoke" symbol.  remote_handle
+// (single-domain, u32) is a separate ABI.
 type FnHandleOpen = unsafe extern "C" fn(name: *const c_char,
-                                          ph: *mut u32) -> c_int;
+                                          ph: *mut u64) -> c_int;
 
-type FnHandleInvoke = unsafe extern "C" fn(h: u32,
+type FnHandleInvoke = unsafe extern "C" fn(h: u64,
                                             scalars: u32,
                                             pra: *mut RemoteArg) -> c_int;
 
-type FnHandleClose = unsafe extern "C" fn(h: u32) -> c_int;
+type FnHandleClose = unsafe extern "C" fn(h: u64) -> c_int;
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -119,7 +122,7 @@ pub struct FastRpcSession {
     _lib:           Library,
     fn_invoke:      FnHandleInvoke,
     fn_close:       FnHandleClose,
-    handle:         u32,
+    handle:         u64,
 }
 
 impl FastRpcSession {
@@ -146,16 +149,16 @@ impl FastRpcSession {
                 .map_err(|_| SpErr::Symbol("remote_session_control"))?
         };
         let fn_open: Symbol<FnHandleOpen> = unsafe {
-            lib.get(b"remote_handle_open\0")
-                .map_err(|_| SpErr::Symbol("remote_handle_open"))?
+            lib.get(b"remote_handle64_open\0")
+                .map_err(|_| SpErr::Symbol("remote_handle64_open"))?
         };
         let fn_invoke: Symbol<FnHandleInvoke> = unsafe {
-            lib.get(b"remote_handle_invoke\0")
-                .map_err(|_| SpErr::Symbol("remote_handle_invoke"))?
+            lib.get(b"remote_handle64_invoke\0")
+                .map_err(|_| SpErr::Symbol("remote_handle64_invoke"))?
         };
         let fn_close: Symbol<FnHandleClose> = unsafe {
-            lib.get(b"remote_handle_close\0")
-                .map_err(|_| SpErr::Symbol("remote_handle_close"))?
+            lib.get(b"remote_handle64_close\0")
+                .map_err(|_| SpErr::Symbol("remote_handle64_close"))?
         };
 
         // Bind the resolved symbols to raw fn pointers we can store past
@@ -187,11 +190,11 @@ impl FastRpcSession {
             return Err(SpErr::UnsignedPdReject(rc));
         }
 
-        // 4. Open the skel handle.
+        // 4. Open the skel handle (remote_handle64 = u64).
         let uri_c = CString::new(skel_uri)
             .map_err(|_| SpErr::HandleOpen(-1))?;
-        let mut handle: u32 = 0;
-        let rc = unsafe { fn_open_raw(uri_c.as_ptr(), &mut handle as *mut u32) };
+        let mut handle: u64 = 0;
+        let rc = unsafe { fn_open_raw(uri_c.as_ptr(), &mut handle as *mut u64) };
         if rc != 0 {
             return Err(if rc == AEE_ERPC {
                 SpErr::SignatureMismatch(rc)

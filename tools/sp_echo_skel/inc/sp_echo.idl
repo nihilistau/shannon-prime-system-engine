@@ -1,0 +1,13 @@
+// sp_echo.idl — §3-HX Sprint A echo skel IDL (Path B, Unsigned PD).
+// Inherits remote_handle64 (multi-domain) per SDK S22U pattern; gets qaic
+// to emit "sp_echo_skel_handle_invoke" symbol + S22U_URI-style macro.
+
+#include "AEEStdDef.idl"
+#include "remote.idl"
+
+interface sp_echo : remote_handle64 {
+    // Byte-identity echo: copy min(in_buf.len, out_buf.len) bytes from
+    // in_buf into out_buf.  No HVX, no VTCM, no Halide — minimum viable
+    // FastRPC handshake.
+    long ping(in sequence<octet> in_buf, rout sequence<octet> out_buf);
+};

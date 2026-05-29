@@ -33,13 +33,12 @@ fn main() {
     use dsp_rpc::{make_scalars, FastRpcSession, RemoteArg, RemoteBuf, SpErr};
     use std::ffi::c_void;
 
-    // URI for the echo skel. qaic emits `<iface>_URI` in the generated header
-    // as `"file:///lib<name>_skel.so?<iface>_skel_invoke&_modver=1.0"` (see
-    // prior cohort `sp_hex.h:274`). We hardcode the equivalent so this smoke
-    // binary doesn't link the qaic-generated stub (which would require
-    // sp-daemon's full build chain). `&_dom=cdsp` selects the cDSP domain
-    // (remote.h:142).
-    let skel_uri = "file:///libshannonprime_echo_skel.so?echo_skel_invoke&_modver=1.0&_dom=cdsp";
+    // URI per qaic-generated sp_echo_URI macro (sp_echo.h line 1):
+    //   "file:///libsp_echo_skel.so?sp_echo_skel_handle_invoke&_modver=1.0"
+    // The `_handle_invoke` suffix comes from `interface sp_echo : remote_handle64`
+    // (multi-domain) — the canonical pattern per SDK S22U workspace.
+    // `&_dom=cdsp` selects cDSP domain (remote.h:142).
+    let skel_uri = "file:///libsp_echo_skel.so?sp_echo_skel_handle_invoke&_modver=1.0&_dom=cdsp";
 
     eprintln!("[sp-dsp-smoke] opening FastRpcSession (Unsigned PD admission, Path B)...");
     let session = match FastRpcSession::new(skel_uri) {
@@ -74,12 +73,29 @@ fn main() {
     ] {
         let mut src: Vec<u8> = (0..size).map(|i| ((i * 0x9E + 0x37) & 0xFF) as u8).collect();
         let mut dst: Vec<u8> = vec![0u8; size];
-        // Method 0 = echo.ping(in_buf, rout_buf).
-        // Scalars: method=0, n_in=1, n_out=1.
-        let scalars = make_scalars(0, 1, 1);
+        // Per qaic-emitted sp_echo_stub.c:297-319 marshalling pattern for
+        // `ping(in seq<octet>, rout seq<octet>)`:
+        //   - 3 remote_args total
+        //   - arg[0] = primIn buffer (8 B: [in_len:u32, out_len:u32]) — counted
+        //              as 1st input buffer
+        //   - arg[1] = in_buf data — 2nd input buffer
+        //   - arg[2] = out_buf data — 1st output buffer
+        //   - Scalars: REMOTE_SCALARS_MAKEX(0, method=2, n_in=2, n_out=1, 0, 0)
+        let mut prim_in: [u32; 2] = [size as u32, size as u32];
+        let scalars = make_scalars(2, 2, 1);
         let mut args = [
-            RemoteArg { buf: RemoteBuf { pv: src.as_mut_ptr() as *mut c_void, nlen: src.len() } },
-            RemoteArg { buf: RemoteBuf { pv: dst.as_mut_ptr() as *mut c_void, nlen: dst.len() } },
+            RemoteArg { buf: RemoteBuf {
+                pv: prim_in.as_mut_ptr() as *mut c_void,
+                nlen: 8,
+            }},
+            RemoteArg { buf: RemoteBuf {
+                pv: src.as_mut_ptr() as *mut c_void,
+                nlen: src.len(),
+            }},
+            RemoteArg { buf: RemoteBuf {
+                pv: dst.as_mut_ptr() as *mut c_void,
+                nlen: dst.len(),
+            }},
         ];
 
         match session.invoke(scalars, &mut args) {
@@ -98,6 +114,43 @@ fn main() {
 
     drop(session);  // exercises Drop / remote_handle_close
     eprintln!("[sp-dsp-smoke] session closed cleanly");
+
+    // ── T_RPC_LEAK_1: 1000-cycle create/invoke/drop ─────────────────────────
+    // Each iter: open session → 1 invoke (16 B) → drop. Verifies pool/handle
+    // cleanup is leak-free across many cycles. Bench wall ≈ N × ~ms per cycle.
+    eprintln!("[sp-dsp-smoke] T_RPC_LEAK_1: running 1000 create/invoke/drop cycles...");
+    let mut leak_fails = 0;
+    for iter in 0..1000 {
+        let s = match FastRpcSession::new(skel_uri) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("  leak cycle {iter} new: {e:?}"); leak_fails += 1; break; }
+        };
+        let mut src = [0xA5u8; 16];
+        let mut dst = [0u8; 16];
+        let mut prim_in: [u32; 2] = [16, 16];
+        let mut args = [
+            RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr() as *mut c_void, nlen: 8 }},
+            RemoteArg { buf: RemoteBuf { pv: src.as_mut_ptr() as *mut c_void, nlen: 16 }},
+            RemoteArg { buf: RemoteBuf { pv: dst.as_mut_ptr() as *mut c_void, nlen: 16 }},
+        ];
+        if let Err(e) = s.invoke(make_scalars(2, 2, 1), &mut args) {
+            eprintln!("  leak cycle {iter} invoke: {e:?}");
+            leak_fails += 1;
+            break;
+        }
+        if dst != src {
+            eprintln!("  leak cycle {iter}: bytes diverged");
+            leak_fails += 1;
+            break;
+        }
+        // s drops here
+    }
+    if leak_fails == 0 {
+        eprintln!("[sp-dsp-smoke] T_RPC_LEAK_1 (1000 cycles) PASS");
+    } else {
+        eprintln!("[sp-dsp-smoke] T_RPC_LEAK_1 FAIL: {leak_fails} cycles broke");
+        fails += 1;
+    }
 
     if fails == 0 {
         eprintln!("[sp-dsp-smoke] ALL GATES PASS");
