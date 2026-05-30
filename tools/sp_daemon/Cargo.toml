@@ -61,6 +61,15 @@ path = "src/bin/sp_memo_m4_canonical_replay_smoke.rs"
 name = "sp_chat_ledger_autowire_smoke"
 path = "src/bin/sp_chat_ledger_autowire_smoke.rs"
 
+# §4-NTT Sprint NTT.5c — forward.c activation smoke. Loads the Memory model,
+# creates a session with optional Hex compute backend, runs prefill with
+# SP_ENGINE_NTT_ATTN=1, validates SP_OK + dispatch-counter > 0 when
+# SP_ENGINE_NTT_ATTN_HEX=1 is also set. Android-only on Knack's S22U; host
+# stub prints "android-only".
+[[bin]]
+name = "sp_ntt_5c_forward_smoke"
+path = "src/bin/sp_ntt_5c_forward_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }

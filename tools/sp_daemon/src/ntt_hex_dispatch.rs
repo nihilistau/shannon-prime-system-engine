@@ -28,8 +28,36 @@
 use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::dsp_rpc::{make_scalars, FastRpcSession, RemoteArg, RemoteBuf};
+
+/// Sprint NTT.5c dispatch counters. Bumped per trampoline call from any
+/// thread. Read at smoke-harness end via `dispatch_counts()` to validate the
+/// T_NTT5C_HEX_BACKEND_ROUTES_WHEN_REGISTERED gate (both must be > 0 after a
+/// non-trivial prefill_chunk iteration with SP_ENGINE_NTT_ATTN=1 +
+/// SP_ENGINE_NTT_ATTN_HEX=1 on a HD ∈ {2..256}\{512} Memory model).
+///
+/// Process-static (one set of counters per process). The L1 ABI guarantees
+/// the trampolines are called only from threads that hold a valid Arc to the
+/// ComputeBackend (see lifetime contract above), so the relaxed ordering is
+/// fine — these counters are observability, not synchronization.
+static NTT5C_FORWARD_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
+static NTT5C_INVERSE_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Read the current dispatch counts (forward, inverse). Both are u64
+/// monotonic counters since process start.
+pub fn dispatch_counts() -> (u64, u64) {
+    (NTT5C_FORWARD_DISPATCH_COUNT.load(Ordering::Relaxed),
+     NTT5C_INVERSE_DISPATCH_COUNT.load(Ordering::Relaxed))
+}
+
+/// Reset the dispatch counts (e.g. between gate runs). Use sparingly — most
+/// callers should just read the delta over a window.
+pub fn reset_dispatch_counts() {
+    NTT5C_FORWARD_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+    NTT5C_INVERSE_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+}
 
 /// IDL method indices in the NTT.5b worktree (post-NTT.4 merge).
 /// Same as the values used by the existing NTT smoke binaries
@@ -140,6 +168,12 @@ pub unsafe extern "C" fn sp_compute_ntt_forward_via_fastrpc(
     if handle.is_null() || in_buf.is_null() || out_buf.is_null() || n <= 0 {
         return -1;
     }
+    /* NTT.5c: bump the forward-dispatch counter for
+     * T_NTT5C_HEX_BACKEND_ROUTES_WHEN_REGISTERED. Done BEFORE the FastRPC
+     * call so we count attempted dispatches even if the device call fails;
+     * the smoke harness's pass criterion is "counter > 0", i.e. the
+     * trampoline reached. */
+    NTT5C_FORWARD_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
     let backend: &ComputeBackend = &*(handle as *const ComputeBackend);
     let in_slice = std::slice::from_raw_parts(in_buf, n as usize);
     let out_slice = std::slice::from_raw_parts_mut(out_buf, n as usize);
@@ -173,6 +207,8 @@ pub unsafe extern "C" fn sp_compute_ntt_inverse_via_fastrpc(
     if handle.is_null() || in_buf.is_null() || out_buf.is_null() || n <= 0 {
         return -1;
     }
+    /* NTT.5c: bump the inverse-dispatch counter. */
+    NTT5C_INVERSE_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
     let backend: &ComputeBackend = &*(handle as *const ComputeBackend);
     let in_slice = std::slice::from_raw_parts(in_buf, n as usize);
     let out_slice = std::slice::from_raw_parts_mut(out_buf, n as usize);
