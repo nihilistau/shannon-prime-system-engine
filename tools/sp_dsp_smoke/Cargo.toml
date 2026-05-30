@@ -115,6 +115,17 @@ path = "src/sp_ntt_1_smoke.rs"
 name = "sp_ntt_2_smoke"
 path = "src/sp_ntt_2_smoke.rs"
 
+# §4-NTT Sprint NTT.3 -- dual-prime CRT dispatch smoke (method 17).
+# Drives ntt_hvx_vtcm_oracle (method 17, NTT.3 VTCM-aware HVX) under four
+# gates: T_NTT3_VTCM_AWARE_BIT_EXACT (vs m12 + m13 + math-core),
+# T_NTT3_DUAL_DISPATCH_SPEEDUP (Arc<FastRpcSession> concurrent invoke at
+# N=128/256/512), T_NTT3_VTCM_NO_RECOMPUTE (m17 single-invoke < m13 by
+# >=10% at N=512), T_NTT3_NO_REGRESSION (m12/m13/m14/m15/m16 still ok).
+# See PLAN-NTT-3.md + CLOSURE-NTT-3.md.
+[[bin]]
+name = "sp_ntt_3_dual_smoke"
+path = "src/sp_ntt_3_dual_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
