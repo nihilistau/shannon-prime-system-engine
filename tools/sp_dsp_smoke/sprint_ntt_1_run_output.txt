@@ -1,0 +1,74 @@
+[NTT.1] sp_ntt_1_smoke -- HVX butterfly gates
+[NTT.1]   T_NTT1_HVX_BIT_EXACT   (method 13 == method 12 == math-core)
+[NTT.1]   T_NTT1_WALL_CLOCK_WIN  (method 13 wall < method 12 wall at N=512)
+[NTT.1]   T_NTT1_NO_REGRESSION   (method 12 still 600/600 PASS vs math-core)
+
+[NTT.1] opening FastRpcSession (Path B Unsigned PD)...
+[NTT.1] session open
+
+[NTT.1] === Correctness sweep (T_NTT1_HVX_BIT_EXACT + T_NTT1_NO_REGRESSION) ===
+
+[NTT.1] -- combination q_idx=0  N=128 --
+[NTT.1]   m12 (scalar): diverged=0/100
+[NTT.1]   m13 (HVX):    diverged=0/100  max_lane_diff=0
+
+[NTT.1] -- combination q_idx=1  N=128 --
+[NTT.1]   m12 (scalar): diverged=0/100
+[NTT.1]   m13 (HVX):    diverged=0/100  max_lane_diff=0
+
+[NTT.1] -- combination q_idx=0  N=256 --
+[NTT.1]   m12 (scalar): diverged=0/100
+[NTT.1]   m13 (HVX):    diverged=0/100  max_lane_diff=0
+
+[NTT.1] -- combination q_idx=1  N=256 --
+[NTT.1]   m12 (scalar): diverged=0/100
+[NTT.1]   m13 (HVX):    diverged=0/100  max_lane_diff=0
+
+[NTT.1] -- combination q_idx=0  N=512 --
+[NTT.1]   m12 (scalar): diverged=0/100
+[NTT.1]   m13 (HVX):    diverged=0/100  max_lane_diff=0
+
+[NTT.1] -- combination q_idx=1  N=512 --
+[NTT.1]   m12 (scalar): diverged=0/100
+[NTT.1]   m13 (HVX):    diverged=0/100  max_lane_diff=0
+
+[NTT.1] === Wall-clock sweep (T_NTT1_WALL_CLOCK_WIN) ===
+
+[NTT.1] wall-clock matrix (us total over 100 iters):
+[NTT.1]     N=128                N=256                N=512
+[NTT.1]   q_idx=0 m12-scalar         33055 us     34834 us     45721 us
+[NTT.1]   q_idx=0 m13-HVX            28417 us     32926 us     43235 us
+[NTT.1]   q_idx=1 m12-scalar         30458 us     34639 us     48014 us
+[NTT.1]   q_idx=1 m13-HVX            26720 us     31904 us     42056 us
+
+[NTT.1] HVX-vs-scalar ratio (m13 / m12; <1.0 = HVX wins):
+[NTT.1]   q_idx=0 N=128: m13/m12 = 0.860  (scalar 330.6 us / iter, HVX 284.2 us / iter)
+[NTT.1]   q_idx=0 N=256: m13/m12 = 0.945  (scalar 348.3 us / iter, HVX 329.3 us / iter)
+[NTT.1]   q_idx=0 N=512: m13/m12 = 0.946  (scalar 457.2 us / iter, HVX 432.4 us / iter)
+[NTT.1]   q_idx=1 N=128: m13/m12 = 0.877  (scalar 304.6 us / iter, HVX 267.2 us / iter)
+[NTT.1]   q_idx=1 N=256: m13/m12 = 0.921  (scalar 346.4 us / iter, HVX 319.0 us / iter)
+[NTT.1]   q_idx=1 N=512: m13/m12 = 0.876  (scalar 480.1 us / iter, HVX 420.6 us / iter)
+
+[NTT.1] === T_NTT1_HVX_BIT_EXACT aggregate ===
+[NTT.1]   hvx_combinations_tested  = 6
+[NTT.1]   seeds_per_combination    = 100
+[NTT.1]   hvx_total_runs           = 600
+[NTT.1]   hvx_divergence_count     = 0
+[NTT.1]   hvx_max_diff_per_prime   = {q_1: 0, q_2: 0}
+[NTT.1]   hvx_max_diff_per_N       = {128: 0, 256: 0, 512: 0}
+[NTT.1]   hvx_first_divergence     = (none)
+
+[NTT.1] === T_NTT1_NO_REGRESSION aggregate ===
+[NTT.1]   scalar_combinations_tested = 6
+[NTT.1]   scalar_total_runs          = 600
+[NTT.1]   scalar_divergence_count    = 0
+[NTT.1]   scalar_first_divergence    = (none)
+
+[NTT.1]   correctness_wall_time    = 0.64 s
+[NTT.1] session closed cleanly
+
+[NTT.1] ======= GATE SUMMARY =======
+[NTT.1]   T_NTT1_HVX_BIT_EXACT  : PASS
+[NTT.1]   T_NTT1_NO_REGRESSION  : PASS
+[NTT.1]   T_NTT1_WALL_CLOCK_WIN : PASS  (q0_win=true, q1_win=true at N=512)
+[NTT.1] all 3 substantive gates PASS

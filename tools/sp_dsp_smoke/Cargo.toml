@@ -96,6 +96,15 @@ path = "src/sp_matmul_q_dual_smoke.rs"
 name = "sp_ntt_0_smoke"
 path = "src/sp_ntt_0_smoke.rs"
 
+# §4-NTT Sprint NTT.1 — HVX butterfly smoke.  Drives both ntt_oracle
+# (method 12, NTT.0 scalar) and ntt_hvx_oracle (method 13, NTT.1 HVX) on
+# the same 600-run sweep; element-wise compares each to math-core
+# ntt_forward and to each other; wall-clock benchmark at 3 N × 2 primes.
+# See PLAN-NTT-1.md + CLOSURE-NTT-1.md.
+[[bin]]
+name = "sp_ntt_1_smoke"
+path = "src/sp_ntt_1_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
