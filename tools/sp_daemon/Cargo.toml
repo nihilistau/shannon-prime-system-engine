@@ -25,6 +25,12 @@ path = "src/bin/spec_validate.rs"
 name = "sp_memo_m1_smoke"
 path = "src/bin/sp_memo_m1_smoke.rs"
 
+# §4-MeMo Sprint M.2 — zero-copy dialogue loop (Grounding -> Entity ID ->
+# Synthesis) + Spinor receipt envelope smoke
+[[bin]]
+name = "sp_memo_m2_dialogue_smoke"
+path = "src/bin/sp_memo_m2_dialogue_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
