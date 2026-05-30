@@ -320,4 +320,26 @@ interface sp_compute : remote_handle64 {
     // (prime, N) table is not initialized (call ntt_twiddle_init first).
     long ntt_twiddle_dump(in long N, in long q_idx, in long table_id,
                           rout sequence<octet> dst_buf);
+
+    // ────────────────────────────────────────────────────────────────────
+    // §4-NTT Sprint NTT.3 -- dual-prime CRT dispatch (method 17).
+    //
+    // ntt_hvx_vtcm_oracle -- VTCM-aware HVX forward NTT. Same primIn shape
+    // + same parameter contract + same q_idx/N admissibility as method 13
+    // (`ntt_hvx_oracle`), but consumes NTT.2's VTCM-resident twiddle
+    // tables via the skel-internal `sp_compute_ntt_twiddle_view` accessor
+    // instead of recomputing `find_psi` + `psi_pow` + `w_fwd` + per-stage
+    // stride-1 compaction on every call.
+    //
+    // Caller contract: invoke `ntt_twiddle_init` (method 14) at least once
+    // before this method, otherwise this returns -1. The init is idempotent
+    // so a daemon-startup precompute is sufficient.
+    //
+    // This is the production forward-NTT path for the dual-prime CRT
+    // dispatch substrate (NTT.3 + NTT.5). Method 13 (NTT.1) stays in place
+    // as the SASS-audited per-call-precompute baseline for the
+    // T_NTT3_VTCM_NO_RECOMPUTE gate.
+    long ntt_hvx_vtcm_oracle(in long q_idx, in long N,
+                             in  sequence<octet> data_in,
+                             rout sequence<octet> data_out);
 };

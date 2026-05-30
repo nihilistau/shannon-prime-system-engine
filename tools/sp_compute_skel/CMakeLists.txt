@@ -33,6 +33,9 @@ else()
 
         # §4-NTT Sprint NTT.2 — twiddle VTCM staging
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_twiddle
+
+        # §4-NTT Sprint NTT.3 -- dual-prime CRT dispatch (VTCM-aware HVX, method 17)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_hvx_vtcm_imp
     )
     add_library(sp_compute_skel SHARED ${srcs})
     include_directories(${common_incs})
