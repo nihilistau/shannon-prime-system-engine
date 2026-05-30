@@ -18,7 +18,7 @@ param(
     [int]$Queries = 100,
     [int]$DetCycles = 100,
     [string]$ReportPath = "/data/local/tmp/m5_report.json",
-    [string]$BinaryPath = "..\..\..\target\aarch64-linux-android\release\sp_memo_m5_routing_smoke",
+    [string]$BinaryPath = "..\target\aarch64-linux-android\release\sp_memo_m5_routing_smoke",
     [switch]$PushModel
 )
 

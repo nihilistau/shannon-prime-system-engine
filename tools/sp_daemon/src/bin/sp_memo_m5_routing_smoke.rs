@@ -183,19 +183,47 @@ impl J {
 // ─── Query generation: deterministic, distinct, structurally varied ─────────
 
 /// Generate `n` distinct grounding queries. Each is a Vec<i32> drawn from
-/// integer arithmetic with the query index as seed material; no system clock
-/// or RNG. Querys are length 16 (typical short prompt; KSTE Tier-0 stable at
-/// this size).
+/// SplitMix64 reseeded per-query with the query index; deterministic, no
+/// system clock or RNG. Queries are length 16 (typical short prompt; KSTE
+/// Tier-0 stable at this size).
+///
+/// Design note (load-bearing — caught Stage 3 v1):
+/// `sp_kste_encode` (kste_encode.c label_of):
+///   1. Truncates input to first 24 values.
+///   2. Clamps each value to int16 range via `quantize()`.
+///   3. Sorts the clamped slice and samples 6 order statistics.
+/// If raw input values exceed int16 (±32767), the clamp pins many values
+/// to the extrema -> distinct queries collapse to the same Tier-0 root ->
+/// RoutingMasks collide.
+///
+/// Two prior schemes failed T_MEMO_M5_ROUTING_VARIES:
+///   v0 — `i*1_000_003 + j*31 + 7` (pure additive shift): all clamped to
+///         32767 since 1M*i > i16 max -> 20% distinct fraction observed.
+///   v1 — SplitMix64 high-32-bit dump: still mostly out-of-i16-range ->
+///         ~35% distinct fraction observed.
+///
+/// v2 (this scheme) draws SplitMix64 then folds to int16 range so the
+/// quantize step is the IDENTITY, preserving the entropy of the raw
+/// SplitMix64 output through encoding.
 fn gen_queries(n: usize) -> Vec<Vec<i32>> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        // Mix the query index across all 16 components so different i values
-        // give different KSTE Tier-0 roots.
+        // Seed per-query SplitMix64 with a non-trivial transform of the
+        // query index so neighbouring i's don't share low-bit state.
+        let mut state: u64 = (i as u64).wrapping_mul(0xA0761D6478BD642F) ^ 0x9E3779B97F4A7C15;
         let mut q = Vec::with_capacity(16);
-        for j in 0..16usize {
-            // arithmetic mix; values stay well under i32::MAX with this scheme
-            let v = ((i as i64) * 1_000_003 + (j as i64) * 31 + 7) as i32;
-            q.push(v);
+        for _ in 0..16usize {
+            // SplitMix64 step inline to keep this binary self-contained.
+            state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            // Map to i16 range; `quantize()` in kste_encode.c will be a
+            // no-op for these values, preserving SplitMix64 entropy through
+            // the encoding step.
+            let v_i16: i16 = ((z as u64) % 65536u64) as i16; // wrap into i16 range
+            q.push(v_i16 as i32);
         }
         out.push(q);
     }
