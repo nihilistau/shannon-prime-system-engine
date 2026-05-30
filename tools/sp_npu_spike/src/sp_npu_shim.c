@@ -210,8 +210,12 @@ int sp_qnn_run_add_smoke(const int8_t* a, const int8_t* b, int8_t* c,
      */
     uint32_t dims[1] = { n };
 
+    /* Per QNN error 7004 ("tensor buffer parameters not supported"): at tensor
+     * CREATION time, clientBuf must be NULL. Buffers are bound only at execute
+     * time. The tensor object is "registered" with the graph (assigned an id +
+     * shape + dtype + quant) at create; the data pointer comes later. */
     Qnn_Tensor_t t_a = QNN_TENSOR_INIT;
-    t_a.v1.id              = 1;
+    t_a.v1.id              = 0;   /* QNN auto-assigns; client provides 0 */
     t_a.v1.name            = "in_a";
     t_a.v1.type            = QNN_TENSOR_TYPE_APP_WRITE;
     t_a.v1.dataFormat      = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
@@ -223,16 +227,18 @@ int sp_qnn_run_add_smoke(const int8_t* a, const int8_t* b, int8_t* c,
     t_a.v1.rank            = 1;
     t_a.v1.dimensions      = dims;
     t_a.v1.memType         = QNN_TENSORMEMTYPE_RAW;
-    t_a.v1.clientBuf.data     = (void*)a;
-    t_a.v1.clientBuf.dataSize = n * sizeof(int8_t);
+    t_a.v1.clientBuf.data     = NULL;
+    t_a.v1.clientBuf.dataSize = 0;
     e = g.iface->QNN_INTERFACE_VER_NAME.tensorCreateGraphTensor(g.graph, &t_a);
     if (e != QNN_SUCCESS) {
         set_err("tensorCreateGraphTensor(in_a) failed: rc=%lld", (long long)e);
         return -4;
     }
+    /* QNN populates t_a.v1.id with the auto-assigned id; capture it. */
+    fprintf(stderr, "[sp-npu-spike] tensor in_a registered id=%u\n", t_a.v1.id);
 
     Qnn_Tensor_t t_b = QNN_TENSOR_INIT;
-    t_b.v1.id              = 2;
+    t_b.v1.id              = 0;
     t_b.v1.name            = "in_b";
     t_b.v1.type            = QNN_TENSOR_TYPE_APP_WRITE;
     t_b.v1.dataFormat      = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
@@ -244,16 +250,17 @@ int sp_qnn_run_add_smoke(const int8_t* a, const int8_t* b, int8_t* c,
     t_b.v1.rank            = 1;
     t_b.v1.dimensions      = dims;
     t_b.v1.memType         = QNN_TENSORMEMTYPE_RAW;
-    t_b.v1.clientBuf.data     = (void*)b;
-    t_b.v1.clientBuf.dataSize = n * sizeof(int8_t);
+    t_b.v1.clientBuf.data     = NULL;
+    t_b.v1.clientBuf.dataSize = 0;
     e = g.iface->QNN_INTERFACE_VER_NAME.tensorCreateGraphTensor(g.graph, &t_b);
     if (e != QNN_SUCCESS) {
         set_err("tensorCreateGraphTensor(in_b) failed: rc=%lld", (long long)e);
         return -5;
     }
+    fprintf(stderr, "[sp-npu-spike] tensor in_b registered id=%u\n", t_b.v1.id);
 
     Qnn_Tensor_t t_c = QNN_TENSOR_INIT;
-    t_c.v1.id              = 3;
+    t_c.v1.id              = 0;
     t_c.v1.name            = "out_c";
     t_c.v1.type            = QNN_TENSOR_TYPE_APP_READ;
     t_c.v1.dataFormat      = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
@@ -265,15 +272,18 @@ int sp_qnn_run_add_smoke(const int8_t* a, const int8_t* b, int8_t* c,
     t_c.v1.rank            = 1;
     t_c.v1.dimensions      = dims;
     t_c.v1.memType         = QNN_TENSORMEMTYPE_RAW;
-    t_c.v1.clientBuf.data     = (void*)c;
-    t_c.v1.clientBuf.dataSize = n * sizeof(int8_t);
+    t_c.v1.clientBuf.data     = NULL;
+    t_c.v1.clientBuf.dataSize = 0;
     e = g.iface->QNN_INTERFACE_VER_NAME.tensorCreateGraphTensor(g.graph, &t_c);
     if (e != QNN_SUCCESS) {
         set_err("tensorCreateGraphTensor(out_c) failed: rc=%lld", (long long)e);
         return -6;
     }
+    fprintf(stderr, "[sp-npu-spike] tensor out_c registered id=%u\n", t_c.v1.id);
 
-    /* Step 6: add the ElementWiseAdd op. */
+    /* Step 6: add the ElementWiseAdd op. The registered tensors (without
+     * buffers) are passed in op config so the runtime knows the op connects
+     * to the registered ids by name. */
     Qnn_Tensor_t inputs[2]  = { t_a, t_b };
     Qnn_Tensor_t outputs[1] = { t_c };
     Qnn_OpConfig_t op = QNN_OPCONFIG_INIT;
@@ -301,11 +311,20 @@ int sp_qnn_run_add_smoke(const int8_t* a, const int8_t* b, int8_t* c,
     fprintf(stderr, "[sp-npu-spike] graphFinalize OK\n");
 
     /* Step 8: execute the graph with the actual buffers.
-     * Note: per QNN convention, the executes' input/output Tensors are
-     * COPIES OF the registered tensors with the SAME id; the QNN runtime
-     * uses the id to bind the buffer. */
-    Qnn_Tensor_t exec_in[2]  = { t_a, t_b };
-    Qnn_Tensor_t exec_out[1] = { t_c };
+     * Per QNN convention the execute tensors are SHALLOW COPIES of the
+     * registered tensor descriptors (same id, same name, same dtype) but
+     * with clientBuf populated for the actual run. The runtime binds by id. */
+    Qnn_Tensor_t exec_a = t_a;
+    exec_a.v1.clientBuf.data     = (void*)a;
+    exec_a.v1.clientBuf.dataSize = n * sizeof(int8_t);
+    Qnn_Tensor_t exec_b = t_b;
+    exec_b.v1.clientBuf.data     = (void*)b;
+    exec_b.v1.clientBuf.dataSize = n * sizeof(int8_t);
+    Qnn_Tensor_t exec_c = t_c;
+    exec_c.v1.clientBuf.data     = (void*)c;
+    exec_c.v1.clientBuf.dataSize = n * sizeof(int8_t);
+    Qnn_Tensor_t exec_in[2]  = { exec_a, exec_b };
+    Qnn_Tensor_t exec_out[1] = { exec_c };
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     e = g.iface->QNN_INTERFACE_VER_NAME.graphExecute(g.graph,

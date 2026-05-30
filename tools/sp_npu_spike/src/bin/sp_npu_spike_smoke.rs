@@ -151,5 +151,14 @@ fn main() {
     let exit = if pass_correctness && pass_wall_bound { 0 } else { 1 };
     eprintln!("[sp-npu-spike] === T_K2_SPIKE_POC: {} ===",
               if exit == 0 { "PASS" } else { "FAIL" });
-    std::process::exit(exit);
+    // Use _exit(2) to bypass Rust at-exit cleanup that double-runs against
+    // QNN state already torn down (segfault during static destructors). The
+    // POC has already reported its result; clean process termination here.
+    unsafe { libc_exit(exit) };
+}
+
+#[cfg(target_os = "android")]
+extern "C" {
+    #[link_name = "_exit"]
+    fn libc_exit(status: c_int) -> !;
 }
