@@ -26,6 +26,10 @@ mod sieve_ffi;
 mod spec;
 mod state;
 mod tokenizer;
+// Chat-integration: daemon-callable MeMo dialogue runner — host + android
+// safe; drives M.2's 3-turn Grounding → Entity ID → Synthesis protocol
+// through the existing crate::session::SpSession wrapper.
+mod dialogue_runner;
 
 use clap::{Parser, Subcommand};
 
@@ -52,6 +56,11 @@ struct Cli {
     draft_model: String,
     #[arg(long, default_value = "", hide = true)]
     draft_tokenizer: String,
+    // Chat-integration: Memory model for /v1/dialogue (empty = disabled).
+    #[arg(long, default_value = "", hide = true)]
+    memo_model: String,
+    #[arg(long, default_value = "", hide = true)]
+    memo_tokenizer: String,
     #[arg(long, default_value = "0", hide = true)]
     quic_port: u16,
     #[arg(long, default_value = "8080", hide = true)]
@@ -78,6 +87,14 @@ enum Cmd {
         /// Path to draft .sp-tokenizer (optional, required if --draft-model is set).
         #[arg(long, env = "SP_DRAFT_TOKENIZER_PATH", default_value = "")]
         draft_tokenizer: String,
+        /// Chat-integration: path to Memory .sp-model for the /v1/dialogue MeMo
+        /// endpoint (optional; if unset the endpoint returns HTTP 501).
+        #[arg(long, env = "SP_MEMO_MODEL_PATH", default_value = "")]
+        memo_model: String,
+        /// Chat-integration: path to Memory .sp-tokenizer (required if
+        /// --memo-model is set).
+        #[arg(long, env = "SP_MEMO_TOKENIZER_PATH", default_value = "")]
+        memo_tokenizer: String,
         /// UDP port for the QUIC DHT mesh coordinator (set SP_QUIC_PORT or 0 to disable).
         #[arg(long, env = "SP_QUIC_PORT", default_value = "0")]
         quic_port: u16,
@@ -105,14 +122,16 @@ async fn main() {
         daemon::run_inner(
             &cli.model, &cli.tokenizer,
             &cli.draft_model, &cli.draft_tokenizer,
+            // Chat-integration: Memory model wiring.
+            &cli.memo_model, &cli.memo_tokenizer,
             cli.quic_port, cli.port, &cli.peer, &cli.peers,
         ).await;
         return;
     }
 
     match cli.command {
-        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, quic_port, port, peer, peers }) =>
-            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, quic_port, port, &peer, &peers),
+        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, memo_model, memo_tokenizer, quic_port, port, peer, peers }) =>
+            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, &memo_model, &memo_tokenizer, quic_port, port, &peer, &peers),
         Some(Cmd::Stop) => daemon::cmd_stop(),
         Some(Cmd::Reload) => daemon::cmd_reload(),
         None => {

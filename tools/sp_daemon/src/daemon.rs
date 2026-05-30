@@ -31,7 +31,7 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, memo_model: &str, memo_tokenizer: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     let exe = std::env::current_exe().expect("current_exe");
     let quic_port_s = quic_port.to_string();
     let http_port_s = http_port.to_string();
@@ -42,6 +42,9 @@ pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenize
         "--tokenizer",       tokenizer,
         "--draft-model",     draft_model,
         "--draft-tokenizer", draft_tokenizer,
+        // Chat-integration: Memory model for /v1/dialogue (empty = disabled).
+        "--memo-model",      memo_model,
+        "--memo-tokenizer",  memo_tokenizer,
         "--quic-port",       &quic_port_s,
         "--port",            &http_port_s,
         "--peer",            peer,
@@ -94,7 +97,7 @@ pub fn cmd_reload() {
 /// mining (ledger) run on both (the C ABI links on android now). The cDSP DSP
 /// model + echo session load in a `cfg(android)` block; the QUIC garner mesh
 /// stays host-only (NTT-CRT cluster, out of scope — android serves empty peers).
-pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, memo_model_path: &str, memo_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -142,6 +145,30 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     } else {
         info!("no draft model — single-model mode");
         (None, None)
+    };
+
+    // ── Chat-integration: Memory model for /v1/dialogue — optional ────────
+    let (memo_model, memo_session, memo_tokenizer, memo_vocab_size) = if !memo_model_path.is_empty() {
+        let mm = crate::session::SpModel::load(memo_model_path, memo_tok_path)
+            .expect("memo sp_model_load failed — check SP_MEMO_MODEL_PATH / SP_MEMO_TOKENIZER_PATH");
+        let memo_arch = mm.arch_info().expect("memo sp_model_arch failed");
+        info!("memo arch: vocab={} n_layers={} hidden={}",
+            memo_arch.vocab_size, memo_arch.n_layers, memo_arch.hidden_dim);
+        let m_cancel = Arc::new(AtomicI32::new(0));
+        let ms = crate::session::SpSession::create(&mm, m_cancel)
+            .expect("memo sp_session_create failed");
+        let mt = crate::tokenizer::SptbTokenizer::build(&mm, memo_arch.arch_id)
+            .expect("memo SptbTokenizer::build failed — check Memory .sp-tokenizer blob");
+        info!("memo tokenizer built: arch_id={} eos_ids={:?}", memo_arch.arch_id, mt.eos_ids);
+        (
+            Some(mm),
+            Some(Mutex::new(ms)),
+            Some(mt), // SptbTokenizer::build already returns Arc<Self>
+            memo_arch.vocab_size as usize,
+        )
+    } else {
+        info!("no memo model — /v1/dialogue endpoint will return HTTP 501");
+        (None, None, None, 0usize)
     };
 
     let (events_tx, _) =
@@ -224,6 +251,11 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         receipt_store:    receipt_store.clone(),
         node_signing_key,
         peer_map: Arc::new(DashMap::new()),
+        // Chat-integration: Memory model wiring (None when --memo-model unset).
+        memo_session,
+        memo_tokenizer,
+        memo_model,
+        memo_vocab_size,
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]

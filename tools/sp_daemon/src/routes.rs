@@ -574,3 +574,207 @@ pub async fn v1_dsp_model_info(State(state): State<Arc<AppState>>) -> Response {
     }))
     .into_response()
 }
+
+// ── Chat-integration: POST /v1/dialogue ─────────────────────────────────
+//
+// Single-shot JSON endpoint that drives the M.2 MeMo (Grounding → Entity ID
+// → Synthesis) dialogue. Returns the final answer + 3 base64-encoded
+// 64-byte SpinorReceipts (one per turn) per `reference-spinor-receipt-layout`.
+//
+// Returns HTTP 501 if Memory model isn't loaded (--memo-model not passed
+// at daemon startup, or model load failed).
+//
+// This is the Option B parallel endpoint chosen in PLAN-CHAT-INTEGRATION.md;
+// the existing /v1/chat is untouched and continues to serve single-model
+// SSE streaming chat against the Executive model.
+
+const DIALOGUE_MAX_PROMPT_TOKENS: usize = 64;
+const DIALOGUE_MAX_TURN_TOKENS: usize = 8;
+
+#[derive(Deserialize)]
+pub struct DialogueRequest {
+    pub prompt: String,
+}
+
+#[derive(Serialize)]
+struct DialogueResponse {
+    response: String,
+    receipts: Vec<String>, // base64-encoded 64-byte SpinorReceipts
+    wall_ms: u64,
+    turn_us: [u64; 3],
+}
+
+/// STANDARD base64 encoder (RFC 4648). Hand-rolled to avoid adding a
+/// dependency for ~6 lines of code; verified against the standard
+/// alphabet `ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/`
+/// with `=` padding. 64 input bytes → 88 output chars (ceil(64/3)*4 = 88).
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((input.len() + 2) / 3) * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHABET[(n & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+pub async fn v1_dialogue(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DialogueRequest>,
+) -> Response {
+    // 501 if Memory model isn't loaded.
+    if state.memo_model.is_none() || state.memo_session.is_none() || state.memo_tokenizer.is_none() {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "memo_model_not_loaded",
+                "hint": "start sp-daemon with --memo-model / --memo-tokenizer or SP_MEMO_MODEL_PATH / SP_MEMO_TOKENIZER_PATH",
+            })),
+        )
+            .into_response();
+    }
+
+    if req.prompt.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "prompt required"})),
+        )
+            .into_response();
+    }
+
+    // Clone Executive base session (mirrors /v1/chat lines 150-154).
+    let exec_cancel = Arc::new(AtomicI32::new(0));
+    let exec_child = {
+        let guard = state.session.lock().unwrap();
+        guard.clone_session(exec_cancel.clone())
+    };
+    let mut exec_child = match exec_child {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("exec clone: {e}")})))
+                .into_response();
+        }
+    };
+
+    // Clone Memory base session.
+    let memo_cancel = Arc::new(AtomicI32::new(0));
+    let memo_child = {
+        let guard = state.memo_session.as_ref().expect("checked above").lock().unwrap();
+        guard.clone_session(memo_cancel.clone())
+    };
+    let mut memo_child = match memo_child {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("memo clone: {e}")})))
+                .into_response();
+        }
+    };
+
+    let exec_tokenizer = state.tokenizer.clone();
+    let exec_vocab = state.vocab_size;
+    let memo_vocab = state.memo_vocab_size;
+    let prompt = req.prompt;
+
+    // Signal the mining loop to back off for the duration (mirrors /v1/chat:176).
+    state.inference_active.store(true, std::sync::atomic::Ordering::Relaxed);
+    struct InferenceGuard(Arc<AtomicBool>);
+    impl Drop for InferenceGuard {
+        fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::Relaxed); }
+    }
+    let _guard = InferenceGuard(state.inference_active.clone());
+
+    // Drive the dialogue on a spawn_blocking thread (L1 forward is sync).
+    let result = tokio::task::spawn_blocking(move || {
+        let _g = _guard;
+        let caps = sp_daemon::dialogue::DialogueCaps {
+            max_prompt_tokens: DIALOGUE_MAX_PROMPT_TOKENS,
+            max_query_tokens:  DIALOGUE_MAX_TURN_TOKENS,
+            max_response_tokens: DIALOGUE_MAX_TURN_TOKENS,
+            max_answer_tokens: DIALOGUE_MAX_TURN_TOKENS,
+        };
+        let mut pool = sp_daemon::dialogue::DialoguePool::new(exec_vocab, memo_vocab, &caps);
+        crate::dialogue_runner::run_dialogue(
+            &mut exec_child,
+            &mut memo_child,
+            exec_tokenizer.as_ref(),
+            &mut pool,
+            &prompt,
+            &caps,
+        )
+    }).await;
+
+    match result {
+        Ok(Ok(outcome)) => {
+            let receipts_b64: Vec<String> = outcome
+                .receipts
+                .iter()
+                .map(|r| base64_encode(&r.as_bytes()))
+                .collect();
+            let body = DialogueResponse {
+                response: outcome.final_answer,
+                receipts: receipts_b64,
+                wall_ms: outcome.total_wall_us / 1000,
+                turn_us: outcome.turn_us,
+            };
+            (StatusCode::OK, Json(serde_json::to_value(&body).unwrap_or(serde_json::json!({})))).into_response()
+        }
+        Ok(Err(e)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR,
+             Json(serde_json::json!({"error": format!("run_dialogue: {e}")})))
+            .into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR,
+             Json(serde_json::json!({"error": format!("spawn_blocking: {e}")})))
+            .into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod chat_integration_tests {
+    use super::*;
+
+    #[test]
+    fn base64_encode_known_vectors() {
+        // RFC 4648 test vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_encode_64_bytes_to_88_chars() {
+        let input = [0xA5u8; 64];
+        let out = base64_encode(&input);
+        assert_eq!(out.len(), 88);
+        // First char of all-0xA5 input: 0xA5=10100101 → first 6 bits = 101001 = 41 = 'p'
+        assert!(out.starts_with('p'));
+    }
+}
