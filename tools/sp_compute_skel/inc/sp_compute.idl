@@ -342,4 +342,32 @@ interface sp_compute : remote_handle64 {
     long ntt_hvx_vtcm_oracle(in long q_idx, in long N,
                              in  sequence<octet> data_in,
                              rout sequence<octet> data_out);
+
+    // §4-NTT Sprint NTT.4 — INTT + Garner (method 18 — renumbered from 17
+    // at merge time; NTT.3 took 17 first).
+    //
+    // intt_hvx_oracle — HVX-vectorized inverse NTT mod a frozen Proth
+    // prime. Mirrors math-core's `inverse_one`
+    // (lib/.../core/ntt_crt/ntt_crt.c:281-294):
+    //   1. out[j] = in[j] % q
+    //   2. bit-reversal permutation
+    //   3. logN stages of radix-2 DIT butterflies with w_inv
+    //      (HVX large-stage, scalar small-stage fallback — same dual
+    //      path as NTT.1)
+    //   4. post-pass: out[j] = (out[j] * ninv) * ipsi_pow[j] mod q
+    //
+    // Consumes VTCM-resident `ipsi_pow`, `w_inv`, `w_inv_stages` tables
+    // populated by `ntt_twiddle_init` (method 14). Returns -1 if the
+    // (q_idx, N) table is not present.
+    //
+    // primIn shape, parameter contract, q_idx mapping, and N admissibility
+    // are IDENTICAL to ntt_oracle (method 12) and ntt_hvx_oracle
+    // (method 13) — drop-in inverse path at the IDL surface.
+    //
+    // Correctness gate (T_NTT4_INTT_BIT_EXACT): output byte-exact vs
+    // math-core's `inverse_one` host-side reference. Same 600-run sweep
+    // (3 N × 2 primes × 100 seeds).
+    long intt_hvx_oracle(in long q_idx, in long N,
+                         in  sequence<octet> data_in,
+                         rout sequence<octet> data_out);
 };

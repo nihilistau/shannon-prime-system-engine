@@ -1,0 +1,41 @@
+[NTT.4] sp_ntt_4_intt_smoke -- INTT correctness gate
+[NTT.4]   T_NTT4_INTT_BIT_EXACT (method 17 == math-core inverse_one)
+[NTT.4]   round-trip = INTT(NTT(x)) ?= x mod q  for all (q, N, seed)
+
+[NTT.4] opening FastRpcSession (Path B Unsigned PD)...
+[NTT.4] session open
+[NTT.4] priming VTCM twiddles via ntt_twiddle_init(N=512)...
+[NTT.4] ntt_twiddle_init ok
+
+[NTT.4] -- combination q_idx=0  N=128 --
+[NTT.4]   host round-trip sanity ok (q_idx=0 N=128 seed_ix=0)
+[NTT.4]   combination max_diff = 0
+
+[NTT.4] -- combination q_idx=1  N=128 --
+[NTT.4]   host round-trip sanity ok (q_idx=1 N=128 seed_ix=0)
+[NTT.4]   combination max_diff = 0
+
+[NTT.4] -- combination q_idx=0  N=256 --
+[NTT.4]   host round-trip sanity ok (q_idx=0 N=256 seed_ix=0)
+[NTT.4]   combination max_diff = 0
+
+[NTT.4] -- combination q_idx=1  N=256 --
+[NTT.4]   host round-trip sanity ok (q_idx=1 N=256 seed_ix=0)
+[NTT.4]   combination max_diff = 0
+
+[NTT.4] -- combination q_idx=0  N=512 --
+[NTT.4]   host round-trip sanity ok (q_idx=0 N=512 seed_ix=0)
+[NTT.4]   combination max_diff = 0
+
+[NTT.4] -- combination q_idx=1  N=512 --
+[NTT.4]   host round-trip sanity ok (q_idx=1 N=512 seed_ix=0)
+[NTT.4]   combination max_diff = 0
+
+[NTT.4] ── T_NTT4_INTT_BIT_EXACT SUMMARY ──
+[NTT.4] combinations_tested  : 6
+[NTT.4] total_runs           : 600
+[NTT.4] divergence_count     : 0
+[NTT.4] max_diff_per_prime   : q1=0 q2=0
+[NTT.4] max_diff_per_n       : N=128:0 N=256:0 N=512:0
+[NTT.4] elapsed              : 0.63 s
+[NTT.4] T_NTT4_INTT_BIT_EXACT PASS  (600/600 runs byte-exact)

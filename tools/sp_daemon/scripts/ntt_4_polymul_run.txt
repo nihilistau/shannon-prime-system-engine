@@ -1,0 +1,58 @@
+[NTT.4] sp_ntt_4_polymul_smoke -- end-to-end polynomial multiplication
+[NTT.4]   T_NTT4_POLY_MUL_EXACT (round-trip == math-core ntt_inverse)
+
+[NTT.4] opening FastRpcSession (Path B Unsigned PD)...
+[NTT.4] session open
+[NTT.4] priming VTCM twiddles via ntt_twiddle_init(N=512)...
+[NTT.4] ntt_twiddle_init ok
+
+[NTT.4] -- N=128  seed_ix=0 (seed=0x5ee0123456789abc) --
+[NTT.4]   N=128 seed_ix=0 OK (byte-exact, N=128 coefficients)
+
+[NTT.4] -- N=128  seed_ix=1 (seed=0xdeeffacec001bead) --
+[NTT.4]   N=128 seed_ix=1 OK (byte-exact, N=128 coefficients)
+
+[NTT.4] -- N=128  seed_ix=2 (seed=0x123456789abcdef0) --
+[NTT.4]   N=128 seed_ix=2 OK (byte-exact, N=128 coefficients)
+
+[NTT.4] -- N=128  seed_ix=3 (seed=0xcafebabefeedf00d) --
+[NTT.4]   N=128 seed_ix=3 OK (byte-exact, N=128 coefficients)
+
+[NTT.4] -- N=256  seed_ix=0 (seed=0x5ee0123456789abc) --
+[NTT.4]   N=256 seed_ix=0 OK (byte-exact, N=256 coefficients)
+
+[NTT.4] -- N=256  seed_ix=1 (seed=0xdeeffacec001bead) --
+[NTT.4]   N=256 seed_ix=1 OK (byte-exact, N=256 coefficients)
+
+[NTT.4] -- N=256  seed_ix=2 (seed=0x123456789abcdef0) --
+[NTT.4]   N=256 seed_ix=2 OK (byte-exact, N=256 coefficients)
+
+[NTT.4] -- N=256  seed_ix=3 (seed=0xcafebabefeedf00d) --
+[NTT.4]   N=256 seed_ix=3 OK (byte-exact, N=256 coefficients)
+
+[NTT.4] -- N=512  seed_ix=0 (seed=0x5ee0123456789abc) --
+[NTT.4]   N=512 seed_ix=0 OK (byte-exact, N=512 coefficients)
+
+[NTT.4] -- N=512  seed_ix=1 (seed=0xdeeffacec001bead) --
+[NTT.4]   N=512 seed_ix=1 OK (byte-exact, N=512 coefficients)
+
+[NTT.4] -- N=512  seed_ix=2 (seed=0x123456789abcdef0) --
+[NTT.4]   N=512 seed_ix=2 OK (byte-exact, N=512 coefficients)
+
+[NTT.4] -- N=512  seed_ix=3 (seed=0xcafebabefeedf00d) --
+[NTT.4]   N=512 seed_ix=3 OK (byte-exact, N=512 coefficients)
+
+[NTT.4] -- T_NTT4_POLY_MUL_EXACT SUMMARY --
+[NTT.4] combinations_tested : 12
+[NTT.4] total_runs          : 12
+[NTT.4] divergence_count    : 0
+[NTT.4]   N=128: seeds_tested=4 divergences=0
+[NTT.4]   N=256: seeds_tested=4 divergences=0
+[NTT.4]   N=512: seeds_tested=4 divergences=0
+[NTT.4] elapsed             : 0.04 s
+
+[NTT.4] -- Wall-clock benchmark (informational, N=512, 100 iters) --
+[NTT.4] N=512 polymul round-trip: total=265.254688ms iters=100 per_iter=2652.5 us
+[NTT.4]   (per iter includes 4 forward NTTs + 2 pointwise + 2 INTTs + Garner)
+
+[NTT.4] T_NTT4_POLY_MUL_EXACT PASS  (12/12 runs byte-exact)
