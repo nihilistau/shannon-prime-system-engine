@@ -1,0 +1,63 @@
+[M.1] pre-load VmRSS=2716 KB; MemTotal=11473784 KB MemAvailable=5540192 KB
+
+[M.1] ═══ T_MEMO_DUAL_LOAD ═══
+[M.1]   Executive loaded: vocab=151936 n_layers=28 hidden=1024 load_wall=19 ms VmRSS=6516 KB
+[M.1]   Memory loaded: vocab=151936 n_layers=24 hidden=896 load_wall=20 ms VmRSS=10652 KB
+[M.1]   combined dual-load wall = 41 ms (gate threshold: <30000)
+[M.1]   T_MEMO_DUAL_LOAD PASS
+
+[M.1] ═══ T_MEMO_BUDGET_AUDIT ═══
+[M.1]   total VmRSS delta = 7936 KB (7.8 MB)
+[M.1]   MemAvailable post-load = 5539944 KB (5410.0 MB)
+[M.1]   Android OS reservation (pre-load) ≈ 5794 MB
+[M.1]   Gate threshold: headroom_mb ≥ 2048
+[M.1]   T_MEMO_BUDGET_AUDIT PASS
+
+[M.1] ═══ Solo baselines ═══
+[M.1]   exec solo prefill[1,2,3] = [9.357893, 9.666778, 11.927738] wall=1245442 μs
+[M.1]   memo solo prefill[1,2,3] = [13.456227, 13.751490, 15.366045] wall=1016466 μs
+[M.1]   sequential (exec+memo) wall = 2261908 μs
+
+[M.1] ═══ T_MEMO_DUAL_INVOKE ═══
+[M.1]   exec concurrent prefill wall = 1252806 μs
+[M.1]   memo concurrent prefill wall = 1256618 μs
+[M.1]   concurrent total wall        = 1259203 μs
+[M.1]   speedup = 1.796× (sequential / concurrent)
+[M.1]   exec concurrent == solo baseline: PASS
+[M.1]   memo concurrent == solo baseline: PASS
+[M.1]   T_MEMO_DUAL_INVOKE PASS
+
+[M.1] ═══ T_MEMO_NO_INTERFERENCE (1000 cycles) ═══
+[M.1] Per feedback-leak-gate-allocator-warmup: gate metric is
+[M.1] second-half VmRSS slope ≤ 256 KB, NOT total delta.
+[M.1]   iter 100: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106304 KB
+[M.1]   iter 200: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106304 KB
+[M.1]   iter 300: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106308 KB
+[M.1]   iter 400: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106308 KB
+[M.1]   iter 500: VmRSS = 1106308 KB (mid checkpoint)
+[M.1]   iter 500: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106308 KB
+[M.1]   iter 600: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106304 KB
+[M.1]   iter 700: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106304 KB
+[M.1]   iter 800: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106304 KB
+[M.1]   iter 900: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106316 KB
+[M.1]   iter 1000: drift_exec=0 drift_memo=0 errs=0 VmRSS=1106300 KB
+[M.1]   cycles_run                  = 1000
+[M.1]   executive_drift_count       = 0
+[M.1]   memory_drift_count          = 0
+[M.1]   fastrpc_errors              = 0
+[M.1]   vmrss_loop_start_kb         = 1101252
+[M.1]   vmrss_loop_mid_kb           = 1106308
+[M.1]   vmrss_loop_end_kb           = 1106300
+[M.1]   vmrss_first_half_delta_kb   = 5056
+[M.1]   vmrss_second_half_delta_kb  = -8  (load-bearing — gate ≤256 KB)
+[M.1]   vmrss_total_delta_kb        = 5048  (diagnostic; allocator warmup expected)
+[M.1]   wall = 1546.48 s (1546.48 ms/iter)
+[M.1]   T_MEMO_NO_INTERFERENCE PASS
+[M.1] report JSON written to /data/local/tmp/m1_full.json
+
+[M.1] ═══ SUMMARY ═══
+[M.1]   T_MEMO_DUAL_LOAD          PASS
+[M.1]   T_MEMO_BUDGET_AUDIT       PASS
+[M.1]   T_MEMO_DUAL_INVOKE        PASS
+[M.1]   T_MEMO_NO_INTERFERENCE    PASS
+[M.1] ALL GATES PASS
