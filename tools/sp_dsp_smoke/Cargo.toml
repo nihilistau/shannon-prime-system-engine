@@ -80,6 +80,14 @@ path = "src/sp_matmul_q_ref_test.rs"
 name = "sp_matmul_q_smoke"
 path = "src/sp_matmul_q_smoke.rs"
 
+# §3-HX Sprint K v0.beta Stage 2.5c Stage 3 — dual-dispatch + leak-free
+# harness.  Measures parallelism at TWO shapes (prompt-spec data-bound +
+# compute-bound) per feedback-shape-dependent-parallelism-gates; second-half
+# VmRSS slope as leak metric per feedback-leak-gate-allocator-warmup.
+[[bin]]
+name = "sp_matmul_q_dual_smoke"
+path = "src/sp_matmul_q_dual_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
