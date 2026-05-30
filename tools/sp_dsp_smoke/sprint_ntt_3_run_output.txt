@@ -1,0 +1,78 @@
+[NTT.3] sp_ntt_3_dual_smoke -- dual-prime CRT dispatch gates
+[NTT.3]   T_NTT3_VTCM_AWARE_BIT_EXACT   (m17 == m12 == m13 == math-core)
+[NTT.3]   T_NTT3_DUAL_DISPATCH_SPEEDUP  (concurrent m17 vs sequential at N=512, >=1.5x)
+[NTT.3]   T_NTT3_VTCM_NO_RECOMPUTE      (m17 single-invoke wall < m13 by >=10% at N=512)
+[NTT.3]   T_NTT3_NO_REGRESSION          (m12 600/600 + m13 600/600 + m14/15/16 PASS)
+
+[NTT.3] opening FastRpcSession (Path B Unsigned PD)...
+[NTT.3] session open
+
+[NTT.3] === Prime VTCM tables (ntt_twiddle_init m14) ===
+[NTT.3]   ntt_twiddle_init(N=512) ok (718 us)
+[NTT.3]   ntt_twiddle_init(N=512) #2 (idempotent) ok (293 us)
+[NTT.3]   q_idx=0 N=128: present=1 vtcm_addr_lo=0xff000000 vtcm_size=2560
+[NTT.3]   q_idx=0 N=256: present=1 vtcm_addr_lo=0xff040000 vtcm_size=5120
+[NTT.3]   q_idx=0 N=512: present=1 vtcm_addr_lo=0xff080000 vtcm_size=10240
+[NTT.3]   q_idx=1 N=128: present=1 vtcm_addr_lo=0xff0c0000 vtcm_size=2560
+[NTT.3]   q_idx=1 N=256: present=1 vtcm_addr_lo=0xff100000 vtcm_size=5120
+[NTT.3]   q_idx=1 N=512: present=1 vtcm_addr_lo=0xff140000 vtcm_size=10240
+[NTT.3] T_NTT3_NO_REGRESSION (m14/15 sanity): PASS
+
+[NTT.3] === Correctness sweep (T_NTT3_VTCM_AWARE_BIT_EXACT + T_NTT3_NO_REGRESSION) ===
+
+[NTT.3] -- combination q_idx=0 N=128 --
+[NTT.3]   m17 (VTCM-HVX): diverged=0/100  max_lane_diff=0
+
+[NTT.3] -- combination q_idx=1 N=128 --
+[NTT.3]   m17 (VTCM-HVX): diverged=0/100  max_lane_diff=0
+
+[NTT.3] -- combination q_idx=0 N=256 --
+[NTT.3]   m17 (VTCM-HVX): diverged=0/100  max_lane_diff=0
+
+[NTT.3] -- combination q_idx=1 N=256 --
+[NTT.3]   m17 (VTCM-HVX): diverged=0/100  max_lane_diff=0
+
+[NTT.3] -- combination q_idx=0 N=512 --
+[NTT.3]   m17 (VTCM-HVX): diverged=0/100  max_lane_diff=0
+
+[NTT.3] -- combination q_idx=1 N=512 --
+[NTT.3]   m17 (VTCM-HVX): diverged=0/100  max_lane_diff=0
+
+[NTT.3] === Correctness aggregate ===
+[NTT.3]   m12 total_runs=600 divergence=0
+[NTT.3]   m13 total_runs=600 divergence=0
+[NTT.3]   m17 total_runs=600 divergence=0
+[NTT.3]   m17 first_divergence = (none)
+[NTT.3]   correctness wall time   = 0.80 s
+
+[NTT.3] === Wall-clock sweep (T_NTT3_VTCM_NO_RECOMPUTE: m17 vs m13 single-invoke) ===
+
+[NTT.3] wall-clock single-invoke matrix (us total over 100 iters):
+[NTT.3]                          N=128       N=256       N=512
+[NTT.3]   q_idx=0 m13-HVX-recompute        20734 us     33104 us     41788 us
+[NTT.3]   q_idx=0 m17-HVX-VTCM             25772 us     36776 us     49053 us
+[NTT.3]   q_idx=1 m13-HVX-recompute        27900 us     35407 us     41566 us
+[NTT.3]   q_idx=1 m17-HVX-VTCM             30832 us     35339 us     49875 us
+
+[NTT.3] VTCM-vs-recompute ratio (m17/m13; <1.0 = VTCM wins):
+[NTT.3]   q_idx=0 N=128: m17/m13 = 1.243  (m13 207.3 us/iter, m17 257.7 us/iter)
+[NTT.3]   q_idx=0 N=256: m17/m13 = 1.111  (m13 331.0 us/iter, m17 367.8 us/iter)
+[NTT.3]   q_idx=0 N=512: m17/m13 = 1.174  (m13 417.9 us/iter, m17 490.5 us/iter)
+[NTT.3]   q_idx=1 N=128: m17/m13 = 1.105  (m13 279.0 us/iter, m17 308.3 us/iter)
+[NTT.3]   q_idx=1 N=256: m17/m13 = 0.998  (m13 354.1 us/iter, m17 353.4 us/iter)
+[NTT.3]   q_idx=1 N=512: m17/m13 = 1.200  (m13 415.7 us/iter, m17 498.8 us/iter)
+
+[NTT.3] === Dual-dispatch sweep (T_NTT3_DUAL_DISPATCH_SPEEDUP at N=128,256,512) ===
+[NTT.3]   N=128: seq_wall=26866 us / conc_wall=55837 us / speedup=0.481x / last_overlap_fraction=0.3119 (iters=50)
+[NTT.3]   N=256: seq_wall=28211 us / conc_wall=54241 us / speedup=0.520x / last_overlap_fraction=0.3572 (iters=50)
+[NTT.3]   N=512: seq_wall=37063 us / conc_wall=48039 us / speedup=0.772x / last_overlap_fraction=0.4140 (iters=50)
+[NTT.3]   speedup at N=512 = 0.772x (threshold >=1.5x)
+[NTT.3]   m16 dump ok (2048 bytes, non-zero)
+
+[NTT.3] ======= GATE SUMMARY =======
+[NTT.3]   T_NTT3_VTCM_AWARE_BIT_EXACT  : PASS  (m17 total_runs=600, divergences=0)
+[NTT.3]   T_NTT3_DUAL_DISPATCH_SPEEDUP : FAIL  (speedup at N=512 = 0.772x, threshold >=1.5x)
+[NTT.3]   T_NTT3_VTCM_NO_RECOMPUTE     : FAIL  (m17 < m13 at N=512: false, m17 <= 0.9*m13 at N=512: false)
+[NTT.3]   T_NTT3_NO_REGRESSION         : PASS  (m12 600/600, m13 600/600, m14/15/16 ok=true)
+[NTT.3] session closed cleanly
+[NTT.3] one or more gates FAIL

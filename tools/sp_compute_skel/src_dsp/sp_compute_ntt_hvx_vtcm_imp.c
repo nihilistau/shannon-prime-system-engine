@@ -162,10 +162,19 @@ static inline HVX_Vector sp_ntt3_modsub_hvx_lane(
 }
 
 /* ─── Large-stage butterfly (half >= 32). Identical inner-loop shape to
- * NTT.1's sp_ntt_butterfly_stage_hvx; consumes a stride-1 compacted twiddle
- * pointer. The VTCM-resident `w_fwd_stages[stage_offset_entries(s)..]`
- * already IS stride-1 (per CLOSURE-NTT-2.md compaction layout), so the
- * caller passes a pointer into that table directly — no per-call copy.
+ * NTT.1's sp_ntt_butterfly_stage_hvx; consumes a 128-B-aligned stride-1
+ * compacted twiddle pointer (`w_compact`). Caller has copied the relevant
+ * VTCM stage chunk into 128-B-aligned scratch (see
+ * `sp_ntt3_forward_one_hvx_vtcm`).
+ *
+ * Rationale: per CLOSURE-NTT-2.md §"Per-stage compaction layout" the
+ * per-stage byte offsets within w_fwd_stages are 0,4,12,28,60,124,252,
+ * 508,1020 — NOT 128-B-aligned in general. The HVX vmem load (`w_vp[v]`)
+ * needs an aligned source. The "unaligned vmemu" alternative was
+ * silicon-tested 2026-05-31 and produced larger wall-clock cost than the
+ * aligned-copy variant (VTCM unaligned access latency dominates the saved
+ * memcpy). The aligned-copy variant is chosen for both correctness and
+ * for matching NTT.1's SASS audit shape.
  * ───────────────────────────────────────────────────────────────────── */
 static void sp_ntt3_butterfly_stage_hvx(uint32_t *out, uint32_t N,
                                         uint32_t len, uint32_t half,
@@ -248,16 +257,35 @@ static void sp_ntt3_forward_one_hvx_vtcm(uint32_t N, uint32_t logN,
     HVX_Vector vq_m1 = Q6_V_vsplat_R((int32_t)(q - 1u));
     HVX_Vector vmu   = Q6_V_vsplat_R((int32_t)mu);
 
+    /* Per-stage scratch for HVX butterfly. The VTCM-resident
+     * `w_fwd_stages[stage_offset..]` is byte-stride-4 but NOT 128-byte
+     * aligned (per CLOSURE-NTT-2.md §"Per-stage compaction layout"
+     * stage offsets 0, 4, 12, 28, 60, 124, 252, 508, 1020). The HVX
+     * inner loop uses ALIGNED vmem loads for SASS-audit isolation with
+     * NTT.1, so we copy each stage's stride-1 chunk into a 128-B-aligned
+     * scratch before running the butterfly. The "unaligned vmemu"
+     * alternative was silicon-tested 2026-05-31 and produced larger
+     * wall-clock cost than the aligned-copy variant.
+     *
+     * The net win vs NTT.1's m13 is that `find_psi` + `psi_pow[N]`
+     * precompute + `w_fwd[N/2]` precompute are ELIMINATED -- only the
+     * per-stage memcpy of `half` words remains. */
+    uint32_t w_scratch[SP_NTT3_N_MAX / 2] __attribute__((aligned(128)));
+
     uint32_t stage = 1u;
     for (uint32_t len = 2u; len <= N; len <<= 1, stage++) {
         uint32_t half = len >> 1;
         uint32_t off_entries = sp_ntt3_stage_offset_entries(stage);
-        const uint32_t *w_compact = w_fwd_stages + off_entries;
+        const uint32_t *w_compact_src = w_fwd_stages + off_entries;
         if (half >= 32u) {
-            sp_ntt3_butterfly_stage_hvx(out, N, len, half, w_compact,
+            /* Copy this stage's stride-1 twiddles from VTCM into the
+             * 128-B-aligned scratch so the HVX inner loop's `vmem`
+             * (aligned load) hits a legal boundary. */
+            memcpy(w_scratch, w_compact_src, (size_t)half * 4u);
+            sp_ntt3_butterfly_stage_hvx(out, N, len, half, w_scratch,
                                         vq, vq_m1, vmu);
         } else {
-            sp_ntt3_butterfly_stage_scalar(out, N, len, half, w_compact,
+            sp_ntt3_butterfly_stage_scalar(out, N, len, half, w_compact_src,
                                            q, mu);
         }
     }
