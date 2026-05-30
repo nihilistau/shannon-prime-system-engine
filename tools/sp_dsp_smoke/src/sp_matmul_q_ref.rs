@@ -91,6 +91,43 @@ pub fn garner_combine_q1_q2(r1: &[u32], r2: &[u32]) -> Vec<u64> {
     }).collect()
 }
 
+/// §4-NTT Sprint NTT.4 — symmetric Garner CRT producing SIGNED centered output
+/// in (-M/2, M/2].
+///
+/// Matches math-core `garner_one` (ntt_crt.c:303-317): same unsigned recombine
+/// formula `r = x1 + q1 * ((x2 - x1) * q1_inv_mod_q2 mod q2)`, then cast to
+/// i64 and center: `if (v > M/2) v -= M`.
+///
+/// Distinct from `garner_combine_q1_q2` above (which returns u64 in [0, M));
+/// K.beta.2.5c's existing gates consume the unsigned variant — DO NOT modify
+/// that function.
+///
+/// Used by NTT.4's end-to-end polynomial multiplication smoke harness to
+/// recombine per-prime INTT outputs into a single signed coefficient vector
+/// matching math-core's `ntt_inverse` output.
+pub fn garner_combine_q1_q2_signed(r1: &[u32], r2: &[u32]) -> Vec<i64> {
+    assert_eq!(r1.len(), r2.len());
+    let q1 = SP_NTT_Q1;
+    let q2 = SP_NTT_Q2;
+    let inv = Q1_INV_MOD_Q2 as u64;
+    let q2_64 = q2 as u64;
+    let m: u64 = M_Q1Q2;
+    let half_m: i64 = (m / 2) as i64;
+    r1.iter().zip(r2.iter()).map(|(&a, &b)| {
+        let diff: u64 = if b >= a {
+            (b - a) as u64
+        } else {
+            q2_64 - ((a - b) as u64)
+        };
+        let t = (diff * inv) % q2_64;
+        let r: u64 = (a as u64) + (q1 as u64) * t;
+        // u64 r is in [0, M); M < 2^60 so r fits i64. Center to (-M/2, M/2].
+        let mut v: i64 = r as i64;
+        if v > half_m { v -= m as i64; }
+        v
+    }).collect()
+}
+
 /// 60-bit-exact matmul WITHOUT modular reduction.  Used by T_GARNER_BIT_EXACT
 /// to verify the CRT-combined output recovers the un-reduced sum-of-products.
 ///
@@ -214,5 +251,76 @@ mod tests {
                 "Garner CRT mismatch at i={}: recombined={} direct={}",
                 i, recombined[i], direct[i]);
         }
+    }
+
+    /// §4-NTT Sprint NTT.4 — T_NTT4_GARNER_SIGNED_BIT_EXACT.
+    ///
+    /// Drive 1000 random (r_1, r_2) pairs through garner_combine_q1_q2_signed
+    /// and verify the output matches math-core's garner_one centering rule:
+    /// take the unsigned u64 recombine in [0, M), and if > M/2, subtract M.
+    ///
+    /// The unsigned step is the same as garner_combine_q1_q2 (already gated
+    /// in `garner_recovers_known_residue`), so this test focuses on the
+    /// centering boundary: we verify
+    ///   signed == unsigned                      if unsigned <= M/2
+    ///   signed == (unsigned as i64) - (M as i64) if unsigned >  M/2
+    /// holds element-wise.
+    #[test]
+    fn garner_signed_matches_centering_rule() {
+        let q1 = SP_NTT_Q1;
+        let q2 = SP_NTT_Q2;
+        let m = M_Q1Q2;
+        let half_m: u64 = m / 2;
+
+        let mut seed: u64 = 0xCEBA_FECA_5C0F_FEE5;
+        let n_pairs = 1000usize;
+        let mut r1: Vec<u32> = Vec::with_capacity(n_pairs);
+        let mut r2: Vec<u32> = Vec::with_capacity(n_pairs);
+        for _ in 0..n_pairs {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            r1.push((seed as u32) % q1);
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            r2.push((seed as u32) % q2);
+        }
+
+        // Force half of the pairs into the upper half (> M/2) by selecting
+        // r1, r2 that recombine to a known large value. The PRNG sweep is
+        // already uniform over [0, M), so statistically half land above M/2,
+        // but we add a few explicit corner-case pairs to ensure coverage.
+        // Boundaries: 0, M-1, M/2, M/2+1.
+        for &u in &[0u64, 1, half_m, half_m + 1, m - 1] {
+            r1.push((u % q1 as u64) as u32);
+            r2.push((u % q2 as u64) as u32);
+        }
+
+        let unsigned = garner_combine_q1_q2(&r1, &r2);
+        let signed   = garner_combine_q1_q2_signed(&r1, &r2);
+        assert_eq!(unsigned.len(), signed.len());
+
+        let half_m_i: i64 = half_m as i64;
+        for i in 0..signed.len() {
+            let u = unsigned[i];
+            let s = signed[i];
+            let expected: i64 = if u as i64 > half_m_i {
+                (u as i64).wrapping_sub(m as i64)
+            } else {
+                u as i64
+            };
+            assert_eq!(s, expected,
+                "centering mismatch at i={}: unsigned={} signed={} expected={} half_M={}",
+                i, u, s, expected, half_m);
+        }
+
+        // Also assert: signed value is in (-M/2, M/2].
+        for &s in signed.iter() {
+            assert!(s > -(half_m_i + 1) && s <= half_m_i,
+                "out-of-range signed value: {} (half_M={})", s, half_m);
+        }
+
+        // Range coverage diagnostic.
+        let n_upper: usize = unsigned.iter().filter(|&&u| u > half_m).count();
+        let n_lower: usize = unsigned.iter().filter(|&&u| u <= half_m).count();
+        assert!(n_upper > 0 && n_lower > 0,
+            "test did not cover both halves: upper={} lower={}", n_upper, n_lower);
     }
 }
