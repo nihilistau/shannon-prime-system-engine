@@ -266,6 +266,45 @@ shift accordingly.
 Below is the scoped implementation plan assuming operator selects
 Path A. NOT to be executed without operator disposition.
 
+## [plan-amend 2026-05-30 — Path A selected by operator]
+
+**Operator disposition:** Path A. The roadmap was corrected at lattice
+`main @ e927f6f` ("[Phase 4-NTT block CORRECTED + NTT.0 UPSTREAM-REQUIRED
+resolved Path A]"). N ladder is now `{128, 256, 512}` everywhere; long
+context (ctx ≥ 1024) is reframed as TILED N=512 NTT blocks for NTT.6.
+Two memory entries written: `reference-ntt-frozen-primes-N-cap` +
+`feedback-lead-with-reference-then-theory` (updated).
+
+**Stage 1 scope reduction (continuation-agent decision):** the original
+Stage 1 in this plan introduced a host-runnable Rust port of math-core
+plus a `sp_ntt_ref_test` self-check binary. The continuation prompt asks
+to use math-core's C reference DIRECTLY via the existing static-lib link
+path (the L3.FG cross-compile pattern that `sp_daemon/build.rs` already
+implements). `sp_dsp_smoke` does not currently have a build.rs — it
+will get one mirroring `sp_daemon/build.rs`, linking math-core's
+`sp_ntt_crt` (and the modules it depends on transitively).
+
+**Why this is better than the prior Stage 1 plan:**
+1. Single source of truth — math-core's C reference is the oracle on
+   the Rust side too; no Rust port to drift out of date.
+2. Removes a sub-gate (T_NTT0_REF_SELF_CHECK is no longer needed; the
+   Rust port doesn't exist to validate).
+3. Mirrors the K.beta.2.5c oracle pattern: skel-side scalar invariant
+   compared against host-side math-core C — but now the host side IS
+   math-core, not a Rust port of it.
+
+**Stage renumbering:** Stage 1 is reduced from "Rust reference port +
+ref-self-check binary" to "build.rs wiring + bindgen of `ntt_crt.h`".
+Stages 2/3/4 unchanged. Gate `T_NTT0_REF_SELF_CHECK` is dropped (the
+Rust port it referenced no longer exists); the only gate is
+`T_NTT0_SCALAR_BIT_EXACT` (Hexagon scalar vs math-core C, 600 runs).
+
+**Risk:** sp_ntt_crt depends transitively on a small subset of math-core
+modules. The plan adds JUST `sp_ntt_crt` (plus any direct transitive
+need surfaced at link time). If the dependency graph requires more
+modules than expected, that surfaces at link time as a clear error
+(not a silent miscompare), which is recoverable.
+
 ### Stage 1 — Math-core reference port verification
 
 Goal: produce a Rust-side scalar reference NTT that's byte-identical
