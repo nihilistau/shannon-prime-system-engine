@@ -1,0 +1,32 @@
+[package]
+name = "sp-npu-spike"
+version = "0.1.0"
+edition = "2021"
+description = "K.2-spike: investigation crate — design doc + POC harness for the QNN HTP (NPU) bridge for cross-island Manifesto Trick #1. Builds on aarch64-linux-android against Knack's S22U (Snapdragon 8 Gen 1, Hexagon V69 NPU)."
+build = "build.rs"
+
+# K.2-spike POC — round-trip an INT8 buffer through QNN HTP graph (ElementWiseAdd).
+# Build:
+#   set QNN_SDK_ROOT=C:\Qualcomm\AIStack\QAIRT\2.45.40.260406
+#   cargo build --target aarch64-linux-android --release --bin sp_npu_spike_smoke
+# Deploy + run on Knack's S22U:
+#   adb push <QNN_SDK_ROOT>\lib\aarch64-android\libQnnHtp.so /data/local/tmp/
+#   adb push <QNN_SDK_ROOT>\lib\aarch64-android\libQnnHtpV69Stub.so /data/local/tmp/
+#   adb push <QNN_SDK_ROOT>\lib\aarch64-android\libQnnHtpPrepare.so /data/local/tmp/
+#   adb push <QNN_SDK_ROOT>\lib\aarch64-android\libQnnSystem.so /data/local/tmp/
+#   adb push target/aarch64-linux-android/release/sp_npu_spike_smoke /data/local/tmp/
+#   adb shell '
+#     cd /data/local/tmp &&
+#     ADSP_LIBRARY_PATH="/data/local/tmp;/vendor/lib/rfsa/adsp;" \
+#     LD_LIBRARY_PATH=/data/local/tmp:/vendor/lib64 \
+#     ./sp_npu_spike_smoke
+#   '
+[[bin]]
+name = "sp_npu_spike_smoke"
+path = "src/bin/sp_npu_spike_smoke.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+libloading = "0.8"
+
+[build-dependencies]
+cc = "1"
