@@ -196,21 +196,23 @@ fn main() {
         Err(e) => { eprintln!("[NTT.2] session FAIL: {e:?}"); std::process::exit(1); }
     };
 
-    // ── method 13: ntt_twiddle_init ────────────────────────────────────
+    // ── method 14: ntt_twiddle_init (post-NTT.3-merge slot) ─────────────
+    // NTT.5b correction: was 13 pre-merge; renumbered 13→14, 14→15, 15→16
+    // by merge commit fec6fe3 (NTT.3 took slot 13 for ntt_hvx_oracle).
     // primIn = [N(i32)] (4 bytes). No data buffer.
-    // scalars: method=13, inbufs=1, outbufs=0
+    // scalars: method=14, inbufs=1, outbufs=0
     fn invoke_init(sess: &FastRpcSession, n: i32) -> Result<i64, String> {
         let mut prim_in: [u32; 1] = [n as u32];
         let mut args = [
             RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr() as *mut c_void, nlen: 4 }},
         ];
         let t0 = Instant::now();
-        sess.invoke(make_scalars(13, 1, 0), &mut args)
-            .map_err(|e| format!("invoke method 13: {e:?}"))?;
+        sess.invoke(make_scalars(14, 1, 0), &mut args)
+            .map_err(|e| format!("invoke method 14: {e:?}"))?;
         Ok(t0.elapsed().as_micros() as i64)
     }
 
-    // ── method 14: ntt_twiddle_status ──────────────────────────────────
+    // ── method 15: ntt_twiddle_status (post-NTT.3-merge slot) ──────────
     // primIn  = [N(i32), q_idx(i32)] (8 bytes)
     // primOut = 9 × i32 (36 bytes):
     //   table_present, vtcm_addr_lo, vtcm_size, psi_pow_off, ipsi_pow_off,
@@ -237,8 +239,8 @@ fn main() {
             RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr()  as *mut c_void, nlen: 8  }},
             RemoteArg { buf: RemoteBuf { pv: prim_out.as_mut_ptr() as *mut c_void, nlen: 36 }},
         ];
-        sess.invoke(make_scalars(14, 1, 1), &mut args)
-            .map_err(|e| format!("invoke method 14: {e:?}"))?;
+        sess.invoke(make_scalars(15, 1, 1), &mut args)
+            .map_err(|e| format!("invoke method 15: {e:?}"))?;
         Ok(StatusOut {
             table_present:    prim_out[0] as i32,
             vtcm_addr_lo:     prim_out[1] as i32,
@@ -252,10 +254,10 @@ fn main() {
         })
     }
 
-    // ── method 15: ntt_twiddle_dump ────────────────────────────────────
+    // ── method 16: ntt_twiddle_dump (post-NTT.3-merge slot) ────────────
     // primIn = [N(i32), q_idx(i32), table_id(i32), dst_bufLen(i32)] (16 bytes)
     // dst_buf = OUTBUF (variable)
-    // scalars: method=15, inbufs=1, outbufs=1
+    // scalars: method=16, inbufs=1, outbufs=1
     fn invoke_dump(sess: &FastRpcSession, n: i32, q_idx: i32, table_id: i32,
                    expected_bytes: usize) -> Result<Vec<u32>, String>
     {
@@ -267,8 +269,8 @@ fn main() {
             RemoteArg { buf: RemoteBuf { pv: prim_in.as_mut_ptr() as *mut c_void, nlen: 16 }},
             RemoteArg { buf: RemoteBuf { pv: dst_bytes.as_mut_ptr() as *mut c_void, nlen: expected_bytes }},
         ];
-        sess.invoke(make_scalars(15, 1, 1), &mut args)
-            .map_err(|e| format!("invoke method 15: {e:?}"))?;
+        sess.invoke(make_scalars(16, 1, 1), &mut args)
+            .map_err(|e| format!("invoke method 16: {e:?}"))?;
         let words: Vec<u32> = dst_bytes.chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         Ok(words)

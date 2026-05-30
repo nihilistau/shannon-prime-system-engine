@@ -140,9 +140,12 @@ fn main() {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
     }
 
-    // ── method 17 (this worktree): INTT ──
-    // Anticipated method 18 post-NTT.3-merge; this worktree's IDL slot is 17.
-    const INTT_METHOD: u32 = 17;
+    // ── INTT via method 18 (post-NTT.3-merge slot) ──
+    // NTT.5b correction: method index updated from 17 to 18. NTT.3 took slot
+    // 17 for ntt_hvx_vtcm_oracle; the merge commit fec6fe3 renumbered
+    // intt_hvx_oracle to 18 in the IDL but left this constant stale at 17.
+    // Verified against tools/sp_compute_skel/inc/sp_compute.idl line 370.
+    const INTT_METHOD: u32 = 18;
     fn invoke_intt(
         sess: &FastRpcSession, q_idx: i32, n: i32, data_in: &[u32],
     ) -> Result<Vec<u32>, String> {

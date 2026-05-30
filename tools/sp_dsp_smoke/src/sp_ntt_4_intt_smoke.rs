@@ -298,10 +298,11 @@ fn main() {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
     }
 
-    // ── method 17 (this worktree): intt_hvx_oracle ──
+    // ── method 18 (post-NTT.3-merge slot): intt_hvx_oracle ──
     // Same primIn shape as forward (16 bytes); takes u32 NTT output as input.
-    // Post-merge with NTT.3, this MAY become method 18 — closure documents.
-    const INTT_METHOD: u32 = 17;
+    // NTT.5b correction: was 17 pre-merge; renumbered to 18 by merge commit
+    // fec6fe3 (NTT.3 took slot 17 for ntt_hvx_vtcm_oracle).
+    const INTT_METHOD: u32 = 18;
     fn invoke_intt(
         sess: &FastRpcSession, q_idx: i32, n: i32, data_in: &[u32],
     ) -> Result<Vec<u32>, String> {
