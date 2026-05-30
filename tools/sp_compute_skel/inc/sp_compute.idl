@@ -234,4 +234,24 @@ interface sp_compute : remote_handle64 {
     long ntt_oracle(in long q_idx, in long N,
                     in  sequence<octet> data_in,
                     rout sequence<octet> data_out);
+
+    // ────────────────────────────────────────────────────────────────────
+    // §4-NTT Sprint NTT.1 — HVX-vectorized NTT butterfly oracle.
+    //
+    // ntt_hvx_oracle — same contract as ntt_oracle (method 12) but routes
+    // through the HVX implementation. Large stages (half >= 32) use hand-
+    // rolled HVX intrinsics calling the K.beta.2.5b silicon-confirmed
+    // Q6_W_vmpye + Q6_W_vmpyoacc Barrett primitive (per
+    // reference-hexagon-v69-32x32-widening-idiom). Small stages
+    // (half < 32) fall back to byte-identical scalar (option (i) in
+    // PLAN-NTT-1.md). Pre-weight + bit-reversal are scalar.
+    //
+    // primIn shape, parameter contract, q_idx mapping, and N admissibility
+    // are IDENTICAL to ntt_oracle — drop-in replacement at the IDL surface.
+    //
+    // Correctness gate (T_NTT1_HVX_BIT_EXACT): output byte-exact vs
+    // ntt_oracle (method 12) on the same 600-run sweep that NTT.0 uses.
+    long ntt_hvx_oracle(in long q_idx, in long N,
+                        in  sequence<octet> data_in,
+                        rout sequence<octet> data_out);
 };
