@@ -67,6 +67,13 @@ path = "src/sp_barrett_oracle_smoke.rs"
 name = "sp_barrett_dual_smoke"
 path = "src/sp_barrett_dual_smoke.rs"
 
+# §3-HX Sprint K v0.beta Stage 2.5c Stage 1 — host-runnable scalar reference
+# + Garner CRT round-trip test.  Bin (not lib) to match the existing crate
+# convention; runs on Windows/Linux x86 without DSP.
+[[bin]]
+name = "sp_matmul_q_ref_test"
+path = "src/sp_matmul_q_ref_test.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
