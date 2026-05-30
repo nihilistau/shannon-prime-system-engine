@@ -115,6 +115,16 @@ path = "src/sp_ntt_1_smoke.rs"
 name = "sp_ntt_2_smoke"
 path = "src/sp_ntt_2_smoke.rs"
 
+# §4-NTT Sprint NTT.4 Stage 1 — INTT correctness smoke.
+# Drives ntt_twiddle_init (method 14), ntt_hvx_oracle (method 13), and the
+# new intt_hvx_oracle (method 17 in this worktree; anticipated 18 post-
+# NTT.3-merge). Runs round-trip INTT(NTT(x)) ?= x mod q across 600 runs
+# (3 N × 2 primes × 100 seeds) vs Rust-impl math-core reference.
+# See PLAN-NTT-4.md + CLOSURE-NTT-4.md.
+[[bin]]
+name = "sp_ntt_4_intt_smoke"
+path = "src/sp_ntt_4_intt_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
