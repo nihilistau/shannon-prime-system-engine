@@ -27,3 +27,8 @@ pub mod ffi_l1 {
 // Host build also exposes this (build.rs wires KSTE encoder symbols into the lib's
 // own link closure via the bindgen wrapper header).
 pub mod memo_routing;
+
+// M.4 (ledger): PoUW receipt ledger + mesh replay primitive. Host-buildable
+// (file I/O + SpinorReceipt::as_bytes round-trip, no L1 ABI needed); the
+// android smoke binary sp_memo_m4_ledger_smoke drives it on the S22U.
+pub mod pouw_ledger;
