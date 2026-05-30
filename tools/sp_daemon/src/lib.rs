@@ -1,6 +1,12 @@
 pub mod network;
 pub mod ntt_ffi;
 
+// §4-MeMo Sprint M.2 — Zero-copy dialogue loop (Grounding → Entity ID →
+// Synthesis) + Spinor receipt envelope. Host-build-safe: the module itself
+// compiles on host (struct + tests); the L1-driven `run_dialogue()` helper
+// lives in the android binary (sp_memo_m2_dialogue_smoke.rs).
+pub mod dialogue;
+
 #[cfg(target_os = "android")]
 pub mod dsp_rpc;
 

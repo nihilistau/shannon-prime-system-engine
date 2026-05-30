@@ -40,6 +40,11 @@ tokenizers      = "0.21"
 ahash           = "0.8"
 ed25519-dalek   = { version = "2", features = ["rand_core"] }
 rand            = "0.8"
+# §4-MeMo Sprint M.2 — SHA-256 for the per-turn Spinor receipt input/output
+# hashes. Already in the dependency graph transitively via ed25519-dalek;
+# direct registration here keeps `dialogue.rs` independent of that
+# transitive path (resilient to future ed25519-dalek refactors).
+sha2            = "0.10"
 quinn   = { version = "0.11", features = ["rustls"] }
 rustls  = { version = "0.23", default-features = false, features = ["ring"] }
 rcgen   = { version = "0.13", default-features = false, features = ["ring"] }
