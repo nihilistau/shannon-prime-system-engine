@@ -37,5 +37,5 @@
 [NTT.4] divergence_count     : 0
 [NTT.4] max_diff_per_prime   : q1=0 q2=0
 [NTT.4] max_diff_per_n       : N=128:0 N=256:0 N=512:0
-[NTT.4] elapsed              : 0.61 s
+[NTT.4] elapsed              : 0.63 s
 [NTT.4] T_NTT4_INTT_BIT_EXACT PASS  (600/600 runs byte-exact)

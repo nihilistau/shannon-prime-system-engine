@@ -125,6 +125,15 @@ path = "src/sp_ntt_2_smoke.rs"
 name = "sp_ntt_4_intt_smoke"
 path = "src/sp_ntt_4_intt_smoke.rs"
 
+# §4-NTT Sprint NTT.4 Stage 3 — end-to-end polynomial multiplication.
+# Drives forward NTT (method 13) + pointwise mul (ARM-side Barrett)
+# + INTT (method 17) + ARM signed Garner. Byte-exact vs math-core
+# ntt_init+ntt_forward+ntt_pointwise_mul+ntt_inverse via FFI.
+# 12 runs (3 N x 4 seeds); pass = 0 divergences.
+[[bin]]
+name = "sp_ntt_4_polymul_smoke"
+path = "src/sp_ntt_4_polymul_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
