@@ -187,6 +187,19 @@ impl SpSession {
         }
     }
 
+    /// §4-NTT Sprint NTT.5b — escape hatch to call L1 functions that aren't
+    /// otherwise wrapped on the safe surface. Currently used only by
+    /// `sp_session_register_compute_backend` in daemon.rs at startup.
+    ///
+    /// Safety: the returned pointer is only valid while &mut self is held
+    /// (i.e. for the duration of the borrow); the SpSession Drop calls
+    /// sp_session_destroy. Callers must NOT retain the pointer past the
+    /// borrow's lifetime, and must NOT call any L1 fn that mutates session
+    /// state from another thread concurrently.
+    pub fn raw_ptr(&mut self) -> *mut ffi::sp_session {
+        self.ptr
+    }
+
     /// Roll back n_tokens positions in the KV cache (O(1) ring-pointer decrement).
     ///
     /// Corollary T8.1: state at P−n after rewind from P is byte-identical to

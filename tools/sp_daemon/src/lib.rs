@@ -16,6 +16,14 @@ pub mod dialogue;
 #[cfg(target_os = "android")]
 pub mod dsp_rpc;
 
+// §4-NTT Sprint NTT.5b — Hexagon backend dispatch trampolines for math-core's
+// sp_compute_ntt_dispatch_fn ABI. Routes the inner Bluestein NTT calls through
+// FastRPC method 17 (forward, VTCM-aware HVX) and method 18 (HVX INTT). Held
+// in AppState as Option<Arc<ComputeBackend>>; registered with the Memory L1
+// session at daemon startup when SP_ENGINE_NTT_ATTN_HEX=1 is set.
+#[cfg(target_os = "android")]
+pub mod ntt_hex_dispatch;
+
 // §4-MeMo Sprint M.1 — re-export the L1 C ABI bindings from the lib crate so
 // android binaries (e.g. sp_memo_m1_smoke) pick up the link dependency on
 // the math-core static libs via the lib's own link graph. On host this is

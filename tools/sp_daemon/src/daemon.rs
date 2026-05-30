@@ -257,6 +257,86 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         (dsp_session, dsp_model, kv_cache)
     };
 
+    // ── §4-NTT Sprint NTT.5b: optional Hexagon NTT compute-backend ─────────
+    //
+    // When SP_ENGINE_NTT_ATTN_HEX=1 is set AND a Memory model session is
+    // loaded, we (a) open a dedicated FastRpcSession against the compute
+    // skel, (b) wrap it in an Arc<ComputeBackend>, (c) leak an Arc::clone
+    // into a Box<ComputeBackend> raw pointer that L1 can hold, and (d) call
+    // sp_session_register_compute_backend on the Memory session. The
+    // backend is also stashed in AppState so the Arc count keeps the
+    // FastRpcSession alive past the L1 raw pointer's last invocation.
+    //
+    // Unset env OR no Memory model OR FastRpcSession open failure = None
+    // (the L1 register call is skipped; existing host path stays intact).
+    //
+    // NTT.5b ships the registration only. Consumption — i.e. flipping
+    // forward.c's NTT-attention routing through the backend instead of the
+    // host ntt_crt path — is OUT OF SCOPE per the sprint spec.
+    #[cfg(target_os = "android")]
+    let ntt_hex_backend: Option<std::sync::Arc<sp_daemon::ntt_hex_dispatch::ComputeBackend>> = {
+        let env_set = std::env::var("SP_ENGINE_NTT_ATTN_HEX")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
+        if env_set && memo_session.is_some() {
+            const COMPUTE_SKEL_URI: &str =
+                "file:///libsp_compute_skel.so?sp_compute_skel_handle_invoke&_modver=1.0&_dom=cdsp";
+            // Use lib-crate path so the FastRpcSession type matches the
+            // ComputeBackend::new constructor (both live in the lib crate).
+            match sp_daemon::dsp_rpc::FastRpcSession::new(COMPUTE_SKEL_URI) {
+                Ok(s) => {
+                    info!("NTT.5b: Hexagon compute backend session open (SP_ENGINE_NTT_ATTN_HEX=1)");
+                    let backend = std::sync::Arc::new(
+                        sp_daemon::ntt_hex_dispatch::ComputeBackend::new(std::sync::Arc::new(s))
+                    );
+                    // Register with the Memory session via the L1 ABI.
+                    // The raw pointer is the Arc::clone-leaked Box; AppState's
+                    // ntt_hex_backend field keeps the Arc alive so the pointer
+                    // stays valid until daemon shutdown.
+                    if let Some(memo_mu) = memo_session.as_ref() {
+                        let backend_for_l1 = std::sync::Arc::clone(&backend);
+                        let leaked: *mut sp_daemon::ntt_hex_dispatch::ComputeBackend =
+                            std::sync::Arc::into_raw(backend_for_l1) as *mut _;
+                        let (fwd, inv) = sp_daemon::ntt_hex_dispatch::ComputeBackend::dispatch_fns();
+                        // memo_session is a Mutex<SpSession>; take the lock briefly
+                        // to get the raw L1 session pointer for the register call.
+                        let mut guard = memo_mu.lock().unwrap();
+                        // SAFETY: SpSession.ptr stays valid for SpSession's lifetime;
+                        // we hold the Mutex guard so no concurrent forward is running.
+                        let session_raw: *mut crate::ffi::sp_session = guard.raw_ptr();
+                        let rc = unsafe {
+                            crate::ffi::sp_session_register_compute_backend(
+                                session_raw,
+                                leaked as *mut std::os::raw::c_void,
+                                Some(fwd),
+                                Some(inv),
+                            )
+                        };
+                        drop(guard);
+                        if rc == crate::ffi::sp_status_SP_OK {
+                            info!("NTT.5b: sp_session_register_compute_backend OK on Memory session");
+                        } else {
+                            tracing::warn!("NTT.5b: sp_session_register_compute_backend rc={rc} — backend stored on AppState but L1 link failed");
+                            // Reclaim the leaked Arc so we don't double-count;
+                            // the AppState Arc still has its own ref.
+                            unsafe { std::sync::Arc::from_raw(leaked); }
+                        }
+                    }
+                    Some(backend)
+                }
+                Err(e) => {
+                    tracing::warn!("NTT.5b: FastRpcSession::new failed: {e:?} — backend disabled (host path)");
+                    None
+                }
+            }
+        } else {
+            if env_set && memo_session.is_none() {
+                info!("NTT.5b: SP_ENGINE_NTT_ATTN_HEX=1 set but no Memory model — backend disabled");
+            }
+            None
+        }
+    };
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -286,6 +366,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         dsp_model,
         #[cfg(target_os = "android")]
         kv_cache,
+        #[cfg(target_os = "android")]
+        ntt_hex_backend,
     });
 
     // ── Background PoUW mining task ────────────────────────────────────────

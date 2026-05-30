@@ -122,6 +122,20 @@ pub struct AppState {
     /// decode-time mutation; L3.FG only reads `total_bytes()`.
     #[cfg(target_os = "android")]
     pub kv_cache: Option<Arc<Mutex<KvCacheHandle>>>,
+
+    /// §4-NTT Sprint NTT.5b — optional compute-backend for Memory model's
+    /// NTT-attention routed through Hexagon HVX via FastRPC. Held in
+    /// AppState so the Arc<FastRpcSession> + raw pointer registered with
+    /// L1's `sp_session_register_compute_backend` stays valid for the
+    /// session's lifetime. None when SP_ENGINE_NTT_ATTN_HEX is unset OR
+    /// the Memory model is not loaded.
+    ///
+    /// NOTE: registering this backend with the Memory session is plumbing
+    /// only — the actual env-gated activation in forward.c is OUT OF SCOPE
+    /// for NTT.5b per the sprint spec. Until forward.c wire-up lands in a
+    /// follow-on sprint, the registered backend is stored but never invoked.
+    #[cfg(target_os = "android")]
+    pub ntt_hex_backend: Option<Arc<sp_daemon::ntt_hex_dispatch::ComputeBackend>>,
 }
 
 /// §3-HX Sprint J.5 — `Send + Sync` wrapper for the DSP-resident model.
