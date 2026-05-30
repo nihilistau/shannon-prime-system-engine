@@ -28,6 +28,8 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_imp
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_crt_imp
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_imp
+        # §4-NTT Sprint NTT.2 — twiddle VTCM staging
+        ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_twiddle
     )
     add_library(sp_compute_skel SHARED ${srcs})
     include_directories(${common_incs})
