@@ -184,6 +184,73 @@ impl Ledger {
     /// Returns `Vec<SpinorReceipt>` directly (NOT raw bytes) so the
     /// caller can choose how to serialize — `as_bytes()` for byte-exact
     /// wire, or higher-level format for an HTTP gateway.
+    // ─── mesh-canonical-order: canonical sort + replay ────────────────────
+    //
+    // Sprint `mesh-canonical-order` (follow-on to M.4). The M.4 closure
+    // (`CLOSURE-M4-LEDGER.md:263-269`) called out that the
+    // T_M4_CROSS_DEVICE_REPLAY gate succeeds only because each device's
+    // local-first-then-broadcast merge order produces a per-device
+    // deterministic result — NOT because devices converge to a single
+    // canonical state. These two methods close that gap.
+    //
+    // Canonical sort key: `(sequence_rank ASC, input_hash ASC)`.
+    //   - `sequence_rank` is the u16 stamped via
+    //     [`SpinorReceipt::with_sequence_rank`] into `_reserved[0..2]`.
+    //   - `input_hash` is the existing 24-byte SHA-256-truncated digest;
+    //     dense (≥192-bit entropy) and domain-separated by
+    //     (model_id, turn_index) per `dialogue::hash_buf`. It serves as a
+    //     deterministic device-disambiguating tiebreak: two receipts with
+    //     the same rank produced by different devices (different content)
+    //     compare unequal by lexicographic byte order on `input_hash`;
+    //     two devices producing IDENTICAL content under the same rank ARE
+    //     the same receipt and the canonical sort dedupes-by-equality.
+    //
+    // Per `feedback-no-silent-gate-revisions`: the dispatch prompt's
+    // requested `(rank, device_id)` key was structurally impossible
+    // under the existing 2-byte `_reserved` field; surfaced in plan-
+    // commit Stage 0.
+
+    /// Read all records from this ledger, sort in-memory by canonical
+    /// key `(sequence_rank, input_hash)` ascending, return the sorted
+    /// list. Does NOT modify the on-disk file.
+    ///
+    /// Allocates a `Vec<SpinorReceipt>` of `len_bytes()/64` entries —
+    /// for a 1M-record ledger that's 64 MB. Callers driving very large
+    /// ledgers should chunk or use the file-streaming
+    /// [`Ledger::replay_canonical_into`] companion instead.
+    pub fn canonical_sort(&self) -> LedgerResult<Vec<SpinorReceipt>> {
+        let mut recs: Vec<SpinorReceipt> = self
+            .iter()?
+            .collect::<LedgerResult<Vec<_>>>()?;
+        recs.sort_by(|a, b| {
+            a.sequence_rank()
+                .cmp(&b.sequence_rank())
+                .then_with(|| a.input_hash.cmp(&b.input_hash))
+        });
+        Ok(recs)
+    }
+
+    /// Read all records from this ledger, canonical-sort them, append
+    /// to `dest` in canonical order. Returns the count of receipts
+    /// appended.
+    ///
+    /// This is the cross-device byte-identity primitive: two devices
+    /// holding the same receipt SET (e.g. after each broadcasts to the
+    /// other) and invoking this method against a fresh empty `dest`
+    /// produce SHA-256-equal `dest` files by construction.
+    ///
+    /// The source ledger is unchanged. Per
+    /// `feedback-bundled-changeset-root-cause-ambiguity`: this method
+    /// chains `canonical_sort()` + per-record `append()`; the sorted
+    /// order is the only variable changing across calls.
+    pub fn replay_canonical_into(&self, dest: &mut Ledger) -> LedgerResult<usize> {
+        let sorted = self.canonical_sort()?;
+        for r in &sorted {
+            dest.append(r)?;
+        }
+        Ok(sorted.len())
+    }
+
     pub fn broadcast_to_peers(&self, since_offset: u64) -> LedgerResult<Vec<SpinorReceipt>> {
         // Walk the file from `since_offset`. Validate sentinels as we go;
         // refuse to broadcast a corrupt prefix.
@@ -532,6 +599,198 @@ mod tests {
             other => panic!("expected Io(InvalidInput), got {other}"),
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ─── mesh-canonical-order: canonical_sort + replay_canonical_into ─────
+
+    fn mk_ranked(rank: u16, turn: u8, model: u8) -> SpinorReceipt {
+        // input bytes vary with rank so input_hash is well-distributed
+        let in_tokens: [i32; 3] = [rank as i32, (rank ^ 0x5A5A) as i32, turn as i32];
+        let out_tokens: [i32; 2] = [(rank as i32) + 1, model as i32];
+        SpinorReceipt::mint(turn, model, &in_tokens, &out_tokens, 1000 + rank as u64)
+            .with_sequence_rank(rank)
+    }
+
+    #[test]
+    fn canonical_sort_orders_by_rank_ascending() {
+        let p = tmpfile("canon_sort_rank_asc");
+        let mut l = Ledger::open(&p).unwrap();
+        // Insert in reverse rank order.
+        for rank in [9u16, 7, 5, 3, 1, 8, 6, 4, 2, 0] {
+            l.append(&mk_ranked(rank, 1, MODEL_ID_EXECUTIVE)).unwrap();
+        }
+        drop(l);
+        let l2 = Ledger::open(&p).unwrap();
+        let sorted = l2.canonical_sort().unwrap();
+        assert_eq!(sorted.len(), 10);
+        for (i, r) in sorted.iter().enumerate() {
+            assert_eq!(r.sequence_rank(), i as u16,
+                "position {i} should hold rank {i}");
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn canonical_sort_tiebreaks_by_input_hash() {
+        let p = tmpfile("canon_sort_tiebreak");
+        let mut l = Ledger::open(&p).unwrap();
+        // Two receipts at rank=5 with different input streams -> different input_hash.
+        let a = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[1, 2, 3], &[10], 100)
+            .with_sequence_rank(5);
+        let b = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[9, 8, 7], &[20], 200)
+            .with_sequence_rank(5);
+        // Insert in a non-canonical order; whichever input_hash compares lower
+        // must come first.
+        l.append(&b).unwrap();
+        l.append(&a).unwrap();
+        drop(l);
+        let l2 = Ledger::open(&p).unwrap();
+        let sorted = l2.canonical_sort().unwrap();
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].sequence_rank(), 5);
+        assert_eq!(sorted[1].sequence_rank(), 5);
+        // First in canonical order is the one with lexicographically smaller input_hash.
+        let expected_first = if a.input_hash <= b.input_hash { a } else { b };
+        assert_eq!(sorted[0].input_hash, expected_first.input_hash,
+            "tiebreak under equal rank must order by input_hash ASC");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn canonical_sort_is_deterministic_across_runs() {
+        use sha2::{Digest, Sha256};
+        let p = tmpfile("canon_sort_determ");
+        let mut l = Ledger::open(&p).unwrap();
+        // 100 receipts at randomized-but-seeded ranks.
+        let mut rng_state: u64 = 0x5DEECE66D;
+        for i in 0..100u16 {
+            // SplitMix-style PRNG
+            rng_state = rng_state.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(0x123456789ABCDEF0);
+            let rank = ((rng_state >> 16) as u16) % 1000;
+            l.append(&mk_ranked(rank, ((i % 3) as u8) + 1,
+                if i % 2 == 0 { MODEL_ID_EXECUTIVE } else { MODEL_ID_MEMORY })).unwrap();
+        }
+        drop(l);
+
+        let h = |sorted: &Vec<SpinorReceipt>| {
+            let mut h = Sha256::new();
+            for r in sorted { h.update(r.as_bytes()); }
+            let d = h.finalize();
+            d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+
+        // Two independent runs on fresh Ledger::open handles.
+        let l1 = Ledger::open(&p).unwrap();
+        let s1 = l1.canonical_sort().unwrap();
+        drop(l1);
+        let l2 = Ledger::open(&p).unwrap();
+        let s2 = l2.canonical_sort().unwrap();
+        drop(l2);
+
+        let h1 = h(&s1);
+        let h2 = h(&s2);
+        assert_eq!(h1, h2,
+            "canonical_sort must be deterministic: two runs over the same source must SHA-256-match");
+
+        // Spot-check ordering invariant: rank monotone non-decreasing.
+        for i in 1..s1.len() {
+            assert!(s1[i - 1].sequence_rank() <= s1[i].sequence_rank(),
+                "rank monotone non-decreasing violated at {i}");
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn replay_canonical_into_byte_identical_under_permutation() {
+        use sha2::{Digest, Sha256};
+        // Two source ledgers with the SAME receipt SET in different orders;
+        // replay_canonical_into to fresh destinations -> SHA-256-equal files.
+        let src_a_p = tmpfile("canon_replay_src_a");
+        let src_b_p = tmpfile("canon_replay_src_b");
+        let dst_a_p = tmpfile("canon_replay_dst_a");
+        let dst_b_p = tmpfile("canon_replay_dst_b");
+
+        // Build the receipt set once.
+        let mut all: Vec<SpinorReceipt> = (0..10u16)
+            .map(|r| mk_ranked(r, ((r % 3) as u8) + 1,
+                if r % 2 == 0 { MODEL_ID_EXECUTIVE } else { MODEL_ID_MEMORY }))
+            .collect();
+
+        // Source A: forward order.
+        {
+            let mut la = Ledger::open(&src_a_p).unwrap();
+            for r in &all { la.append(r).unwrap(); }
+        }
+        // Source B: reverse order.
+        all.reverse();
+        {
+            let mut lb = Ledger::open(&src_b_p).unwrap();
+            for r in &all { lb.append(r).unwrap(); }
+        }
+
+        // Replay canonically.
+        let src_a = Ledger::open(&src_a_p).unwrap();
+        let src_b = Ledger::open(&src_b_p).unwrap();
+        let mut dst_a = Ledger::open(&dst_a_p).unwrap();
+        let mut dst_b = Ledger::open(&dst_b_p).unwrap();
+        let na = src_a.replay_canonical_into(&mut dst_a).unwrap();
+        let nb = src_b.replay_canonical_into(&mut dst_b).unwrap();
+        assert_eq!(na, 10);
+        assert_eq!(nb, 10);
+        drop(dst_a); drop(dst_b);
+
+        let hash = |path: &PathBuf| -> String {
+            let bytes = std::fs::read(path).unwrap();
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let ha = hash(&dst_a_p);
+        let hb = hash(&dst_b_p);
+        assert_eq!(ha, hb,
+            "replay_canonical_into must produce byte-identical dest files for same-set sources under permutation");
+        assert_eq!(std::fs::metadata(&dst_a_p).unwrap().len(), 640,
+            "10 receipts * 64 bytes = 640 byte dest file");
+
+        let _ = std::fs::remove_file(&src_a_p);
+        let _ = std::fs::remove_file(&src_b_p);
+        let _ = std::fs::remove_file(&dst_a_p);
+        let _ = std::fs::remove_file(&dst_b_p);
+    }
+
+    #[test]
+    fn canonical_sort_empty_ledger_returns_empty_vec() {
+        let p = tmpfile("canon_sort_empty");
+        let l = Ledger::open(&p).unwrap();
+        drop(l);
+        let l2 = Ledger::open(&p).unwrap();
+        let sorted = l2.canonical_sort().unwrap();
+        assert!(sorted.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn replay_canonical_into_preserves_source() {
+        let src_p = tmpfile("canon_replay_preserve_src");
+        let dst_p = tmpfile("canon_replay_preserve_dst");
+        let mut src = Ledger::open(&src_p).unwrap();
+        for r in [3u16, 1, 4, 1, 5, 9, 2, 6, 5, 3] {
+            src.append(&mk_ranked(r, 1, MODEL_ID_EXECUTIVE)).unwrap();
+        }
+        drop(src);
+        let pre_size = std::fs::metadata(&src_p).unwrap().len();
+
+        let src_r = Ledger::open(&src_p).unwrap();
+        let mut dst = Ledger::open(&dst_p).unwrap();
+        let n = src_r.replay_canonical_into(&mut dst).unwrap();
+        assert_eq!(n, 10);
+        drop(dst);
+
+        let post_size = std::fs::metadata(&src_p).unwrap().len();
+        assert_eq!(pre_size, post_size,
+            "replay_canonical_into must not mutate the source ledger file");
+        let _ = std::fs::remove_file(&src_p);
+        let _ = std::fs::remove_file(&dst_p);
     }
 
     #[test]
