@@ -20,6 +20,11 @@ path = "src/bin/sp_console.rs"
 name = "spec_validate"
 path = "src/bin/spec_validate.rs"
 
+# §4-MeMo Sprint M.1 — dual-load budget audit + concurrent invoke smoke
+[[bin]]
+name = "sp_memo_m1_smoke"
+path = "src/bin/sp_memo_m1_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
