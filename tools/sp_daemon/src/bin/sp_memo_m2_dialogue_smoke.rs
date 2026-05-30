@@ -467,11 +467,21 @@ fn main() {
     let memo_base = create_session(&memo_model).expect("memo base session");
 
     let caps = DialogueCaps {
-        // Byte-level encoding → prompt char count = token count. Keep generous.
-        max_prompt_tokens: 256,
-        max_query_tokens: 32,
-        max_response_tokens: 64,
-        max_answer_tokens: 64,
+        // Byte-level encoding + per-decode-step wall on Knack's S22U is
+        // dominated by the host-scalar L1 forward (~30-300 ms/step depending
+        // on context length). Caps are tuned for the smoke harness's job
+        // (validate the protocol gates), NOT for production answer quality:
+        //   - max_prompt_tokens 64 fits "What is the capital of France?" + slack
+        //   - max_query_tokens 8 = 8 decode steps for Turn 1 (Executive)
+        //   - max_response_tokens 8 = 8 decode steps for Turn 2 (Memory)
+        //   - max_answer_tokens 8 = 8 decode steps for Turn 3 (Executive)
+        // Total = 1 prefill + 24 decode-steps per dialogue on each session
+        // (Exec runs prefill+decode twice; Memo runs prefill+decode once).
+        // Expected wall ≈ 5-15 s per dialogue; 100 runs ≈ 15-25 min.
+        max_prompt_tokens: 64,
+        max_query_tokens: 8,
+        max_response_tokens: 8,
+        max_answer_tokens: 8,
     };
 
     // ─── Gate 1: T_MEMO_M2_DIALOGUE_RUNS ────────────────────────────────────
@@ -639,9 +649,13 @@ fn main() {
             vmrss_mid = vmrss_kb();
             eprintln!("[M.2]   iter {}: VmRSS = {} KB (mid checkpoint)", i + 1, vmrss_mid);
         }
-        if (i + 1) % 10 == 0 {
+        if (i + 1) % 5 == 0 {
             eprintln!("[M.2]   iter {}: drift={} errs={} VmRSS={} KB",
                       i + 1, run_drift_count, errors, vmrss_kb());
+            // Force-flush stderr — Android pipes to file are block-buffered,
+            // which hides progress for the entire run otherwise.
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
         }
     }
     let cycle_wall = cycle_start.elapsed();

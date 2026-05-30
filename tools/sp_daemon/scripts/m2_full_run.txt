@@ -1,0 +1,60 @@
+[M.2] ═══ Load models ═══
+[M.2]   Executive arch: vocab=151936 n_layers=28 hidden=1024 load_ms=26
+[M.2]   Memory    arch: vocab=151936 n_layers=24 hidden=896 load_ms=24
+[M.2]   VmRSS: pre=2652 KB post-load=10536 KB delta=7884 KB
+
+[M.2] ═══ T_MEMO_M2_DIALOGUE_RUNS ═══
+[M.2]   turns_completed = 3
+[M.2]   total_wall_ms = 83196
+[M.2]   turn_us = [t1=35189449, t2=11232527, t3=36774009]
+[M.2]   final_answer_token_count = 8
+[M.2]   final_answer_first_64_chars = ".... . K"
+[M.2]   receipts_minted = 3
+[M.2]   T_MEMO_M2_DIALOGUE_RUNS PASS
+
+[M.2] ═══ T_MEMO_M2_SPINOR_RECEIPTS ═══
+[M.2]   receipts_count       = 3
+[M.2]   all_64_bytes         = true
+[M.2]   all_sentinel_match   = true
+[M.2]   all_hashes_nonzero   = true
+[M.2]   receipt[0]: head=01 0E 00 00 C9 F2 18 02 1F 65 99 9E 3A 55 8F EF ... tail=49 36 FA 6E 8F 63 27 E3 1E 00 00 00 08 00 00 A5
+[M.2]   receipt[1]: head=02 4D 00 00 0F 65 AB 00 1B 58 0F 4E 26 37 38 F8 ... tail=10 0F 43 0D CE 3C 23 8F 08 00 00 00 08 00 00 A5
+[M.2]   receipt[2]: head=03 0E 00 00 79 20 31 02 A3 B6 03 EC BA 28 B3 30 ... tail=32 1B 47 75 67 A7 C3 71 08 00 00 00 08 00 00 A5
+[M.2]   T_MEMO_M2_SPINOR_RECEIPTS PASS
+
+[M.2] ═══ T_MEMO_M2_ZERO_COPY ═══
+[M.2] Per PLAN-M2-DIALOGUE: in-loop ARM-side allocation gate uses
+[M.2] VmRSS delta before/after run_dialogue() loop body as proxy
+[M.2] (256-KB band per allocator-warmup noise floor; strict 256-byte
+[M.2] gate filed UPSTREAM as jemalloc-instrumented follow-up).
+[M.2]   vmrss_pre_loop_kb  = 1125388
+[M.2]   vmrss_post_loop_kb = 1138176
+[M.2]   inloop_delta_kb    = 12788
+[M.2]   inloop_alloc_bytes_estimated = 13094912
+[M.2]   T_MEMO_M2_ZERO_COPY FAIL (gate: ≤256 KB)
+
+[M.2] ═══ T_MEMO_M2_DIALOGUE_NO_INTERFERENCE (10 runs) ═══
+[M.2] Per feedback-leak-gate-allocator-warmup: gate metric is
+[M.2] second-half VmRSS slope ≤ 256 KB, NOT total delta.
+[M.2] Baseline (from zero-copy run): 8 tokens, preview=".... . K"
+[M.2]   iter 5: VmRSS = 1138180 KB (mid checkpoint)
+[M.2]   iter 5: drift=0 errs=0 VmRSS=1138180 KB
+[M.2]   iter 10: drift=0 errs=0 VmRSS=1138168 KB
+[M.2]   runs_completed                = 10
+[M.2]   run_drift_count               = 0
+[M.2]   errors                        = 0
+[M.2]   vmrss_loop_start_kb           = 1125516
+[M.2]   vmrss_loop_mid_kb             = 1138180
+[M.2]   vmrss_loop_end_kb             = 1125508
+[M.2]   first_half_delta_kb           = 12664
+[M.2]   second_half_delta_kb          = -12672  (gate ≤ 256 KB)
+[M.2]   wall = 781.92 s (78192.27 ms/run)
+[M.2]   T_MEMO_M2_DIALOGUE_NO_INTERFERENCE FAIL
+[M.2] report JSON written to /data/local/tmp/m2_full_report.json
+
+[M.2] ═══ SUMMARY ═══
+[M.2]   T_MEMO_M2_DIALOGUE_RUNS              PASS
+[M.2]   T_MEMO_M2_SPINOR_RECEIPTS            PASS
+[M.2]   T_MEMO_M2_ZERO_COPY                  FAIL
+[M.2]   T_MEMO_M2_DIALOGUE_NO_INTERFERENCE   FAIL
+[M.2] 2 gate(s) FAILED
