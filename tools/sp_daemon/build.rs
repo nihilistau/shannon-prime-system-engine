@@ -41,6 +41,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_l1.h").display());
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_model.h").display());
     println!("cargo:rerun-if-changed={}", include_dir.join("sp/sp_status.h").display());
+    // M.5 (routing): KSTE encoder header is the routing primitive input.
+    println!("cargo:rerun-if-changed={}", include_dir.join("sp/kste.h").display());
 
     // Phase 2-L3.FG: android now bindgens + links the math-core C ABI (the
     // early sp_no_link skip is removed). bindgen runs on the host but targets
@@ -49,11 +51,24 @@ fn main() {
 
     // ── bindgen ────────────────────────────────────────────────────────────
     // Bindgen the frozen L1 header. sp_l1.h includes sp_model.h + sp_status.h
-    // transitively; bindgen sees all three through -I.
+    // transitively; bindgen sees all three through -I. M.5 routing also needs
+    // sp_kste_encode + sp_kste_tree_t from sp/kste.h which is NOT transitively
+    // included from sp_l1.h, so we add it via a synthesized wrapper header in
+    // OUT_DIR.
     // Requires libclang. On Windows set:
     //   LIBCLANG_PATH=C:\Program Files\LLVM\bin
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let wrapper_path = out_dir.join("sp_bindgen_wrapper.h");
+    std::fs::write(
+        &wrapper_path,
+        "/* Auto-generated bindgen wrapper. */\n\
+         #include \"sp/sp_l1.h\"\n\
+         /* M.5 (routing): KSTE encoder + Tier-0/Tier-1 dominance API. */\n\
+         #include \"sp/kste.h\"\n",
+    ).expect("could not write sp_bindgen_wrapper.h");
+
     let bindings = bindgen::Builder::default()
-        .header(include_dir.join("sp/sp_l1.h").to_string_lossy())
+        .header(wrapper_path.to_string_lossy())
         .clang_arg(format!("-I{}", include_dir.display()))
         .allowlist_function("sp_.*")
         .allowlist_type("sp_.*")
@@ -62,7 +77,6 @@ fn main() {
         .generate()
         .expect("bindgen failed — set LIBCLANG_PATH if libclang is not on PATH");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out_dir.join("sp_bindings.rs"))
         .expect("could not write sp_bindings.rs");

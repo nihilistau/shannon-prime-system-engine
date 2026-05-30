@@ -21,3 +21,9 @@ pub mod dsp_rpc;
 pub mod ffi_l1 {
     include!(concat!(env!("OUT_DIR"), "/sp_bindings.rs"));
 }
+
+// M.5 (routing): KSTE-routed sparse Memory activation primitive. Public from
+// the lib crate so sp_memo_m5_routing_smoke binary can `use sp_daemon::memo_routing`.
+// Host build also exposes this (build.rs wires KSTE encoder symbols into the lib's
+// own link closure via the bindgen wrapper header).
+pub mod memo_routing;

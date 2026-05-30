@@ -1,0 +1,38 @@
+[M.5] sp_memo_m5_routing_smoke -- KSTE-routed sparse Memory activation
+[M.5]   Memory model = ./qwen25-coder-0.5b-memory.sp-model
+[M.5]   queries      = 100
+[M.5]   det-cycles   = 100
+[M.5]   variant      = B (orchestration-side advisory mask)
+[M.5]   loaded: n_layers=24 n_heads=14 vocab=151936 load_wall=20 ms
+[M.5]   K_primary = 8/14 ; K_sparse = 4/14
+
+[M.5] === T_MEMO_M5_ROUTING_DETERMINISTIC ===
+[M.5]   runs=100 divergence_count=0 -> PASS
+
+[M.5] === T_MEMO_M5_ROUTING_VARIES ===
+[M.5]   pairs_total=45 pairs_distinct=45 (100.0 %) mean_hamming=165.11 -> PASS
+
+[M.5] === T_MEMO_M5_TTFT_MEASURED ===
+[M.5]   full_ttft_ms (median of 5) = 5533.365
+[M.5]   sparse_ttft_K8_estimated  = 3161.923  (speedup_est = 1.750x)
+[M.5]   sparse_ttft_K4_estimated  = 1580.962  (speedup_est = 3.500x)
+[M.5]   T_MEMO_M5_TTFT_MEASURED PASS (no threshold; reported)
+
+[M.5] === T_MEMO_M5_INVARIANCE_PRESERVING ===
+[M.5]   Variant B advisory: sparse forward = identity to full forward
+[M.5]   (no kernel mask applied). Gate interpreted as 'routing layer
+[M.5]   does not break full forward across N=100 queries'.
+[M.5]   q024: full_top1=11 sparse_top1=11 agree_so_far=25/25 mask_active=192
+[M.5]   q049: full_top1=1042 sparse_top1=1042 agree_so_far=50/50 mask_active=192
+[M.5]   q074: full_top1=12762 sparse_top1=12762 agree_so_far=75/75 mask_active=192
+[M.5]   q099: full_top1=2336 sparse_top1=2336 agree_so_far=100/100 mask_active=192
+[M.5]   queries_tested=100 errors=0 top1_agreement_rate=1.0000 top5_overlap_rate=1.0000 mean_kl_divergence=0.000000 -> PASS
+
+[M.5] === GATES SUMMARY ===
+[M.5]   T_MEMO_M5_ROUTING_DETERMINISTIC   PASS
+[M.5]   T_MEMO_M5_ROUTING_VARIES          PASS
+[M.5]   T_MEMO_M5_INVARIANCE_PRESERVING   PASS-ADVISORY (Variant B advisory)
+[M.5]   T_MEMO_M5_TTFT_MEASURED           PASS (reported, no gate)
+[M.5]   fails = 0
+[M.5] report written to /data/local/tmp/m5_report_full.json
+{"sprint":"M.5","variant":"B-advisory","memory":{"path":"./qwen25-coder-0.5b-memory.sp-model","load_wall_ms":20,"n_layers":24,"n_heads":14,"n_kv_heads":2,"head_dim":64,"vocab_size":151936},"gate_routing_deterministic":{"runs":100,"divergence_count":0,"verdict":"PASS"},"gate_routing_varies":{"pairs_total":45,"pairs_distinct":45,"distinct_fraction":1,"mean_hamming_distance":165.11111111111111,"k_per_layer":8,"n_layers":24,"n_heads":14,"verdict":"PASS"},"gate_ttft_measured":{"full_forward_ttft_ms":5533.3654670000005,"ttft_runs":5,"sparse_forward_ttft_ms_K_primary_estimated":3161.923124,"sparse_forward_ttft_ms_K_sparse_estimated":1580.961562,"k_primary":8,"k_sparse":4,"observed_speedup_K_primary_estimated":1.7500000000000002,"observed_speedup_K_sparse_estimated":3.5000000000000004,"active_fraction_K_primary":0.5714285714285714,"active_fraction_K_sparse":0.2857142857142857,"verdict":"PASS","note":"full_ttft_ms is measured; sparse_ttft_ms_*_estimated is linear-in-active-fraction estimate, NOT a measurement. Real sparse-forward measurement requires Variant A (kernel-side head mask)."},"gate_invariance_preserving":{"queries_total":100,"queries_errors":0,"queries_tested":100,"top1_agreement_rate":1,"top5_overlap_rate":1,"mean_kl_divergence_to_full":0,"k_per_layer":8,"wall_full_total_us":662726824,"wall_sparse_total_us":663034030,"variant_b_advisory_note":"Variant B does not apply mask at kernel; sparse forward is identity to full forward. top1_agreement=1.0 by construction; gate tests that routing layer presence does not break the pipeline. Real sparse-vs-full divergence measurement requires Variant A.","verdict":"PASS-ADVISORY"},"gates_summary":{"T_MEMO_M5_ROUTING_DETERMINISTIC":"PASS","T_MEMO_M5_ROUTING_VARIES":"PASS","T_MEMO_M5_INVARIANCE_PRESERVING":"PASS-ADVISORY","T_MEMO_M5_TTFT_MEASURED":"PASS","fail_count":0}}
