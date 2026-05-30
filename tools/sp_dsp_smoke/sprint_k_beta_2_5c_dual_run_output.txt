@@ -1,0 +1,66 @@
+[K-β-2.5c dual] opening FastRpcSession (Path B)...
+[K-β-2.5c dual] session open
+
+[K-β-2.5c dual] ═══ Shape A — prompt-spec (B=8 D_in=128 D_out=128) ═══
+[K-β-2.5c dual] Per K v0.beta-2.5c Stage 2 smoke: ~400 μs / invoke at this shape
+[K-β-2.5c dual] (data-bound; reported for transparency per feedback-shape-dependent-parallelism-gates)
+
+[K-β-2.5c dual]   --- shape A (B=8 D_in=128 D_out=128) ---
+[K-β-2.5c dual]     n_x=1024 n_w=16384 n_y=1024
+[K-β-2.5c dual]     seq q_1 invoke = 452 μs
+[K-β-2.5c dual]     seq q_2 invoke = 349 μs
+[K-β-2.5c dual]     sequential total = 940 μs
+[K-β-2.5c dual]     conc q_1 invoke = 534 μs
+[K-β-2.5c dual]     conc q_2 invoke = 544 μs
+[K-β-2.5c dual]     concurrent total = 1179 μs
+[K-β-2.5c dual]     overlap = 501 μs (0.4249)
+[K-β-2.5c dual]     speedup = 0.797× (seq / conc)
+[K-β-2.5c dual]     functional (concurrent == sequential): PASS
+
+[K-β-2.5c dual] ═══ Shape B — compute-bound (B=8 D_in=1024 D_out=512) ═══
+[K-β-2.5c dual] Expected per-invoke wall ~10-20 ms (matches K v0.alpha regime ~17.7 ms)
+[K-β-2.5c dual] Total MACs/invoke: 8 * 1024 * 512 = 4194304 = 32× shape A's 131k MACs
+
+[K-β-2.5c dual]   --- shape B (B=8 D_in=1024 D_out=512) ---
+[K-β-2.5c dual]     n_x=8192 n_w=524288 n_y=4096
+[K-β-2.5c dual]     seq q_1 invoke = 26007 μs
+[K-β-2.5c dual]     seq q_2 invoke = 26999 μs
+[K-β-2.5c dual]     sequential total = 57523 μs
+[K-β-2.5c dual]     conc q_1 invoke = 27563 μs
+[K-β-2.5c dual]     conc q_2 invoke = 27997 μs
+[K-β-2.5c dual]     concurrent total = 33372 μs
+[K-β-2.5c dual]     overlap = 27563 μs (0.8259)
+[K-β-2.5c dual]     speedup = 1.724× (seq / conc)
+[K-β-2.5c dual]     functional (concurrent == sequential): PASS
+
+[K-β-2.5c dual] ═══ T_MATMUL_DUAL_DISPATCH_SPEEDUP ═══
+[K-β-2.5c dual] Per feedback-shape-dependent-parallelism-gates: load-bearing measurement
+[K-β-2.5c dual] is at the compute-bound shape (B), NOT the data-bound shape (A).
+[K-β-2.5c dual]   shape B: seq_wall=57523 μs / conc_wall=33372 μs / speedup=1.724× / overlap_fraction=0.8259 / single_avg=26503 μs
+[K-β-2.5c dual]   shape B threshold ≥ 1.5×: PASS
+[K-β-2.5c dual]   shape B stretch goal ≥ 1.7× MET
+[K-β-2.5c dual]   shape A (diagnostic): seq_wall=940 μs / conc_wall=1179 μs / speedup=0.797× / overlap_fraction=0.4249
+
+[K-β-2.5c dual] ═══ T_MATMUL_LEAK_FREE (10000-iter dual-invoke; second-half slope) ═══
+[K-β-2.5c dual] Per feedback-leak-gate-allocator-warmup: gate metric is second-half VmRSS delta ≤ 256 KB.
+[K-β-2.5c dual]   VmRSS @ iter 0     = 17620 KB
+[K-β-2.5c dual]   VmRSS @ iter 5000  = 18228 KB
+[K-β-2.5c dual]   VmRSS @ iter 10000 = 18304 KB
+[K-β-2.5c dual]   cycles_run         = 10000
+[K-β-2.5c dual]   wall time          = 20.09 s (2.01 ms/iter)
+[K-β-2.5c dual]   first_half_delta_kb  = 608
+[K-β-2.5c dual]   second_half_delta_kb = 76  (load-bearing — gate threshold ≤ 256 KB)
+[K-β-2.5c dual]   total_delta_kb       = 684  (diagnostic; allocator warmup expected)
+[K-β-2.5c dual]   leaked_dma_bufs       = (rough proxy — second-half VmRSS slope)
+[K-β-2.5c dual]   leaked_vtcm_chunks    = (n/a — matmul kernel does not allocate VTCM)
+[K-β-2.5c dual]   leaked_remote_handles = 0 (Arc-shared session retained whole run)
+[K-β-2.5c dual]   T_MATMUL_LEAK_FREE PASS
+
+[K-β-2.5c dual] ═══ T_GARNER_BIT_EXACT_CONCURRENT ═══
+[K-β-2.5c dual] Concurrent dual-dispatch produces (r_1, r_2) Garner-recombined
+[K-β-2.5c dual] bit-equal to sequential dispatch — already covered by functional
+[K-β-2.5c dual] check in shape A + B above.
+[K-β-2.5c dual]   T_GARNER_BIT_EXACT_CONCURRENT PASS (via shape A + B functional checks)
+
+[K-β-2.5c dual] session closed cleanly
+[K-β-2.5c dual] ALL GATES PASS
