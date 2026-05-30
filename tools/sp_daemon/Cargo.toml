@@ -48,6 +48,14 @@ path = "src/bin/sp_memo_m4_ledger_smoke.rs"
 name = "sp_chat_dialogue_smoke"
 path = "src/bin/sp_chat_dialogue_smoke.rs"
 
+# §4-mesh-canonical-order — u16 rank in _reserved[0..2] + Ledger
+# canonical_sort + replay_canonical_into; cross-device byte-identity
+# smoke harness. Three gates (T_MESH_RANK_PROTOCOL,
+# T_MESH_CANONICAL_SORT_DETERMINISTIC, T_MESH_CROSS_DEVICE_BYTE_IDENTITY).
+[[bin]]
+name = "sp_memo_m4_canonical_replay_smoke"
+path = "src/bin/sp_memo_m4_canonical_replay_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
