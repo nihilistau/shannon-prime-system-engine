@@ -470,6 +470,72 @@ int sp_compute_ntt_twiddle_status(remote_handle64 h,
     return 0;
 }
 
+/* ─── IDL handler — sp_compute_ntt_twiddle_dump (method 16) ──────────── */
+
+/* Signature (per IDL):
+ *   long ntt_twiddle_dump(in long N, in long q_idx, in long table_id,
+ *                         rout sequence<octet> dst_buf) -> long
+ *
+ * Copies one VTCM-resident sub-table into the caller's buffer for the
+ * T_NTT2_TWIDDLE_BIT_EXACT gate.  dst_buf MUST be sized exactly to the
+ * sub-table size or the call fails (-1).
+ *
+ * table_id mapping:
+ *   0 → psi_pow      (4N bytes)
+ *   1 → ipsi_pow     (4N bytes)
+ *   2 → w_fwd        (2N bytes)
+ *   3 → w_inv        (2N bytes)
+ *   4 → w_fwd_stages (4*(N-1) bytes)
+ *   5 → w_inv_stages (4*(N-1) bytes)
+ */
+int sp_compute_ntt_twiddle_dump(remote_handle64 h,
+                                int N, int q_idx, int table_id,
+                                unsigned char *dst_buf, int dst_bufLen)
+{
+    (void)h;
+    if (q_idx < 0 || q_idx > 1) return -1;
+    if (N != 128 && N != 256 && N != 512) return -1;
+    if (table_id < 0 || table_id > 5) return -1;
+    if (!dst_buf) return -1;
+
+    uint32_t ni = sp_tw_n_idx((uint32_t)N);
+    const sp_tw_one_ctx *c = &g_tw_ctx[q_idx][ni];
+    if (!c->present || !c->vtcm_base) {
+        FARF(RUNTIME_ERROR,
+             "sp_compute_ntt_twiddle_dump: table not present q_idx=%d N=%d",
+             q_idx, N);
+        return -1;
+    }
+
+    uint32_t expected_bytes;
+    uint32_t src_off;
+    switch (table_id) {
+        case 0: expected_bytes = 4u * (uint32_t)N;        src_off = c->off_psi_pow;       break;
+        case 1: expected_bytes = 4u * (uint32_t)N;        src_off = c->off_ipsi_pow;      break;
+        case 2: expected_bytes = 2u * (uint32_t)N;        src_off = c->off_w_fwd;         break;
+        case 3: expected_bytes = 2u * (uint32_t)N;        src_off = c->off_w_inv;         break;
+        case 4: expected_bytes = 4u * ((uint32_t)N - 1u); src_off = c->off_w_fwd_stages;  break;
+        case 5: expected_bytes = 4u * ((uint32_t)N - 1u); src_off = c->off_w_inv_stages;  break;
+        default: return -1;
+    }
+
+    if ((uint32_t)dst_bufLen != expected_bytes) {
+        FARF(RUNTIME_ERROR,
+             "sp_compute_ntt_twiddle_dump: dst_bufLen=%d != expected_bytes=%u "
+             "(q_idx=%d N=%d table_id=%d)",
+             dst_bufLen, expected_bytes, q_idx, N, table_id);
+        return -1;
+    }
+
+    const uint8_t *src = (const uint8_t *)c->vtcm_base + src_off;
+    memcpy(dst_buf, src, expected_bytes);
+
+    FARF(RUNTIME_HIGH,
+         "sp_compute_ntt_twiddle_dump: q_idx=%d N=%d table_id=%d bytes=%u src_off=%u",
+         q_idx, N, table_id, expected_bytes, src_off);
+    return 0;
+}
+
 /* ─── public accessor for NTT.1 / NTT.4 (skel-internal C) ─────────────── */
 
 /* Future skel-side consumers (sp_compute_ntt_hvx_imp.c, sp_compute_ntt_intt

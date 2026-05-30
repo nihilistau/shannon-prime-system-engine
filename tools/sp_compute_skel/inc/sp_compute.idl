@@ -278,4 +278,26 @@ interface sp_compute : remote_handle64 {
                             rout long w_inv_off,
                             rout long w_fwd_stages_off,
                             rout long w_inv_stages_off);
+
+    // ntt_twiddle_dump — copy one sub-table from VTCM into a caller buffer.
+    //
+    // Used by the NTT.2 smoke harness for the T_NTT2_TWIDDLE_BIT_EXACT
+    // gate (byte-exact comparison vs host-side reference).  Also useful
+    // for future SASS audit + debug.
+    //
+    // table_id selects which sub-table to dump:
+    //   0 → psi_pow      (N × u32 = 4N bytes)
+    //   1 → ipsi_pow     (N × u32 = 4N bytes)
+    //   2 → w_fwd        (N/2 × u32 = 2N bytes)
+    //   3 → w_inv        (N/2 × u32 = 2N bytes)
+    //   4 → w_fwd_stages ((N-1) × u32 = 4(N-1) bytes)
+    //   5 → w_inv_stages ((N-1) × u32 = 4(N-1) bytes)
+    //
+    // dst_buf MUST be sized exactly to the requested sub-table; if
+    // dst_buf.nLen != expected_bytes the call returns -1.
+    //
+    // Returns 0 on success, -1 on input validation failure or if the
+    // (prime, N) table is not initialized (call ntt_twiddle_init first).
+    long ntt_twiddle_dump(in long N, in long q_idx, in long table_id,
+                          rout sequence<octet> dst_buf);
 };
