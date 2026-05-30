@@ -1,0 +1,89 @@
+[autowire] ═══ ledger-autowire smoke ═══
+[autowire]   url:         http://127.0.0.1:8080/v1/dialogue
+[autowire]   ledger:      C:\Users\Knack\AppData\Local\Temp\autowire.spinor
+[autowire]   N dialogues: 5
+[autowire]   pre_size:    0 bytes
+[autowire]   ── dialogue 1 / 5 ──
+[autowire]     http_status     = 200
+[autowire]     response_head   = ".C. The capital of Japan is Tokyo"
+[autowire]     response_wall_ms= 42016
+[autowire]     receipts        = 3 entries
+[autowire]       receipt[0] 64 bytes (sentinel=A5)
+[autowire]       receipt[1] 64 bytes (sentinel=A5)
+[autowire]       receipt[2] 64 bytes (sentinel=A5)
+[autowire]   ── dialogue 2 / 5 ──
+[autowire]     http_status     = 200
+[autowire]     response_head   = ".C. The capital of Japan is Tokyo"
+[autowire]     response_wall_ms= 42998
+[autowire]     receipts        = 3 entries
+[autowire]       receipt[0] 64 bytes (sentinel=A5)
+[autowire]       receipt[1] 64 bytes (sentinel=A5)
+[autowire]       receipt[2] 64 bytes (sentinel=A5)
+[autowire]   ── dialogue 3 / 5 ──
+[autowire]     http_status     = 200
+[autowire]     response_head   = ".C. The capital of Japan is Tokyo"
+[autowire]     response_wall_ms= 42314
+[autowire]     receipts        = 3 entries
+[autowire]       receipt[0] 64 bytes (sentinel=A5)
+[autowire]       receipt[1] 64 bytes (sentinel=A5)
+[autowire]       receipt[2] 64 bytes (sentinel=A5)
+[autowire]   ── dialogue 4 / 5 ──
+[autowire]     http_status     = 200
+[autowire]     response_head   = ".C. The capital of Japan is Tokyo"
+[autowire]     response_wall_ms= 42162
+[autowire]     receipts        = 3 entries
+[autowire]       receipt[0] 64 bytes (sentinel=A5)
+[autowire]       receipt[1] 64 bytes (sentinel=A5)
+[autowire]       receipt[2] 64 bytes (sentinel=A5)
+[autowire]   ── dialogue 5 / 5 ──
+[autowire]     http_status     = 200
+[autowire]     response_head   = ".C. The capital of Japan is Tokyo"
+[autowire]     response_wall_ms= 42166
+[autowire]     receipts        = 3 entries
+[autowire]       receipt[0] 64 bytes (sentinel=A5)
+[autowire]       receipt[1] 64 bytes (sentinel=A5)
+[autowire]       receipt[2] 64 bytes (sentinel=A5)
+[autowire]   total wall: 211706 ms
+[autowire]   post_size:   960 bytes
+[autowire]   delta:       960 bytes (expected 960)
+
+[autowire] ═══ T_AUTOWIRE_LEDGER_GROWS ═══
+[autowire]   pre_size  = 0
+[autowire]   post_size = 960
+[autowire]   delta     = 960
+[autowire]   expected  = 960
+[autowire]   T_AUTOWIRE_LEDGER_GROWS PASS
+
+[autowire] ═══ T_AUTOWIRE_RECEIPT_BYTE_IDENTITY ═══
+[autowire]   receipt[0,0] identity OK (64 bytes)
+[autowire]   receipt[0,1] identity OK (64 bytes)
+[autowire]   receipt[0,2] identity OK (64 bytes)
+[autowire]   receipt[1,0] identity OK (64 bytes)
+[autowire]   receipt[1,1] identity OK (64 bytes)
+[autowire]   receipt[1,2] identity OK (64 bytes)
+[autowire]   receipt[2,0] identity OK (64 bytes)
+[autowire]   receipt[2,1] identity OK (64 bytes)
+[autowire]   receipt[2,2] identity OK (64 bytes)
+[autowire]   receipt[3,0] identity OK (64 bytes)
+[autowire]   receipt[3,1] identity OK (64 bytes)
+[autowire]   receipt[3,2] identity OK (64 bytes)
+[autowire]   receipt[4,0] identity OK (64 bytes)
+[autowire]   receipt[4,1] identity OK (64 bytes)
+[autowire]   receipt[4,2] identity OK (64 bytes)
+[autowire]   receipts_compared = 15
+[autowire]   byte_divergences  = 0
+[autowire]   T_AUTOWIRE_RECEIPT_BYTE_IDENTITY PASS
+
+[autowire] ═══ T_AUTOWIRE_NO_REGRESSION ═══
+[autowire]   dialogues_with_status_200          = 5
+[autowire]   dialogues_with_3_receipts          = 5
+[autowire]   transport_errors                   = 0
+[autowire]   T_AUTOWIRE_NO_REGRESSION PASS
+
+[autowire] report JSON written to C:\Users\Knack\AppData\Local\Temp\autowire_report.json
+
+[autowire] ═══ SUMMARY ═══
+[autowire]   T_AUTOWIRE_LEDGER_GROWS          PASS
+[autowire]   T_AUTOWIRE_RECEIPT_BYTE_IDENTITY PASS
+[autowire]   T_AUTOWIRE_NO_REGRESSION         PASS
+[autowire] ALL GATES PASS

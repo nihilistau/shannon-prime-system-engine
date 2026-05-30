@@ -727,6 +727,34 @@ pub async fn v1_dialogue(
 
     match result {
         Ok(Ok(outcome)) => {
+            // ledger-autowire: best-effort append of all 3 receipts to the
+            // shared PoUW ledger BEFORE building the HTTP response. Per the
+            // sprint plan + the broader M.4 design, the ledger is
+            // observational, not a transactional gate — a lock or append
+            // failure logs a warning and the response still ships. The
+            // critical section is ~10 µs total (3 × p99=3 µs per M.4
+            // measurement) so contention is structurally irrelevant.
+            if let Some(ledger) = &state.ledger {
+                match ledger.lock() {
+                    Ok(mut guard) => {
+                        for (idx, r) in outcome.receipts.iter().enumerate() {
+                            if let Err(e) = guard.append(r) {
+                                tracing::warn!(
+                                    error = %e,
+                                    receipt_idx = idx,
+                                    "ledger-autowire: append failed; response still returns"
+                                );
+                            }
+                        }
+                    }
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            error = ?poisoned,
+                            "ledger-autowire: mutex poisoned; skipping append"
+                        );
+                    }
+                }
+            }
             let receipts_b64: Vec<String> = outcome
                 .receipts
                 .iter()

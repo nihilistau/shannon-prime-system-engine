@@ -61,6 +61,9 @@ struct Cli {
     memo_model: String,
     #[arg(long, default_value = "", hide = true)]
     memo_tokenizer: String,
+    // ledger-autowire: PoUW receipt ledger path (empty = disabled).
+    #[arg(long, default_value = "", hide = true)]
+    pouw_ledger_path: String,
     #[arg(long, default_value = "0", hide = true)]
     quic_port: u16,
     #[arg(long, default_value = "8080", hide = true)]
@@ -95,6 +98,13 @@ enum Cmd {
         /// --memo-model is set).
         #[arg(long, env = "SP_MEMO_TOKENIZER_PATH", default_value = "")]
         memo_tokenizer: String,
+        /// ledger-autowire: path to the PoUW receipt ledger (append-only file).
+        /// If set, every /v1/dialogue invocation auto-appends its 3
+        /// SpinorReceipts here in addition to returning them in the HTTP
+        /// response. If unset, the autowire is disabled (no ledger
+        /// persistence; receipts still surface in the response).
+        #[arg(long, env = "SP_POUW_LEDGER_PATH", default_value = "")]
+        pouw_ledger_path: String,
         /// UDP port for the QUIC DHT mesh coordinator (set SP_QUIC_PORT or 0 to disable).
         #[arg(long, env = "SP_QUIC_PORT", default_value = "0")]
         quic_port: u16,
@@ -124,14 +134,16 @@ async fn main() {
             &cli.draft_model, &cli.draft_tokenizer,
             // Chat-integration: Memory model wiring.
             &cli.memo_model, &cli.memo_tokenizer,
+            // ledger-autowire: PoUW ledger path (empty = disabled).
+            &cli.pouw_ledger_path,
             cli.quic_port, cli.port, &cli.peer, &cli.peers,
         ).await;
         return;
     }
 
     match cli.command {
-        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, memo_model, memo_tokenizer, quic_port, port, peer, peers }) =>
-            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, &memo_model, &memo_tokenizer, quic_port, port, &peer, &peers),
+        Some(Cmd::Start { model, tokenizer, draft_model, draft_tokenizer, memo_model, memo_tokenizer, pouw_ledger_path, quic_port, port, peer, peers }) =>
+            daemon::cmd_start(&model, &tokenizer, &draft_model, &draft_tokenizer, &memo_model, &memo_tokenizer, &pouw_ledger_path, quic_port, port, &peer, &peers),
         Some(Cmd::Stop) => daemon::cmd_stop(),
         Some(Cmd::Reload) => daemon::cmd_reload(),
         None => {

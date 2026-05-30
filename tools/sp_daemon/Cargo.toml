@@ -56,6 +56,11 @@ path = "src/bin/sp_chat_dialogue_smoke.rs"
 name = "sp_memo_m4_canonical_replay_smoke"
 path = "src/bin/sp_memo_m4_canonical_replay_smoke.rs"
 
+# Sprint ledger-autowire — /v1/dialogue + PoUW ledger autowire smoke harness
+[[bin]]
+name = "sp_chat_ledger_autowire_smoke"
+path = "src/bin/sp_chat_ledger_autowire_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
