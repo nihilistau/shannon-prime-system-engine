@@ -36,6 +36,13 @@ path = "src/bin/sp_memo_m2_dialogue_smoke.rs"
 name = "sp_memo_m5_routing_smoke"
 path = "src/bin/sp_memo_m5_routing_smoke.rs"
 
+# §4-MeMo Sprint M.4 — pouw ledger smoke (append + read + replay-determinism
+# + cross-device replay simulation). Host-buildable; android binary runs on
+# Knack's S22U via adb push.
+[[bin]]
+name = "sp_memo_m4_ledger_smoke"
+path = "src/bin/sp_memo_m4_ledger_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
