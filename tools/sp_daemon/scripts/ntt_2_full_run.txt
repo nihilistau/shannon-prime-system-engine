@@ -1,0 +1,80 @@
+[NTT.2] sp_ntt_2_smoke — twiddle VTCM staging gates
+[NTT.2]   T_NTT2_TWIDDLE_INIT      (init + status query)
+[NTT.2]   T_NTT2_TWIDDLE_BIT_EXACT (VTCM tables == host ref)
+[NTT.2]   T_NTT2_VTCM_BUDGET       (≤ 2 MB peak across all (prime, N))
+
+[NTT.2] opening FastRpcSession (Path B Unsigned PD)...
+[NTT.2] session open
+
+[NTT.2] ── T_NTT2_TWIDDLE_INIT — drive ntt_twiddle_init(N=512) ──
+[NTT.2]   ntt_twiddle_init(N=512) ok (741 us)
+[NTT.2]   ntt_twiddle_init(N=512) #2 ok (470 us, expect << #1 due to idempotent fast path)
+[NTT.2]   q_idx=0 N=128: present=1 vtcm_addr_lo=0xff000000 vtcm_size=2560 psi_pow_off=0 ipsi_pow_off=512 w_fwd_off=1024 w_inv_off=1280 w_fwd_stages_off=1536 w_inv_stages_off=2044
+[NTT.2]   q_idx=0 N=256: present=1 vtcm_addr_lo=0xff040000 vtcm_size=5120 psi_pow_off=0 ipsi_pow_off=1024 w_fwd_off=2048 w_inv_off=2560 w_fwd_stages_off=3072 w_inv_stages_off=4092
+[NTT.2]   q_idx=0 N=512: present=1 vtcm_addr_lo=0xff080000 vtcm_size=10240 psi_pow_off=0 ipsi_pow_off=2048 w_fwd_off=4096 w_inv_off=5120 w_fwd_stages_off=6144 w_inv_stages_off=8188
+[NTT.2]   q_idx=1 N=128: present=1 vtcm_addr_lo=0xff0c0000 vtcm_size=2560 psi_pow_off=0 ipsi_pow_off=512 w_fwd_off=1024 w_inv_off=1280 w_fwd_stages_off=1536 w_inv_stages_off=2044
+[NTT.2]   q_idx=1 N=256: present=1 vtcm_addr_lo=0xff100000 vtcm_size=5120 psi_pow_off=0 ipsi_pow_off=1024 w_fwd_off=2048 w_inv_off=2560 w_fwd_stages_off=3072 w_inv_stages_off=4092
+[NTT.2]   q_idx=1 N=512: present=1 vtcm_addr_lo=0xff140000 vtcm_size=10240 psi_pow_off=0 ipsi_pow_off=2048 w_fwd_off=4096 w_inv_off=5120 w_fwd_stages_off=6144 w_inv_stages_off=8188
+[NTT.2] init wall   = 741 us  (first call)
+[NTT.2] init wall#2 = 470 us (idempotent)
+[NTT.2] total_vtcm_bytes = 35840
+[NTT.2] T_NTT2_TWIDDLE_INIT PASS
+
+[NTT.2] ── T_NTT2_VTCM_BUDGET ──
+[NTT.2]   N=128: sum_across_primes=5120 bytes
+[NTT.2]   N=256: sum_across_primes=10240 bytes
+[NTT.2]   N=512: sum_across_primes=20480 bytes
+[NTT.2]   peak_vtcm_bytes_all_combos = 35840 (budget = 2097152)
+[NTT.2] T_NTT2_VTCM_BUDGET PASS
+
+[NTT.2] ── T_NTT2_TWIDDLE_BIT_EXACT — dump each VTCM table + compare to host ref ──
+[NTT.2]   q_idx=0 N=128 table=0 (psi_pow): 128 entries, diverged=0
+[NTT.2]   q_idx=0 N=128 table=1 (ipsi_pow): 128 entries, diverged=0
+[NTT.2]   q_idx=0 N=128 table=2 (w_fwd): 64 entries, diverged=0
+[NTT.2]   q_idx=0 N=128 table=3 (w_inv): 64 entries, diverged=0
+[NTT.2]   q_idx=0 N=128 table=4 (w_fwd_stages): 127 entries, diverged=0
+[NTT.2]   q_idx=0 N=128 table=5 (w_inv_stages): 127 entries, diverged=0
+[NTT.2]   q_idx=0 N=256 table=0 (psi_pow): 256 entries, diverged=0
+[NTT.2]   q_idx=0 N=256 table=1 (ipsi_pow): 256 entries, diverged=0
+[NTT.2]   q_idx=0 N=256 table=2 (w_fwd): 128 entries, diverged=0
+[NTT.2]   q_idx=0 N=256 table=3 (w_inv): 128 entries, diverged=0
+[NTT.2]   q_idx=0 N=256 table=4 (w_fwd_stages): 255 entries, diverged=0
+[NTT.2]   q_idx=0 N=256 table=5 (w_inv_stages): 255 entries, diverged=0
+[NTT.2]   q_idx=0 N=512 table=0 (psi_pow): 512 entries, diverged=0
+[NTT.2]   q_idx=0 N=512 table=1 (ipsi_pow): 512 entries, diverged=0
+[NTT.2]   q_idx=0 N=512 table=2 (w_fwd): 256 entries, diverged=0
+[NTT.2]   q_idx=0 N=512 table=3 (w_inv): 256 entries, diverged=0
+[NTT.2]   q_idx=0 N=512 table=4 (w_fwd_stages): 511 entries, diverged=0
+[NTT.2]   q_idx=0 N=512 table=5 (w_inv_stages): 511 entries, diverged=0
+[NTT.2]   q_idx=1 N=128 table=0 (psi_pow): 128 entries, diverged=0
+[NTT.2]   q_idx=1 N=128 table=1 (ipsi_pow): 128 entries, diverged=0
+[NTT.2]   q_idx=1 N=128 table=2 (w_fwd): 64 entries, diverged=0
+[NTT.2]   q_idx=1 N=128 table=3 (w_inv): 64 entries, diverged=0
+[NTT.2]   q_idx=1 N=128 table=4 (w_fwd_stages): 127 entries, diverged=0
+[NTT.2]   q_idx=1 N=128 table=5 (w_inv_stages): 127 entries, diverged=0
+[NTT.2]   q_idx=1 N=256 table=0 (psi_pow): 256 entries, diverged=0
+[NTT.2]   q_idx=1 N=256 table=1 (ipsi_pow): 256 entries, diverged=0
+[NTT.2]   q_idx=1 N=256 table=2 (w_fwd): 128 entries, diverged=0
+[NTT.2]   q_idx=1 N=256 table=3 (w_inv): 128 entries, diverged=0
+[NTT.2]   q_idx=1 N=256 table=4 (w_fwd_stages): 255 entries, diverged=0
+[NTT.2]   q_idx=1 N=256 table=5 (w_inv_stages): 255 entries, diverged=0
+[NTT.2]   q_idx=1 N=512 table=0 (psi_pow): 512 entries, diverged=0
+[NTT.2]   q_idx=1 N=512 table=1 (ipsi_pow): 512 entries, diverged=0
+[NTT.2]   q_idx=1 N=512 table=2 (w_fwd): 256 entries, diverged=0
+[NTT.2]   q_idx=1 N=512 table=3 (w_inv): 256 entries, diverged=0
+[NTT.2]   q_idx=1 N=512 table=4 (w_fwd_stages): 511 entries, diverged=0
+[NTT.2]   q_idx=1 N=512 table=5 (w_inv_stages): 511 entries, diverged=0
+
+[NTT.2]   tables_compared       = 36 (expect 36 = 6 combos × 6 tables)
+[NTT.2]   total_bytes_compared  = 35792
+[NTT.2]   byte_divergences      = 0
+[NTT.2]   first_divergence      = (none)
+[NTT.2] T_NTT2_TWIDDLE_BIT_EXACT PASS
+
+[NTT.2] session closed cleanly
+
+[NTT.2] ═══ Sprint NTT.2 aggregate ═══
+[NTT.2]   T_NTT2_TWIDDLE_INIT       = PASS
+[NTT.2]   T_NTT2_TWIDDLE_BIT_EXACT  = PASS
+[NTT.2]   T_NTT2_VTCM_BUDGET        = PASS
+[NTT.2] ALL GATES PASS

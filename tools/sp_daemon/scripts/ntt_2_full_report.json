@@ -1,0 +1,80 @@
+{
+  "sprint": "NTT.2",
+  "scope": "twiddle factor VTCM staging (precomputed at init, stride-1 access for HVX butterflies)",
+  "device": "Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Hexagon V69 cDSP, Path B Unsigned PD)",
+  "engine_base": "f834bff",
+  "branch": "sprint/ntt-2",
+  "skel_method_assignments": {
+    "ntt_oracle": 12,
+    "ntt_twiddle_init": 13,
+    "ntt_twiddle_status": 14,
+    "ntt_twiddle_dump": 15
+  },
+  "gates": {
+    "T_NTT2_TWIDDLE_INIT": {
+      "status": "PASS",
+      "init_wall_first_us": 625,
+      "init_wall_idempotent_us": 134,
+      "combinations": [
+        { "q_idx": 0, "N": 128, "table_present": 1, "vtcm_addr_lo": "0xff000000", "vtcm_size": 2560 },
+        { "q_idx": 0, "N": 256, "table_present": 1, "vtcm_addr_lo": "0xff040000", "vtcm_size": 5120 },
+        { "q_idx": 0, "N": 512, "table_present": 1, "vtcm_addr_lo": "0xff080000", "vtcm_size": 10240 },
+        { "q_idx": 1, "N": 128, "table_present": 1, "vtcm_addr_lo": "0xff0c0000", "vtcm_size": 2560 },
+        { "q_idx": 1, "N": 256, "table_present": 1, "vtcm_addr_lo": "0xff100000", "vtcm_size": 5120 },
+        { "q_idx": 1, "N": 512, "table_present": 1, "vtcm_addr_lo": "0xff140000", "vtcm_size": 10240 }
+      ]
+    },
+    "T_NTT2_TWIDDLE_BIT_EXACT": {
+      "status": "PASS",
+      "tables_compared": 36,
+      "total_bytes_compared": 35792,
+      "byte_divergences": 0,
+      "first_divergence": null
+    },
+    "T_NTT2_VTCM_BUDGET": {
+      "status": "PASS",
+      "peak_vtcm_bytes_all_combos": 35840,
+      "budget_bytes": 2097152,
+      "envelope_utilization_pct": 1.71,
+      "per_N_sum_across_primes": {
+        "128": 5120,
+        "256": 10240,
+        "512": 20480
+      }
+    }
+  },
+  "vtcm_layout_observed": {
+    "arena_alignment": "page-aligned (0x40000-stride between arenas in HAP allocator output)",
+    "per_arena_sub_table_offsets_N128": {
+      "psi_pow": 0,
+      "ipsi_pow": 512,
+      "w_fwd": 1024,
+      "w_inv": 1280,
+      "w_fwd_stages": 1536,
+      "w_inv_stages": 2044
+    },
+    "per_arena_sub_table_offsets_N256": {
+      "psi_pow": 0,
+      "ipsi_pow": 1024,
+      "w_fwd": 2048,
+      "w_inv": 2560,
+      "w_fwd_stages": 3072,
+      "w_inv_stages": 4092
+    },
+    "per_arena_sub_table_offsets_N512": {
+      "psi_pow": 0,
+      "ipsi_pow": 2048,
+      "w_fwd": 4096,
+      "w_inv": 5120,
+      "w_fwd_stages": 6144,
+      "w_inv_stages": 8188
+    },
+    "per_arena_total_bytes": {
+      "N=128": 2560,
+      "N=256": 5120,
+      "N=512": 10240
+    }
+  },
+  "init_strategy": "lazy on first ntt_twiddle_init call; idempotent across calls",
+  "anti_contamination": "engine-ntt-2 worktree only; no touch of engine-ntt-1 / engine-ntt-0 / other engine-* / lattice-* / shannon-prime-system-engine"
+}

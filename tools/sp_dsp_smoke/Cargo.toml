@@ -96,6 +96,16 @@ path = "src/sp_matmul_q_dual_smoke.rs"
 name = "sp_ntt_0_smoke"
 path = "src/sp_ntt_0_smoke.rs"
 
+# §4-NTT Sprint NTT.2 — twiddle VTCM staging smoke.
+# Drives ntt_twiddle_init (method 14), ntt_twiddle_status (method 15) and
+# ntt_twiddle_dump (method 16) against the cDSP skel.  Re-implements the
+# math-core `prime_setup` table init in Rust as the byte-exact reference
+# (math-core's ntt_ctx is opaque; no internal-table FFI accessor).
+# See PLAN-NTT-2.md + CLOSURE-NTT-2.md.
+[[bin]]
+name = "sp_ntt_2_smoke"
+path = "src/sp_ntt_2_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
