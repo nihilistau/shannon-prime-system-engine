@@ -14,6 +14,8 @@ use serde::Serialize;
 use crate::session::{SpModel, SpSession};
 use crate::sessions::Sessions;
 use crate::tokenizer::SptbTokenizer;
+// ledger-autowire: shared PoUW ledger handle for /v1/dialogue auto-append.
+use sp_daemon::pouw_ledger::Ledger;
 
 /// Events broadcast on the /v1/events SSE channel.
 #[derive(Clone, Debug)]
@@ -97,6 +99,13 @@ pub struct AppState {
     /// Chat-integration: vocab size of the Memory model — used to pre-allocate
     /// DialoguePool's memo_logits slot at request time.
     pub memo_vocab_size: usize,
+
+    // ledger-autowire: optional PoUW receipt ledger. When set
+    // (--pouw-ledger-path / SP_POUW_LEDGER_PATH at startup), the /v1/dialogue
+    // handler appends each of the 3 SpinorReceipts per dialogue to this
+    // shared, mutex-serialized handle. None disables ledger autowire (the
+    // HTTP response still returns receipts; nothing is persisted daemon-side).
+    pub ledger: Option<Arc<Mutex<Ledger>>>,
 
     // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the

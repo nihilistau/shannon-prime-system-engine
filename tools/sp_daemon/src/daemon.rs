@@ -31,7 +31,7 @@ fn pid_file() -> PathBuf {
 
 /// Spawn the daemon inner process detached from the current session, write
 /// the PID file, and return so the calling process can exit.
-pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, memo_model: &str, memo_tokenizer: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
+pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenizer: &str, memo_model: &str, memo_tokenizer: &str, pouw_ledger_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     let exe = std::env::current_exe().expect("current_exe");
     let quic_port_s = quic_port.to_string();
     let http_port_s = http_port.to_string();
@@ -45,6 +45,8 @@ pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenize
         // Chat-integration: Memory model for /v1/dialogue (empty = disabled).
         "--memo-model",      memo_model,
         "--memo-tokenizer",  memo_tokenizer,
+        // ledger-autowire: PoUW receipt ledger path (empty = disabled).
+        "--pouw-ledger-path", pouw_ledger_path,
         "--quic-port",       &quic_port_s,
         "--port",            &http_port_s,
         "--peer",            peer,
@@ -97,7 +99,7 @@ pub fn cmd_reload() {
 /// mining (ledger) run on both (the C ABI links on android now). The cDSP DSP
 /// model + echo session load in a `cfg(android)` block; the QUIC garner mesh
 /// stays host-only (NTT-CRT cluster, out of scope — android serves empty peers).
-pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, memo_model_path: &str, memo_tok_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
+pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str, draft_tok_path: &str, memo_model_path: &str, memo_tok_path: &str, pouw_ledger_path: &str, quic_port: u16, http_port: u16, peer: &str, peers: &str) {
     // Detach from the parent's controlling terminal on Unix.
     // On Windows, DETACHED_PROCESS in cmd_start already did this.
     #[cfg(unix)]
@@ -169,6 +171,26 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     } else {
         info!("no memo model — /v1/dialogue endpoint will return HTTP 501");
         (None, None, None, 0usize)
+    };
+
+    // ── ledger-autowire: open the PoUW receipt ledger if --pouw-ledger-path
+    // was passed. Open failures bail the daemon (operator can correct
+    // misconfig at startup rather than at first dialogue). Empty path
+    // disables autowire (None → /v1/dialogue handler skips append silently).
+    let ledger: Option<Arc<Mutex<sp_daemon::pouw_ledger::Ledger>>> = if !pouw_ledger_path.is_empty() {
+        match sp_daemon::pouw_ledger::Ledger::open(pouw_ledger_path) {
+            Ok(l) => {
+                info!("ledger-autowire: PoUW ledger opened at {} ({} pre-existing bytes)",
+                    pouw_ledger_path, l.len_bytes());
+                Some(Arc::new(Mutex::new(l)))
+            }
+            Err(e) => {
+                panic!("ledger-autowire: PoUW ledger open failed at {pouw_ledger_path}: {e}");
+            }
+        }
+    } else {
+        info!("ledger-autowire: PoUW ledger autowire disabled (--pouw-ledger-path empty)");
+        None
     };
 
     let (events_tx, _) =
@@ -256,6 +278,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         memo_tokenizer,
         memo_model,
         memo_vocab_size,
+        // ledger-autowire: shared PoUW ledger handle (None when --pouw-ledger-path unset).
+        ledger,
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]
