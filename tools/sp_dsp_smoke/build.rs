@@ -38,8 +38,16 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| engine_root.join("build-android-libs"));
 
-    let search = build_dir.join("core").join("ntt_crt");
-    println!("cargo:rustc-link-search=native={}", search.display());
-    println!("cargo:rustc-link-lib=static=sp_ntt_crt");
+    // NTT.0-4 smokes only need sp_ntt_crt. NTT.5b adds sp_poly_ring (for
+    // sp_pr_bluestein_*). Order matters for static linking: poly_ring depends
+    // on ntt_crt, so list poly_ring first to satisfy the resolver.
+    for (subdir, lib) in &[
+        ("poly_ring", "sp_poly_ring"),   // NTT.5b — sp_pr_bluestein_*
+        ("ntt_crt",   "sp_ntt_crt"),     // NTT.0-4 — ntt_init/forward/inverse
+    ] {
+        let search = build_dir.join("core").join(subdir);
+        println!("cargo:rustc-link-search=native={}", search.display());
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
     println!("cargo:rustc-link-lib=m");
 }

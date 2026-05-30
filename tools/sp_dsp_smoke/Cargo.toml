@@ -144,6 +144,14 @@ path = "src/sp_ntt_4_intt_smoke.rs"
 name = "sp_ntt_4_polymul_smoke"
 path = "src/sp_ntt_4_polymul_smoke.rs"
 
+# §4-NTT Sprint NTT.5b Stage 3 — T_NTT5B_HOST_HEX_BIT_EXACT.
+# Drives sp_pr_bluestein_inner along both host and Hex-dispatched paths;
+# byte-exact gate. 600 runs (3 N x 100 seeds x 2 paths = 600 dispatched +
+# 300 host baseline). Builds against libsp_poly_ring + libsp_ntt_crt.
+[[bin]]
+name = "sp_ntt_5b_bluestein_hex_smoke"
+path = "src/sp_ntt_5b_bluestein_hex_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
