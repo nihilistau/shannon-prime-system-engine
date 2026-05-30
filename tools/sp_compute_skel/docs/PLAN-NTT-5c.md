@@ -150,6 +150,30 @@ The third row covers `tools/probe`-style callers that go through
 `session=NULL` → backend NULL → host Bluestein path. The new capability
 (HD=64 working at all) reaches them; backend-dispatch does not.
 
+## Stage 0 — qwen25.c overlay discovery
+
+**Discovery during pre-read** (`core/forward/qwen25.c`): qwen25_forward
+has NO NTT-attention overlay. It calls `sp_attn_head` directly at line
+79 (fp32 attention). gemma3.c likewise has no NTT-attention overlay.
+Only `forward.c::qwen3_forward_ex` has the `g_ntt_attn` branch.
+
+**Implication for NTT.5c's stated mission.** The Memory model
+(Qwen2.5-Coder-0.5B) goes through `qwen25_forward` via
+`sp_prefill_chunk → qwen25_forward(s->qm, ...)` (sp_session.c:156).
+Even if NTT.5c only patches forward.c's qwen3 overlay, the Memory
+model would NEVER hit the new Bluestein code path because it routes
+through qwen25_forward not qwen3_forward.
+
+**Therefore NTT.5c MUST add the NTT-attention overlay to qwen25.c**
+in addition to extending forward.c's overlay. The overlay structure is
+mechanical: the Qwen2.5 attention loop at qwen25.c:77-82 becomes a
+NTT-attention conditional dispatch identical in shape to forward.c:188-211.
+
+**Out of scope:** Adding the overlay to gemma3.c. Gemma3 has sliding-
+window attention via `sp_attn_head` with `win=` parameter — the NTT-
+attention overlay shape doesn't trivially compose with SWA, and Gemma3
+isn't the NTT.5c target model. Documented as deferred.
+
 ## Forward.c overlay logic (before vs after)
 
 **Before (NTT.4-era; HD silently fails for {2..64}):**
@@ -251,7 +275,7 @@ a one-line edit. Going with A.
 | `include/sp/model.h` | Add `qwen3_forward_ex2` / `gemma3_forward_ex2` / `qwen25_forward_ex2` declarations (session-aware) | +30 |
 | `core/forward/forward.c` | Bluestein dispatch in NTT overlay; new `qwen3_forward_ex2` impl; `qwen3_forward_ex` becomes wrapper | +60 / -8 |
 | `core/forward/gemma3.c` | `gemma3_forward_ex2` impl (likely no NTT-attention in gemma3 path — confirm; just thread param through) | +15 / -2 |
-| `core/forward/qwen25.c` | `qwen25_forward_ex2` impl (NTT-attention overlay is qwen25-relevant since HD=64) | +60 / -8 |
+| `core/forward/qwen25.c` | **CRITICAL:** qwen25_forward had NO NTT-attention overlay at all today (Stage 0 discovery — see §"Stage 0 — qwen25.c overlay discovery"). NTT.5c adds the overlay AND wires Bluestein dispatch — this is the actual unblocker for the Memory model. | +90 / -3 |
 | `core/session/sp_session.c` | `sp_prefill_chunk` switches to `qwen{3,25}_forward_ex2(..., s)` per arch | +5 / -3 |
 | `core/forward/CMakeLists.txt` | Already lists forward.c; no new file needed | 0 |
 
