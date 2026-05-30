@@ -236,7 +236,7 @@ interface sp_compute : remote_handle64 {
                     rout sequence<octet> data_out);
 
     // ────────────────────────────────────────────────────────────────────
-    // §4-NTT Sprint NTT.1 — HVX-vectorized NTT butterfly oracle.
+    // §4-NTT Sprint NTT.1 — HVX-vectorized NTT butterfly oracle (method 13).
     //
     // ntt_hvx_oracle — same contract as ntt_oracle (method 12) but routes
     // through the HVX implementation. Large stages (half >= 32) use hand-
@@ -254,4 +254,70 @@ interface sp_compute : remote_handle64 {
     long ntt_hvx_oracle(in long q_idx, in long N,
                         in  sequence<octet> data_in,
                         rout sequence<octet> data_out);
+
+    // §4-NTT Sprint NTT.2 — twiddle VTCM staging (methods 14/15/16; renumbered
+    // from 13/14/15 at merge time to avoid collision with NTT.1's method 13).
+    //
+    // ntt_twiddle_init (method 14) — precompute + pin all 6 (prime, N) twiddle
+    //                    tables in VTCM via HAP_request_VTCM. Lazy idempotent
+    //                    init: subsequent calls (any N) no-op if all tables
+    //                    already present.
+    //
+    // Per (prime ∈ {q1, q2}, N ∈ {128, 256, 512}) the arena holds:
+    //   psi_pow[N], ipsi_pow[N], w_fwd[N/2], w_inv[N/2],
+    //   w_fwd_stages[N-1], w_inv_stages[N-1]
+    // Total ≈ 20N - 8 bytes per (prime, N); ≈ 35.8 KB across all 6.
+    //
+    // N parameter is informational — the implementation always
+    // initializes the full {128, 256, 512} × {q1, q2} matrix so the
+    // ARM-side daemon needs only one call.  Future revisions may
+    // honour N as a subset selector.
+    //
+    // Returns 0 on success (all 6 tables present), -1 on any init
+    // failure (VTCM denial, find_psi failure, etc.).  All-or-nothing.
+    long ntt_twiddle_init(in long N);
+
+    // ntt_twiddle_status (method 15) — inspect one (prime, N) entry's VTCM state.
+    //
+    // Reports table_present + VTCM base address + arena size + per-
+    // sub-table byte offsets within the arena.  Used by the NTT.2
+    // smoke harness for T_NTT2_TWIDDLE_INIT + T_NTT2_VTCM_BUDGET gates
+    // and by future SASS audit / debug tooling.
+    //
+    // table_present = 1 iff the arena is populated; 0 otherwise (other
+    // rout fields are zero in that case).
+    // vtcm_addr_lo is the low-32 bits of the arena base pointer (matches
+    // sp_compute_vtcm_probe convention).
+    long ntt_twiddle_status(in long N, in long q_idx,
+                            rout long table_present,
+                            rout long vtcm_addr_lo,
+                            rout long vtcm_size,
+                            rout long psi_pow_off,
+                            rout long ipsi_pow_off,
+                            rout long w_fwd_off,
+                            rout long w_inv_off,
+                            rout long w_fwd_stages_off,
+                            rout long w_inv_stages_off);
+
+    // ntt_twiddle_dump (method 16) — copy one sub-table from VTCM into a caller buffer.
+    //
+    // Used by the NTT.2 smoke harness for the T_NTT2_TWIDDLE_BIT_EXACT
+    // gate (byte-exact comparison vs host-side reference).  Also useful
+    // for future SASS audit + debug.
+    //
+    // table_id selects which sub-table to dump:
+    //   0 → psi_pow      (N × u32 = 4N bytes)
+    //   1 → ipsi_pow     (N × u32 = 4N bytes)
+    //   2 → w_fwd        (N/2 × u32 = 2N bytes)
+    //   3 → w_inv        (N/2 × u32 = 2N bytes)
+    //   4 → w_fwd_stages ((N-1) × u32 = 4(N-1) bytes)
+    //   5 → w_inv_stages ((N-1) × u32 = 4(N-1) bytes)
+    //
+    // dst_buf MUST be sized exactly to the requested sub-table; if
+    // dst_buf.nLen != expected_bytes the call returns -1.
+    //
+    // Returns 0 on success, -1 on input validation failure or if the
+    // (prime, N) table is not initialized (call ntt_twiddle_init first).
+    long ntt_twiddle_dump(in long N, in long q_idx, in long table_id,
+                          rout sequence<octet> dst_buf);
 };

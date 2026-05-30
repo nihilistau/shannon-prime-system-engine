@@ -30,6 +30,9 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_imp
         # §4-NTT Sprint NTT.1 — HVX butterfly core (method 13).
         ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_hvx_imp
+
+        # §4-NTT Sprint NTT.2 — twiddle VTCM staging
+        ${CMAKE_CURRENT_SOURCE_DIR}/src_dsp/sp_compute_ntt_twiddle
     )
     add_library(sp_compute_skel SHARED ${srcs})
     include_directories(${common_incs})
