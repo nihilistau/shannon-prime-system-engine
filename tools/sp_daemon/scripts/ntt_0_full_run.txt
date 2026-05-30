@@ -1,0 +1,39 @@
+[NTT.0] sp_ntt_0_smoke — T_NTT0_SCALAR_BIT_EXACT
+[NTT.0]   oracle = math-core ntt_forward (per-prime channel)
+[NTT.0]   subject = sp_compute_ntt_oracle (skel method 12)
+[NTT.0]   N ∈ {128, 256, 512}  ×  q_idx ∈ {0, 1}  ×  100 seeds = 600 runs
+
+[NTT.0] opening FastRpcSession (Path B Unsigned PD)...
+[NTT.0] session open
+
+[NTT.0] === combination q_idx=0  N=128 ===
+[NTT.0]   q_idx=0 N=128: diverged=0/100  max_lane_diff=0
+
+[NTT.0] === combination q_idx=1  N=128 ===
+[NTT.0]   q_idx=1 N=128: diverged=0/100  max_lane_diff=0
+
+[NTT.0] === combination q_idx=0  N=256 ===
+[NTT.0]   q_idx=0 N=256: diverged=0/100  max_lane_diff=0
+
+[NTT.0] === combination q_idx=1  N=256 ===
+[NTT.0]   q_idx=1 N=256: diverged=0/100  max_lane_diff=0
+
+[NTT.0] === combination q_idx=0  N=512 ===
+[NTT.0]   q_idx=0 N=512: diverged=0/100  max_lane_diff=0
+
+[NTT.0] === combination q_idx=1  N=512 ===
+[NTT.0]   q_idx=1 N=512: diverged=0/100  max_lane_diff=0
+
+[NTT.0] ═══ T_NTT0_SCALAR_BIT_EXACT — aggregate report ═══
+[NTT.0]   combinations_tested      = 6
+[NTT.0]   seeds_per_combination    = 100
+[NTT.0]   total_runs               = 600
+[NTT.0]   divergence_count         = 0
+[NTT.0]   max_diff_per_prime       = {q_1: 0, q_2: 0}
+[NTT.0]   max_diff_per_N           = {128: 0, 256: 0, 512: 0}
+[NTT.0]   first_divergence         = (none)
+[NTT.0]   wall_time                = 0.40 s
+
+[NTT.0] session closed cleanly
+[NTT.0] T_NTT0_SCALAR_BIT_EXACT PASS
+

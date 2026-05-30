@@ -88,6 +88,14 @@ path = "src/sp_matmul_q_smoke.rs"
 name = "sp_matmul_q_dual_smoke"
 path = "src/sp_matmul_q_dual_smoke.rs"
 
+# Sprint NTT.0 — T_NTT0_SCALAR_BIT_EXACT smoke.  Calls math-core's
+# `ntt_forward` host-side via the static-lib link in build.rs (sp_ntt_crt) as
+# the oracle; compares to the cDSP-scalar sp_compute_ntt_oracle (skel
+# method 12) across 6 × 100 = 600 runs.  See PLAN-NTT-0.md + CLOSURE-NTT-0.md.
+[[bin]]
+name = "sp_ntt_0_smoke"
+path = "src/sp_ntt_0_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"
