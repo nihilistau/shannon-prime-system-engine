@@ -3,250 +3,278 @@
 **Date:** 2026-05-30
 **Branch:** `sprint/ntt-0` (engine worktree `D:\F\shannon-prime-repos\engine-ntt-0`)
 **Base:** engine main @ 833abbe (ledger-autowire closed)
-**Status:** **STAGE 0 ONLY — UPSTREAM-REQUIRED — math-core ABI conflicts with prompt+roadmap N ladder**
+**Status:** **CLOSED — T_NTT0_SCALAR_BIT_EXACT 600/600 PASS at N ∈ {128, 256, 512}**
 
 ## Headline
 
-Stage 0 reference reading is complete and surfaces an architectural
-conflict that **blocks Stages 1-3 implementation** until operator
-disposition: the NTT.0 substantive gate `T_NTT0_SCALAR_BIT_EXACT`
-is specified at N ∈ {256, 1024, 4096} × 2 frozen primes, but the
-math-core canonical C reference rejects N ∈ {1024, 4096} as
-mathematically impossible with the frozen primes. Closure left in
-UPSTREAM-REQUIRED state per `feedback-no-silent-gate-revisions`,
-matching the K.beta.2.5b operator-disposition pattern.
+Sprint NTT.0 CLOSED. `T_NTT0_SCALAR_BIT_EXACT` passes 600/600 on Knack's
+S22 Ultra (V69 cDSP, Path B Unsigned PD), 0 divergences across 100
+random inputs × N ∈ {128, 256, 512} × 2 frozen primes (q_1, q_2). The
+on-Hexagon scalar NTT oracle (`sp_compute_ntt_oracle`, skel method 12)
+is byte-exact against math-core's canonical C reference
+`ntt_forward`. NTT.1 (HVX butterfly) and NTT.2 (twiddle VTCM staging)
+are now parallel-dispatchable on the validated scalar floor.
+
+This closure supersedes the prior UPSTREAM-REQUIRED closure (commit
+`6238980` on this branch) per operator-side Path A disposition. See
+**Recovery note** at the end.
 
 ## Gate table
 
-| Gate | Threshold | Observed | PASS/FAIL | Comment |
-|---|---|---|---|---|
-| **T_NTT0_SCALAR_BIT_EXACT** | 0 divergences across 100 random inputs × 3 N values × 2 primes vs math-core C reference | NOT EXECUTED | **UPSTREAM-REQUIRED** | Reference (math-core's `ntt_forward`) does not exist at N ∈ {1024, 4096}. See Diagnosis below. |
+| Gate | Threshold | Observed | PASS/FAIL |
+|---|---|---|---|
+| **T_NTT0_SCALAR_BIT_EXACT** | 0 divergences across 100 random inputs × N ∈ {128, 256, 512} × 2 primes vs math-core `ntt_forward` per-prime output | combinations=6, seeds/comb=100, total_runs=600, divergence_count=0, max_diff_per_prime={q_1:0, q_2:0}, max_diff_per_N={128:0, 256:0, 512:0}, first_divergence=null, wall_time=0.40 s | **PASS** |
 
-## Math-core NTT signature (the reference this port matches)
+Full numeric report: `tools/sp_daemon/scripts/ntt_0_full_report.json`.
+Verbatim run capture:  `tools/sp_daemon/scripts/ntt_0_full_run.txt`.
 
-- **Path:** `lib/shannon-prime-system/core/ntt_crt/ntt_crt.c` at math-core
-  `aeecdbae` (submodule pinned by engine main @ 833abbe).
-- **Public API:** `void ntt_forward(const ntt_ctx *ctx, const int32_t *in,
-  uint32_t *out1, uint32_t *out2);` (lines 274-278). Takes one signed
-  `int32_t` input vector of length N, writes TWO residue-domain output
-  vectors (mod q1 and mod q2).
-- **Allocator:** `ntt_ctx *ntt_init(uint32_t N);` (lines 188-215).
-  Restricts N to {128, 256, 512} at line 189; returns NULL otherwise.
-- **Inner algorithm:** Cooley-Tukey radix-2 DIT negacyclic NTT
-  (`ntt_core` lines 229-255). Pre-weight by `psi^j` (`forward_one`
-  lines 266-270) where `psi` is a primitive 2N-th root of unity
-  (`find_psi` lines 116-127).
-- **Barrett primitive:** `barrett_reduce(x, q, mu)` at lines 72-78
-  with `mu = floor(2^60 / q)`. Math-identical to cDSP scalar Barrett
-  at `tools/sp_compute_skel/src_dsp/sp_compute_crt_imp.c:42-48`.
+## Architectural commitments compliance
 
-## Hexagon scalar implementation
+Phase 4-NTT block (lattice `papers/PPT-LAT-Roadmap.md`) — commitments
+relevant to NTT.0:
 
-NOT WRITTEN. Stage 2 was blocked by the Stage 0 UPSTREAM-REQUIRED
-disposition. Planned signature documented in `PLAN-NTT-0.md` (Stage 2
-section).
+- [x] **#1 (math-core canonical NTT is the reference)** — Hexagon
+      scalar oracle is byte-exact against `ntt_forward` per-prime
+      output across all 600 runs. Same Cooley-Tukey radix-2 DIT
+      negacyclic algorithm; same `psi^j` pre-weight; same Barrett
+      primitive; same bit-reversal step.
+- [x] **#2 (FROZEN primes)** — both `q_1 = 1073738753`,
+      `μ_1 = 1073744895` and `q_2 = 1073732609`, `μ_2 = 1073751039`
+      embedded as compile-time constants in
+      `sp_compute_ntt_imp.c:32-35`. NOT modified.
+- [x] **#3 (no 128-bit arithmetic on Hexagon)** — the scalar oracle
+      uses `uint64_t` end-to-end, same Barrett shift constants
+      (`(Q_BITS-1)=29`, `(Q_BITS+1)=31`) as math-core and the K.beta
+      cDSP path. Verified at source.
+- [x] **#5 (N ladder)** — implemented exactly per operator Path A:
+      N ∈ {128, 256, 512}. Larger N rejected at the IDL boundary
+      with `return -1`, matching math-core's `ntt_init` ABI.
+- [x] **#6 (single-prime per-channel pipe)** — skel takes one
+      `q_idx`, computes ONE residue channel. CRT combination is
+      caller's responsibility (matches math-core's per-prime
+      `forward_one` design, not its dual-prime `ntt_forward` wrapper).
+- [x] **#7 (scalar-first, vector follow-up)** — NO HVX intrinsics
+      in `sp_compute_ntt_imp.c`. Plain scalar pipe. HVX butterfly is
+      NTT.1 scope.
 
-## IDL method
+Commitments #4 (CRT residues), #8 (long-context tiling) are
+out-of-scope for NTT.0; deferred to NTT.3 / NTT.5 / NTT.6.
 
-NOT WRITTEN. Planned signature documented in `PLAN-NTT-0.md` (Stage 2
-section).
-
-## Architecture compliance (commitments from Phase 4-NTT block)
-
-| # | Commitment | Status |
-|---|---|---|
-| 1 | Negacyclic NTT (primitive 2N-th root, not N-th) | **COMPLIES** (plan honors; math-core is already negacyclic). |
-| 2 | FROZEN primes (q_1, q_2, M, Q1_INV_MOD_Q2) | **COMPLIES** (plan honors; primes are not changed). |
-| 3 | Barrett in inner loop | **COMPLIES IN PLAN** (reuse `sp_barrett_reduce32_scalar`). |
-| 4 | Cooley-Tukey radix-2 DIT | **COMPLIES IN PLAN** (matches math-core). |
-| 5 | N ladder N ∈ {256, 1024, 4096, 16384} | **CONFLICTS WITH #2.** N=1024 and beyond are mathematically impossible with the frozen primes (max N=512). See Diagnosis. |
-| 6 | Scalar Hexagon reference before vectorizing | **COMPLIES IN PLAN** (NTT.0 IS the scalar oracle). |
-| 7 | Shape-regime-aware parallelism gates | N/A for NTT.0 (single-thread oracle; relevant to NTT.3). |
-| 8 | MeMo integration is THE deliverable | N/A for NTT.0 (relevant to NTT.5). |
-
-**The conflict between commitments #2 and #5 is the architectural
-finding that puts this sprint in UPSTREAM-REQUIRED.** Both cannot
-hold simultaneously; #2 is locked by every previously-shipped cross-
-backend bit-identity gate (Phase 4-9, K.beta.2.5c Garner constants,
-DHT topology). #5 was filed 2026-05-30 in the same roadmap block as
-NTT.0 and is not yet locked by any shipping code.
-
-## Diagnosis (the load-bearing finding)
-
-### Mathematical statement
-
-Negacyclic NTT over `Z_q[x]/(x^N + 1)` requires a primitive 2N-th
-root of unity in `(Z_q)^*`. Such a root exists iff `2N | (q - 1)`.
-For the frozen primes:
-
-- `q_1 - 1 = 1073738752 = 2^10 × 1048573` (2-adic valuation = 10)
-- `q_2 - 1 = 1073732608 = 2^10 × 1048567` (2-adic valuation = 10)
-
-Therefore the maximum N admitting a 2N-th root in BOTH primes
-simultaneously is **N = 512** (`2N = 2^10 = 1024 ≤ q-1`).
-
-### Where the rejection lives in code
-
-`lib/shannon-prime-system/core/ntt_crt/ntt_crt.c:189`:
+## Math-core reference signature
 
 ```c
-if (N != 128u && N != 256u && N != 512u) return NULL;
+// lib/shannon-prime-system/include/sp/ntt_crt.h
+ntt_ctx *ntt_init(uint32_t N);                                      // N ∈ {128, 256, 512}
+void     ntt_free(ntt_ctx *ctx);
+void     ntt_forward(const ntt_ctx *ctx, const int32_t *in,
+                     uint32_t *out1, uint32_t *out2);               // dual-prime output
 ```
 
-`include/sp/ntt_crt.h:53-55`:
+Internal per-prime path (matched byte-for-byte by NTT.0 Hexagon
+scalar):
 
-> "N must be one of {128,256,512}; any other value (**including
-> 1024, which the frozen primes cannot support**) returns NULL."
+```c
+// lib/shannon-prime-system/core/ntt_crt/ntt_crt.c:259-272
+static void forward_one(const ntt_ctx *ctx, const prime_ctx *pc,
+                        const int32_t *in, uint32_t *out);
+```
 
-If the gate at line 189 were patched, `find_psi(N=1024, q, mu)` at
-lines 116-127 would exhaust the search loop without finding a 2048-th
-root (none exists), then return 0 → `prime_setup` returns 0 →
-`ntt_init` cleans up and returns NULL.
+`out1[]` = output of `forward_one` with `pc = &ctx->p1` (mod q_1).
+`out2[]` = output of `forward_one` with `pc = &ctx->p2` (mod q_2).
 
-### Where the conflict is on the record (prior sessions)
+## Hexagon implementation signature
 
-- `papers/SESSION-CLOSED-lat-1.md:62` — user-confirmed cap from a
-  prior session: "N capped to {128,256,512}; the frozen primes
-  admit no 2N-th root at N=1024. Primes kept frozen
-  (dominance-verification + DHT topology depend on the exact
-  residues). **User-confirmed decision.**"
+```c
+// tools/sp_compute_skel/src_dsp/sp_compute_ntt_imp.c
+int sp_compute_ntt_oracle(remote_handle64 h,
+                          int q_idx, int N,
+                          const unsigned char *data_in,  int data_inLen,
+                          unsigned char       *data_out, int data_outLen);
+```
 
-The Phase 4-NTT roadmap block (filed 2026-05-30) does not
-acknowledge this prior decision — commitments #2 + #5 are mutually
-incompatible by construction.
+`q_idx == 0` selects (q_1, μ_1); `q_idx == 1` selects (q_2, μ_2).
+`N` ∈ {128, 256, 512}; any other value returns -1. `data_in` is N
+signed i32 LE (arbitrary range — modular reduction is done inside,
+matching math-core's `forward_one:267-268` contract). `data_out` is
+N u32 LE in `[0, q)`.
 
-### What this means for NTT.0 specifically
+Twiddle policy: `psi`, `psi_pow[N]`, `w_fwd[N/2]` computed per-call
+from `find_psi(N, q)` into stack-resident scratch (≤ 3 KB at N=512).
+Matches math-core's `prime_setup` algorithm. NTT.2 lifts these to
+VTCM-resident precomputed tables.
 
-The substantive gate `T_NTT0_SCALAR_BIT_EXACT` says "0 divergences
-... vs math-core C reference." For N ∈ {1024, 4096} math-core's
-reference returns NULL — there is no oracle to compare against. Any
-"agreement" at those N values would be Hexagon-scalar-vs-itself, not
-Hexagon-vs-math-core, and would not satisfy the gate as written.
+## IDL method signature
 
-## Disposition options (operator-decides)
+```idl
+// tools/sp_compute_skel/inc/sp_compute.idl
+long ntt_oracle(in long q_idx, in long N,
+                in  sequence<octet> data_in,
+                rout sequence<octet> data_out);
+```
 
-Three paths enumerated in `PLAN-NTT-0.md` "UPSTREAM-REQUIRED
-disposition options". Summary:
+Method index 12 (verified at
+`hexagon_Release_toolv87_v69/sp_compute_skel.c::sp_compute_skel_invoke`
+case 12 → `_skel_method(__QAIC_IMPL(sp_compute_ntt_oracle), ...)`).
+Scalars MAKEX: method=12, inbufs=2, outbufs=1, inhandles=0,
+outhandles=0.
 
-- **Path A — Re-spec NTT.0 to N ∈ {128, 256, 512}.** Honors FROZEN
-  primes (locked); amends N ladder commitment (not yet locked).
-  Downstream NTT.5/.6 ctx=4096 mobile chat target shifts to a
-  tiling strategy (multiple N=512 NTT slices), not a single
-  large-N NTT. The "630× speedup at ctx=8192" framing becomes
-  tile-composition-dependent.
+`primIn` layout (16 B): `[q_idx i32, N i32, data_inLen i32,
+data_outLen i32]`.
 
-- **Path B — Add a third prime to admit larger N.** Triple-prime
-  CRT. Violates commitment #2 unless the FROZEN list is amended.
-  Cascading invalidation of K.beta.2.5c Garner constants, every
-  dominance-verification residue, DHT topology constants. NOT
-  NTT.0-scope; needs a separate Phase 4-NTT-PRIME-EXTENSION
-  sprint with full impact analysis.
+## Files changed
 
-- **Path C — Defer NTT.0 closure pending operator clarification.**
-
-**Agent recommendation: Path A** with a dated roadmap amendment
-block, matching the K.beta.2.5b operator-disposition pattern: gate
-FAIL preserved on the record, architectural reason named, corrective
-forward path named. Path A also preserves the most cross-backend
-bit-identity guarantees (no prime change, no Garner-constants
-change, no dominance-verification ripple).
-
-## Files changed (this sprint)
-
-| File | LOC delta | Purpose |
+| Path | LOC | Note |
 |---|---|---|
-| `tools/sp_compute_skel/docs/PLAN-NTT-0.md` | +427 | Stage 0 plan with file:line citations + UPSTREAM diagnosis + Stage 1-4 plan conditional on Path A. |
-| `tools/sp_compute_skel/docs/CLOSURE-NTT-0.md` | +this file | Stage 0 closure in UPSTREAM-REQUIRED state. |
-
-Total new code shipped on cDSP / Rust: **0 lines.** This is by
-design — surfacing UPSTREAM before writing code is exactly the
-mesh-canonical-order Stage-0 discipline.
+| `tools/sp_compute_skel/docs/PLAN-NTT-0.md` | +39 | `[plan-amend]` block documenting Path A disposition + Stage 1 reduction |
+| `tools/sp_compute_skel/src_dsp/sp_compute_ntt_imp.c` | +203 | new file; scalar Hexagon NTT oracle |
+| `tools/sp_compute_skel/inc/sp_compute.idl` | +24 | `ntt_oracle` method 12 |
+| `tools/sp_compute_skel/CMakeLists.txt` | +1 | add `sp_compute_ntt_imp` to srcs |
+| `tools/sp_dsp_smoke/build.rs` | +43 | new file; links math-core `sp_ntt_crt` for android |
+| `tools/sp_dsp_smoke/Cargo.toml` | +9 | `sp_ntt_0_smoke` `[[bin]]` entry |
+| `tools/sp_dsp_smoke/src/sp_ntt_0_smoke.rs` | +198 | new file; T_NTT0_SCALAR_BIT_EXACT smoke harness |
+| `tools/sp_daemon/scripts/ntt_0_full_report.json` | +1 | machine-parseable gate result |
+| `tools/sp_daemon/scripts/ntt_0_full_run.txt` | +40 | verbatim S22U run capture |
+| `tools/sp_compute_skel/docs/CLOSURE-NTT-0.md` | (rewrite) | this file; supersedes UPSTREAM-REQUIRED |
 
 ## Commits on `sprint/ntt-0`
 
-- `8143fe5` — `[plan] NTT.0 — scalar Hexagon NTT (Cooley-Tukey
-  radix-2 DIT, negacyclic, q_1+q_2) — UPSTREAM-REQUIRED on N
-  ladder`
-- (this commit) — `[NTT.0] stage 0 closure — UPSTREAM-REQUIRED
-  on N ladder; no implementation work pending operator
-  disposition`
+Full chain on the branch (base `833abbe` engine main → tip on push):
 
-## Proposed sub-tag
+```
+8143fe5  [plan] NTT.0 - scalar Hexagon NTT (Cooley-Tukey radix-2 DIT, negacyclic, q_1+q_2) - UPSTREAM-REQUIRED on N ladder
+6238980  [NTT.0] stage 0 closure - UPSTREAM-REQUIRED on N ladder
+0c7ddaa  [plan-amend] NTT.0 -- Path A selected; Stage 1 reduced to math-core C FFI (drop Rust port)
+0e841a7  [NTT.0] feat: Stage 2 -- scalar Hexagon NTT + IDL ntt_oracle (N in {128, 256, 512}, q_1 + q_2)
+4f27ff9  [NTT.0] test: Stage 3 -- T_NTT0_SCALAR_BIT_EXACT on S22U (600/600 PASS, ...)
+<this>   [NTT.0] doc: Stage 4 -- closure supersedes UPSTREAM-REQUIRED; T_NTT0 PASS after operator Path A disposition
+```
 
-NO TAG. Closure is UPSTREAM-REQUIRED, not PASS. Tags
-(`lat-phase-4-ntt-0-scalar-hexagon` or similar) wait for
-operator disposition + Stages 1-3 completion.
+The first two commits (`8143fe5`, `6238980`) were the prior agent's
+honest UPSTREAM-REQUIRED stop. They are PRESERVED on this branch as
+historical context, NOT rewritten — per
+`feedback-bundled-changeset-root-cause-ambiguity` (and the rewind-
+discipline lesson from M.4: never silently overwrite a prior agent's
+work).
+
+## Sub-tag proposal
+
+`lat-phase-4-ntt-0-scalar-hexagon` on the merge commit when operator
+fast-forwards `sprint/ntt-0` into engine main.
 
 ## What's NOT done
 
-Stages 1, 2, 3 (Rust reference, cDSP `sp_compute_ntt_scalar` +
-`ntt_oracle` IDL, smoke harness + on-device gate) — all blocked
-pending operator disposition. The work-detail is documented in
-`PLAN-NTT-0.md` so a follow-up agent (or this agent on a second
-pass) can execute promptly once the N ladder is locked.
+- **NTT.1 (HVX butterfly)** — vectorize the radix-2 DIT inner loop.
+  Reuses `sp_barrett_reduce32_hvx_lane` from K.beta.2.5b
+  (silicon-confirmed). Substrate is the validated scalar floor in
+  this sprint; gate is HVX vs scalar bitwise.
+- **NTT.2 (twiddle VTCM staging)** — lift `psi_pow[]` + `w_fwd[]`
+  out of per-call stack scratch into VTCM-resident precomputed
+  tables. Gate is wall-clock improvement at fixed correctness.
+- **NTT.3 (dual-prime concurrent dispatch)** — the scalar oracle
+  takes one `q_idx` at a time; NTT.3 composes two
+  `Arc<FastRpcSession>` threads for q_1 and q_2 in parallel per
+  `reference-fastrpc-concurrent-dispatch` + Trick #1 of
+  `reference-heterogeneous-soc-crt-tricks`.
+- **NTT.4 (INTT + Garner CRT)** — inverse transform + 60-bit
+  recombine. Math-core has `ntt_inverse` + `ntt_crt_recombine`
+  already; the Hexagon scalar port mirrors the same pattern.
+- **NTT.5 / NTT.6 (poly-ring attention + long-context tiling)** —
+  the payload sprints. Reframed in the corrected Phase 4-NTT block
+  to TILED N=512 transforms rather than monolithic N=ctx.
 
-NTT.1 (HVX butterfly), NTT.2 (twiddle VTCM staging), NTT.3 (dual-
-prime CRT dispatch), NTT.4 (INTT + Garner), NTT.5 (MeMo
-integration), NTT.6 (long-context benchmark) — all explicitly
-out of scope per the prompt; NTT.0 was the foundation. None of
-them is unblocked by this stop.
+## What unblocks
 
-## What unblocks (after operator disposition + Path A execution)
+NTT.1 and NTT.2 are now parallel-dispatchable. Both require:
+- a separate engine worktree per agent (per
+  `feedback-parallel-agents-separate-worktrees`)
+- the scalar oracle in this sprint as the bitwise correctness anchor
+- math-core's `ntt_forward` per-prime channel as the cross-validation
+  reference (same FFI binding path established in
+  `tools/sp_dsp_smoke/build.rs`).
 
-If Path A is chosen and Stages 1-3 ship:
-
-- NTT.1 + NTT.2 can dispatch in parallel (one agent on HVX
-  butterfly intrinsics, one on twiddle VTCM staging).
-- NTT.3 needs NTT.1 + NTT.2 both closed.
-- NTT.4 + NTT.5 + NTT.6 chain from NTT.3.
-
-If Path B is chosen, NTT.0 unblocks only after the
-Phase 4-NTT-PRIME-EXTENSION sprint completes (months of cascading
-work); NTT.1+ unblock from there.
-
-If Path C, this sprint stays open.
+NTT.3 unlocks once at least one of {NTT.1, NTT.2} ships — concurrent
+dispatch only makes wall-clock sense once the kernel itself is fast
+enough that marshalling doesn't dominate (see
+`feedback-shape-dependent-parallelism-gates`).
 
 ## Memory entry candidates
 
-1. **`reference-ntt-frozen-primes-N-cap`** — record the algebraic
-   constraint and the existing ABI cap:
-   > Negacyclic NTT over Z_q[x]/(x^N+1) requires 2N | (q-1).
-   > Frozen primes q_1=1073738753, q_2=1073732609 have
-   > 2-adic valuation 10 in (q-1), capping N at 512. Math-core
-   > `ntt_init` (`lib/shannon-prime-system/core/ntt_crt/ntt_crt.c:189`)
-   > + header `include/sp/ntt_crt.h:53-55` enforce this cap. Any
-   > Phase 4-NTT roadmap spec at N ≥ 1024 conflicts with FROZEN
-   > primes commitment and is mathematically impossible without a
-   > prime change. User-confirmed decision per
-   > `papers/SESSION-CLOSED-lat-1.md:62`. Re-read this before
-   > spec'ing any future NTT N ladder.
+1. **`reference-ntt-frozen-primes-N-cap`** (already written by
+   operator as part of the e927f6f roadmap correction). Confirmed
+   silicon-true: math-core `ntt_init(N=1024)` returns NULL; only
+   N ∈ {128, 256, 512} construct a context. Operator already locked
+   this; nothing to add.
 
-2. **`feedback-roadmap-block-must-re-read-frozen-abi`** — pattern
-   feedback: roadmap blocks that span FROZEN ABI surfaces must
-   re-read the ABI header before drafting commitments. The
-   Phase 4-NTT block filed 2026-05-30 specced N ∈ {1024, 4096}
-   without re-reading `include/sp/ntt_crt.h:53-55` from the same
-   day's math-core HEAD. Stage 0 reference-reading by the NTT.0
-   agent caught the conflict before any code shipped. The mesh-
-   canonical-order Stage-0 lesson (operator-side memory entry
-   error caught by reading the actual struct) repeats: read the
-   actual frozen surface BEFORE drafting derivative spec.
+2. **`reference-math-core-ntt-twiddle-ordering`** — proposed new
+   entry. NTT.1 + NTT.2 will need to know:
+   - `psi_pow[j]` is `psi^j` for `j ∈ [0, N)` (forward pre-weight)
+   - `w_fwd[j]` is `omega^j` for `j ∈ [0, N/2)` where `omega = psi^2`
+   - Bit-reversal permutation runs on `out[]` AFTER pre-weight,
+     BEFORE the logN butterfly stages (math-core
+     `ntt_crt.c:236-239` + `ntt_core` step ordering).
+   - `widx` indexing in the butterfly inner loop uses
+     `step = N / len` stride; widx accumulates within an `(i, len)`
+     block (math-core lines 244-252). NTT.1 HVX path must match the
+     same widx walk or the gate fails.
+   Single 200-char index line + a 2-page detail doc; suggest filing
+   when the operator triages.
+
+3. **`reference-mathcore-ffi-from-sp-dsp-smoke`** — proposed.
+   `sp_dsp_smoke/build.rs` now establishes the FFI pattern: link
+   math-core static libs (`sp_ntt_crt` for NTT.0) into the
+   aarch64-android cross-build via the same `engine_root /
+   build-android-libs / core / <module>` convention as
+   `sp_daemon/build.rs`. NTT.4 + NTT.5 will reuse this build-path
+   resolution. If math-core grows transitive deps in a future
+   sprint, this build.rs needs a MODULES table like sp_daemon's.
 
 ## Worktree status
 
-- Worktree: `D:\F\shannon-prime-repos\engine-ntt-0` (sole).
-- Branch: `sprint/ntt-0` (committed locally; will push at end).
-- No commits authored from `shannon-prime-system-engine` main
-  worktree. No cross-worktree contamination.
-- math-core submodule initialized at `aeecdbae` (READ-ONLY
-  reference; not modified).
-- Anti-contamination held: zero edits to `shannon-prime\`,
-  `shannon-prime-engine\`, math-core's NTT sources, or any
-  other engine-*/lattice-* worktree.
+- **Sole worktree:** `D:\F\shannon-prime-repos\engine-ntt-0` — all
+  commits on `sprint/ntt-0` originated here. Verified via
+  `git worktree list` semantics: no other concurrent agent touched
+  this branch.
+- **Anti-contamination compliance:**
+  - `shannon-prime-system-engine\` (main worktree) — not modified.
+  - Other `engine-*` / `lattice-*` worktrees — not touched.
+  - `shannon-prime-system\core\ntt_crt\` (math-core) — READ-ONLY
+    reference; never modified.
+  - `models\` artifacts — not accessed by this sprint.
+  - `papers\PPT-LAT-Roadmap.md` — NOT modified. Operator owns the
+    roadmap; the corrected N ladder landed via operator commit
+    `e927f6f` on lattice main, NOT by this agent.
 
-## STOP — operator action required
+## Recovery note
 
-Pick a disposition (Path A / Path B / Path C). On disposition,
-the follow-up agent (or this agent on a second pass) executes
-the Stage 1-4 plan documented in `PLAN-NTT-0.md` against the
-locked N ladder.
+This closure was written by a continuation agent after the prior
+agent surfaced UPSTREAM-REQUIRED on the N ladder during Stage 0
+reference reading. The prior agent honored
+`feedback-no-silent-gate-revisions` and stopped rather than silently
+shipping at the (impossible) N ∈ {256, 1024, 4096} ladder.
+
+**Operator disposition:** Path A. Lattice main `e927f6f`
+("[Phase 4-NTT block CORRECTED + NTT.0 UPSTREAM-REQUIRED resolved
+Path A]") corrected the roadmap to N ∈ {128, 256, 512} and reframed
+long context as TILED N=512 NTT blocks. Two memory entries were
+written by the operator alongside the roadmap correction:
+`reference-ntt-frozen-primes-N-cap` and
+`feedback-lead-with-reference-then-theory` (updated).
+
+The continuation agent (this closure's author):
+1. Re-read `PLAN-NTT-0.md` to confirm the Stage 1-4 conditional plan
+   already targets N ∈ {128, 256, 512} (it does — math-core's ABI
+   was already the source of truth).
+2. Filed a small `[plan-amend]` block adjusting Stage 1 from "Rust
+   port + ref-self-check" to "math-core C FFI directly via build.rs
+   static-lib link" — closer to the continuation prompt's intent
+   and removes a redundant sub-gate.
+3. Executed Stages 2, 3, 4 in the per-stage commit cadence (no
+   bundled changesets; one variable per stage).
+4. PASS reported here on `sprint/ntt-0` tip; ready for operator
+   review + merge.
+
+**The prior agent's UPSTREAM-REQUIRED commit (`6238980`) is preserved
+on the branch.** This was the right call — without that stop, the
+sprint would have shipped silently at an architecturally-impossible
+gate, exactly the failure mode `feedback-no-silent-gate-revisions`
+exists to prevent.
