@@ -36,6 +36,11 @@ path = "src/bin/sp_memo_m2_dialogue_smoke.rs"
 name = "sp_memo_m5_routing_smoke"
 path = "src/bin/sp_memo_m5_routing_smoke.rs"
 
+# Chat-integration — MeMo dialogue endpoint smoke harness for POST /v1/dialogue
+[[bin]]
+name = "sp_chat_dialogue_smoke"
+path = "src/bin/sp_chat_dialogue_smoke.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
