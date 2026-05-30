@@ -210,4 +210,28 @@ interface sp_compute : remote_handle64 {
                   rout sequence<octet> y_buf,
                   rout long kernel_pcycles_lo,
                   rout long kernel_pcycles_hi);
+
+    // ────────────────────────────────────────────────────────────────────
+    // ntt_oracle — Sprint NTT.0 T_NTT0_SCALAR_BIT_EXACT.
+    //
+    // Drives N signed i32 inputs through scalar negacyclic NTT mod q_{1,2}
+    // on the cDSP scalar pipe.  Byte-exact port of math-core's per-prime
+    // `ntt_forward` (one residue channel out of the dual-prime CRT pair).
+    //
+    //   q_idx=0 → q_1=1073738753, μ=1073744895
+    //   q_idx=1 → q_2=1073732609, μ=1073751039
+    //   N ∈ {128, 256, 512} — frozen primes have 2-adic valuation 10, so
+    //                          larger N has no 2N-th root mod q; returns -1.
+    //
+    // data_in : N × i32 LE (arbitrary signed; modular reduction done inside)
+    // data_out: N × u32 LE in [0, q)
+    //
+    // Twiddle policy (NTT.0): psi + psi_pow + w_fwd are computed per-call
+    // from `find_psi(N, q)` into stack scratch.  NTT.2 lifts these to
+    // VTCM-resident precomputed tables.
+    //
+    // NO HVX (NTT.1 introduces the HVX butterfly); pure scalar pipe oracle.
+    long ntt_oracle(in long q_idx, in long N,
+                    in  sequence<octet> data_in,
+                    rout sequence<octet> data_out);
 };
