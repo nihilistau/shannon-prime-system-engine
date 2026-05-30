@@ -146,6 +146,49 @@ impl SpinorReceipt {
         self.input_hash.iter().any(|&b| b != 0)
             && self.output_hash.iter().any(|&b| b != 0)
     }
+
+    // ─── mesh-canonical-order: u16 sequence rank in `_reserved[0..2]` ──────
+    //
+    // Sprint `mesh-canonical-order` (follow-on to M.4). The 2-byte
+    // `_reserved` field carries a little-endian `u16` sequence rank used by
+    // `Ledger::canonical_sort` + `Ledger::replay_canonical_into` to produce
+    // a cross-device byte-identical ledger.
+    //
+    // Layout invariant: rank lives at on-wire offsets 61-62. Sentinel
+    // (offset 63) and ALL other bytes (offsets 0-60) are unchanged. The
+    // 64-byte `repr(C, packed)` size invariant is preserved exactly.
+    //
+    // Per `feedback-no-silent-gate-revisions`: the dispatch prompt
+    // requested an additional `u32 device_id` at `_reserved[4..8]`. The
+    // struct has only 2 bytes of `_reserved`; this constraint was surfaced
+    // upstream in the plan-commit and Option A (rank-only on-wire;
+    // tiebreak by input_hash at sort time) was adopted. Device_id remains
+    // available to callers out-of-band — the canonical sort tiebreaks
+    // determinstically on the existing 24-byte SHA-256-truncated
+    // input_hash field, which is dense (≥192-bit entropy) and
+    // domain-separated by (model_id, turn_index) per [`hash_buf`].
+
+    /// Return a NEW receipt with `_reserved[0..2]` populated as the
+    /// little-endian `u16` sequence rank. ALL other fields — turn_index,
+    /// model_id, _pad, wall_us, input_hash, output_hash, n_input_tokens,
+    /// n_output_tokens, sentinel — are preserved bit-exact.
+    ///
+    /// On-wire effect: bytes at offsets 61-62 carry the rank in
+    /// little-endian; byte 63 keeps the 0xA5 sentinel.
+    pub fn with_sequence_rank(mut self, rank: u16) -> SpinorReceipt {
+        self._reserved = rank.to_le_bytes();
+        self
+    }
+
+    /// Read the `u16` sequence rank from `_reserved[0..2]` (on-wire
+    /// offsets 61-62). Returns 0 for a freshly minted receipt that has
+    /// not been stamped via [`SpinorReceipt::with_sequence_rank`].
+    pub fn sequence_rank(&self) -> u16 {
+        // Field access through `#[repr(C, packed)]` requires a local copy
+        // (taking a reference would be UB under packed layout).
+        let r = self._reserved;
+        u16::from_le_bytes(r)
+    }
 }
 
 // ─── Argmax (greedy sampler) ───────────────────────────────────────────────
@@ -334,6 +377,75 @@ mod tests {
         // the routes.rs argmax semantics (max_by + Ordering::Equal -> a).
         let logits = vec![5.0, 5.0, 5.0];
         assert_eq!(argmax(&logits), 0);
+    }
+
+    // ─── mesh-canonical-order: sequence rank helpers ───────────────────
+
+    #[test]
+    fn with_sequence_rank_sets_reserved_at_offsets_61_62() {
+        let r = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[1, 2, 3], &[4, 5], 1234)
+            .with_sequence_rank(42);
+        let bytes = r.as_bytes();
+        // 42 little-endian = 0x2A 0x00.
+        assert_eq!(bytes[61], 0x2A, "rank low byte at offset 61");
+        assert_eq!(bytes[62], 0x00, "rank high byte at offset 62");
+    }
+
+    #[test]
+    fn with_sequence_rank_preserves_sentinel() {
+        let r = SpinorReceipt::mint(2, MODEL_ID_MEMORY, &[1], &[2], 0)
+            .with_sequence_rank(0xBEEF);
+        let bytes = r.as_bytes();
+        assert_eq!(bytes[63], SPINOR_SENTINEL,
+            "sentinel 0xA5 at offset 63 must survive with_sequence_rank");
+    }
+
+    #[test]
+    fn with_sequence_rank_preserves_all_other_bytes() {
+        let base = SpinorReceipt::mint(3, MODEL_ID_EXECUTIVE, &[7, 11, 13], &[17, 19], 0xABCD);
+        let stamped = base.with_sequence_rank(0x1234);
+        let b0 = base.as_bytes();
+        let b1 = stamped.as_bytes();
+        // bytes 0..61 must be identical
+        assert_eq!(&b0[0..61], &b1[0..61],
+            "with_sequence_rank must only touch offsets 61-62");
+        // byte 63 sentinel survives
+        assert_eq!(b1[63], SPINOR_SENTINEL);
+    }
+
+    #[test]
+    fn sequence_rank_round_trips() {
+        for rank in [0u16, 1, 42, 255, 256, 32767, 32768, 65535] {
+            let r = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[1], &[2], 0)
+                .with_sequence_rank(rank);
+            assert_eq!(r.sequence_rank(), rank,
+                "sequence_rank() must round-trip through with_sequence_rank({rank})");
+        }
+    }
+
+    #[test]
+    fn fresh_receipt_has_rank_zero() {
+        let r = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[1], &[2], 0);
+        assert_eq!(r.sequence_rank(), 0,
+            "freshly minted receipt must have rank=0 (unstamped sentinel)");
+    }
+
+    #[test]
+    fn with_sequence_rank_preserves_64_byte_invariant() {
+        let r = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[1], &[2], 0)
+            .with_sequence_rank(0xDEAD);
+        assert_eq!(r.as_bytes().len(), 64,
+            "SpinorReceipt remains 64 bytes post-stamping");
+    }
+
+    #[test]
+    fn with_sequence_rank_le_byte_order() {
+        // 0x1234 -> bytes [0x34, 0x12] (little-endian)
+        let r = SpinorReceipt::mint(1, MODEL_ID_EXECUTIVE, &[1], &[2], 0)
+            .with_sequence_rank(0x1234);
+        let bytes = r.as_bytes();
+        assert_eq!(bytes[61], 0x34, "low byte first (LE)");
+        assert_eq!(bytes[62], 0x12, "high byte second (LE)");
     }
 
     #[test]
