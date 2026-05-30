@@ -74,6 +74,12 @@ path = "src/sp_barrett_dual_smoke.rs"
 name = "sp_matmul_q_ref_test"
 path = "src/sp_matmul_q_ref_test.rs"
 
+# §3-HX Sprint K v0.beta Stage 2.5c Stage 2 — on-device HVX mod_q matmul
+# correctness + Garner CRT bit-exact smoke.
+[[bin]]
+name = "sp_matmul_q_smoke"
+path = "src/sp_matmul_q_smoke.rs"
+
 [target.'cfg(target_os = "android")'.dependencies]
 libloading = "0.8"
 axum       = "0.7"

@@ -1,0 +1,93 @@
+§3-HX Sprint K v0.beta-2.5c — sp_matmul_q_smoke verbatim on-device output
+========================================================================
+
+Device:      Samsung S22 Ultra R5CT22445JA, V69 cDSP via Path B Unsigned PD
+Engine HEAD: sprint/kbeta-2-5c worktree D:\F\shannon-prime-repos\engine-kbeta-2-5c
+Date:        2026-05-30
+
+Command:
+    adb shell 'ADSP_LIBRARY_PATH="/data/local/tmp;" /data/local/tmp/sp_matmul_q_smoke'
+
+Output:
+-------
+[K-β-2.5c] opening FastRpcSession (Path B)...
+[K-β-2.5c] session open
+
+[K-β-2.5c] ═══ T_MATMUL_Q_CORRECTNESS ═══
+[K-β-2.5c]   shape: B=8 D_in=128 D_out=128  (4 seeds × 2 primes)
+[K-β-2.5c]   seed=0x00000000deadbeef q_idx=0 PASS  pcyc=211651 wall=546 μs y[0]=48046580 y[last]=414701632
+[K-β-2.5c]   seed=0x00000000deadbeef q_idx=1 PASS  pcyc=217216 wall=390 μs y[0]=468316722 y[last]=310473461
+[K-β-2.5c]   seed=0x00000000cafebabe q_idx=0 PASS  pcyc=214806 wall=383 μs y[0]=100149872 y[last]=750762530
+[K-β-2.5c]   seed=0x00000000cafebabe q_idx=1 PASS  pcyc=221768 wall=406 μs y[0]=882696718 y[last]=415052874
+[K-β-2.5c]   seed=0x00000000feedface q_idx=0 PASS  pcyc=221631 wall=395 μs y[0]=826063382 y[last]=700576050
+[K-β-2.5c]   seed=0x00000000feedface q_idx=1 PASS  pcyc=220564 wall=383 μs y[0]=266800849 y[last]=190574597
+[K-β-2.5c]   seed=0x00000000baadf00d q_idx=0 PASS  pcyc=220166 wall=387 μs y[0]=708880760 y[last]=793314877
+[K-β-2.5c]   seed=0x00000000baadf00d q_idx=1 PASS  pcyc=220124 wall=387 μs y[0]=115700411 y[last]=76793018
+[K-β-2.5c]   q_1 divergences        = 0
+[K-β-2.5c]   q_2 divergences        = 0
+[K-β-2.5c]   max_lane_diff (signed) = 0
+[K-β-2.5c]   samples_compared (per prime) = 4096
+[K-β-2.5c]   T_MATMUL_Q_CORRECTNESS PASS
+
+[K-β-2.5c] ═══ T_GARNER_BIT_EXACT ═══
+[K-β-2.5c]   inputs bounded < 2^26 so unreduced sum < M = q_1*q_2 ≈ 2^60
+[K-β-2.5c]   seed=0x00000000deadbeef PASS  (1024 elements)
+[K-β-2.5c]   seed=0x00000000cafebabe PASS  (1024 elements)
+[K-β-2.5c]   seed=0x00000000feedface PASS  (1024 elements)
+[K-β-2.5c]   seed=0x00000000baadf00d PASS  (1024 elements)
+[K-β-2.5c]   total divergences      = 0
+[K-β-2.5c]   T_GARNER_BIT_EXACT PASS
+
+[K-β-2.5c] ═══ Per-invoke timing summary ═══
+[K-β-2.5c]   n_invokes              = 8
+[K-β-2.5c]   total invoke wall      = 3277 μs
+[K-β-2.5c]   avg per-invoke wall    = 409 μs
+[K-β-2.5c]   K v0.alpha matmul ref  = ~17700 μs (saturating matmul, same B/D_in/D_out)
+
+[K-β-2.5c] session closed cleanly
+[K-β-2.5c] Stage 2 correctness + Garner gates ALL PASS
+
+
+Numerical analysis:
+-------------------
+
+Per-invoke DSP pcycles: ~215000 / invoke (avg). At cdsp clock ~1.05 GHz
+(per K v0.alpha analysis), this corresponds to ~205 μs of pure DSP
+compute.  Wall time avg 409 μs is roughly 2× compute time, consistent
+with ~200 μs of FastRPC marshalling (4 KB X + 64 KB W + 4 KB Y = 72 KB
+transferred to/from cDSP heap).
+
+Per-element work at B=8 / D_in=128 / D_out=128:
+  Total MACs (per prime): 8 * 128 * 128 = 131072 modular MACs
+  At ~24 intrinsics per inner-loop iter (Barrett + modular add) × 4096
+  inner-loop bodies = 98304 HVX vector ops per invoke
+  ≈ 98304 / 215000 pcycles = 0.46 ops / pcycle (close to single-issue HVX
+  throughput; consistent with the inner loop being VLIW-packed but
+  not fully utilizing the dual HVX vector contexts on a single thread)
+
+Comparison to K v0.alpha:
+  K v0.alpha kernel pcyc:       ~18.5M (saturating-matmul + 2 stages)
+  K v0.beta-2.5c matmul_q pcyc: ~215k (mod_q matmul, single stage)
+  Ratio: K v0.alpha is ~85× larger compute envelope
+
+  K v0.alpha wall ≈ 17.7 ms; K v0.beta-2.5c matmul_q wall ≈ 0.4 ms.
+  The mod_q matmul at this shape is data-movement-bound, NOT
+  compute-bound.
+
+Implication for T_MATMUL_DUAL_DISPATCH_SPEEDUP gate:
+  At this shape regime, the FastRPC marshalling time (~200 μs) is
+  comparable to the cDSP compute time (~205 μs).  Even with perfect
+  cDSP-side parallelism via SSR:XA dual vector contexts, wall-clock
+  speedup is bounded by the data-movement overhead which DOES serialize.
+  This is the same shape effect that produced 1.006× in K.beta.2.5b.
+
+  Two paths forward (Stage 4 dual smoke will measure both shapes):
+  1. Scale the test shape up to D_in=512, D_out=512 (4× compute, ~4× wall
+     time → ~1.6 ms compute / ~200 μs marshalling = 8:1 compute:data
+     ratio).
+  2. Accept FAIL at this primitive matmul shape and surface UPSTREAM
+     with K.beta.2.5b-style diagnostic detail.
+
+  Stage 4 (dual smoke) will measure BOTH the prompt-spec'd B=8/128/128
+  shape and a scaled-up shape, document both numbers, and surface the
+  finding rather than silently retune.

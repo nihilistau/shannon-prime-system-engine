@@ -173,4 +173,41 @@ interface sp_compute : remote_handle64 {
                         in  sequence<octet> a_buf,
                         in  sequence<octet> b_buf,
                         rout sequence<octet> r_buf);
+
+    // ────────────────────────────────────────────────────────────────────
+    // matmul_q — §3-HX Sprint K v0.beta Stage 2.5c HVX mod_q matmul.
+    //
+    //   Y[b][i] = ( Σ_k X[b][k] * W[k][i] ) mod q
+    //
+    //   q_idx=0 → q_1=1073738753, μ=1073744895
+    //   q_idx=1 → q_2=1073732609, μ=1073751039
+    //
+    // Buffer layouts (all u32 little-endian, [0, q) per element):
+    //   x_buf:  batch × d_in × 4 B,  row-major  (X[b][k] = x_buf[b*d_in+k])
+    //   w_buf:  d_in × d_out × 4 B,  row-major  (W[k][i] = w_buf[k*d_out+i])
+    //   y_buf:  batch × d_out × 4 B, row-major  (Y[b][i] = y_buf[b*d_out+i])
+    //
+    // Constraints (returns -1 if violated):
+    //   q_idx ∈ {0, 1}
+    //   d_out % 32 == 0  (HVX 32-lane vector width)
+    //   batch ≥ 1, d_in ≥ 1, d_out ≥ 32
+    //   x_buf.len == batch*d_in*4
+    //   w_buf.len == d_in*d_out*4
+    //   y_buf.len == batch*d_out*4
+    //
+    // Algorithm (per PLAN-K-beta-2-5c.md §Architectural choices, path C):
+    //   Reuses sp_barrett_reduce32_hvx_lane (Stage 2.5b silicon-confirmed).
+    //   For each (b, i, k): splat X[b][k], load W[k][i..i+32] as one HVX
+    //   vector, Barrett-reduce (X*W) mod q, modular-add into running acc
+    //   that stays in [0, q) at every step.
+    //
+    // Reports kernel_pcycles (HAP_perf_get_pcycles delta over the kernel
+    // loop) split into lo/hi u32 halves as secondary diagnostic.
+    long matmul_q(in long q_idx,
+                  in long batch, in long d_in, in long d_out,
+                  in  sequence<octet> x_buf,
+                  in  sequence<octet> w_buf,
+                  rout sequence<octet> y_buf,
+                  rout long kernel_pcycles_lo,
+                  rout long kernel_pcycles_hi);
 };
