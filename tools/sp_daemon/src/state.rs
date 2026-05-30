@@ -80,6 +80,24 @@ pub struct AppState {
     /// Empty until the coordinator is wired into daemon startup.
     pub peer_map: Arc<DashMap<SocketAddr, ConnectedPeer>>,
 
+    // Chat-integration: Memory model for the MeMo dialogue endpoint (/v1/dialogue).
+    // All three Memory-* fields are Option<...>: None when --memo-model is not
+    // passed at startup; the /v1/dialogue route returns HTTP 501 in that case.
+    // Drop order (declaration order) puts memo_session before memo_model so the
+    // L1 session destructor runs first, then sp_model_unload, like the
+    // target-model pair above.
+    /// Chat-integration: Memory base session (cloned per /v1/dialogue request).
+    pub memo_session: Option<Mutex<SpSession>>,
+    /// Chat-integration: Memory tokenizer (used by dialogue_runner's
+    /// `final_answer` byte stream — Memory side decodes its own tokens).
+    pub memo_tokenizer: Option<Arc<SptbTokenizer>>,
+    /// Chat-integration: Memory model handle. Kept alive after memo_session so
+    /// the mmap-backed pointers in the session remain valid.
+    pub memo_model: Option<SpModel>,
+    /// Chat-integration: vocab size of the Memory model — used to pre-allocate
+    /// DialoguePool's memo_logits slot at request time.
+    pub memo_vocab_size: usize,
+
     // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the
     /// skel could not be admitted; `/v1/dsp/echo` then returns 501. Per-request
