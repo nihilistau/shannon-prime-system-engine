@@ -26,6 +26,10 @@ mod sieve_ffi;
 mod spec;
 mod state;
 mod tokenizer;
+// Chat-integration: daemon-callable MeMo dialogue runner — host + android
+// safe; drives M.2's 3-turn Grounding → Entity ID → Synthesis protocol
+// through the existing crate::session::SpSession wrapper.
+mod dialogue_runner;
 
 use clap::{Parser, Subcommand};
 

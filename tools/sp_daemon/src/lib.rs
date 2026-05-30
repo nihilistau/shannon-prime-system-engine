@@ -7,6 +7,12 @@ pub mod ntt_ffi;
 // lives in the android binary (sp_memo_m2_dialogue_smoke.rs).
 pub mod dialogue;
 
+// Chat-integration: the daemon-callable MeMo dialogue runner lives in the
+// binary crate (src/dialogue_runner.rs declared from main.rs) because it
+// depends on session/tokenizer modules that are binary-crate-local. The
+// host-safe primitives (SpinorReceipt, DialoguePool, argmax) stay in
+// `dialogue` above.
+
 #[cfg(target_os = "android")]
 pub mod dsp_rpc;
 
