@@ -584,8 +584,8 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
             hx_rmsnorm(resid + (size_t)t * E, attn_norm, E, eps, nx + (size_t)t * E);
 #ifdef __HVX__
         hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* HX.3b-alpha-v2 Stage 2 */
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* HX.3b Stage 3 */
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);
         hx_matmul_q8(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);
@@ -606,7 +606,7 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
                 hx_attn_head(q + (size_t)t * QD + (size_t)h * HD, k, v, t, KVD,
                              h / group, HD, ascale, win, sc, ao + (size_t)t * QD + (size_t)h * HD);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);
 #endif
@@ -620,15 +620,15 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
           for (int t = 0; t < n_tok; t++)
               hx_rmsnorm(resid + (size_t)t * E, fn, E, eps, nx + (size_t)t * E); }
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* HX.3b Stage 3 */
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);
         hx_matmul_q8(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up);
 #endif
         for (size_t i = 0; i < (size_t)n_tok * FF; i++) g[i] = hx_gelu_tanh(g[i]) * up[i];
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);
 #endif
