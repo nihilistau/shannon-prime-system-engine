@@ -174,6 +174,9 @@ struct Trick1Worker {
     /// Atomic snapshot of the worker thread's `JoinHandle::is_finished` proxy.
     /// Set to true by the worker just before it returns from `recv` on a
     /// shutdown message; checked by the trampoline to detect dead worker.
+    /// Held but currently only inspected by future shutdown diagnostics —
+    /// allow dead_code so the field doesn't bit-rot under -W warnings.
+    #[allow(dead_code)]
     shutdown: Arc<AtomicBool>,
     _handle: JoinHandle<()>,
 }
