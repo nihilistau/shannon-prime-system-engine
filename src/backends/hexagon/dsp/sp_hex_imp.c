@@ -24,6 +24,7 @@
  *     PD — use stack / rpcmem.
  */
 #include <stdlib.h>
+#include <stdint.h>          /* uintptr_t for hx_rsum cache pointer hash (HX.3b-alpha-v2) */
 #include <math.h>
 #include "HAP_farf.h"
 #include "sp_hex.h"
@@ -249,6 +250,136 @@ static void hx_matmul_q8_vrmpy(const unsigned char *blk, int out, int in,
         }
     }
 }
+
+/* HX.3b-alpha-v2: per-weight-block row_sum cache.
+ *
+ * The single-vrmpy kernel (hx_matmul_q8_vrmpy_v2 below) replaces the per-call
+ * wsum vrmpy + hsum with a lookup `rsum[j]`. Ideally `rsum` would be packed
+ * into the weight blob by the host at sp_hex_host.c::hx_pack_q8 time. That
+ * would require a coordinated rebuild of the daemon binary. Instead, we
+ * populate the cache lazily on the FIRST forward call: hx_rsum_get returns
+ * a pointer to a 16-byte-aligned int32_t[out] table; on cache miss it walks
+ * the int8 codes once and fills the table, on hit it returns the cached ptr.
+ *
+ * Cache keying: the (blk, out, in) tuple uniquely identifies a weight tensor
+ * during a session (the host's weight blob is rpcmem-allocated once per
+ * model load and the per-layer pointers are stable). We index by `blk`
+ * pointer hash. Capacity 256 = headroom over Gemma3-1B's 182 tensors
+ * (26 layers * 7 Q8 weights).
+ *
+ * Numerical equivalence: cache fill computes
+ *   rsum[j] = Sigma_{i=0..in-1} (int32) (int8)codes[j*in + i]
+ * — identical int8 bytes, identical index range, identical int32 accumulator
+ * as the per-call wsum in HX.3b. Therefore `dot_b - 128 * rsum[j]` is bit-
+ * identical to the prior `dot_b - 128 * ws_b`, y is identical, argmax is
+ * identical. Bit-exact decode preserved by construction.
+ *
+ * Lifetime: the cache survives across sp_hex_forward calls; entries are
+ * freed by hx_rsum_clear (called only from sp_hex_close).
+ */
+#define HX_RSUM_CACHE_CAP 256
+typedef struct {
+    const unsigned char *key;   /* blk pointer; NULL = empty slot */
+    int                  out;
+    int                  in;
+    int32_t             *vals;  /* malloc'd [out] */
+} hx_rsum_entry;
+static hx_rsum_entry g_hx_rsum_cache[HX_RSUM_CACHE_CAP] = {{0}};
+
+static inline unsigned hx_ptr_hash(const unsigned char *p) {
+    /* FNV-1a-ish, 32-bit input from pointer low/high words mixed. */
+    uintptr_t v = (uintptr_t)p;
+    unsigned h = 2166136261u ^ (unsigned)v;
+    h = (h ^ (unsigned)(v >> 16)) * 16777619u;
+    h ^= (h >> 13);
+    return h;
+}
+
+/* Return cached rsum[out] for this weight block; fill cache on miss.
+ * Returns NULL only on malloc failure (fall back to v1 path at caller). */
+static const int32_t *hx_rsum_get(const unsigned char *blk, int out, int in) {
+    unsigned h = hx_ptr_hash(blk);
+    /* linear probe from h mod cap */
+    for (unsigned step = 0; step < HX_RSUM_CACHE_CAP; step++) {
+        unsigned idx = (h + step) & (HX_RSUM_CACHE_CAP - 1);
+        hx_rsum_entry *e = &g_hx_rsum_cache[idx];
+        if (e->key == blk && e->out == out && e->in == in) {
+            return e->vals;   /* hit */
+        }
+        if (e->key == NULL) {
+            /* miss — populate */
+            int32_t *vals = (int32_t *)malloc((size_t)out * sizeof(int32_t));
+            if (!vals) return NULL;
+            const signed char *codes = (const signed char *)blk;
+            for (int j = 0; j < out; j++) {
+                int32_t s = 0;
+                const signed char *row = codes + (size_t)j * in;
+                for (int i = 0; i < in; i++) s += (int32_t)row[i];
+                vals[j] = s;
+            }
+            e->key = blk; e->out = out; e->in = in; e->vals = vals;
+            return vals;
+        }
+        /* collision; continue probe */
+    }
+    return NULL;   /* table full — should not happen with cap 256 vs 182 tensors */
+}
+
+static void hx_rsum_clear(void) {
+    for (int i = 0; i < HX_RSUM_CACHE_CAP; i++) {
+        if (g_hx_rsum_cache[i].vals) free(g_hx_rsum_cache[i].vals);
+        g_hx_rsum_cache[i].key = NULL;
+        g_hx_rsum_cache[i].vals = NULL;
+    }
+}
+
+/* HX.3b-alpha-v2 kernel: single-vrmpy inner loop + post-loop bias-correction
+ * via cached rsum[]. On the first call for a given weight block, hx_rsum_get
+ * fills the cache (~O(out*in) int8 sum); subsequent calls are O(1) lookup
+ * per output row. Falls back to hx_matmul_q8_vrmpy on cache-fill failure. */
+static void hx_matmul_q8_vrmpy_v2(const unsigned char *blk, int out, int in,
+                                  const float *X, int n_tok, float *Y) {
+    const int32_t *rsum = hx_rsum_get(blk, out, in);
+    if (!rsum) {   /* malloc failure — degrade gracefully to v1 path */
+        hx_matmul_q8_vrmpy(blk, out, in, X, n_tok, Y);
+        return;
+    }
+    const signed char *codes = (const signed char *)blk;
+    const float *scales = (const float *)(blk + sp_hex_align((size_t)out * in));
+
+    static unsigned char act_ub[SP_HEX_VRMPY_MAX_IN] __attribute__((aligned(128)));
+    int nb = in & ~127;
+
+    for (int t = 0; t < n_tok; t++) {
+        const float *x = X + (size_t)t * in;
+        float S_act = hx_quant_act_ub(x, in, act_ub);
+
+        for (int j = 0; j < out; j++) {
+            const signed char *row = codes + (size_t)j * in;
+
+            HVX_Vector acc_dot = Q6_V_vzero();   /* single accumulator now */
+
+            for (int i = 0; i < nb; i += 128) {
+                HVX_Vector w_v   = *(const HVX_Vector *)(row    + i);
+                HVX_Vector act_v = *(const HVX_Vector *)(act_ub + i);
+                acc_dot = Q6_Vw_vrmpyacc_VwVubVb(acc_dot, act_v, w_v);
+            }
+            int32_t dot_b = hx_hsum_w(acc_dot);   /* one hsum, not two */
+
+            /* Scalar tail (in % 128). Only the dot accumulator runs here;
+             * tail weights are already counted in rsum[j] from cache fill. */
+            for (int i = nb; i < in; i++) {
+                int a = (int)act_ub[i];
+                int w = (int)row[i];
+                dot_b += a * w;
+            }
+
+            int32_t true_dot = dot_b - 128 * rsum[j];   /* O(1) lookup */
+            float y = (float)true_dot * (S_act * scales[j] / 127.0f);
+            Y[(size_t)t * out + j] = y;
+        }
+    }
+}
 #endif /* __HVX__ */
 
 int sp_hex_open(const char *uri, remote_handle64 *h) {
@@ -262,6 +393,9 @@ int sp_hex_open(const char *uri, remote_handle64 *h) {
 
 int sp_hex_close(remote_handle64 h) {
     if (h) free((void *)h);
+#ifdef __HVX__
+    hx_rsum_clear();   /* HX.3b-alpha-v2: drop the per-block weight-sum cache */
+#endif
     return 0;
 }
 
@@ -449,9 +583,9 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
         for (int t = 0; t < n_tok; t++)
             hx_rmsnorm(resid + (size_t)t * E, attn_norm, E, eps, nx + (size_t)t * E);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* HX.3b Stage 2 */
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* HX.3b Stage 3 */
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* HX.3b-alpha-v2 Stage 2 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);
         hx_matmul_q8(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);
@@ -472,7 +606,7 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
                 hx_attn_head(q + (size_t)t * QD + (size_t)h * HD, k, v, t, KVD,
                              h / group, HD, ascale, win, sc, ao + (size_t)t * QD + (size_t)h * HD);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);
 #endif
@@ -486,15 +620,15 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
           for (int t = 0; t < n_tok; t++)
               hx_rmsnorm(resid + (size_t)t * E, fn, E, eps, nx + (size_t)t * E); }
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* HX.3b Stage 3 */
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);
         hx_matmul_q8(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up);
 #endif
         for (size_t i = 0; i < (size_t)n_tok * FF; i++) g[i] = hx_gelu_tanh(g[i]) * up[i];
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* HX.3b Stage 3 */
+        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* HX.3b-alpha-v2 Stage 3 */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);
 #endif

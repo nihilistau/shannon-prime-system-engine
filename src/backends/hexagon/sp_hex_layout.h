@@ -51,7 +51,17 @@ enum {
 #define SP_HEX_ALIGN 128u
 static inline size_t sp_hex_align(size_t x) { return (x + (SP_HEX_ALIGN - 1)) & ~(size_t)(SP_HEX_ALIGN - 1); }
 
-/* bytes of a 128-aligned Q8 weight block: padded int8 codes + f32 row scales. */
+/* bytes of a 128-aligned Q8 weight block: padded int8 codes + f32 row scales.
+ *
+ * HX.3b-alpha-v2 NOTE: an earlier variant of this sprint added a per-row
+ * int32 row_sum tail to the block layout. That change required a coordinated
+ * rebuild of the host-side daemon binary (sp-daemon-wire-hex links sp_hex_host.c
+ * via libsp_hex_daemon_backend.a) AND the cDSP skel. Since the operator's worktree
+ * is configured for skel-only rebuilds (math-core submodule intentionally empty
+ * per HX.3b precedent), the precomputed-row_sum table was moved to a DSP-side
+ * session cache (see hx_rsum_get in sp_hex_imp.c) populated on the first
+ * sp_hex_forward call and reused on subsequent calls. The blob layout below
+ * stays bit-identical to HX.3b. */
 static inline size_t sp_hex_q8_bytes(int out, int in) {
     size_t codes = sp_hex_align((size_t)out * (size_t)in);   /* int8 codes, padded */
     return sp_hex_align(codes + (size_t)out * sizeof(float)); /* + per-row scales   */

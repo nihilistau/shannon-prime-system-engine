@@ -50,7 +50,16 @@ static void hx_cfg_from(const qwen3_model *m, sp_hex_cfg *c) {
     c->rope_local = 10000.0f;                 /* gemma3 local/SWA layers */
 }
 
-/* copy a Q8 arena weight (codes + per-row scales) into the blob at `dst`. */
+/* copy a Q8 arena weight (codes + per-row scales) into the blob at `dst`.
+ *
+ * HX.3b-alpha-v2 NOTE: this packer is bit-identical to HX.3b. The per-row
+ * weight-sum lookup table for the v2 single-vrmpy kernel is populated on the
+ * DSP side via a session cache (sp_hex_imp.c::hx_rsum_get) on the first
+ * sp_hex_forward call. Reason: rebuilding sp-daemon-wire-hex from this
+ * worktree requires building libsp_hex_daemon_backend.a + cross-compiling the
+ * Rust daemon for aarch64-android, which is out of scope for an incremental-
+ * lift sprint. The DSP-side cache lives across forward calls within a session
+ * (one-time amortized cost; subsequent prefills run on the lookup-only path). */
 static int hx_pack_q8(unsigned char *dst, const qwen3_model *m, const gguf_tensor *W) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, W->name) : 0;
     if (!at) { sp_set_error("hexagon: matmul weight not in Q8 arena (need SP_ARENA=q8)"); return 1; }
