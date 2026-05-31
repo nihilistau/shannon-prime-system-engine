@@ -1,0 +1,21 @@
+﻿adb.exe : [bench] cell=4 model=Memory config=host_ntt prompt_len=256 decode_n=2 reps=1
+At line:1 char:1
++ & 'D:\Files\Android\pt-latest\platform-tools\adb.exe' -s R5CT22445JA  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([bench] cell=4 ...code_n=2 reps=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 20 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 256 toks in 545547098 us = 0.469 tok/s (argmax=220)
+[bench]   rep 0: decode 2 steps in 62288970 us = 0.032 tok/s (first_step=61957213us steady_mean=331757.0us) dispatch 
+fwd+=0 inv+=0
+
+[bench] ΓòÉΓòÉΓòÉ cell 4 summary (Memory / host_ntt) ΓòÉΓòÉΓòÉ
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=0.469 min=0.469 max=0.469
+[bench]   decode  toks/s: mean=0.032 min=0.032 max=0.032
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":4,"model_label":"Memory","config_label":"host_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":20,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":256,"decode_n_requested":2,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":545547098,"prefill_toks_per_sec":0.469254,"decode_n_run":2,"decode_total_wall_us":62288970,"decode_toks_per_sec":0.032108,"decode_first_step_us":61957213,"decode_steady_mean_us":331757.000,"first_argmax_after_prefill":220,"last_decoded_token":16}],"prefill_toks_per_sec":{"mean":0.469254,"min":0.469254,"max":0.469254},"decode_toks_per_sec":{"mean":0.032108,"min":0.032108,"max":0.032108},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 4 to /data/local/tmp/ntt6_curve_ctx256_hostntt.jsonl
