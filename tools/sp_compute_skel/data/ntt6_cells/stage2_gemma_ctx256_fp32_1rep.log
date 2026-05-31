@@ -1,0 +1,21 @@
+﻿adb.exe : [bench] cell=1 model=Gemma3 config=fp32 prompt_len=256 decode_n=2 reps=1
+At line:1 char:1
++ & 'D:\Files\Android\pt-latest\platform-tools\adb.exe' -s R5CT22445JA  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([bench] cell=1 ...code_n=2 reps=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[bench]   env: SP_ENGINE_NTT_ATTN=false SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 25 ms: arch_id=3 HD=256 hidden=1152 layers=26 vocab=262144
+[bench]   HD=256: direct_pr_admissible=true bluestein_admissible=true
+[bench]   rep 0: prefill 256 toks in 172401296 us = 1.485 tok/s (argmax=263)
+[bench]   rep 0: decode 2 steps in 122289642 us = 0.016 tok/s (first_step=121616223us steady_mean=673419.0us) dispatch 
+fwd+=0 inv+=0
+
+[bench] ΓòÉΓòÉΓòÉ cell 1 summary (Gemma3 / fp32) ΓòÉΓòÉΓòÉ
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=1.485 min=1.485 max=1.485
+[bench]   decode  toks/s: mean=0.016 min=0.016 max=0.016
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":1,"model_label":"Gemma3","config_label":"fp32","model_path":"/data/local/tmp/gemma3-1b.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":25,"arch":{"arch_id":3,"head_dim":256,"hidden_dim":1152,"n_layers":26,"vocab_size":262144},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":256,"decode_n_requested":2,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":172401296,"prefill_toks_per_sec":1.484908,"decode_n_run":2,"decode_total_wall_us":122289642,"decode_toks_per_sec":0.016355,"decode_first_step_us":121616223,"decode_steady_mean_us":673419.000,"first_argmax_after_prefill":263,"last_decoded_token":238}],"prefill_toks_per_sec":{"mean":1.484908,"min":1.484908,"max":1.484908},"decode_toks_per_sec":{"mean":0.016355,"min":0.016355,"max":0.016355},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 1 to /data/local/tmp/ntt6_curve_gemma_ctx256_fp32.jsonl

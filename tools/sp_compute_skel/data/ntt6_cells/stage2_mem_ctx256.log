@@ -1,0 +1,79 @@
+﻿[ntt6-driver] === NTT.6 curve run started 2026-05-31 18:42:46 ===
+[ntt6-driver] Ctx=256 Reps=2 DecodeN=2 IncludeHex=False OnlyModel='Memory'
+[ntt6-driver] Binary on device: /data/local/tmp/sp_ntt_bench_toks
+[ntt6-driver] adb devices:
+-rw-rw-rw- 1 shell shell  185704 2026-05-31 06:50 /data/local/tmp/libsp_compute_skel.so
+-rw-rw-rw- 1 shell shell   52896 2026-05-31 18:11 /data/local/tmp/sp22u/libsp_hex_skel.so
+-rwxrwxrwx 1 shell shell 1002064 2026-05-31 11:05 /data/local/tmp/sp_ntt_bench_toks
+
+[ntt6-driver] running 2 cells:
+  cell 3 Memory/fp32 env=''
+  cell 4 Memory/host_ntt env='SP_ENGINE_NTT_ATTN=1'
+
+[ntt6-driver] ============================================================
+[ntt6-driver] cell 3 ctx=256 model=Memory config=fp32
+[ntt6-driver]   env: 
+[ntt6-driver] ============================================================
+[ntt6-driver] invoking at 18:42:46 ...
+adb.exe : [bench] cell=3 model=Memory config=fp32 prompt_len=256 decode_n=2 reps=2
+At D:\F\shannon-prime-repos\engine-ntt-6\tools\sp_daemon\scripts\ntt6_curve_run.ps1:108 char:12
++     $out = & $AdbExe -s $Serial shell $cmd 2>&1 | Out-String
++            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([bench] cell=3 ...code_n=2 reps=2:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[bench]   env: SP_ENGINE_NTT_ATTN=false SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 24 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 256 toks in 84457827 us = 3.031 tok/s (argmax=220)
+[bench]   rep 0: decode 2 steps in 62249411 us = 0.032 tok/s (first_step=61913837us steady_mean=335574.0us) dispatch 
+fwd+=0 inv+=0
+[bench]   rep 1: prefill 256 toks in 85063900 us = 3.010 tok/s (argmax=220)
+[bench]   rep 1: decode 2 steps in 62688530 us = 0.032 tok/s (first_step=62355940us steady_mean=332590.0us) dispatch 
+fwd+=0 inv+=0
+
+[bench] ΓòÉΓòÉΓòÉ cell 3 summary (Memory / fp32) ΓòÉΓòÉΓòÉ
+[bench]   reps_ok = 2/2
+[bench]   prefill toks/s: mean=3.020 min=3.010 max=3.031
+[bench]   decode  toks/s: mean=0.032 min=0.032 max=0.032
+[bench]   total dispatch counts: fwd=0 inv=0
+[bench] appended cell 3 to /data/local/tmp/ntt6_curve_ctx256_report.jsonl
+{"cell":3,"model_label":"Memory","config_label":"fp32","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model"
+,"env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":24,"arch":{"arch_id":6,"head_dim":64,
+"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":tru
+e},"prompt_len":256,"decode_n_requested":2,"reps":2,"reps_detail":[{"rep_index":0,"prefill_wall_us":84457827,"prefill_t
+oks_per_sec":3.031099,"decode_n_run":2,"decode_total_wall_us":62249411,"decode_toks_per_sec":0.032129,"decode_first_ste
+p_us":61913837,"decode_steady_mean_us":335574.000,"first_argmax_after_prefill":220,"last_decoded_token":16},{"rep_index
+":1,"prefill_wall_us":85063900,"prefill_toks_per_sec":3.009502,"decode_n_run":2,"decode_total_wall_us":62688530,"decode
+_toks_per_sec":0.031904,"decode_first_step_us":62355940,"decode_steady_mean_us":332590.000,"first_argmax_after_prefill"
+:220,"last_decoded_token":16}],"prefill_toks_per_sec":{"mean":3.020300,"min":3.009502,"max":3.031099},"decode_toks_per_
+sec":{"mean":0.032016,"min":0.031904,"max":0.032129},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+
+[ntt6-driver] cell 3 elapsed: 295 s
+
+[ntt6-driver] ============================================================
+[ntt6-driver] cell 4 ctx=256 model=Memory config=host_ntt
+[ntt6-driver]   env: SP_ENGINE_NTT_ATTN=1
+[ntt6-driver] ============================================================
+[ntt6-driver] invoking at 18:47:41 ...
+adb.exe : [bench] cell=4 model=Memory config=host_ntt prompt_len=256 decode_n=2 reps=2
+At D:\F\shannon-prime-repos\engine-ntt-6\tools\sp_daemon\scripts\ntt6_curve_run.ps1:108 char:12
++     $out = & $AdbExe -s $Serial shell $cmd 2>&1 | Out-String
++            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([bench] cell=4 ...code_n=2 reps=2:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 26 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 256 toks in 545979251 us = 0.469 tok/s (argmax=220)
+[bench]   rep 0: decode 2 steps in 62258739 us = 0.032 tok/s (first_step=61925434us steady_mean=333305.0us) dispatch 
+fwd+=0 inv+=0
+Terminated 
+
+[ntt6-driver] cell 4 elapsed: 896 s
+[ntt6-driver] ============================================================
+[ntt6-driver] pulling report from device...
+[ntt6-driver] report pulled: 
+D:\F\shannon-prime-repos\engine-ntt-6\tools\sp_compute_skel\data\ntt6_cells\ntt6_curve_ctx256_report.jsonl
+[ntt6-driver] --- report contents ---

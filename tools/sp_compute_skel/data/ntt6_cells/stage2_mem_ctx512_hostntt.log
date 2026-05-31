@@ -1,0 +1,11 @@
+﻿adb.exe : [bench] cell=4 model=Memory config=host_ntt prompt_len=512 decode_n=2 reps=1
+At line:1 char:1
++ & 'D:\Files\Android\pt-latest\platform-tools\adb.exe' -s R5CT22445JA  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([bench] cell=4 ...code_n=2 reps=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 22 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+Terminated 
