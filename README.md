@@ -81,8 +81,8 @@ through it at runtime.
 
 | Model | Wall (s) | Tokens | tok/s |
 |-------|---------:|-------:|------:|
-| Gemma3-1B | 18.06 | 16 | 0.89 |
-| Qwen3-0.6B | 11.21 | 16 | 1.43 |
+| Gemma3-1B | 18.06 | 16 | 0.89 | *These are numbers run during testing of an individual piece of the system on the phone
+| Qwen3-0.6B | 11.21 | 16 | 1.43 | **These are numbers run during testing of an individual piece of the system on the phone
 
 The HVX backend wiring is in place daemon-side (LLVM-nm on the
 android binary shows `gemma3_forward_hexagon` + `sp_hex_forward` +
