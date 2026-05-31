@@ -24,6 +24,15 @@ pub mod dsp_rpc;
 #[cfg(target_os = "android")]
 pub mod ntt_hex_dispatch;
 
+// Sprint WIRE-HEX — full-forward backend dispatcher for sp_l1.h:§6. The
+// 6-month-gap fix: routes sp_prefill_chunk through the engine's
+// gemma3_forward_hexagon (cDSP V69 HVX layers + final norm) instead of
+// math-core's reference forward. Active when SP_DAEMON_BACKEND=hex is set
+// AND the daemon was built with SP_DAEMON_LINK_HEX=1 so the
+// libsp_hex_daemon_backend.a static lib is linked.
+#[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
+pub mod hex_forward_dispatch;
+
 // §4-MeMo Sprint M.1 — re-export the L1 C ABI bindings from the lib crate so
 // android binaries (e.g. sp_memo_m1_smoke) pick up the link dependency on
 // the math-core static libs via the lib's own link graph. On host this is

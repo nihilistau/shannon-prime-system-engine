@@ -61,6 +61,54 @@ pub async fn v1_metrics(State(state): State<Arc<AppState>>) -> Json<Metrics> {
     })
 }
 
+// ── /v1/debug/backend_counts (Sprint WIRE-HEX) ────────────────────────────
+//
+// Surfaces the dispatch counters for the optional accelerator backends
+// (hex forward, hex NTT). T_WIRE_HEX_BACKEND_DISPATCHES reads
+// `hex_forward_count` after one prefill of a known prompt; PASS criterion is
+// > 0. wire_hex_active reports whether the registration succeeded at
+// startup (independent of whether a prefill has run yet).
+
+#[derive(Serialize)]
+pub(crate) struct BackendCounts {
+    /// Sprint WIRE-HEX: gemma3_forward_hexagon dispatcher hit count
+    /// since process start. > 0 after one prefill when SP_DAEMON_BACKEND=hex
+    /// is set AND the daemon was built with --features wire_hex_backend.
+    /// Always 0 on host builds and on android without the feature.
+    hex_forward_count: u64,
+    /// Sprint WIRE-HEX: whether sp_session_register_forward_backend was
+    /// invoked successfully on the target session at startup. False when
+    /// SP_DAEMON_BACKEND is unset / != "hex", when the feature was off at
+    /// build time, or when registration failed (see daemon log).
+    wire_hex_active: bool,
+    /// NTT.5b/c: hex NTT forward + inverse dispatch counters (Bluestein
+    /// inner kernels via FastRPC). Always 0 when SP_ENGINE_NTT_ATTN_HEX
+    /// is unset. Independent of WIRE-HEX (different ABI hook).
+    ntt_hex_forward_count: u64,
+    ntt_hex_inverse_count: u64,
+}
+
+pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json<BackendCounts> {
+    let hex_forward_count = {
+        #[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
+        { sp_daemon::hex_forward_dispatch::dispatch_count() }
+        #[cfg(not(all(target_os = "android", feature = "wire_hex_backend")))]
+        { 0u64 }
+    };
+    let (ntt_hex_forward_count, ntt_hex_inverse_count) = {
+        #[cfg(target_os = "android")]
+        { sp_daemon::ntt_hex_dispatch::dispatch_counts() }
+        #[cfg(not(target_os = "android"))]
+        { (0u64, 0u64) }
+    };
+    Json(BackendCounts {
+        hex_forward_count,
+        wire_hex_active: state.wire_hex_active,
+        ntt_hex_forward_count,
+        ntt_hex_inverse_count,
+    })
+}
+
 // ── /v1/chat ──────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]

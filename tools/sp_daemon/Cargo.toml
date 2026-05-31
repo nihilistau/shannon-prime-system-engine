@@ -113,3 +113,13 @@ libloading = "0.8"
 
 [build-dependencies]
 bindgen = "0.70"
+
+# ── Sprint WIRE-HEX features ────────────────────────────────────────────────
+# `wire_hex_backend`: links libsp_hex_daemon_backend.a (built by
+#   tools/sp_daemon/build-android-hex-backend.bat) and compiles the
+#   `hex_forward_dispatch` module. Off by default — the daemon binary stays
+#   identical to pre-WIRE-HEX when this feature is unset. Turn ON via
+#   `cargo build --features wire_hex_backend` after running the bat.
+[features]
+default = []
+wire_hex_backend = []

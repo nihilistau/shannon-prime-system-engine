@@ -128,4 +128,56 @@ fn main() {
     if target_os == "linux" || target_os == "android" {
         println!("cargo:rustc-link-lib=m");
     }
+
+    // ── Sprint WIRE-HEX: link the daemon-callable Hexagon V69 backend ──
+    //
+    // When the `wire_hex_backend` Cargo feature is on AND we're cross-compiling
+    // for android, link the standalone static lib built by
+    // `tools/sp_daemon/build-android-hex-backend.bat`:
+    //   build-android-hex-backend/libsp_hex_daemon_backend.a
+    //
+    // That archive contains:
+    //   - src/backends/hexagon/sp_hex_host.c (gemma3_forward_hexagon)
+    //   - src/backends/cpu/cpu_overlay.c     (matmul/embed_row/as_f32/sp_kernels_read_env)
+    //   - generated sp_hex_stub.c            (qaic FastRPC client stub)
+    //   - tools/sp_daemon/c_backend/sp_daemon_hex_glue.c (the §6 dispatcher)
+    //
+    // Plus the FastRPC runtime libs from Hexagon SDK 5.5.6.0:
+    //   libcdsprpc.so   (intra-device IPC; provides remote_handle64_* + remote_session_control)
+    //   rpcmem.a        (rpcmem_alloc/free/init)
+    //
+    // Build order: `build-android-libs.bat` first (math-core archives the
+    // hex glue depends on transitively), then `build-android-hex-backend.bat`,
+    // then `cargo build --target aarch64-linux-android --features wire_hex_backend`.
+    let wire_hex = env::var("CARGO_FEATURE_WIRE_HEX_BACKEND").is_ok();
+    if wire_hex && target_os == "android" {
+        let hex_lib_dir = env::var("SP_HEX_BACKEND_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| engine_root.join("build-android-hex-backend"));
+        let hex_archive = hex_lib_dir.join("libsp_hex_daemon_backend.a");
+        if !hex_archive.exists() {
+            panic!(
+                "WIRE-HEX: hex backend archive not found at {} — run build-android-hex-backend.bat first",
+                hex_archive.display()
+            );
+        }
+        println!("cargo:rustc-link-search=native={}", hex_lib_dir.display());
+        println!("cargo:rustc-link-lib=static=sp_hex_daemon_backend");
+
+        // FastRPC runtime libs (Hexagon SDK 5.5.6.0). HEXAGON_SDK_ROOT is set
+        // by scripts/env/env-hexagon.bat; this build step expects it present.
+        let hex_sdk = env::var("HEXAGON_SDK_ROOT")
+            .unwrap_or_else(|_| String::from("C:/Qualcomm/Hexagon_SDK/5.5.6.0"));
+        let rpcmem_dir  = format!("{hex_sdk}/ipc/fastrpc/rpcmem/prebuilt/android_aarch64");
+        let cdsprpc_dir = format!("{hex_sdk}/ipc/fastrpc/remote/ship/android_aarch64");
+        println!("cargo:rustc-link-search=native={rpcmem_dir}");
+        println!("cargo:rustc-link-search=native={cdsprpc_dir}");
+        // rpcmem.a is a non-standard archive name (not librpcmem.a). Use an
+        // explicit -l:rpcmem.a directive so the GNU/Clang linker accepts it.
+        println!("cargo:rustc-link-arg=-l:rpcmem.a");
+        println!("cargo:rustc-link-lib=dylib=cdsprpc");
+        println!("cargo:rerun-if-env-changed=SP_HEX_BACKEND_DIR");
+        println!("cargo:rerun-if-env-changed=HEXAGON_SDK_ROOT");
+        println!("cargo:warning=WIRE-HEX: linking libsp_hex_daemon_backend.a + libcdsprpc.so + rpcmem.a");
+    }
 }

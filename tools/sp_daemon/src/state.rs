@@ -62,6 +62,13 @@ pub struct AppState {
     pub sessions: Arc<Sessions>,
     /// Logits buffer width for this model; set once at startup from sp_arch_info.
     pub vocab_size: usize,
+    /// Sprint WIRE-HEX — true when the engine's `gemma3_forward_hexagon`
+    /// dispatcher is registered on `session` for sp_prefill_chunk.
+    /// Toggled by SP_DAEMON_BACKEND=hex at startup (only meaningful when the
+    /// daemon was built with the `wire_hex_backend` Cargo feature; always
+    /// false on host builds and on android builds without the feature).
+    /// Surfaced via /v1/metrics so the headline tok/s diff is attributable.
+    pub wire_hex_active: bool,
     /// Lifetime token counter for rolling tps in /v1/metrics.
     pub tokens_decoded: AtomicU64,
     /// Daemon start time (for tps denominator).

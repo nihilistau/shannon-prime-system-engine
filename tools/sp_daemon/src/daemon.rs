@@ -337,6 +337,56 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         }
     };
 
+    // ── Sprint WIRE-HEX: optional full-forward backend on the TARGET session ─
+    //
+    // When SP_DAEMON_BACKEND=hex is set AND the daemon was built with
+    // --features wire_hex_backend (so libsp_hex_daemon_backend.a is linked),
+    // register the engine's gemma3_forward_hexagon dispatcher with the
+    // target session via the new sp_l1.h:§6 hook. After registration,
+    // sp_prefill_chunk routes through the cDSP V69 HVX backend instead of
+    // math-core's reference forward (the 6-month gap fix).
+    //
+    // Decode (persistent KV) is NOT hooked — sp_hex_host.c re-runs the full
+    // forward over the accumulated history per call and has no persistent-KV
+    // API. Decode keeps using the math-core reference. Documented honestly
+    // in CLOSURE-WIRE-HEX.md.
+    //
+    // Unset env OR wrong feature set = skipped (existing reference path).
+    // Wrong arch (not gemma3) or wrong arena (not Q8) = the first prefill
+    // will return SP_EBADSTATE; daemon logs the cause via sp_last_error.
+    #[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
+    let wire_hex_active = {
+        let env_set = std::env::var("SP_DAEMON_BACKEND")
+            .map(|v| v.trim().eq_ignore_ascii_case("hex"))
+            .unwrap_or(false);
+        if env_set {
+            let mut guard = session.lock().unwrap();
+            let session_raw: *mut crate::ffi::sp_session = guard.raw_ptr();
+            // SAFETY: holding the Mutex on `session`; no concurrent forward.
+            match unsafe { sp_daemon::hex_forward_dispatch::register_with_session(session_raw) } {
+                Ok(()) => {
+                    info!("WIRE-HEX: sp_session_register_forward_backend OK on TARGET session — prefill routes to gemma3_forward_hexagon (cDSP V69 HVX)");
+                    drop(guard);
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("WIRE-HEX: registration failed: {e} — falling back to math-core reference forward");
+                    drop(guard);
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    };
+    #[cfg(not(all(target_os = "android", feature = "wire_hex_backend")))]
+    let wire_hex_active = false;
+    if !wire_hex_active {
+        // Host build OR feature off OR env unset — log once for clarity.
+        #[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
+        info!("WIRE-HEX: feature linked but SP_DAEMON_BACKEND!=hex — staying on math-core reference forward");
+    }
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -344,6 +394,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         draft_model,
         draft_session,
         sessions: crate::sessions::Sessions::new(),
+        wire_hex_active,
         vocab_size,
         tokens_decoded: AtomicU64::new(0),
         started_at: Instant::now(),
