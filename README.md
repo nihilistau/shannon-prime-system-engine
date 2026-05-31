@@ -77,12 +77,13 @@ through it at runtime.
 | FastRPC cDSP echo (`/v1/dsp/echo`) | yes | yes (android) | 8 MB max payload |
 | FastRPC cDSP model info (`/v1/dsp/model_info`) | yes | yes (android) | persistent DSP-resident model |
 
-**Production tok/s baseline (S22U, math-core reference forward, ctx = 16 prefill + 32 decode):**
+** tok/s baseline (S22U, math-core reference forward, ctx = 16 prefill + 32 decode):**
+**These are numbers run during testing of an individual piece of the system on the phone
 
 | Model | Wall (s) | Tokens | tok/s |
 |-------|---------:|-------:|------:|
-| Gemma3-1B | 18.06 | 16 | 0.89 | *These are numbers run during testing of an individual piece of the system on the phone
-| Qwen3-0.6B | 11.21 | 16 | 1.43 | **These are numbers run during testing of an individual piece of the system on the phone
+| Gemma3-1B | 18.06 | 16 | 0.89 | 
+| Qwen3-0.6B | 11.21 | 16 | 1.43 | 
 
 The HVX backend wiring is in place daemon-side (LLVM-nm on the
 android binary shows `gemma3_forward_hexagon` + `sp_hex_forward` +
