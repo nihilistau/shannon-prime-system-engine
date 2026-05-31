@@ -50,7 +50,12 @@ static void hx_cfg_from(const qwen3_model *m, sp_hex_cfg *c) {
     c->rope_local = 10000.0f;                 /* gemma3 local/SWA layers */
 }
 
-/* copy a Q8 arena weight (codes + per-row scales) into the blob at `dst`. */
+/* copy a Q8 arena weight (codes + per-row scales) into the blob at `dst`.
+ * HX.3b-alpha-v2: also precompute and pack the per-row int32 weight-sum
+ * row_sum[j] = Sigma_{i=0..in-1} (int32) int8(codes[j*in + i]). This replaces
+ * the per-call wsum vrmpy accumulator inside hx_matmul_q8_vrmpy with a single
+ * lookup. Bit-identical to per-call wsum (same int8 codes, same index range,
+ * same int32 accumulator type). |sum| <= 127 * 8192 < 2^20 — no overflow. */
 static int hx_pack_q8(unsigned char *dst, const qwen3_model *m, const gguf_tensor *W) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, W->name) : 0;
     if (!at) { sp_set_error("hexagon: matmul weight not in Q8 arena (need SP_ARENA=q8)"); return 1; }
@@ -59,6 +64,16 @@ static int hx_pack_q8(unsigned char *dst, const qwen3_model *m, const gguf_tenso
     memcpy(dst, pt->codes, (size_t)out * in);                       /* int8 codes (row j = j*in) */
     float *scales = (float *)(dst + sp_hex_align((size_t)out * in));
     memcpy(scales, pt->row_scale, (size_t)out * sizeof(float));
+
+    /* HX.3b-alpha-v2: per-row int32 weight-sum, at byte offset sp_hex_q8_rsum_off. */
+    int32_t *rsum = (int32_t *)(dst + sp_hex_q8_rsum_off(out, in));
+    const signed char *codes = (const signed char *)pt->codes;
+    for (int j = 0; j < out; j++) {
+        int32_t s = 0;
+        const signed char *row = codes + (size_t)j * in;
+        for (int i = 0; i < in; i++) s += (int32_t)row[i];
+        rsum[j] = s;
+    }
     return 0;
 }
 static void hx_pack_f32(unsigned char *dst, const qwen3_model *m, const gguf_tensor *t, int n) {

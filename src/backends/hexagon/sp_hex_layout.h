@@ -51,10 +51,22 @@ enum {
 #define SP_HEX_ALIGN 128u
 static inline size_t sp_hex_align(size_t x) { return (x + (SP_HEX_ALIGN - 1)) & ~(size_t)(SP_HEX_ALIGN - 1); }
 
-/* bytes of a 128-aligned Q8 weight block: padded int8 codes + f32 row scales. */
+/* bytes of a 128-aligned Q8 weight block: padded int8 codes + f32 row scales
+ * + int32 row_sum (HX.3b-alpha-v2 — precomputed Sigma_i int8(W[i,j]) per row,
+ * eliminates the per-call wsum vrmpy from hx_matmul_q8_vrmpy). */
 static inline size_t sp_hex_q8_bytes(int out, int in) {
-    size_t codes = sp_hex_align((size_t)out * (size_t)in);   /* int8 codes, padded */
-    return sp_hex_align(codes + (size_t)out * sizeof(float)); /* + per-row scales   */
+    size_t codes  = sp_hex_align((size_t)out * (size_t)in);           /* int8 codes, padded   */
+    size_t scales = sp_hex_align((size_t)out * sizeof(float));        /* + per-row f32 scales */
+    size_t rsums  = sp_hex_align((size_t)out * sizeof(int32_t));      /* + per-row int32 rsum */
+    return codes + scales + rsums;                                    /* each already 128-aligned */
+}
+
+/* Byte offset (within a Q8 block start) of the int32 row_sum[out] array.
+ * Used by both host packer (write) and DSP kernel (read). */
+static inline size_t sp_hex_q8_rsum_off(int out, int in) {
+    size_t codes  = sp_hex_align((size_t)out * (size_t)in);
+    size_t scales = sp_hex_align((size_t)out * sizeof(float));
+    return codes + scales;
 }
 static inline size_t sp_hex_f32_bytes(int n) { return sp_hex_align((size_t)n * sizeof(float)); }
 
