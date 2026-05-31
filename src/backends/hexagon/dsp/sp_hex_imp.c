@@ -1270,12 +1270,9 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
         const int32_t *rsum_wk = hx_vtcm_rsum_for(L, hx_vtcm_rsum_off_wk(&cfg));
         const int32_t *rsum_wv = hx_vtcm_rsum_for(L, hx_vtcm_rsum_off_wv(&cfg));
         const int32_t *rsum_wo = hx_vtcm_rsum_for(L, hx_vtcm_rsum_off_wo(&cfg));
-        /* Stage 2: ONLY WQ uses VTCM dispatch. WK/WV/WO stay on V3 DDR path
-         * for incremental rollout (single-variable Stage commit per
-         * feedback-bundled-changeset-root-cause-ambiguity). Stage 3 extends
-         * to all 4. The Stage 3 commit will move 3 more call sites. */
-        (void)vtcm_wk; (void)vtcm_wv; (void)vtcm_wo;
-        (void)rsum_wk; (void)rsum_wv; (void)rsum_wo;
+        /* Stage 3: ALL 4 attention matmuls (WQ/WK/WV/WO) use VTCM dispatch.
+         * FFN matmuls (WGATE/WUP/WDOWN) stay on V3 DDR path (Stage 4 stretch
+         * = FFN tile-streaming via ping-pong VTCM tiles, deferred). */
 #endif
         const float *attn_norm = (const float *)WPTR(SP_HEX_ATTN_NORM);
         const float *qn = (const float *)WPTR(SP_HEX_Q_NORM);
@@ -1284,12 +1281,14 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
         for (int t = 0; t < n_tok; t++)
             hx_rmsnorm(resid + (size_t)t * E, attn_norm, E, eps, nx + (size_t)t * E);
 #ifdef __HVX__
-        /* V4 Stage 2: WQ uses VTCM-resident weights via dispatch (falls back
-         * to V3 DDR path if VTCM unavailable). WK/WV/WO stay on V3 path. */
+        /* V4 Stage 3: all 4 attention matmuls (WQ/WK/WV/WO) use VTCM
+         * dispatch with per-layer rsum_attn tables; FFN remains on V3 DDR. */
         hx_matmul_q8_vrmpy_dispatch(WPTR(SP_HEX_WQ), vtcm_wq, rsum_wq,
-                                    QD, E, nx, n_tok, q);                       /* V4 WQ */
-        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* V3: WK dual-HVX-context */
-        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* V3: WV dual-HVX-context */
+                                    QD,  E, nx, n_tok, q);                       /* V4 WQ */
+        hx_matmul_q8_vrmpy_dispatch(WPTR(SP_HEX_WK), vtcm_wk, rsum_wk,
+                                    KVD, E, nx, n_tok, k);                       /* V4 WK */
+        hx_matmul_q8_vrmpy_dispatch(WPTR(SP_HEX_WV), vtcm_wv, rsum_wv,
+                                    KVD, E, nx, n_tok, v);                       /* V4 WV */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);
         hx_matmul_q8(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);
@@ -1310,7 +1309,8 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
                 hx_attn_head(q + (size_t)t * QD + (size_t)h * HD, k, v, t, KVD,
                              h / group, HD, ascale, win, sc, ao + (size_t)t * QD + (size_t)h * HD);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* V3: WO dual-HVX-context */
+        hx_matmul_q8_vrmpy_dispatch(WPTR(SP_HEX_WO), vtcm_wo, rsum_wo,
+                                    E, QD, ao, n_tok, ap);                       /* V4 WO */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);
 #endif
