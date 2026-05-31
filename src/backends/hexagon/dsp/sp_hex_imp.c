@@ -877,7 +877,7 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
         for (int t = 0; t < n_tok; t++)
             hx_rmsnorm(resid + (size_t)t * E, attn_norm, E, eps, nx + (size_t)t * E);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* HX.3b-alpha-v2 Stage 2 */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* V3 Stage 2: WQ via dual-HVX-context */
         hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* HX.3b-alpha-v2 Stage 3 */
         hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* HX.3b-alpha-v2 Stage 3 */
 #else
