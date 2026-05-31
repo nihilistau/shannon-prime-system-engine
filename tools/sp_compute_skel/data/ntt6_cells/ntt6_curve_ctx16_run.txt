@@ -1,0 +1,64 @@
+
+[ntt6-driver] === NTT.6 curve run started 2026-05-31 18:00:01 ===
+[ntt6-driver] Ctx=16 Reps=1 DecodeN=2 IncludeHex=False OnlyModel='Memory'
+[ntt6-driver] Binary on device: /data/local/tmp/sp_ntt_bench_toks
+[ntt6-driver] adb devices:
+-rw-rw-rw- 1 shell shell  185704 2026-05-31 06:50 /data/local/tmp/libsp_compute_skel.so
+-rw-rw-rw- 1 shell shell   36416 2026-05-31 17:26 /data/local/tmp/sp22u/libsp_hex_skel.so
+-rwxrwxrwx 1 shell shell 1002064 2026-05-31 11:05 /data/local/tmp/sp_ntt_bench_toks
+
+[ntt6-driver] running 2 cells:
+  cell 3 Memory/fp32 env=''
+  cell 4 Memory/host_ntt env='SP_ENGINE_NTT_ATTN=1'
+
+[ntt6-driver] ============================================================
+[ntt6-driver] cell 3 ctx=16 model=Memory config=fp32
+[ntt6-driver]   env: 
+[ntt6-driver] ============================================================
+[ntt6-driver] invoking at 18:00:01 ...
+[bench] cell=3 model=Memory config=fp32 prompt_len=16 decode_n=2 reps=1
+[bench]   env: SP_ENGINE_NTT_ATTN=false SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 20 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 16 toks in 5463289 us = 2.929 tok/s (argmax=17)
+[bench]   rep 0: decode 2 steps in 4477240 us = 0.447 tok/s (first_step=4149396us steady_mean=327844.0us) dispatch fwd+=0 inv+=0
+
+{"cell":3,"model_label":"Memory","config_label":"fp32","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":20,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":2,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":5463289,"prefill_toks_per_sec":2.928639,"decode_n_run":2,"decode_total_wall_us":4477240,"decode_toks_per_sec":0.446704,"decode_first_step_us":4149396,"decode_steady_mean_us":327844.000,"first_argmax_after_prefill":17,"last_decoded_token":19}],"prefill_toks_per_sec":{"mean":2.928639,"min":2.928639,"max":2.928639},"decode_toks_per_sec":{"mean":0.446704,"min":0.446704,"max":0.446704},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] ═══ cell 3 summary (Memory / fp32) ═══
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=2.929 min=2.929 max=2.929
+[bench]   decode  toks/s: mean=0.447 min=0.447 max=0.447
+[bench]   total dispatch counts: fwd=0 inv=0
+[bench] appended cell 3 to /data/local/tmp/ntt6_curve_ctx16_report.jsonl
+
+[ntt6-driver] cell 3 elapsed: 10 s
+
+[ntt6-driver] ============================================================
+[ntt6-driver] cell 4 ctx=16 model=Memory config=host_ntt
+[ntt6-driver]   env: SP_ENGINE_NTT_ATTN=1
+[ntt6-driver] ============================================================
+[ntt6-driver] invoking at 18:00:11 ...
+[bench] cell=4 model=Memory config=host_ntt prompt_len=16 decode_n=2 reps=1
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 30 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 16 toks in 7571262 us = 2.113 tok/s (argmax=17)
+[bench]   rep 0: decode 2 steps in 4463403 us = 0.448 tok/s (first_step=4136214us steady_mean=327189.0us) dispatch fwd+=0 inv+=0
+
+[bench] ═══ cell 4 summary (Memory / host_ntt) ═══
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=2.113 min=2.113 max=2.113
+[bench]   decode  toks/s: mean=0.448 min=0.448 max=0.448
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":4,"model_label":"Memory","config_label":"host_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":30,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":2,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":7571262,"prefill_toks_per_sec":2.113254,"decode_n_run":2,"decode_total_wall_us":4463403,"decode_toks_per_sec":0.448089,"decode_first_step_us":4136214,"decode_steady_mean_us":327189.000,"first_argmax_after_prefill":17,"last_decoded_token":19}],"prefill_toks_per_sec":{"mean":2.113254,"min":2.113254,"max":2.113254},"decode_toks_per_sec":{"mean":0.448089,"min":0.448089,"max":0.448089},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 4 to /data/local/tmp/ntt6_curve_ctx16_report.jsonl
+
+[ntt6-driver] cell 4 elapsed: 12 s
+[ntt6-driver] ============================================================
+[ntt6-driver] pulling report from device...
+[ntt6-driver] report pulled: D:\F\shannon-prime-repos\engine-ntt-6\tools\sp_compute_skel\data\ntt6_cells\ntt6_curve_ctx16_report.jsonl
+[ntt6-driver] --- report contents ---
+{"cell":3,"model_label":"Memory","config_label":"fp32","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":20,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":2,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":5463289,"prefill_toks_per_sec":2.928639,"decode_n_run":2,"decode_total_wall_us":4477240,"decode_toks_per_sec":0.446704,"decode_first_step_us":4149396,"decode_steady_mean_us":327844.000,"first_argmax_after_prefill":17,"last_decoded_token":19}],"prefill_toks_per_sec":{"mean":2.928639,"min":2.928639,"max":2.928639},"decode_toks_per_sec":{"mean":0.446704,"min":0.446704,"max":0.446704},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+{"cell":4,"model_label":"Memory","config_label":"host_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":30,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":2,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":7571262,"prefill_toks_per_sec":2.113254,"decode_n_run":2,"decode_total_wall_us":4463403,"decode_toks_per_sec":0.448089,"decode_first_step_us":4136214,"decode_steady_mean_us":327189.000,"first_argmax_after_prefill":17,"last_decoded_token":19}],"prefill_toks_per_sec":{"mean":2.113254,"min":2.113254,"max":2.113254},"decode_toks_per_sec":{"mean":0.448089,"min":0.448089,"max":0.448089},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[ntt6-driver] combined JSON: D:\F\shannon-prime-repos\engine-ntt-6\tools\sp_compute_skel\data\ntt6_cells\ntt6_curve_ctx16_report.json (2 cells)
+[ntt6-driver] === NTT.6 curve run finished 2026-05-31 18:00:23 ===
