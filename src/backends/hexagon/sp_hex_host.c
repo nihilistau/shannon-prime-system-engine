@@ -51,11 +51,15 @@ static void hx_cfg_from(const qwen3_model *m, sp_hex_cfg *c) {
 }
 
 /* copy a Q8 arena weight (codes + per-row scales) into the blob at `dst`.
- * HX.3b-alpha-v2: also precompute and pack the per-row int32 weight-sum
- * row_sum[j] = Sigma_{i=0..in-1} (int32) int8(codes[j*in + i]). This replaces
- * the per-call wsum vrmpy accumulator inside hx_matmul_q8_vrmpy with a single
- * lookup. Bit-identical to per-call wsum (same int8 codes, same index range,
- * same int32 accumulator type). |sum| <= 127 * 8192 < 2^20 — no overflow. */
+ *
+ * HX.3b-alpha-v2 NOTE: this packer is bit-identical to HX.3b. The per-row
+ * weight-sum lookup table for the v2 single-vrmpy kernel is populated on the
+ * DSP side via a session cache (sp_hex_imp.c::hx_rsum_get) on the first
+ * sp_hex_forward call. Reason: rebuilding sp-daemon-wire-hex from this
+ * worktree requires building libsp_hex_daemon_backend.a + cross-compiling the
+ * Rust daemon for aarch64-android, which is out of scope for an incremental-
+ * lift sprint. The DSP-side cache lives across forward calls within a session
+ * (one-time amortized cost; subsequent prefills run on the lookup-only path). */
 static int hx_pack_q8(unsigned char *dst, const qwen3_model *m, const gguf_tensor *W) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, W->name) : 0;
     if (!at) { sp_set_error("hexagon: matmul weight not in Q8 arena (need SP_ARENA=q8)"); return 1; }
@@ -64,16 +68,6 @@ static int hx_pack_q8(unsigned char *dst, const qwen3_model *m, const gguf_tenso
     memcpy(dst, pt->codes, (size_t)out * in);                       /* int8 codes (row j = j*in) */
     float *scales = (float *)(dst + sp_hex_align((size_t)out * in));
     memcpy(scales, pt->row_scale, (size_t)out * sizeof(float));
-
-    /* HX.3b-alpha-v2: per-row int32 weight-sum, at byte offset sp_hex_q8_rsum_off. */
-    int32_t *rsum = (int32_t *)(dst + sp_hex_q8_rsum_off(out, in));
-    const signed char *codes = (const signed char *)pt->codes;
-    for (int j = 0; j < out; j++) {
-        int32_t s = 0;
-        const signed char *row = codes + (size_t)j * in;
-        for (int i = 0; i < in; i++) s += (int32_t)row[i];
-        rsum[j] = s;
-    }
     return 0;
 }
 static void hx_pack_f32(unsigned char *dst, const qwen3_model *m, const gguf_tensor *t, int n) {
