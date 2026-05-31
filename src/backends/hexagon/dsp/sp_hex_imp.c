@@ -448,7 +448,11 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
 
         for (int t = 0; t < n_tok; t++)
             hx_rmsnorm(resid + (size_t)t * E, attn_norm, E, eps, nx + (size_t)t * E);
+#ifdef __HVX__
+        hx_matmul_q8_vrmpy(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* HX.3b Stage 2 */
+#else
         hx_matmul_q8(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);
+#endif
         hx_matmul_q8(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);
         hx_matmul_q8(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);
         for (int t = 0; t < n_tok; t++) {
