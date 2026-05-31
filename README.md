@@ -17,7 +17,7 @@ Phasing in `../shannon-prime-lattice/papers/PPT-LAT-Roadmap.md` defines what get
 
 ## Status
 
-**Phase 0 — empty.** README + LICENSE + .gitignore + CMake stub in place. Phase 5 lands the engine bootstrap; Phase 6 lands two-node sharded inference.
+**Phase 0 — empty.** README + LICENSE + .gitignore + CMake stub in place. Phase 5 lands the engine bootstrap; Phase 6 lands two-node sharded inference..
 
 ## Build (placeholder)
 
