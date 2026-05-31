@@ -257,6 +257,7 @@ struct RepResult {
     first_argmax_after_prefill: i32,
     last_decoded_token: i32,
     error: Option<String>,
+    warning: Option<String>,
 }
 
 // ─── Host stub (non-android) ───────────────────────────────────────────────
@@ -478,10 +479,13 @@ fn main() {
                   rr.decode_first_step_us, rr.decode_steady_mean_us,
                   fwd1 - fwd0, inv1 - inv0);
 
-        // Pack per-rep dispatch counter delta into error field if hex was expected
-        // but no dispatches happened (informational, not a hard fail).
+        // Pack per-rep dispatch counter delta into a WARNING field if hex was expected
+        // but no dispatches happened (informational, not a hard fail; wall-clock
+        // measurements are still valid — the forward just took the direct sp_pr
+        // path which has no backend hook per NTT.5c CLOSURE §"What's NOT done").
+        // Use a distinct field so the aggregator doesn't drop this rep from stats.
         if ntt_attn_hex && backend.is_some() && (fwd1 - fwd0) == 0 && rr.error.is_none() {
-            rr.error = Some(format!("hex_no_dispatch (HD={hd} likely direct_pr path)"));
+            rr.warning = Some(format!("hex_no_dispatch (HD={hd} likely direct_pr path)"));
             eprintln!("[bench]   rep {rep}: WARN hex expected but 0 dispatches (HD={hd})");
         }
 
@@ -622,6 +626,9 @@ fn build_cell_json(
             r.rep_index, r.prefill_wall_us, r.prefill_toks_per_sec, r.decode_n_run, r.decode_total_wall_us, r.decode_toks_per_sec, r.decode_first_step_us, r.decode_steady_mean_us, r.first_argmax_after_prefill, r.last_decoded_token));
         if let Some(e) = r.error.as_deref() {
             s.push_str(&format!(",\"error\":\"{}\"", esc_json(e)));
+        }
+        if let Some(w) = r.warning.as_deref() {
+            s.push_str(&format!(",\"warning\":\"{}\"", esc_json(w)));
         }
         s.push('}');
     }

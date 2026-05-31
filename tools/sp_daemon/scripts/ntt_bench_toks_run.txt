@@ -1,0 +1,140 @@
+[NTT-bench] run captured 2026-05-31 11:12:16 on Knack's S22U (R5CT22445JA)
+==============================================================
+List of devices attached
+R5CT22445JA	device
+
+==============================================================
+# binary
+-rw-rw-rw- 1 shell shell    185704 2026-05-31 06:50 /data/local/tmp/libsp_compute_skel.so
+-rw-rw-rw- 1 shell shell 496202752 2026-05-26 23:33 /data/local/tmp/qwen25-coder-0.5b-memory.sp-model
+-rw-rw-rw- 1 shell shell 754551808 2026-05-26 14:46 /data/local/tmp/qwen3_rt.sp-model
+-rwxrwxrwx 1 shell shell   1002064 2026-05-31 11:05 /data/local/tmp/sp_ntt_bench_toks
+
+==============================================================
+# cell 1 log
+==============================================================
+[bench] cell=1 model=Executive config=fp32 prompt_len=16 decode_n=32 reps=3
+[bench]   env: SP_ENGINE_NTT_ATTN=false SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 22 ms: arch_id=2 HD=128 hidden=1024 layers=28 vocab=151936
+[bench]   HD=128: direct_pr_admissible=true bluestein_admissible=true
+[bench]   rep 0: prefill 16 toks in 6455088 us = 2.479 tok/s (argmax=17)
+[bench]   rep 0: decode 32 steps in 17567615 us = 1.822 tok/s (first_step=5097572us steady_mean=402259.5us) dispatch fwd+=0 inv+=0
+[bench]   rep 1: prefill 16 toks in 6397661 us = 2.501 tok/s (argmax=17)
+[bench]   rep 1: decode 32 steps in 17467180 us = 1.832 tok/s (first_step=5105050us steady_mean=398778.4us) dispatch fwd+=0 inv+=0
+[bench]   rep 2: prefill 16 toks in 6372020 us = 2.511 tok/s (argmax=17)
+[bench]   rep 2: decode 32 steps in 17637521 us = 1.814 tok/s (first_step=5109112us steady_mean=404142.2us) dispatch fwd+=0 inv+=0
+
+[bench] ═══ cell 1 summary (Executive / fp32) ═══
+[bench]   reps_ok = 3/3
+[bench]   prefill toks/s: mean=2.497 min=2.479 max=2.511
+[bench]   decode  toks/s: mean=1.823 min=1.814 max=1.832
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":1,"model_label":"Executive","config_label":"fp32","model_path":"/data/local/tmp/qwen3_rt.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":22,"arch":{"arch_id":2,"head_dim":128,"hidden_dim":1024,"n_layers":28,"vocab_size":151936},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":3,"reps_detail":[{"rep_index":0,"prefill_wall_us":6455088,"prefill_toks_per_sec":2.478665,"decode_n_run":32,"decode_total_wall_us":17567615,"decode_toks_per_sec":1.821534,"decode_first_step_us":5097572,"decode_steady_mean_us":402259.452,"first_argmax_after_prefill":17,"last_decoded_token":18},{"rep_index":1,"prefill_wall_us":6397661,"prefill_toks_per_sec":2.500914,"decode_n_run":32,"decode_total_wall_us":17467180,"decode_toks_per_sec":1.832007,"decode_first_step_us":5105050,"decode_steady_mean_us":398778.387,"first_argmax_after_prefill":17,"last_decoded_token":18},{"rep_index":2,"prefill_wall_us":6372020,"prefill_toks_per_sec":2.510978,"decode_n_run":32,"decode_total_wall_us":17637521,"decode_toks_per_sec":1.814314,"decode_first_step_us":5109112,"decode_steady_mean_us":404142.226,"first_argmax_after_prefill":17,"last_decoded_token":18}],"prefill_toks_per_sec":{"mean":2.496852,"min":2.478665,"max":2.510978},"decode_toks_per_sec":{"mean":1.822618,"min":1.814314,"max":1.832007},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 1 to /data/local/tmp/ntt_bench_toks_report.jsonl
+
+==============================================================
+# cell 2 log
+==============================================================
+[bench] cell=2 model=Executive config=host_ntt prompt_len=16 decode_n=32 reps=1
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 19 ms: arch_id=2 HD=128 hidden=1024 layers=28 vocab=151936
+[bench]   HD=128: direct_pr_admissible=true bluestein_admissible=true
+[bench]   rep 0: prefill 16 toks in 8238746 us = 1.942 tok/s (argmax=17)
+[bench]   rep 0: decode 32 steps in 17450739 us = 1.834 tok/s (first_step=5104686us steady_mean=398259.8us) dispatch fwd+=0 inv+=0
+
+[bench] ═══ cell 2 summary (Executive / host_ntt) ═══
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=1.942 min=1.942 max=1.942
+[bench]   decode  toks/s: mean=1.834 min=1.834 max=1.834
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":2,"model_label":"Executive","config_label":"host_ntt","model_path":"/data/local/tmp/qwen3_rt.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":19,"arch":{"arch_id":2,"head_dim":128,"hidden_dim":1024,"n_layers":28,"vocab_size":151936},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":8238746,"prefill_toks_per_sec":1.942043,"decode_n_run":32,"decode_total_wall_us":17450739,"decode_toks_per_sec":1.833733,"decode_first_step_us":5104686,"decode_steady_mean_us":398259.774,"first_argmax_after_prefill":17,"last_decoded_token":18}],"prefill_toks_per_sec":{"mean":1.942043,"min":1.942043,"max":1.942043},"decode_toks_per_sec":{"mean":1.833733,"min":1.833733,"max":1.833733},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 2 to /data/local/tmp/ntt_bench_toks_report.jsonl
+
+==============================================================
+# cell 3 log
+==============================================================
+[bench] cell=3 model=Executive config=hex_ntt prompt_len=16 decode_n=32 reps=1
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=true
+[bench] model loaded in 21 ms: arch_id=2 HD=128 hidden=1024 layers=28 vocab=151936
+[bench]   HD=128: direct_pr_admissible=true bluestein_admissible=true
+[bench] FastRpcSession open OK
+[bench]   rep 0: prefill 16 toks in 8239586 us = 1.942 tok/s (argmax=17)
+[bench]   rep 0: decode 32 steps in 17483884 us = 1.830 tok/s (first_step=5103334us steady_mean=399372.6us) dispatch fwd+=0 inv+=0
+[bench]   rep 0: WARN hex expected but 0 dispatches (HD=128)
+
+[bench] ═══ cell 3 summary (Executive / hex_ntt) ═══
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=1.942 min=1.942 max=1.942
+[bench]   decode  toks/s: mean=1.830 min=1.830 max=1.830
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":3,"model_label":"Executive","config_label":"hex_ntt","model_path":"/data/local/tmp/qwen3_rt.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":true},"load_wall_ms":21,"arch":{"arch_id":2,"head_dim":128,"hidden_dim":1024,"n_layers":28,"vocab_size":151936},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":8239586,"prefill_toks_per_sec":1.941845,"decode_n_run":32,"decode_total_wall_us":17483884,"decode_toks_per_sec":1.830257,"decode_first_step_us":5103334,"decode_steady_mean_us":399372.581,"first_argmax_after_prefill":17,"last_decoded_token":18,"warning":"hex_no_dispatch (HD=128 likely direct_pr path)"}],"prefill_toks_per_sec":{"mean":1.941845,"min":1.941845,"max":1.941845},"decode_toks_per_sec":{"mean":1.830257,"min":1.830257,"max":1.830257},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 3 to /data/local/tmp/ntt_bench_toks_report.jsonl
+
+==============================================================
+# cell 4 log
+==============================================================
+[bench] cell=4 model=Memory config=fp32 prompt_len=16 decode_n=32 reps=3
+[bench]   env: SP_ENGINE_NTT_ATTN=false SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 25 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 16 toks in 5450077 us = 2.936 tok/s (argmax=17)
+[bench]   rep 0: decode 32 steps in 14311759 us = 2.236 tok/s (first_step=4136960us steady_mean=328219.3us) dispatch fwd+=0 inv+=0
+[bench]   rep 1: prefill 16 toks in 5352236 us = 2.989 tok/s (argmax=17)
+[bench]   rep 1: decode 32 steps in 14343502 us = 2.231 tok/s (first_step=4142397us steady_mean=329067.9us) dispatch fwd+=0 inv+=0
+[bench]   rep 2: prefill 16 toks in 5379786 us = 2.974 tok/s (argmax=17)
+[bench]   rep 2: decode 32 steps in 14307339 us = 2.237 tok/s (first_step=4134020us steady_mean=328171.6us) dispatch fwd+=0 inv+=0
+
+[bench] ═══ cell 4 summary (Memory / fp32) ═══
+[bench]   reps_ok = 3/3
+[bench]   prefill toks/s: mean=2.966 min=2.936 max=2.989
+[bench]   decode  toks/s: mean=2.235 min=2.231 max=2.237
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":4,"model_label":"Memory","config_label":"fp32","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":25,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":3,"reps_detail":[{"rep_index":0,"prefill_wall_us":5450077,"prefill_toks_per_sec":2.935738,"decode_n_run":32,"decode_total_wall_us":14311759,"decode_toks_per_sec":2.235924,"decode_first_step_us":4136960,"decode_steady_mean_us":328219.323,"first_argmax_after_prefill":17,"last_decoded_token":279},{"rep_index":1,"prefill_wall_us":5352236,"prefill_toks_per_sec":2.989405,"decode_n_run":32,"decode_total_wall_us":14343502,"decode_toks_per_sec":2.230975,"decode_first_step_us":4142397,"decode_steady_mean_us":329067.903,"first_argmax_after_prefill":17,"last_decoded_token":279},{"rep_index":2,"prefill_wall_us":5379786,"prefill_toks_per_sec":2.974096,"decode_n_run":32,"decode_total_wall_us":14307339,"decode_toks_per_sec":2.236614,"decode_first_step_us":4134020,"decode_steady_mean_us":328171.581,"first_argmax_after_prefill":17,"last_decoded_token":279}],"prefill_toks_per_sec":{"mean":2.966413,"min":2.935738,"max":2.989405},"decode_toks_per_sec":{"mean":2.234504,"min":2.230975,"max":2.236614},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 4 to /data/local/tmp/ntt_bench_toks_report.jsonl
+
+==============================================================
+# cell 5 log
+==============================================================
+[bench] cell=5 model=Memory config=host_ntt prompt_len=16 decode_n=32 reps=1
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=false
+[bench] model loaded in 19 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench]   rep 0: prefill 16 toks in 7578118 us = 2.111 tok/s (argmax=17)
+[bench]   rep 0: decode 32 steps in 14308954 us = 2.236 tok/s (first_step=4137719us steady_mean=328104.4us) dispatch fwd+=0 inv+=0
+
+[bench] ═══ cell 5 summary (Memory / host_ntt) ═══
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=2.111 min=2.111 max=2.111
+[bench]   decode  toks/s: mean=2.236 min=2.236 max=2.236
+[bench]   total dispatch counts: fwd=0 inv=0
+{"cell":5,"model_label":"Memory","config_label":"host_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":19,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":7578118,"prefill_toks_per_sec":2.111342,"decode_n_run":32,"decode_total_wall_us":14308954,"decode_toks_per_sec":2.236362,"decode_first_step_us":4137719,"decode_steady_mean_us":328104.355,"first_argmax_after_prefill":17,"last_decoded_token":279}],"prefill_toks_per_sec":{"mean":2.111342,"min":2.111342,"max":2.111342},"decode_toks_per_sec":{"mean":2.236362,"min":2.236362,"max":2.236362},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+[bench] appended cell 5 to /data/local/tmp/ntt_bench_toks_report.jsonl
+
+==============================================================
+# cell 6 log
+==============================================================
+[bench] cell=6 model=Memory config=hex_ntt prompt_len=16 decode_n=32 reps=1
+[bench]   env: SP_ENGINE_NTT_ATTN=true SP_ENGINE_NTT_ATTN_HEX=true
+[bench] model loaded in 19 ms: arch_id=6 HD=64 hidden=896 layers=24 vocab=151936
+[bench]   HD=64: direct_pr_admissible=false bluestein_admissible=true
+[bench] FastRpcSession open OK
+[bench]   rep 0: prefill 16 toks in 91987924 us = 0.174 tok/s (argmax=17)
+[bench]   rep 0: decode 32 steps in 14298166 us = 2.238 tok/s (first_step=4133638us steady_mean=327888.0us) dispatch fwd+=91392 inv+=45696
+
+[bench] ═══ cell 6 summary (Memory / hex_ntt) ═══
+[bench]   reps_ok = 1/1
+[bench]   prefill toks/s: mean=0.174 min=0.174 max=0.174
+[bench]   decode  toks/s: mean=2.238 min=2.238 max=2.238
+[bench]   total dispatch counts: fwd=91392 inv=45696
+{"cell":6,"model_label":"Memory","config_label":"hex_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":true},"load_wall_ms":19,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":91987924,"prefill_toks_per_sec":0.173936,"decode_n_run":32,"decode_total_wall_us":14298166,"decode_toks_per_sec":2.238049,"decode_first_step_us":4133638,"decode_steady_mean_us":327888.000,"first_argmax_after_prefill":17,"last_decoded_token":279}],"prefill_toks_per_sec":{"mean":0.173936,"min":0.173936,"max":0.173936},"decode_toks_per_sec":{"mean":2.238049,"min":2.238049,"max":2.238049},"dispatch_counts":{"forward_total":91392,"inverse_total":45696}}
+[bench] appended cell 6 to /data/local/tmp/ntt_bench_toks_report.jsonl
+
+==============================================================
+# final report JSONL (6 lines, one per cell)
+==============================================================
+{"cell":1,"model_label":"Executive","config_label":"fp32","model_path":"/data/local/tmp/qwen3_rt.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":22,"arch":{"arch_id":2,"head_dim":128,"hidden_dim":1024,"n_layers":28,"vocab_size":151936},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":3,"reps_detail":[{"rep_index":0,"prefill_wall_us":6455088,"prefill_toks_per_sec":2.478665,"decode_n_run":32,"decode_total_wall_us":17567615,"decode_toks_per_sec":1.821534,"decode_first_step_us":5097572,"decode_steady_mean_us":402259.452,"first_argmax_after_prefill":17,"last_decoded_token":18},{"rep_index":1,"prefill_wall_us":6397661,"prefill_toks_per_sec":2.500914,"decode_n_run":32,"decode_total_wall_us":17467180,"decode_toks_per_sec":1.832007,"decode_first_step_us":5105050,"decode_steady_mean_us":398778.387,"first_argmax_after_prefill":17,"last_decoded_token":18},{"rep_index":2,"prefill_wall_us":6372020,"prefill_toks_per_sec":2.510978,"decode_n_run":32,"decode_total_wall_us":17637521,"decode_toks_per_sec":1.814314,"decode_first_step_us":5109112,"decode_steady_mean_us":404142.226,"first_argmax_after_prefill":17,"last_decoded_token":18}],"prefill_toks_per_sec":{"mean":2.496852,"min":2.478665,"max":2.510978},"decode_toks_per_sec":{"mean":1.822618,"min":1.814314,"max":1.832007},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+{"cell":4,"model_label":"Memory","config_label":"fp32","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":false,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":25,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":3,"reps_detail":[{"rep_index":0,"prefill_wall_us":5450077,"prefill_toks_per_sec":2.935738,"decode_n_run":32,"decode_total_wall_us":14311759,"decode_toks_per_sec":2.235924,"decode_first_step_us":4136960,"decode_steady_mean_us":328219.323,"first_argmax_after_prefill":17,"last_decoded_token":279},{"rep_index":1,"prefill_wall_us":5352236,"prefill_toks_per_sec":2.989405,"decode_n_run":32,"decode_total_wall_us":14343502,"decode_toks_per_sec":2.230975,"decode_first_step_us":4142397,"decode_steady_mean_us":329067.903,"first_argmax_after_prefill":17,"last_decoded_token":279},{"rep_index":2,"prefill_wall_us":5379786,"prefill_toks_per_sec":2.974096,"decode_n_run":32,"decode_total_wall_us":14307339,"decode_toks_per_sec":2.236614,"decode_first_step_us":4134020,"decode_steady_mean_us":328171.581,"first_argmax_after_prefill":17,"last_decoded_token":279}],"prefill_toks_per_sec":{"mean":2.966413,"min":2.935738,"max":2.989405},"decode_toks_per_sec":{"mean":2.234504,"min":2.230975,"max":2.236614},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+{"cell":2,"model_label":"Executive","config_label":"host_ntt","model_path":"/data/local/tmp/qwen3_rt.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":19,"arch":{"arch_id":2,"head_dim":128,"hidden_dim":1024,"n_layers":28,"vocab_size":151936},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":8238746,"prefill_toks_per_sec":1.942043,"decode_n_run":32,"decode_total_wall_us":17450739,"decode_toks_per_sec":1.833733,"decode_first_step_us":5104686,"decode_steady_mean_us":398259.774,"first_argmax_after_prefill":17,"last_decoded_token":18}],"prefill_toks_per_sec":{"mean":1.942043,"min":1.942043,"max":1.942043},"decode_toks_per_sec":{"mean":1.833733,"min":1.833733,"max":1.833733},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+{"cell":3,"model_label":"Executive","config_label":"hex_ntt","model_path":"/data/local/tmp/qwen3_rt.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":true},"load_wall_ms":21,"arch":{"arch_id":2,"head_dim":128,"hidden_dim":1024,"n_layers":28,"vocab_size":151936},"dispatch":{"direct_pr_admissible":true,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":8239586,"prefill_toks_per_sec":1.941845,"decode_n_run":32,"decode_total_wall_us":17483884,"decode_toks_per_sec":1.830257,"decode_first_step_us":5103334,"decode_steady_mean_us":399372.581,"first_argmax_after_prefill":17,"last_decoded_token":18,"warning":"hex_no_dispatch (HD=128 likely direct_pr path)"}],"prefill_toks_per_sec":{"mean":1.941845,"min":1.941845,"max":1.941845},"decode_toks_per_sec":{"mean":1.830257,"min":1.830257,"max":1.830257},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+{"cell":5,"model_label":"Memory","config_label":"host_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":false},"load_wall_ms":19,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":7578118,"prefill_toks_per_sec":2.111342,"decode_n_run":32,"decode_total_wall_us":14308954,"decode_toks_per_sec":2.236362,"decode_first_step_us":4137719,"decode_steady_mean_us":328104.355,"first_argmax_after_prefill":17,"last_decoded_token":279}],"prefill_toks_per_sec":{"mean":2.111342,"min":2.111342,"max":2.111342},"decode_toks_per_sec":{"mean":2.236362,"min":2.236362,"max":2.236362},"dispatch_counts":{"forward_total":0,"inverse_total":0}}
+{"cell":6,"model_label":"Memory","config_label":"hex_ntt","model_path":"/data/local/tmp/qwen25-coder-0.5b-memory.sp-model","env":{"SP_ENGINE_NTT_ATTN":true,"SP_ENGINE_NTT_ATTN_HEX":true},"load_wall_ms":19,"arch":{"arch_id":6,"head_dim":64,"hidden_dim":896,"n_layers":24,"vocab_size":151936},"dispatch":{"direct_pr_admissible":false,"bluestein_admissible":true},"prompt_len":16,"decode_n_requested":32,"reps":1,"reps_detail":[{"rep_index":0,"prefill_wall_us":91987924,"prefill_toks_per_sec":0.173936,"decode_n_run":32,"decode_total_wall_us":14298166,"decode_toks_per_sec":2.238049,"decode_first_step_us":4133638,"decode_steady_mean_us":327888.000,"first_argmax_after_prefill":17,"last_decoded_token":279}],"prefill_toks_per_sec":{"mean":0.173936,"min":0.173936,"max":0.173936},"decode_toks_per_sec":{"mean":2.238049,"min":2.238049,"max":2.238049},"dispatch_counts":{"forward_total":91392,"inverse_total":45696}}
