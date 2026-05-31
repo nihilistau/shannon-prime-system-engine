@@ -37,6 +37,7 @@
 #include "qurt_thread.h"       /* V3: qurt_thread_create + attr API for dual-HVX-context worker pool */
 #include "qurt_futex.h"        /* V3: qurt_futex_wait/wake — signal-wait between handler + workers */
 #include "HAP_perf.h"          /* V3: HAP_perf_get_pcycles for T_BOTH_HVX_ACTIVE instrumentation */
+#include "HAP_vtcm_mgr.h"      /* V4: HAP_request_VTCM / HAP_release_VTCM / HAP_query_total_VTCM */
 #include <stdatomic.h>         /* V3: atomic_uint / atomic_load / atomic_store for worker signalling */
 #include <string.h>            /* V3: memcpy for per-thread activation-quant buffer staging */
 /* f32 dot on V69 HVX, the hardware-mandated float shape (see the header note):
@@ -673,6 +674,175 @@ static int hx_matmul_q8_vrmpy_dual_ctx(const unsigned char *blk, int out, int in
     }
     return 0;
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * V4 (TRICK-1-FORWARD-V4): VTCM weight pinning.
+ *
+ * V3's substrate (worker pool + dual-HVX-context per matmul) is silicon-
+ * validated but perf-flat at Gemma3-1B chat shape due to memory-bandwidth
+ * contention (reference-v69-vrmpy-chat-shape-memory-bound, 3rd confirmation).
+ * V4 attacks the bandwidth by staging the active layer's attention weight
+ * set (WQ + WK + WV + WO ≈ 2.85 MB) in V69's 8 MB VTCM at layer entry.
+ *
+ * Budget reality (per PLAN-TRICK-1-FORWARD-V4.md §D-A):
+ *   Per-layer Q8 weight total ≈ 25.7 MB; attention (Q+K+V+O) ≈ 2.85 MB;
+ *   each FFN tensor (WGATE/WUP/WDOWN) ≈ 7.6 MB. 8 MB VTCM cannot hold even
+ *   ONE FFN tensor alongside attention. HYBRID strategy: pin attention per
+ *   layer, leave FFN in DDR (Stage 1-3). FFN tile-streaming is the named
+ *   Stage 4 stretch / V5 follow-on.
+ *
+ * Lifecycle:
+ *   - sp_hex_open: no-op (cfg not yet known).
+ *   - first sp_hex_forward call: lazy-init the VTCM allocation sized for
+ *     the model's attention set (max-over-layers — all 26 Gemma3-1B
+ *     layers have the same attention shape so single sizing suffices).
+ *   - per-layer in forward: if g_hx_vtcm.cached_layer != L, memcpy the
+ *     attention sub-blob from DDR into VTCM; update cached_layer.
+ *   - sp_hex_close: HAP_release_VTCM if allocated.
+ *
+ * Robustness:
+ *   - HAP_request_VTCM may fail (other PD holding VTCM, allocator denial);
+ *     g_hx_vtcm.vtcm_base stays NULL; kernel falls back to V3 DDR path.
+ *   - No regression on VTCM-unavailable devices.
+ *
+ * Cache coherency:
+ *   VTCM is cDSP-private; ARM never reads it. The DDR-resident weights
+ *   were registered via rpcmem (host-flushed); the cDSP-internal memcpy
+ *   from DDR to VTCM doesn't need DMA_BUF sync (rpcmem handles host-side
+ *   flush at registration time).
+ * ──────────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    void    *vtcm_base;       /* HAP_request_VTCM return value (NULL = not allocated) */
+    uint32_t vtcm_size;       /* size requested (bytes) */
+    int      cached_layer;    /* layer index whose attention weights are in VTCM; -1 = empty */
+    /* Per-tensor offsets within vtcm_base — match the DDR sub-block layout. */
+    uint32_t off_wq;          /* offset to WQ block start (always 0) */
+    uint32_t off_wk;
+    uint32_t off_wv;
+    uint32_t off_wo;
+    uint32_t bytes_wq;        /* sp_hex_q8_bytes(QD, E) */
+    uint32_t bytes_wk;
+    uint32_t bytes_wv;
+    uint32_t bytes_wo;
+    int      ddr_path_count;  /* number of attention matmuls that fell back to DDR (V3 path); FARF-logged */
+    int      vtcm_path_count; /* number that used VTCM; FARF-logged */
+    sp_hex_cfg cfg;           /* cached cfg for sub-offset math */
+} hx_vtcm_t;
+
+static hx_vtcm_t g_hx_vtcm = { NULL, 0u, -1, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0, 0, {0} };
+
+/* Compute the byte size of one layer's attention weight set (Q+K+V+O).
+ * Q/K/V/O are contiguous Q8 blocks in the DDR layout (SP_HEX_WQ..SP_HEX_WO,
+ * indices 6..9 per sp_hex_layout.h). Each block is sp_hex_align()'d so the
+ * sum is also aligned. */
+static uint32_t hx_vtcm_attn_set_bytes(const sp_hex_cfg *cfg) {
+    size_t bytes = 0;
+    bytes += sp_hex_kind_bytes(cfg, SP_HEX_WQ);
+    bytes += sp_hex_kind_bytes(cfg, SP_HEX_WK);
+    bytes += sp_hex_kind_bytes(cfg, SP_HEX_WV);
+    bytes += sp_hex_kind_bytes(cfg, SP_HEX_WO);
+    return (uint32_t)bytes;
+}
+
+/* Lazy-init: allocate the VTCM region once (sized for the model's attention
+ * set). Idempotent — second call returns 0 if already allocated.
+ * Returns 0 on success, nonzero on failure (caller falls back to DDR path). */
+static int hx_vtcm_init(const sp_hex_cfg *cfg) {
+    if (g_hx_vtcm.vtcm_base != NULL) return 0;   /* already alloc'd */
+
+    /* Query the cDSP's VTCM budget for diagnostic. */
+    unsigned int page_size = 0u, page_count = 0u;
+    if (HAP_query_total_VTCM(&page_size, &page_count) == 0) {
+        FARF(RUNTIME_HIGH, "sp_hex V4: VTCM total page_size=%u page_count=%u total=%u",
+             page_size, page_count, page_size * page_count);
+    }
+    unsigned int avail_block = 0u, max_page = 0u, num_pages = 0u;
+    if (HAP_query_avail_VTCM(&avail_block, &max_page, &num_pages) == 0) {
+        FARF(RUNTIME_HIGH, "sp_hex V4: VTCM avail block=%u max_page=%u num_pages=%u",
+             avail_block, max_page, num_pages);
+    }
+
+    uint32_t bytes = hx_vtcm_attn_set_bytes(cfg);
+    /* Allocate with single_page_flag=0 (multi-page OK; we don't need
+     * scatter/gather single-page constraint for plain vmem reads). */
+    void *p = HAP_request_VTCM(bytes, 0u);
+    if (!p) {
+        FARF(ERROR, "sp_hex V4: HAP_request_VTCM(%u, 0) FAILED -- falling back to DDR-only path",
+             bytes);
+        return -1;
+    }
+
+    /* Stash offsets: sub-blocks are laid out sequentially matching the DDR
+     * blob order WQ, WK, WV, WO. Same byte-stride as the DDR layout, so
+     * within-block sub-offsets (codes + scales) are byte-identical to the
+     * DDR version once we memcpy. */
+    g_hx_vtcm.vtcm_base = p;
+    g_hx_vtcm.vtcm_size = bytes;
+    g_hx_vtcm.cached_layer = -1;
+    g_hx_vtcm.cfg = *cfg;
+    g_hx_vtcm.bytes_wq = (uint32_t)sp_hex_kind_bytes(cfg, SP_HEX_WQ);
+    g_hx_vtcm.bytes_wk = (uint32_t)sp_hex_kind_bytes(cfg, SP_HEX_WK);
+    g_hx_vtcm.bytes_wv = (uint32_t)sp_hex_kind_bytes(cfg, SP_HEX_WV);
+    g_hx_vtcm.bytes_wo = (uint32_t)sp_hex_kind_bytes(cfg, SP_HEX_WO);
+    g_hx_vtcm.off_wq = 0u;
+    g_hx_vtcm.off_wk = g_hx_vtcm.off_wq + g_hx_vtcm.bytes_wq;
+    g_hx_vtcm.off_wv = g_hx_vtcm.off_wk + g_hx_vtcm.bytes_wk;
+    g_hx_vtcm.off_wo = g_hx_vtcm.off_wv + g_hx_vtcm.bytes_wv;
+    g_hx_vtcm.ddr_path_count = 0;
+    g_hx_vtcm.vtcm_path_count = 0;
+
+    FARF(RUNTIME_HIGH, "sp_hex V4: VTCM allocated base=%p size=%u "
+                       "WQ@%u(%u) WK@%u(%u) WV@%u(%u) WO@%u(%u)",
+         p, bytes,
+         g_hx_vtcm.off_wq, g_hx_vtcm.bytes_wq,
+         g_hx_vtcm.off_wk, g_hx_vtcm.bytes_wk,
+         g_hx_vtcm.off_wv, g_hx_vtcm.bytes_wv,
+         g_hx_vtcm.off_wo, g_hx_vtcm.bytes_wo);
+    return 0;
+}
+
+/* Ensure VTCM holds layer L's attention weights. If cache miss, memcpy
+ * Q + K + V + O from DDR-resident `weights + sp_hex_weight_off(cfg, L, WQ)`
+ * into the VTCM region (single contiguous copy since WQ..WO are adjacent
+ * in the blob layout). Returns the VTCM base pointer (== g_hx_vtcm.vtcm_base)
+ * or NULL if VTCM unavailable (caller uses DDR path). */
+static void *hx_vtcm_ensure_layer(int L, const unsigned char *weights,
+                                  const sp_hex_cfg *cfg) {
+    if (hx_vtcm_init(cfg) != 0) return NULL;          /* alloc failure path */
+    if (g_hx_vtcm.cached_layer == L) return g_hx_vtcm.vtcm_base;  /* already cached */
+
+    /* Compute DDR source: start of WQ for layer L. WQ..WO are contiguous. */
+    size_t src_off = sp_hex_weight_off(cfg, L, SP_HEX_WQ);
+    const unsigned char *src = weights + src_off;
+    uint32_t total = g_hx_vtcm.bytes_wq + g_hx_vtcm.bytes_wk
+                   + g_hx_vtcm.bytes_wv + g_hx_vtcm.bytes_wo;
+
+    /* memcpy DDR -> VTCM. cDSP memcpy uses scalar loads/stores; bandwidth
+     * is DDR-bound (~10 GB/s class) → ~290 μs for 2.85 MB attention set on
+     * Gemma3-1B. Amortized over 7 matmuls × 16 tokens of work in the layer:
+     * negligible vs the bandwidth saved on attention matmul inner loops. */
+    memcpy(g_hx_vtcm.vtcm_base, src, total);
+    g_hx_vtcm.cached_layer = L;
+    return g_hx_vtcm.vtcm_base;
+}
+
+/* Release VTCM on session close. Called from sp_hex_close. */
+static void hx_vtcm_release(void) {
+    if (g_hx_vtcm.vtcm_base) {
+        FARF(RUNTIME_HIGH, "sp_hex V4: VTCM release base=%p size=%u "
+                           "(usage: vtcm_matmul=%d ddr_fallback=%d)",
+             g_hx_vtcm.vtcm_base, g_hx_vtcm.vtcm_size,
+             g_hx_vtcm.vtcm_path_count, g_hx_vtcm.ddr_path_count);
+        HAP_release_VTCM(g_hx_vtcm.vtcm_base);
+        g_hx_vtcm.vtcm_base = NULL;
+        g_hx_vtcm.vtcm_size = 0u;
+    }
+    g_hx_vtcm.cached_layer = -1;
+    g_hx_vtcm.ddr_path_count = 0;
+    g_hx_vtcm.vtcm_path_count = 0;
+}
+
 #endif /* __HVX__ */
 
 int sp_hex_open(const char *uri, remote_handle64 *h) {
@@ -688,6 +858,7 @@ int sp_hex_close(remote_handle64 h) {
     if (h) free((void *)h);
 #ifdef __HVX__
     hx_worker_pool_shutdown();   /* V3: tear down worker thread (no-op if never inited) */
+    hx_vtcm_release();           /* V4: release the per-layer attention VTCM region */
     hx_rsum_clear();   /* HX.3b-alpha-v2: drop the per-block weight-sum cache */
 #endif
     return 0;
@@ -870,6 +1041,15 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
         const int win = global ? -1 : sliding_window;
         const unsigned char *base = weights;
         #define WPTR(kind) (base + sp_hex_weight_off(&cfg, L, (kind)))
+#ifdef __HVX__
+        /* V4 Stage 1: ensure this layer's attention weight set (WQ+WK+WV+WO)
+         * is staged in VTCM. Returns the VTCM base ptr (or NULL on failure).
+         * Stage 1 does NOT yet consume this in the kernel — the matmul calls
+         * below still use V3's DDR-resident hx_matmul_q8_vrmpy_dual_ctx.
+         * Stage 2+ swaps in the VTCM-aware kernel and uses vtcm_attn_base. */
+        void *vtcm_attn_base = hx_vtcm_ensure_layer(L, weights, &cfg);
+        (void)vtcm_attn_base;   /* unused at Stage 1; Stage 2 wires it */
+#endif
         const float *attn_norm = (const float *)WPTR(SP_HEX_ATTN_NORM);
         const float *qn = (const float *)WPTR(SP_HEX_Q_NORM);
         const float *kn = (const float *)WPTR(SP_HEX_K_NORM);
