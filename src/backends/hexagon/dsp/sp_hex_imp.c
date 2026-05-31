@@ -34,6 +34,11 @@
 #include <hexagon_types.h>     /* HVX_Vector */
 #include <hexagon_protos.h>    /* Q6_* HVX intrinsics */
 #include "qurt_hvx.h"          /* qurt_hvx_lock/unlock + QURT_HVX_MODE_128B (gotcha #4) */
+#include "qurt_thread.h"       /* V3: qurt_thread_create + attr API for dual-HVX-context worker pool */
+#include "qurt_futex.h"        /* V3: qurt_futex_wait/wake — signal-wait between handler + workers */
+#include "HAP_perf.h"          /* V3: HAP_perf_get_pcycles for T_BOTH_HVX_ACTIVE instrumentation */
+#include <stdatomic.h>         /* V3: atomic_uint / atomic_load / atomic_store for worker signalling */
+#include <string.h>            /* V3: memcpy for per-thread activation-quant buffer staging */
 /* f32 dot on V69 HVX, the hardware-mandated float shape (see the header note):
  * sf inputs -> Q6_Vqf32_vmpy_VsfVsf products (V69 float multiply emits qf32) ->
  * qf32 lane accumulate -> a 5-step vror/qf32-add tree reduces the 32 lanes to lane
@@ -380,6 +385,294 @@ static void hx_matmul_q8_vrmpy_v2(const unsigned char *blk, int out, int in,
         }
     }
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * V3 (TRICK-1-FORWARD-V3): dual-HVX-context per-matmul via in-skel QURT
+ * worker pool.
+ *
+ * Reference primitives:
+ *   - K v0.alpha (tools/sp_dsp_smoke/sprint_k_alpha_run_output.txt:14-44):
+ *     two ARM threads + Arc<FastRpcSession> + per-thread invoke = 1.935x
+ *     speedup at 128x128 compute-bound matmul. The cDSP scheduler engaged
+ *     SSR:XA={4,5} dual vector context attachment automatically.
+ *   - reference-v69-hvx-expert-practices: V69 has 4 scalar threads / 2 HVX
+ *     vector contexts. qurt_hvx_lock is thread-local; each thread that
+ *     calls it gets attached to one of the SSR:XA={4,5} contexts.
+ *   - reference-dual-model-cdsp-scheduler: the SSR:XA mechanism is
+ *     kernel-agnostic — it triggers on "two threads both want HVX",
+ *     regardless of whether the two threads came from FastRPC concurrent
+ *     dispatch (K v0.alpha) or in-skel qurt_thread_create (V3).
+ *   - llama.cpp's worker_pool.c (htp/worker-pool.c:113-153) is the
+ *     existence proof for in-skel qurt_thread_create + futex signal-wait;
+ *     V3 mirrors the pattern modulo Unsigned-PD constraints.
+ *
+ * V3 architecture:
+ *   - At first matmul call (lazy init inside sp_hex_forward) the handler
+ *     thread spawns ONE worker thread via qurt_thread_create. The worker
+ *     calls qurt_hvx_lock(QURT_HVX_MODE_128B) — distinct from the handler's
+ *     hvx_lock — and the QURT scheduler attaches it to the OTHER SSR:XA
+ *     context (4 if handler is on 5, vice versa).
+ *   - Per-matmul descriptor passed via shared struct; handler signals
+ *     worker via atomic seqno + futex_wake; worker signals completion
+ *     via n_pending decrement + futex_wake.
+ *   - Output-row split: worker computes rows [0, M/2); handler computes
+ *     rows [M/2, M). Both consume the same activation buffer + weight
+ *     blob; disjoint output writes.
+ *   - Worker freed in sp_hex_close via killed flag.
+ *
+ * Why one worker not two: the handler thread is itself one of the
+ *   parallel compute threads (it has its own HVX context). Adding ONE
+ *   worker gives us 2 concurrent HVX contexts on V69 — the maximum.
+ *   A two-worker pool plus the handler would be 3 HVX clients for 2
+ *   contexts; one would block on hvx_lock.
+ *
+ * Per-thread activation buffer: HX.3b's `static unsigned char act_ub[]`
+ *   is shared / not thread-safe. V3 each thread gets its own buffer in
+ *   its own context struct.
+ *
+ * Memory-bandwidth-bound risk (reference-v69-vrmpy-chat-shape-memory-bound):
+ *   At Gemma3-1B chat shape, the inner-loop is bandwidth-bound. Dual-
+ *   context parallel execution may yield only 1.0x-1.2x wall-clock lift
+ *   because both contexts contend for DDR/L1 bandwidth. PERF_LIFT gate
+ *   is structurally at-risk at this shape; PERF_PARITY should hold.
+ * ──────────────────────────────────────────────────────────────────── */
+
+/* Per-thread activation-quant buffer + per-thread pcycle counter. */
+typedef struct {
+    unsigned char act_ub[SP_HEX_VRMPY_MAX_IN] __attribute__((aligned(128)));
+    uint64_t      pcyc_start;
+    uint64_t      pcyc_end;
+} hx_worker_local_t;
+
+/* Per-matmul descriptor — single producer (handler), single consumer (worker). */
+typedef struct {
+    const unsigned char *blk;     /* weight blob */
+    int                  out;     /* total output rows (M); worker does [0, m_half) */
+    int                  m_half;  /* split point — worker rows [0, m_half), handler [m_half, out) */
+    int                  in_dim;  /* input dim K */
+    const float         *X;       /* activations [n_tok * in_dim] */
+    int                  n_tok;
+    float               *Y;       /* output [n_tok * out] */
+    const int32_t       *rsum;    /* cached weight-row-sum for bias-128 correction */
+} hx_matmul_desc_t;
+
+/* Worker pool: single worker thread + main handler thread = 2 HVX clients = 2 SSR:XA contexts. */
+typedef struct {
+    int                init_done;   /* 1 after qurt_thread_create succeeded; 0 = use single-ctx fallback */
+    int                init_error;  /* AEEResult-style error code from last init attempt */
+    qurt_thread_t      worker_tid;
+    void              *worker_stack;
+    atomic_uint        seqn;        /* producer increments; worker waits on this */
+    atomic_uint        done;        /* worker increments on completion; handler waits */
+    atomic_uint        killed;      /* 1 = worker should exit */
+    hx_matmul_desc_t   desc;        /* current job descriptor */
+    hx_worker_local_t  worker_local;  /* worker's per-thread buffer + pcycles */
+    hx_worker_local_t  handler_local; /* handler's per-thread buffer + pcycles */
+} hx_worker_pool_t;
+
+static hx_worker_pool_t g_hx_pool = {0};
+
+#define HX_WORKER_STACK_SZ 32768  /* 32 KB — matches llama.cpp's 2*16384 baseline */
+
+/* Inner kernel — half-matmul. Computes Y[t*out + j_start..j_end) for all tokens.
+ * Identical arithmetic to hx_matmul_q8_vrmpy_v2 per-row but limited to a row range,
+ * and uses caller-supplied per-thread activation buffer. */
+static void hx_matmul_q8_vrmpy_half(const unsigned char *blk, int out, int in_dim,
+                                    const float *X, int n_tok, float *Y,
+                                    const int32_t *rsum,
+                                    int j_start, int j_end,
+                                    unsigned char *act_ub) {
+    const signed char *codes  = (const signed char *)blk;
+    const float       *scales = (const float *)(blk + sp_hex_align((size_t)out * in_dim));
+    int nb = in_dim & ~127;
+
+    for (int t = 0; t < n_tok; t++) {
+        const float *x = X + (size_t)t * in_dim;
+        float S_act = hx_quant_act_ub(x, in_dim, act_ub);
+        for (int j = j_start; j < j_end; j++) {
+            const signed char *row = codes + (size_t)j * in_dim;
+            HVX_Vector acc_dot = Q6_V_vzero();
+            for (int i = 0; i < nb; i += 128) {
+                HVX_Vector w_v   = *(const HVX_Vector *)(row    + i);
+                HVX_Vector act_v = *(const HVX_Vector *)(act_ub + i);
+                acc_dot = Q6_Vw_vrmpyacc_VwVubVb(acc_dot, act_v, w_v);
+            }
+            int32_t dot_b = hx_hsum_w(acc_dot);
+            for (int i = nb; i < in_dim; i++) {
+                int a = (int)act_ub[i];
+                int w = (int)row[i];
+                dot_b += a * w;
+            }
+            int32_t true_dot = dot_b - 128 * rsum[j];
+            float y = (float)true_dot * (S_act * scales[j] / 127.0f);
+            Y[(size_t)t * out + j] = y;
+        }
+    }
+}
+
+/* Worker thread entry. Acquires its own HVX context (separate SSR:XA from
+ * handler), spins waiting for job-seqno bumps, processes its half of each
+ * matmul, signals done. */
+static void hx_worker_main(void *arg) {
+    (void)arg;
+    /* Worker's HVX lock — distinct call from handler's; QURT scheduler
+     * attaches this thread to the OTHER SSR:XA context (e.g. handler on 5,
+     * worker on 4 on V69). If this fails (returns nonzero) under
+     * Unsigned PD, surface UPSTREAM at runtime via FARF + abort. */
+    int hr = qurt_hvx_lock(QURT_HVX_MODE_128B);
+    if (hr != 0) {
+        FARF(ERROR, "sp_hex V3: worker qurt_hvx_lock FAILED rc=%d (Unsigned PD limitation?)", hr);
+        /* mark init_error and exit — handler will fall back to single-ctx path */
+        g_hx_pool.init_error = hr ? hr : -1;
+        atomic_store(&g_hx_pool.done, 1);  /* unblock any pending handler join */
+        return;
+    }
+    FARF(RUNTIME_HIGH, "sp_hex V3: worker thread started, qurt_hvx_lock OK");
+
+    unsigned int prev_seqn = 0;
+    while (!atomic_load(&g_hx_pool.killed)) {
+        unsigned int seqn = atomic_load(&g_hx_pool.seqn);
+        if (seqn == prev_seqn) {
+            qurt_futex_wait(&g_hx_pool.seqn, prev_seqn);
+            continue;
+        }
+        prev_seqn = seqn;
+        if (atomic_load(&g_hx_pool.killed)) break;
+
+        /* Execute our half of the matmul. */
+        const hx_matmul_desc_t *d = &g_hx_pool.desc;
+        g_hx_pool.worker_local.pcyc_start = HAP_perf_get_pcycles();
+        hx_matmul_q8_vrmpy_half(d->blk, d->out, d->in_dim,
+                                d->X, d->n_tok, d->Y, d->rsum,
+                                0, d->m_half,
+                                g_hx_pool.worker_local.act_ub);
+        g_hx_pool.worker_local.pcyc_end = HAP_perf_get_pcycles();
+
+        atomic_fetch_add(&g_hx_pool.done, 1);
+        qurt_futex_wake(&g_hx_pool.done, 1);
+    }
+    qurt_hvx_unlock();
+    FARF(RUNTIME_HIGH, "sp_hex V3: worker thread exiting");
+}
+
+/* Lazy init: spawn worker once. Called from sp_hex_forward on first matmul.
+ * Returns 0 on success; nonzero = init failure (caller must fall back). */
+static int hx_worker_pool_ensure(void) {
+    if (g_hx_pool.init_done) return 0;
+    if (g_hx_pool.init_error) return g_hx_pool.init_error;  /* permanent fail; don't retry */
+
+    /* Allocate worker stack */
+    g_hx_pool.worker_stack = malloc(HX_WORKER_STACK_SZ);
+    if (!g_hx_pool.worker_stack) {
+        g_hx_pool.init_error = -1;
+        FARF(ERROR, "sp_hex V3: worker stack malloc failed");
+        return -1;
+    }
+    atomic_store(&g_hx_pool.seqn,   0);
+    atomic_store(&g_hx_pool.done,   0);
+    atomic_store(&g_hx_pool.killed, 0);
+
+    qurt_thread_attr_t attr;
+    qurt_thread_attr_init(&attr);
+    qurt_thread_attr_set_stack_addr(&attr, g_hx_pool.worker_stack);
+    qurt_thread_attr_set_stack_size(&attr, HX_WORKER_STACK_SZ);
+    qurt_thread_attr_set_name(&attr, "sp_hex_v3_worker");
+    /* Inherit handler's priority (same prio so neither preempts the other). */
+    int prio = qurt_thread_get_priority(qurt_thread_get_id());
+    if (prio < 1) prio = 1; if (prio > 254) prio = 254;
+    qurt_thread_attr_set_priority(&attr, prio);
+
+    int rc = qurt_thread_create(&g_hx_pool.worker_tid, &attr, hx_worker_main, NULL);
+    if (rc != 0) {
+        free(g_hx_pool.worker_stack); g_hx_pool.worker_stack = NULL;
+        g_hx_pool.init_error = rc;
+        FARF(ERROR, "sp_hex V3: qurt_thread_create FAILED rc=%d", rc);
+        return rc;
+    }
+    g_hx_pool.init_done = 1;
+    FARF(RUNTIME_HIGH, "sp_hex V3: worker pool initialized (tid=%u)", (unsigned)g_hx_pool.worker_tid);
+    return 0;
+}
+
+/* Tear down worker at sp_hex_close. */
+static void hx_worker_pool_shutdown(void) {
+    if (!g_hx_pool.init_done) return;
+    atomic_store(&g_hx_pool.killed, 1);
+    atomic_fetch_add(&g_hx_pool.seqn, 1);
+    qurt_futex_wake(&g_hx_pool.seqn, 1);
+    int status = 0;
+    qurt_thread_join((unsigned)g_hx_pool.worker_tid, &status);
+    if (g_hx_pool.worker_stack) free(g_hx_pool.worker_stack);
+    g_hx_pool.worker_stack = NULL;
+    g_hx_pool.init_done    = 0;
+    g_hx_pool.init_error   = 0;
+    FARF(RUNTIME_HIGH, "sp_hex V3: worker pool shutdown complete (status=%d)", status);
+}
+
+/* Dispatch ONE matmul through the dual-context path. The handler thread
+ * (caller) computes its half [m_half, out) concurrently with the worker's
+ * half [0, m_half). Both threads call qurt_hvx_lock (worker did at start;
+ * handler holds the existing top-of-sp_hex_forward lock). On V69 the QURT
+ * scheduler attaches the two lock-holders to SSR:XA={4,5} respectively. */
+static int hx_matmul_q8_vrmpy_dual_ctx(const unsigned char *blk, int out, int in_dim,
+                                       const float *X, int n_tok, float *Y) {
+    /* Try lazy init; on failure, fall through to single-ctx path. */
+    if (hx_worker_pool_ensure() != 0) {
+        hx_matmul_q8_vrmpy_v2(blk, out, in_dim, X, n_tok, Y);
+        return 1;  /* single-ctx fallback used */
+    }
+
+    const int32_t *rsum = hx_rsum_get(blk, out, in_dim);
+    if (!rsum) {
+        /* malloc failure for rsum cache — single-ctx fallback path. */
+        hx_matmul_q8_vrmpy_v2(blk, out, in_dim, X, n_tok, Y);
+        return 1;
+    }
+
+    /* Even-M split: worker [0, M/2), handler [M/2, M). Ceiling division
+     * to handle odd-M shapes (Gemma3-1B has all even M but be safe). */
+    int m_half = (out + 1) / 2;
+
+    g_hx_pool.desc.blk     = blk;
+    g_hx_pool.desc.out     = out;
+    g_hx_pool.desc.m_half  = m_half;
+    g_hx_pool.desc.in_dim  = in_dim;
+    g_hx_pool.desc.X       = X;
+    g_hx_pool.desc.n_tok   = n_tok;
+    g_hx_pool.desc.Y       = Y;
+    g_hx_pool.desc.rsum    = rsum;
+
+    /* Reset done counter, bump seqno, wake worker. */
+    atomic_store(&g_hx_pool.done, 0);
+    atomic_fetch_add(&g_hx_pool.seqn, 1);
+    qurt_futex_wake(&g_hx_pool.seqn, 1);
+
+    /* Handler's half concurrently. */
+    g_hx_pool.handler_local.pcyc_start = HAP_perf_get_pcycles();
+    hx_matmul_q8_vrmpy_half(blk, out, in_dim, X, n_tok, Y, rsum,
+                            m_half, out,
+                            g_hx_pool.handler_local.act_ub);
+    g_hx_pool.handler_local.pcyc_end = HAP_perf_get_pcycles();
+
+    /* Wait for worker to complete its half. */
+    while (atomic_load(&g_hx_pool.done) == 0) {
+        qurt_futex_wait(&g_hx_pool.done, 0);
+    }
+
+    /* T_TRICK1FWDV3_BOTH_HVX_ACTIVE evidence (sampled). Log the FIRST matmul
+     * per session via a static one-shot so logs aren't flooded. */
+    static int sampled_once = 0;
+    if (!sampled_once) {
+        sampled_once = 1;
+        uint64_t wpc = g_hx_pool.worker_local.pcyc_end  - g_hx_pool.worker_local.pcyc_start;
+        uint64_t hpc = g_hx_pool.handler_local.pcyc_end - g_hx_pool.handler_local.pcyc_start;
+        FARF(RUNTIME_HIGH, "sp_hex V3: dual_ctx matmul out=%d in=%d n_tok=%d "
+                           "worker_pcyc=%llu handler_pcyc=%llu m_half=%d",
+             out, in_dim, n_tok,
+             (unsigned long long)wpc, (unsigned long long)hpc, m_half);
+    }
+    return 0;
+}
 #endif /* __HVX__ */
 
 int sp_hex_open(const char *uri, remote_handle64 *h) {
@@ -394,6 +687,7 @@ int sp_hex_open(const char *uri, remote_handle64 *h) {
 int sp_hex_close(remote_handle64 h) {
     if (h) free((void *)h);
 #ifdef __HVX__
+    hx_worker_pool_shutdown();   /* V3: tear down worker thread (no-op if never inited) */
     hx_rsum_clear();   /* HX.3b-alpha-v2: drop the per-block weight-sum cache */
 #endif
     return 0;
@@ -583,9 +877,9 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
         for (int t = 0; t < n_tok; t++)
             hx_rmsnorm(resid + (size_t)t * E, attn_norm, E, eps, nx + (size_t)t * E);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* HX.3b-alpha-v2 Stage 2 */
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* HX.3b-alpha-v2 Stage 3 */
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);   /* V3: WQ dual-HVX-context */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);   /* V3: WK dual-HVX-context */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WV), KVD, E, nx, n_tok, v);   /* V3: WV dual-HVX-context */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WQ), QD,  E, nx, n_tok, q);
         hx_matmul_q8(WPTR(SP_HEX_WK), KVD, E, nx, n_tok, k);
@@ -606,7 +900,7 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
                 hx_attn_head(q + (size_t)t * QD + (size_t)h * HD, k, v, t, KVD,
                              h / group, HD, ascale, win, sc, ao + (size_t)t * QD + (size_t)h * HD);
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);   /* V3: WO dual-HVX-context */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WO), E, QD, ao, n_tok, ap);
 #endif
@@ -620,15 +914,15 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
           for (int t = 0; t < n_tok; t++)
               hx_rmsnorm(resid + (size_t)t * E, fn, E, eps, nx + (size_t)t * E); }
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* HX.3b-alpha-v2 Stage 3 */
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* V3: WGATE dual-HVX-context */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* V3: WUP dual-HVX-context */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);
         hx_matmul_q8(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up);
 #endif
         for (size_t i = 0; i < (size_t)n_tok * FF; i++) g[i] = hx_gelu_tanh(g[i]) * up[i];
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_v2(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* HX.3b-alpha-v2 Stage 3 */
+        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* V3: WDOWN dual-HVX-context */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);
 #endif
