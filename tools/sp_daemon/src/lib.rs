@@ -33,6 +33,21 @@ pub mod ntt_hex_dispatch;
 #[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
 pub mod hex_forward_dispatch;
 
+// Sprint TRICK-1-FORWARD — Trick #1 parallel-island wrapper around the WIRE-HEX
+// dispatcher. Adds an ARM-side dual-prime LM-head matmul overlap with the cDSP
+// transformer forward (D-A.2 path; per-matmul split surfaced UPSTREAM as
+// FastRPC-tax-blocked, deferred to TRICK-1-FORWARD-V2). Active when
+// SP_DAEMON_HEX_TRICK1=1 in addition to SP_DAEMON_BACKEND=hex; otherwise the
+// WIRE-HEX trampoline stays in place. See tools/sp_daemon/docs/PLAN-TRICK-1-FORWARD.md.
+#[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
+pub mod trick1_forward_dispatch;
+
+// TRICK-1-FORWARD host-side correctness check — replicates the on-device
+// ARM-q2 worker's compute path so `cargo test -p sp-daemon` exercises the
+// T_TRICK1FWD_HOST_STAGE1_CORRECTNESS gate without silicon. Builds on every
+// target.
+pub mod trick1_host_check;
+
 // §4-MeMo Sprint M.1 — re-export the L1 C ABI bindings from the lib crate so
 // android binaries (e.g. sp_memo_m1_smoke) pick up the link dependency on
 // the math-core static libs via the lib's own link graph. On host this is

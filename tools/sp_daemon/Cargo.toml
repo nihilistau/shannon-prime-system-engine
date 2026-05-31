@@ -98,6 +98,12 @@ rand            = "0.8"
 # direct registration here keeps `dialogue.rs` independent of that
 # transitive path (resilient to future ed25519-dalek refactors).
 sha2            = "0.10"
+# Sprint TRICK-1-FORWARD — path dep on the sibling sp-trick1 lib for the
+# DualPrimeTensor + Garner combine primitive used by trick1_forward_dispatch
+# (Android ARM-q2 worker thread) AND trick1_host_check (host-side correctness
+# gate). The lib is host-buildable (no Hexagon dep); the Android binary path
+# wraps the silicon dispatch around it.
+sp-trick1       = { path = "../sp_trick1" }
 quinn   = { version = "0.11", features = ["rustls"] }
 rustls  = { version = "0.23", default-features = false, features = ["ring"] }
 rcgen   = { version = "0.13", default-features = false, features = ["ring"] }

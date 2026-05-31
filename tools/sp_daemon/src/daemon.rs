@@ -359,6 +359,14 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         let env_set = std::env::var("SP_DAEMON_BACKEND")
             .map(|v| v.trim().eq_ignore_ascii_case("hex"))
             .unwrap_or(false);
+        // Sprint TRICK-1-FORWARD: when SP_DAEMON_HEX_TRICK1=1 is ALSO set,
+        // route through the Trick #1 trampoline instead. The Trick #1 wrapper
+        // bumps the existing WIRE-HEX dispatch counter via its own sp_daemon_hex_forward
+        // call AND adds an ARM-side LM-head dual-prime overlap.
+        // Default off; HX.3b vrmpy stays default when only SP_DAEMON_BACKEND=hex.
+        let trick1_env_set = std::env::var("SP_DAEMON_HEX_TRICK1")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
         if env_set {
             // `session` here is the raw SpSession (not yet wrapped in Mutex);
             // we own it exclusively so no locking needed.
@@ -369,9 +377,19 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             let session_raw: *mut sp_daemon::ffi_l1::sp_session =
                 session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
             // SAFETY: we own `session` exclusively; no concurrent forward.
-            match unsafe { sp_daemon::hex_forward_dispatch::register_with_session(session_raw) } {
+            let reg_result = if trick1_env_set {
+                info!("TRICK-1-FORWARD: SP_DAEMON_HEX_TRICK1=1 set — registering parallel-island trampoline (cDSP transformer || ARM-q2 LM-head)");
+                unsafe { sp_daemon::trick1_forward_dispatch::register_with_session(session_raw) }
+            } else {
+                unsafe { sp_daemon::hex_forward_dispatch::register_with_session(session_raw) }
+            };
+            match reg_result {
                 Ok(()) => {
-                    info!("WIRE-HEX: sp_session_register_forward_backend OK on TARGET session — prefill routes to gemma3_forward_hexagon (cDSP V69 HVX)");
+                    if trick1_env_set {
+                        info!("TRICK-1-FORWARD: sp_session_register_forward_backend OK on TARGET session — prefill routes to cDSP transformer forward with concurrent ARM-q2 LM-head dual-prime island");
+                    } else {
+                        info!("WIRE-HEX: sp_session_register_forward_backend OK on TARGET session — prefill routes to gemma3_forward_hexagon (cDSP V69 HVX)");
+                    }
                     true
                 }
                 Err(e) => {
@@ -380,6 +398,9 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                 }
             }
         } else {
+            if trick1_env_set {
+                tracing::warn!("TRICK-1-FORWARD: SP_DAEMON_HEX_TRICK1=1 set but SP_DAEMON_BACKEND!=hex — Trick #1 wrapper is a no-op without the cDSP forward; staying on math-core reference forward");
+            }
             false
         }
     };

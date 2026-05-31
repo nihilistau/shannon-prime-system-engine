@@ -86,6 +86,24 @@ pub(crate) struct BackendCounts {
     /// is unset. Independent of WIRE-HEX (different ABI hook).
     ntt_hex_forward_count: u64,
     ntt_hex_inverse_count: u64,
+    /// Sprint TRICK-1-FORWARD: trick1 forward-dispatch hit count. > 0 after
+    /// one prefill when SP_DAEMON_BACKEND=hex AND SP_DAEMON_HEX_TRICK1=1
+    /// are both set. Distinct from `hex_forward_count` so smoke harnesses
+    /// can distinguish "Trick #1 wrapper ran" from "raw HX.3b wrapper ran."
+    trick1_forward_count: u64,
+    /// TRICK-1-FORWARD: most recent dispatch's cDSP wall (μs). Read by
+    /// T_TRICK1FWD_BOTH_ISLANDS_ACTIVE smoke harness.
+    trick1_last_cdsp_us: u64,
+    /// TRICK-1-FORWARD: most recent dispatch's ARM-q2 wall (μs).
+    trick1_last_arm_us: u64,
+    /// TRICK-1-FORWARD: most recent dispatch's overlap window (μs).
+    trick1_last_overlap_us: u64,
+    /// TRICK-1-FORWARD: most recent ARM-q2 worker sample's max relerr vs
+    /// fp32 reference. Always 0.0 on host builds.
+    trick1_last_sample_max_relerr: f64,
+    /// TRICK-1-FORWARD: most recent dispatch had both islands active >5%
+    /// overlap of cDSP wall.
+    trick1_last_both_islands_active: bool,
 }
 
 pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json<BackendCounts> {
@@ -101,11 +119,33 @@ pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json
         #[cfg(not(target_os = "android"))]
         { (0u64, 0u64) }
     };
+    let (trick1_forward_count, t1_cdsp, t1_arm, t1_overlap, t1_relerr, t1_both) = {
+        #[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
+        {
+            let s = sp_daemon::trick1_forward_dispatch::last_stats();
+            (
+                sp_daemon::trick1_forward_dispatch::trick1_dispatch_count(),
+                s.cdsp_wall_us,
+                s.arm_wall_us,
+                s.overlap_us,
+                s.last_sample_max_relerr,
+                s.both_islands_active,
+            )
+        }
+        #[cfg(not(all(target_os = "android", feature = "wire_hex_backend")))]
+        { (0u64, 0u64, 0u64, 0u64, 0.0f64, false) }
+    };
     Json(BackendCounts {
         hex_forward_count,
         wire_hex_active: state.wire_hex_active,
         ntt_hex_forward_count,
         ntt_hex_inverse_count,
+        trick1_forward_count,
+        trick1_last_cdsp_us: t1_cdsp,
+        trick1_last_arm_us: t1_arm,
+        trick1_last_overlap_us: t1_overlap,
+        trick1_last_sample_max_relerr: t1_relerr,
+        trick1_last_both_islands_active: t1_both,
     })
 }
 

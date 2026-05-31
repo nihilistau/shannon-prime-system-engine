@@ -1885,12 +1885,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sp-trick1",
  "tokenizers",
  "tokio",
  "tokio-stream",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sp-trick1"
+version = "0.1.0"
+dependencies = [
+ "libloading",
 ]
 
 [[package]]
