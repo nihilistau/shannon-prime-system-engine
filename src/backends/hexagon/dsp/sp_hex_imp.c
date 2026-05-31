@@ -97,6 +97,158 @@ static float hx_dot_q8_hvx(const signed char *row, const float *x, int n) {
     for (int i = nb; i < n; i++) sum += (float)row[i] * x[i];   /* scalar tail */
     return sum;
 }
+
+/* ── HX.3b-α: vrmpy-based Q8 matmul kernel ───────────────────────────────────
+ *
+ * Uses Q6_Vw_vrmpy_VubVb (V69 HVX) — per HVX_Vector: 32 int32 lanes, each lane
+ * accumulates 4 ubyte*byte products. Algorithm:
+ *
+ *   1. Per matmul invocation, compute per-tensor activation scale:
+ *        S_act = max(|x|) / 127     (s ≈ "Frobenius scale on activations")
+ *      Quantize all activations to uint8 in [0..255] with bias-128:
+ *        act_ub[i] = clamp(round(x[i] / S_act), -127, 127) + 128
+ *      The bias-128 trick lets us use the unsigned×signed vrmpy intrinsic
+ *      with naturally-signed weight bytes; correction term is subtracted later.
+ *
+ *   2. Per output row j:
+ *      Compute two simultaneous vrmpy reductions across the n-element row:
+ *        dot_b    = Σ_i (act_ub[i])     * weight[j][i]         via Q6_Vw_vrmpy
+ *        wsum_b   = Σ_i (1, 1, 1, 1)    * weight[j][i]         via Q6_Vw_vrmpy(splat_1_ub, w)
+ *      After horizontal reduction (one sum-of-32-int32-lanes per row):
+ *        dot_b       = Σ_i (act_int8[i] + 128) * weight[j][i]
+ *        wsum_b      = Σ_i weight[j][i]
+ *        true_int_dot = dot_b - 128 * wsum_b
+ *                     = Σ_i act_int8[i] * weight[j][i]
+ *
+ *   3. Reconstruct f32: Y[j] = true_int_dot * (S_act * row_scale[j] / 127)
+ *
+ * Bounds check: |true_int_dot| ≤ n * 127 * 127. For Gemma3-1B's largest in-dim
+ * (FF=6912), max ≈ 1.11e8 — well within int32 (2.1e9). No saturation risk in
+ * int32 accumulator across the vrmpy lanes (each lane sums n/4 products of
+ * magnitude ≤ 255*127 = 32385, so per-lane max ≈ 32385 * (6912/4) = 5.6e7,
+ * also safe).
+ *
+ * Throughput vs hx_dot_q8_hvx:
+ *  - Replaces 32-element scalar widen loop (32 fp casts) with 0 widens
+ *  - Replaces qf32_vmpy (1 op) + qf32_vadd (1 op) with vrmpy_acc (1 op)
+ *  - One additional vrmpy per row to compute wsum_b (cheap; could also be
+ *    precomputed at host-pack time as a follow-on optimization)
+ *  - Same 5-step horizontal reduce (but on int32 lanes; uses vadd_VwVw, not
+ *    qf32_vadd, and ends with a scalar lane[0] extract — no qf32→sf convert)
+ *
+ * Activation quant cost: one pass over `n` f32→ub conversions per matmul,
+ * amortized across `out` rows (typically n × out = 1152 × 1152 = 1.33M
+ * accesses per quant, vs 1.33M × 7 matmuls per layer × 26 layers in the
+ * matmul body itself; quant is ~1% of total inner-loop work).
+ *
+ * Determinism: rounding differs from qf32 (int8 saturation vs ULP-float
+ * accumulation), so logit bits will NOT match qf32 path. The decode-determinism
+ * gate is argmax equality, NOT bit equality of logits. Per
+ * reference-lattice-decode-determinism: discrete-substrate cross-backend
+ * determinism CAN hold under argmax if scale calibration is sufficient.
+ * If argmax diverges, the per-tensor activation scale (currently inferred from
+ * |x|_max per-call) may need per-token calibration. Closure documents the gate
+ * disposition either way.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/* Horizontal sum of 32 int32 lanes via 5-step vror+vadd reduction. */
+static inline int32_t hx_hsum_w(HVX_Vector v) {
+    v = Q6_Vw_vadd_VwVw(v, Q6_V_vror_VR(v, 64));
+    v = Q6_Vw_vadd_VwVw(v, Q6_V_vror_VR(v, 32));
+    v = Q6_Vw_vadd_VwVw(v, Q6_V_vror_VR(v, 16));
+    v = Q6_Vw_vadd_VwVw(v, Q6_V_vror_VR(v, 8));
+    v = Q6_Vw_vadd_VwVw(v, Q6_V_vror_VR(v, 4));
+    int32_t lanes[32] __attribute__((aligned(128)));
+    *(HVX_Vector *)lanes = v;
+    return lanes[0];
+}
+
+/* Quantize n f32 activations into n uint8 bias-128 codes. Returns S_act.
+ * `act_ub` must be 128-byte-aligned and at least sp_hex_align(n) bytes (the
+ * caller zeros the tail to 0 = -128 which contributes -128*w to dot — but
+ * we round-trip: act_ub[i] = 128 for i >= n means (act_int8=0)*w = 0, so
+ * tail bytes must be 128, not 0).  We initialise the full padded length to 128. */
+static float hx_quant_act_ub(const float *x, int n, unsigned char *act_ub) {
+    float maxabs = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float a = x[i]; if (a < 0) a = -a;
+        if (a > maxabs) maxabs = a;
+    }
+    float S = maxabs / 127.0f;
+    if (S == 0.0f) S = 1.0f;   /* avoid div-by-zero on all-zero activations; codes all 128 */
+    float inv = 127.0f / maxabs;
+    if (maxabs == 0.0f) inv = 0.0f;
+    int padded_n = (n + 127) & ~127;     /* round up to 128-byte boundary */
+    for (int i = 0; i < n; i++) {
+        float v = x[i] * inv;
+        int q = (int)(v >= 0 ? v + 0.5f : v - 0.5f);
+        if (q > 127) q = 127; if (q < -127) q = -127;
+        act_ub[i] = (unsigned char)(q + 128);
+    }
+    for (int i = n; i < padded_n; i++) act_ub[i] = 128;   /* tail = 0 in signed */
+    return S;
+}
+
+/* vrmpy-based Q8 matmul: Y[t*out + j] = scale[j]/127 * dot(codes[j], x[t]).
+ * `codes` is contiguous int8 row-major [out, in] (in must be multiple of 4 — true
+ * for Gemma3 dims 1152/6912). `scales` is per-row f32, length `out`.
+ *
+ * This is the HX.3b-α replacement for hx_matmul_q8 (qf32 path). Gated at the
+ * call site by SP_HEX_VRMPY_MATMUL — see hx_matmul_q8 dispatch logic below.
+ *
+ * Activation buffer act_ub_scratch must be caller-supplied (size = padded
+ * per-token, reused across t loop). For now we stack-allocate inside the function
+ * with a max bound of 8192 elements (covers Gemma3-1B's largest in-dim of 6912
+ * for ffn_down and embed dim 1152 for the others).  */
+#define SP_HEX_VRMPY_MAX_IN  8192
+static void hx_matmul_q8_vrmpy(const unsigned char *blk, int out, int in,
+                               const float *X, int n_tok, float *Y) {
+    const signed char *codes = (const signed char *)blk;
+    const float *scales = (const float *)(blk + sp_hex_align((size_t)out * in));
+
+    /* Per-token activation quant buffer. 128-byte-aligned for vmem. */
+    static unsigned char act_ub[SP_HEX_VRMPY_MAX_IN] __attribute__((aligned(128)));
+    int nb = in & ~127;            /* whole 128-byte (32-lane) vrmpy blocks */
+
+    for (int t = 0; t < n_tok; t++) {
+        const float *x = X + (size_t)t * in;
+        float S_act = hx_quant_act_ub(x, in, act_ub);
+
+        for (int j = 0; j < out; j++) {
+            const signed char *row = codes + (size_t)j * in;
+
+            HVX_Vector acc_dot = Q6_V_vzero();
+            HVX_Vector acc_ws  = Q6_V_vzero();
+            HVX_Vector v_ones  = Q6_V_vsplat_R(0x01010101);
+
+            for (int i = 0; i < nb; i += 128) {
+                /* vmem loads (rpcmem pointers are page-aligned; row + i is in-line
+                 * 128B-aligned since codes is 128B-aligned and i is multiple of 128). */
+                HVX_Vector w_v   = *(const HVX_Vector *)(row    + i);
+                HVX_Vector act_v = *(const HVX_Vector *)(act_ub + i);
+                /* int32-lane vrmpy_acc:
+                 *   acc_dot[lane] += sum_{4 bytes} act_ub[lane*4+k] * w[lane*4+k] */
+                acc_dot = Q6_Vw_vrmpyacc_VwVubVb(acc_dot, act_v, w_v);
+                /* wsum_b[lane] += sum_{4 bytes} 1 * w[lane*4+k] */
+                acc_ws  = Q6_Vw_vrmpyacc_VwVubVb(acc_ws,  v_ones, w_v);
+            }
+            int32_t dot_b = hx_hsum_w(acc_dot);
+            int32_t ws_b  = hx_hsum_w(acc_ws);
+
+            /* Scalar tail (in % 128). Same arithmetic as in-vector path. */
+            for (int i = nb; i < in; i++) {
+                int a = (int)act_ub[i];         /* in [0..255] */
+                int w = (int)row[i];            /* in [-127..127] */
+                dot_b += a * w;
+                ws_b  += w;
+            }
+
+            int32_t true_dot = dot_b - 128 * ws_b;
+            float y = (float)true_dot * (S_act * scales[j] / 127.0f);
+            Y[(size_t)t * out + j] = y;
+        }
+    }
+}
 #endif /* __HVX__ */
 
 int sp_hex_open(const char *uri, remote_handle64 *h) {
