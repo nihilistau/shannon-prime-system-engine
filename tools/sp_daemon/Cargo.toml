@@ -70,6 +70,14 @@ path = "src/bin/sp_chat_ledger_autowire_smoke.rs"
 name = "sp_ntt_5c_forward_smoke"
 path = "src/bin/sp_ntt_5c_forward_smoke.rs"
 
+# §4-NTT Sprint NTT-bench — tokens/sec measurement on S22U. Per-cell harness
+# invoked 6 times (2 models × 3 configs) by ntt_bench_toks_run.ps1; emits
+# JSON line per cell with prefill_toks_per_sec + decode_toks_per_sec across
+# 3 reps. Host stub prints "android-only".
+[[bin]]
+name = "sp_ntt_bench_toks"
+path = "src/bin/sp_ntt_bench_toks.rs"
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }
