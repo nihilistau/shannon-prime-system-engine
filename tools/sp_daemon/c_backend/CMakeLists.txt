@@ -11,11 +11,16 @@
 #
 # Sources:
 #   src/backends/hexagon/sp_hex_host.c   — gemma3_forward_hexagon entry
-#   src/backends/cpu/cpu_overlay.c       — matmul/embed_row/as_f32/sp_kernels_read_env
-#                                          (transitive deps of sp_hex_host)
 #   sp_hex_stub.c                        — qaic-generated FastRPC client stub
-#   sp_daemon_hex_glue.c                 — C glue exposing the L1 forward dispatcher
-#                                          signature; casts to gemma3_forward_hexagon
+#   sp_daemon_hex_glue.c                 — C glue: (a) L1 forward dispatcher
+#                                          (sp_daemon_hex_forward → gemma3_forward_hexagon)
+#                                          and (b) engine-kernel SHIM (matmul/embed_row/
+#                                          as_f32) routed to math-core's sp_* variants.
+#                                          cpu_overlay.c deliberately NOT linked —
+#                                          duplicates sp_kernels_read_env + qwen3_q4_stats
+#                                          already exported by math-core's
+#                                          libsp_forward_dispatch.a (forward_dispatch.c:30,40).
+#                                          See the glue header for the resolution rationale.
 #
 # Math-core archives (sp_arena, sp_frobenius, sp_weight_dtype, sp_model,
 # sp_gguf, sp_io_format) are linked by sp_daemon's build.rs ALREADY (the
@@ -68,7 +73,9 @@ add_custom_target(sp_hex_daemon_idl
 # ── The static library the daemon links ──
 add_library(sp_hex_daemon_backend STATIC
     ${ENGINE_ROOT}/src/backends/hexagon/sp_hex_host.c
-    ${ENGINE_ROOT}/src/backends/cpu/cpu_overlay.c
+    # cpu_overlay.c omitted — math-core's libsp_forward_dispatch.a already
+    # exports sp_kernels_read_env + qwen3_q4_stats; the engine-name kernel
+    # surface (matmul/embed_row/as_f32) is shimmed in sp_daemon_hex_glue.c.
     ${SP_HEX_GEN}/sp_hex_stub.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sp_daemon_hex_glue.c
 )

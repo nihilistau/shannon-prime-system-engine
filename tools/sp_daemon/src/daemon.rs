@@ -123,7 +123,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     info!("arch: vocab={} n_layers={} hidden={}", arch.vocab_size, arch.n_layers, arch.hidden_dim);
 
     let cancel_flag = Arc::new(AtomicI32::new(0));
-    let session = crate::session::SpSession::create(&model, Arc::clone(&cancel_flag))
+    let mut session = crate::session::SpSession::create(&model, Arc::clone(&cancel_flag))
         .expect("sp_session_create failed");
 
     let pos = session.position().expect("sp_session_position");
@@ -360,18 +360,22 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             .map(|v| v.trim().eq_ignore_ascii_case("hex"))
             .unwrap_or(false);
         if env_set {
-            let mut guard = session.lock().unwrap();
-            let session_raw: *mut crate::ffi::sp_session = guard.raw_ptr();
-            // SAFETY: holding the Mutex on `session`; no concurrent forward.
+            // `session` here is the raw SpSession (not yet wrapped in Mutex);
+            // we own it exclusively so no locking needed.
+            // The binary-crate `crate::ffi::sp_session` and the lib-crate
+            // `sp_daemon::ffi_l1::sp_session` are bindgen outputs from the
+            // same sp_l1.h header — byte-identical opaque structs but
+            // distinct Rust types. Cast through *mut to bridge the alias.
+            let session_raw: *mut sp_daemon::ffi_l1::sp_session =
+                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+            // SAFETY: we own `session` exclusively; no concurrent forward.
             match unsafe { sp_daemon::hex_forward_dispatch::register_with_session(session_raw) } {
                 Ok(()) => {
                     info!("WIRE-HEX: sp_session_register_forward_backend OK on TARGET session — prefill routes to gemma3_forward_hexagon (cDSP V69 HVX)");
-                    drop(guard);
                     true
                 }
                 Err(e) => {
                     tracing::warn!("WIRE-HEX: registration failed: {e} — falling back to math-core reference forward");
-                    drop(guard);
                     false
                 }
             }

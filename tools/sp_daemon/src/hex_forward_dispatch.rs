@@ -124,21 +124,25 @@ pub unsafe extern "C" fn sp_wire_hex_forward_dispatch(
 /// # Safety
 /// `session_raw` must be a valid `*mut sp_session` pointer from
 /// `SpSession::raw_ptr()` with the L2-side Mutex held.
+///
+/// Uses `crate::ffi_l1` (the lib-crate L1 bindings); the binary-crate
+/// `crate::ffi` (main.rs) is the SAME bindgen output, byte-identical layout.
+/// The cast at the call site in daemon.rs reconciles the two type aliases.
 pub unsafe fn register_with_session(
-    session_raw: *mut crate::ffi::sp_session,
+    session_raw: *mut crate::ffi_l1::sp_session,
 ) -> Result<(), String> {
     // SAFETY: caller holds the SpSession's Mutex; no concurrent forward.
     let rc = unsafe {
-        crate::ffi::sp_session_register_forward_backend(
+        crate::ffi_l1::sp_session_register_forward_backend(
             session_raw,
             std::ptr::null_mut(),  // handle: hex backend is singleton (statics in sp_hex_host.c)
             Some(sp_wire_hex_forward_dispatch),
         )
     };
-    if rc == crate::ffi::sp_status_SP_OK {
+    if rc == crate::ffi_l1::sp_status_SP_OK {
         Ok(())
     } else {
-        let detail = unsafe { std::ffi::CStr::from_ptr(crate::ffi::sp_last_error()) }
+        let detail = unsafe { std::ffi::CStr::from_ptr(crate::ffi_l1::sp_last_error()) }
             .to_string_lossy()
             .into_owned();
         Err(format!("sp_session_register_forward_backend → status={rc}: {detail}"))
