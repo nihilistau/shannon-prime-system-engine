@@ -1,0 +1,54 @@
+=== Sprint TRICK-1 silicon smoke (cDSP-q1 + ARM-q2 + Garner) ===
+Fixture: batch=1 d_in=2048 d_out=256
+Pack: s_x=0.999692 s_w=0.999995
+
+[trick-1] opening FastRpcSession (Path B / Unsigned PD)...
+[trick-1] session open
+
+=== Stage 2: cDSP-q1 solo (mod q_1 matmul on Hexagon V69 HVX) ===
+  Stage 2 wall = 6372 μs  (cDSP pcyc = 2924467)
+  Stage 2 q_1 vs ARM-scalar-q_1 ref: 0 / 256 divergences
+  Stage 2 PASS
+
+=== Stage 3: ARM-q2 solo (mod q_2 matmul on Cortex-X2/A710 scalar) ===
+  Stage 3 wall = 4222 μs
+  Stage 3 q_2 residue range check: 0 / 256 out-of-range
+  Stage 3 PASS
+
+=== Stage 4: serial dispatch + Garner combine ===
+  cDSP-q1 phase:  4209 μs
+  ARM-q2 phase:   4032 μs
+  Garner combine: 13 μs
+  Dequantize:     0 μs
+  Stage 4 serial total: 8256 μs
+  T_TRICK1_NUMERICAL_EQUIVALENCE (int byte-exact): PASS
+    divergences: 0 / 256
+    max_abs_diff: 0
+  fp32-budget within 5e-3 (PLAN §D-F b): PASS
+    max_relerr: 1.949e-6
+    violations: 0 / 256
+
+  T_TRICK1_GARNER_BIT_EXACT_VS_HOST_CRT: PASS (= T_TRICK1_NUMERICAL_EQUIVALENCE)
+
+=== Stage 5: parallel dispatch + wall-clock win ===
+Methodology: 10 reps, drop first as warmup, report mean + stddev.
+
+T_dsp_solo:     mean =       4729 μs  stddev =     1067 μs  (cDSP pcyc mean = 2914263)
+T_arm_solo:     mean =       4880 μs  stddev =     1416 μs
+T_trick1_parallel: mean =       5558 μs  stddev =      869 μs
+  thread A (cDSP) mean =       3347 μs
+  thread B (ARM)  mean =       5100 μs
+  overlap window mean   =       3182 μs  (57.2% of parallel wall)
+
+  max(T_dsp_solo, T_arm_solo) =       4880 μs
+  T_trick1_parallel / max     = 1.139× (gate ≤ 1.2)
+  serial vs parallel speedup  = 1.729× (informational)
+  T_TRICK1_PARALLEL_WIN: PASS
+  T_TRICK1_BOTH_ISLANDS_ACTIVE_DSP_ARM: PASS
+    cDSP thread wall: 3347 μs  (vs solo 4729 μs, 71%)
+    ARM  thread wall: 5100 μs  (vs solo 4880 μs, 105%)
+
+VmRSS: 19808 KB (informational)
+{"sprint":"TRICK-1","shape":{"batch":1,"d_in":2048,"d_out":256},"T_dsp_solo_us":4729,"T_arm_solo_us":4880,"T_trick1_parallel_us":5558,"parallel_ratio":1.139,"parallel_speedup_vs_serial":1.729,"overlap_us":3182,"thread_a_us":3347,"thread_b_us":5100,"garner_pass":true,"int_div":0,"fp32_pass":true,"fp32_max_relerr":1.948976e-6,"parallel_pass":true,"both_islands_active":true,"fails":0,"all_pass":true}
+
+=== TRICK-1 overall: 0 fails (PASS) ===

@@ -1,0 +1,20 @@
+[package]
+name = "sp-trick1"
+version = "0.1.0"
+edition = "2021"
+description = "Sprint TRICK-1: silicon-island CRT-sharded matmul demo on Knack's S22U. cDSP V69 (q_1) + ARM Cortex-X2/A710 (q_2) + ARM Garner. See tools/sp_daemon/docs/PLAN-TRICK-1.md and tools/sp_daemon/docs/CLOSURE-TRICK-1.md."
+
+# Stage 1: host-runnable Garner correctness + Frobenius dual-lift round-trip.
+# Builds + runs on Windows / Linux x86 without Hexagon. No silicon dispatch.
+[[bin]]
+name = "sp_trick1_host_smoke"
+path = "src/bin/sp_trick1_host_smoke.rs"
+
+# Stages 2-5: silicon dispatch (cDSP via FastRPC + ARM compute) + parallel-win
+# measurement. Builds for aarch64-linux-android; runs on Knack's S22U.
+[[bin]]
+name = "sp_trick1_smoke"
+path = "src/bin/sp_trick1_smoke.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+libloading = "0.8"
