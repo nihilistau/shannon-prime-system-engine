@@ -1454,6 +1454,15 @@ static int hx_matmul_q8_vrmpy_dual_ctx_v5_tiled(const unsigned char *blk_ddr,
 
     int n_tiles = (out + (int)rows_per_tile - 1) / (int)rows_per_tile;
 
+    /* Stage 5 instrumentation: outer wall + per-tile handler-half compute pcyc.
+     * Only sample the FIRST V5 matmul per session (v5_dma_sampled_once flag). */
+    uint64_t outer_start = 0, outer_end = 0;
+    uint64_t compute_acc = 0;
+    int      sample_this = !v5_dma_sampled_once;
+    if (sample_this) {
+        outer_start = HAP_perf_get_pcycles();
+    }
+
     /* Tile DMA descriptors (one per slot — alternated). The DMA engine
      * consumes the descriptor on dmstart; we may overwrite the slot's
      * descriptor only after dmwait returns. Stack-allocate, 8-byte aligned. */
@@ -1526,13 +1535,18 @@ static int hx_matmul_q8_vrmpy_dual_ctx_v5_tiled(const unsigned char *blk_ddr,
         atomic_fetch_add(&g_hx_pool.seqn, 1);
         qurt_futex_wake(&g_hx_pool.seqn, 1);
 
-        /* Handler runs [m_half, rows_this_tile) on the same tile. */
+        /* Handler runs [m_half, rows_this_tile) on the same tile.
+         * Stage 5: capture handler compute pcyc per tile. */
+        uint64_t tile_compute_start = 0, tile_compute_end = 0;
+        if (sample_this) tile_compute_start = HAP_perf_get_pcycles();
         hx_matmul_q8_vrmpy_half_tile(slots[cur_slot], tile_row_base, rows_this_tile,
                                      out, in_dim,
                                      X, n_tok, Y,
                                      scales_full, rsum_full,
                                      m_half, rows_this_tile,
                                      g_hx_pool.handler_local.act_ub);
+        if (sample_this) tile_compute_end = HAP_perf_get_pcycles();
+        if (sample_this) compute_acc += (tile_compute_end - tile_compute_start);
 
         /* Wait for worker's tile-half compute to complete. */
         while (atomic_load(&g_hx_pool.done) == 0) {
@@ -1567,16 +1581,36 @@ static int hx_matmul_q8_vrmpy_dual_ctx_v5_tiled(const unsigned char *blk_ddr,
 
     g_hx_vtcm.ffn_path_count++;
 
-    /* First-FFN-V5-matmul-per-session evidence sample (T_V5_DMA_PINGPONG_OBSERVED
-     * proxy at this stage: just log shape + tile count; pcycle breakdown is
-     * Stage 5 instrumentation). */
-    static int v5_sampled_once = 0;
-    if (!v5_sampled_once) {
-        v5_sampled_once = 1;
+    /* Stage 5 — close out the per-matmul sample. outer_end captures total
+     * wall pcyc for this V5 dispatch; compute_acc holds the sum of HANDLER
+     * compute pcyc across all tiles. If DMA-compute overlap is working:
+     *     outer < compute_acc + (n_tiles * dma_pcyc_per_tile)
+     * i.e. the prefetch waits are MOSTLY hidden inside the compute window. */
+    if (sample_this) {
+        outer_end = HAP_perf_get_pcycles();
+        v5_dma_total_pcyc   = outer_end - outer_start;
+        v5_dma_compute_pcyc = compute_acc;
+        v5_dma_tile_count   = n_tiles;
+        v5_dma_sampled_once = 1;
+
+        /* For reference, the V3 DDR path on the same shape (per V4 closure L101):
+         * FFN matmul out=6912 in=1152 = 55.7M pcyc per matmul (dual-context).
+         * V5 expectation: compute_acc ~= 55.7M * 0.5 (handler does half),
+         * outer_pcyc should be < compute_acc by the amount of DMA-compute
+         * overlap. Perfect overlap → outer ≈ compute_acc; zero overlap →
+         * outer ≈ compute_acc + total_dma_wall (each tile blocks the handler
+         * on dmwait). */
         FARF(RUNTIME_HIGH, "sp_hex V5: tiled FFN matmul out=%d in=%d n_tok=%d "
-                           "n_tiles=%d rows_per_tile=%u row_stride_bytes=%u",
+                           "n_tiles=%d rows_per_tile=%u "
+                           "outer_pcyc=%llu handler_compute_acc=%llu worker_last_pcyc=%llu "
+                           "overlap_ratio_x1000=%llu",
              out, in_dim, n_tok,
-             n_tiles, rows_per_tile, row_stride_bytes);
+             n_tiles, rows_per_tile,
+             (unsigned long long)v5_dma_total_pcyc,
+             (unsigned long long)v5_dma_compute_pcyc,
+             (unsigned long long)(g_hx_pool.worker_local.pcyc_end - g_hx_pool.worker_local.pcyc_start),
+             /* overlap_ratio = compute_acc * 1000 / outer (1000 = full overlap; <1000 = under-overlap stall) */
+             v5_dma_total_pcyc ? (unsigned long long)(v5_dma_compute_pcyc * 1000 / v5_dma_total_pcyc) : 0ULL);
     }
     return 0;
 }
