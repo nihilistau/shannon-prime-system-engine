@@ -6,7 +6,19 @@ Pinned toolchains, hard paths, version-locked. Set in stone for the project; not
 
 | Component | Pinned version | Path |
 |-----------|----------------|------|
+| **MinGW gcc (CPU primary)** | **15.2** | `C:\ProgramData\mingw64\mingw64\bin` (on PATH) |
 | Visual Studio Build Tools | 2019 | `C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools` |
+
+**CPU toolchain re-pin (2026-06-02, operator-approved).** The canonical CPU
+backend build uses **MinGW gcc 15.2**, not MSVC. This matches roadmap §3.7's
+Tier-1 (gcc closes in-session; MSVC is Tier-3 parity). It is also *forced* by
+the code: the §18 AVX512 backend (`src/backends/cpu/avx512/avx512_*.c`) uses GCC
+`__attribute__((target(...)))` + `__atomic_*` builtins, and math-core
+`core/sp_channel/sp_hedge.c` uses C11 `<stdatomic.h>` — none of which VS2019 BT
+(v142) can compile. MSVC remains required as the **CUDA host compiler** (nvcc +
+CUDA 12.4 pin) and as the Tier-3 parity target, but Tier-3 needs **VS2022**
+(ships `<stdatomic.h>`; the CI `windows-msvc` job already uses it) and a port of
+the AVX512 GCC-isms before it is green. Until then, VS2019 BT builds CUDA only.
 | CUDA Toolkit | 12.4 | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4` |
 | Vulkan SDK | ≥ 1.3.250 | `%VULKAN_SDK%` (installer sets globally) |
 | Hexagon SDK | 5.4.0.x | `C:\Qualcomm\Hexagon_SDK\5.4.0.x` |
@@ -21,7 +33,7 @@ The pins live in `scripts/env/env-common.bat`. **Change them there, nowhere else
 
 | Backend | Env script | Build script | Output dir | Notes |
 |---------|-----------|--------------|------------|-------|
-| CPU     | `scripts\env\env-cpu.bat`     | `scripts\build\build-cpu.bat`     | `build-cpu/`     | AVX2 + AVX512 compiled, runtime-selected |
+| CPU     | MinGW gcc on PATH (env-cpu.bat → gcc; **TODO: script still activates MSVC, re-point to gcc**) | `scripts\build\build-cpu.bat` | `build/` (gcc) — `build-cpu/` (MSVC) is CUDA-host only | AVX2 + AVX512 compiled (GCC target attrs), runtime-selected |
 | CUDA    | `scripts\env\env-cuda.bat`    | `scripts\build\build-cuda.bat`    | `build-cuda/`    | sm_86 + sm_89 fat-binary |
 | Vulkan  | `scripts\env\env-vulkan.bat`  | `scripts\build\build-vulkan.bat`  | `build-vulkan/`  | compute shaders, glslc-compiled |
 | Hexagon | `scripts\env\env-hexagon.bat` | `scripts\build\build-hexagon.bat` | `build-hexagon/` | host stub + V69 device .so |
@@ -52,7 +64,8 @@ All four output dirs coexist. Switching backends does not invalidate the others.
 
 ### CPU
 
-- `/arch:AVX2` is the compile floor; AVX512 paths are guarded by `__cpuid()` and dispatched at runtime so binaries run on any AVX2-capable host.
+- Build with **MinGW gcc 15.2** (the `build/` dir), not MSVC. AVX2 is the compile floor; AVX512 paths are guarded by `__cpuid()` and dispatched at runtime so binaries run on any AVX2-capable host.
+- **MSVC (VS2019 BT) cannot build the CPU backend.** `avx512_{spinor,ternlog,persist}.c` use GCC `__attribute__((target("avx512f")))` and `__atomic_*` / `__ATOMIC_*` builtins (cl.exe: `error C2059/C2143/C2065`). `core/sp_channel/sp_hedge.c` needs `<stdatomic.h>`, absent before VS2022. Tier-3 MSVC parity therefore requires VS2022 + porting the GCC intrinsics to `<intrin.h>` (`_mm512_*` + `_Interlocked*`) — tracked, not yet done. Verified clean on gcc: math-core 19/19 ctest, engine 95/96 link (2026-06-02).
 
 ### Vulkan
 
