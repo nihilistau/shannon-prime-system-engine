@@ -33,13 +33,28 @@ pub mod ntt_hex_dispatch;
 #[cfg(all(target_os = "android", feature = "wire_hex_backend"))]
 pub mod hex_forward_dispatch;
 
+// Sprint WIRE-CUDA — full-forward backend dispatcher for sp_l1.h:§6,
+// symmetric to hex_forward_dispatch. Routes sp_prefill_chunk through the
+// engine's gemma3_forward_cuda / qwen3_forward_cuda (CUDA PTX backend)
+// instead of math-core's reference forward. Active when
+// SP_DAEMON_BACKEND=cuda is set AND the daemon was built with
+// --features wire_cuda_backend so libsp_cuda_daemon_backend.lib (or .a
+// on Linux) is linked. Host x86_64 (NVIDIA GPU); no target_os constraint
+// beyond what CUDA itself requires.
+#[cfg(feature = "wire_cuda_backend")]
+pub mod cuda_forward_dispatch;
+
 // §4-MeMo Sprint M.1 — re-export the L1 C ABI bindings from the lib crate so
 // android binaries (e.g. sp_memo_m1_smoke) pick up the link dependency on
 // the math-core static libs via the lib's own link graph. On host this is
 // harmless; on android this is what propagates -lsp_session etc. through
 // to per-binary link steps (cargo's `rustc-link-lib` from build.rs reaches
 // binaries only via the lib crate's symbol graph).
-#[cfg(target_os = "android")]
+//
+// Sprint WIRE-CUDA: also exposed on host when `wire_cuda_backend` is
+// enabled — `cuda_forward_dispatch::register_with_session` needs
+// `sp_session_register_forward_backend` at host link time.
+#[cfg(any(target_os = "android", feature = "wire_cuda_backend"))]
 #[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, clippy::all)]
 pub mod ffi_l1 {
     include!(concat!(env!("OUT_DIR"), "/sp_bindings.rs"));

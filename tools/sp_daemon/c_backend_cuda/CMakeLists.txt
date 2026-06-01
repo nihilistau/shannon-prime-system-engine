@@ -79,6 +79,27 @@ target_compile_definitions(sp_cuda_daemon_backend PRIVATE
     SP_ENGINE_WITH_CUDA=1
 )
 
+# ── Runtime-library alignment with cargo's cc-rs default (LIBCMT / static MT) ─
+#
+# cc-rs (used by tokenizers/esaxx-rs to build esaxx.lib for the sp-daemon Rust
+# binary) defaults to /MT on MSVC (LIBCMT directive emitted into .objs). nvcc's
+# default is /MD (MSVCRT) for its C++ runtime — which produces LNK2038
+# "RuntimeLibrary mismatch ('MD_DynamicRelease' doesn't match 'MT_StaticRelease')"
+# at the rust binary link step. Force /MT here so both sides of the daemon link
+# graph agree. The math-core C libs (sp_session, sp_arena, ...) are pure C and
+# emit no _RuntimeLibrary directive at all, so they don't enter this conflict —
+# only C++/CUDA TUs do.
+if(MSVC)
+    set_property(TARGET sp_cuda_daemon_backend PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # CMAKE_MSVC_RUNTIME_LIBRARY only applies to host (cl) TUs; CUDA needs
+    # the explicit -Xcompiler flag.
+    target_compile_options(sp_cuda_daemon_backend PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/MT>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-Xcompiler=/MTd>
+    )
+endif()
+
 # CUDA runtime + cuBLAS. The daemon's final link picks these up via build.rs
 # (rustc-link-lib=cudart_static, cublas_static, etc.). We declare them PUBLIC
 # here so the static lib's link interface advertises them, though they're

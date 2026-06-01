@@ -34,7 +34,8 @@
  * shutdown via release_for_model (cuda_forward_dispatch.rs).
  */
 #include "sp_engine/cuda_backend.h"   /* gemma3_forward_cuda + qwen3_forward_cuda + sp_cuda_model_release */
-#include "sp/model.h"                  /* qwen3_model + sp_arch_t + SP_ARCH_GEMMA3 / SP_ARCH_QWEN3 */
+#include "sp/forward_dispatch.h"      /* sp_matmul / sp_embed_row / sp_as_f32 / sp_kernels_read_env */
+#include "sp/model.h"                 /* qwen3_model + sp_arch_t + SP_ARCH_GEMMA3 / SP_ARCH_QWEN3 + gguf_tensor */
 #include <stdint.h>
 
 extern void sp_set_error(const char *msg);
@@ -92,3 +93,30 @@ void sp_daemon_cuda_release(const void *qm_opaque) {
     const qwen3_model *qm = (const qwen3_model *)qm_opaque;
     if (qm) sp_cuda_model_release(qm);
 }
+
+/* ── Engine-kernel shim over math-core forward_dispatch ────────────────────
+ *
+ * cuda_forward.cu reaches for `sp_engine/kernels.h` entry points by unprefixed
+ * names (as_f32, and indirectly matmul/embed_row via the engine's host-side
+ * weight-upload path). In the daemon-link build we DO NOT link cpu_overlay.c
+ * (it would duplicate sp_kernels_read_env + qwen3_q4_stats already present in
+ * math-core's libsp_forward_dispatch). Instead, expose the engine names as
+ * thin aliases over math-core's sp_* variants. Same TU as the L1 dispatcher
+ * so the link graph is one extra .o, matching the WIRE-HEX glue shape. */
+
+int matmul(const qwen3_model *m, const gguf_tensor *W,
+           const float *X, int n_tok, int in, int out, float *Y) {
+    return sp_matmul(m, W, X, n_tok, in, out, Y);
+}
+
+int embed_row(const qwen3_model *m, int32_t tok, int E, float *dst) {
+    return sp_embed_row(m, tok, E, dst);
+}
+
+const float *as_f32(const qwen3_model *m, const gguf_tensor *t) {
+    return sp_as_f32(m, t);
+}
+
+/* sp_kernels_read_env: math-core's forward_dispatch.c already exports this
+ * name; cuda_forward.cu's call site resolves to the math-core symbol directly,
+ * no shim entry needed here. Mirrors the WIRE-HEX glue (sp_daemon_hex_glue.c). */
