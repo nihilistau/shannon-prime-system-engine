@@ -128,10 +128,7 @@ bindgen = "0.70"
 #   HOST target — works on Windows MSVC, Linux GCC/Clang. Activates the
 #   engine's CPU AVX-512 backend forward (Phase 2-CPU.AVX) behind the
 #   SP_DAEMON_BACKEND=cpu runtime env gate.
-[features]
-default = []
-wire_hex_backend = []
-wire_cpu_backend = []
+#
 # `wire_cuda_backend`: links libsp_cuda_daemon_backend.lib (built by
 #   tools/sp_daemon/build-host-cuda-backend.bat) and compiles the
 #   `cuda_forward_dispatch` module. Off by default -- the daemon binary
@@ -139,4 +136,18 @@ wire_cpu_backend = []
 #   via `cargo build --features wire_cuda_backend` after running the bat.
 #   Symmetric to wire_hex_backend (host x86_64 instead of android aarch64;
 #   CUDA::cudart/cublas instead of FastRPC).
+#
+# `wire_vulkan_backend` (Sprint WIRE-VULKAN, host-side): links
+#   libsp_vulkan_daemon_backend.{a,lib} (built by
+#   tools/sp_daemon/build-host-vulkan-backend.bat) and compiles the
+#   `vulkan_forward_dispatch` module. Off by default. Activates the
+#   gemma3_forward_vulkan / qwen3_forward_vulkan whole-forward dispatchers
+#   when SP_DAEMON_BACKEND=vulkan is set at daemon startup. Symmetric to
+#   wire_hex_backend (Hexagon V69 cDSP, android-only) but Vulkan is host
+#   GPU compute — Windows / Linux / macOS where vulkan-1.{dll,so} resolves.
+[features]
+default = []
+wire_hex_backend = []
+wire_cpu_backend = []
 wire_cuda_backend = []
+wire_vulkan_backend = []

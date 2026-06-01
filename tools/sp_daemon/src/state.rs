@@ -84,6 +84,14 @@ pub struct AppState {
     /// Cargo feature; always false on builds without the feature). Surfaced
     /// via /v1/debug/backend_counts.
     pub wire_cuda_active: bool,
+    /// Sprint WIRE-VULKAN — true when the engine's gemma3_forward_vulkan /
+    /// qwen3_forward_vulkan dispatcher is registered on `session` for
+    /// sp_prefill_chunk. Toggled by SP_DAEMON_BACKEND=vulkan at startup
+    /// (only meaningful when the daemon was built with the
+    /// `wire_vulkan_backend` Cargo feature; always false otherwise).
+    /// Host-side (Windows / Linux / macOS). Surfaced via
+    /// /v1/debug/backend_counts so the headline tok/s diff is attributable.
+    pub wire_vulkan_active: bool,
     /// Lifetime token counter for rolling tps in /v1/metrics.
     pub tokens_decoded: AtomicU64,
     /// Daemon start time (for tps denominator).

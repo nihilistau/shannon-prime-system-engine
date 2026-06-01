@@ -106,6 +106,21 @@ pub(crate) struct BackendCounts {
     /// SP_DAEMON_BACKEND is unset / != "cuda", when the feature was off at
     /// build time, or when registration failed (see daemon log).
     wire_cuda_active: bool,
+    /// Sprint WIRE-VULKAN: gemma3_forward_vulkan / qwen3_forward_vulkan
+    /// dispatcher hit count since process start. > 0 after one prefill
+    /// when SP_DAEMON_BACKEND=vulkan is set AND the daemon was built with
+    /// --features wire_vulkan_backend. Counter is bumped BEFORE the engine
+    /// call (per the wire_vulkan trampoline) — increments even if the
+    /// engine returns the known OOM error from a Vulkan device that lacks
+    /// budget for the model arena (the pre-existing M_GEMMA3_VULKAN /
+    /// M_QWEN3_VULKAN OOM bug; see WIRE-VULKAN-OOM-BUGFIX follow-on).
+    /// Always 0 when the feature is off at build time.
+    vulkan_forward_count: u64,
+    /// Sprint WIRE-VULKAN: whether sp_session_register_forward_backend was
+    /// invoked successfully on the target session at startup. False when
+    /// SP_DAEMON_BACKEND is unset / != "vulkan", when the feature was off
+    /// at build time, or when registration failed (see daemon log).
+    wire_vulkan_active: bool,
 }
 
 pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json<BackendCounts> {
@@ -137,6 +152,12 @@ pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json
         #[cfg(not(feature = "wire_cuda_backend"))]
         { 0u64 }
     };
+    let vulkan_forward_count = {
+        #[cfg(feature = "wire_vulkan_backend")]
+        { sp_daemon::vulkan_forward_dispatch::dispatch_count() }
+        #[cfg(not(feature = "wire_vulkan_backend"))]
+        { 0u64 }
+    };
     Json(BackendCounts {
         hex_forward_count,
         wire_hex_active: state.wire_hex_active,
@@ -146,6 +167,8 @@ pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json
         wire_cpu_active: state.wire_cpu_active,
         cuda_forward_count,
         wire_cuda_active: state.wire_cuda_active,
+        vulkan_forward_count,
+        wire_vulkan_active: state.wire_vulkan_active,
     })
 }
 

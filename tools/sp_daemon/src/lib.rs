@@ -44,6 +44,17 @@ pub mod hex_forward_dispatch;
 #[cfg(feature = "wire_cuda_backend")]
 pub mod cuda_forward_dispatch;
 
+// Sprint WIRE-VULKAN — host-side analog of hex_forward_dispatch for the
+// Vulkan compute backend. Routes sp_prefill_chunk through
+// gemma3_forward_vulkan / qwen3_forward_vulkan (the engine's host SPIR-V
+// dispatch path). Active when SP_DAEMON_BACKEND=vulkan is set AND the
+// daemon was built with `--features wire_vulkan_backend` so the
+// libsp_vulkan_daemon_backend.{a,lib} static lib + vulkan loader are
+// linked. Host-only (Windows / Linux / macOS where vulkan-1.{dll,so}
+// resolves); no target_os gate, just the feature flag.
+#[cfg(feature = "wire_vulkan_backend")]
+pub mod vulkan_forward_dispatch;
+
 // §4-MeMo Sprint M.1 — re-export the L1 C ABI bindings from the lib crate so
 // android binaries (e.g. sp_memo_m1_smoke) pick up the link dependency on
 // the math-core static libs via the lib's own link graph. On host this is
@@ -54,7 +65,13 @@ pub mod cuda_forward_dispatch;
 // Sprint WIRE-CUDA: also exposed on host when `wire_cuda_backend` is
 // enabled — `cuda_forward_dispatch::register_with_session` needs
 // `sp_session_register_forward_backend` at host link time.
-#[cfg(any(target_os = "android", feature = "wire_cuda_backend"))]
+//
+// Sprint WIRE-VULKAN: also un-gated for host when `wire_vulkan_backend` is
+// on, so the host trampoline `vulkan_forward_dispatch::register_with_session`
+// can call `sp_session_register_forward_backend` via the lib-crate L1
+// bindings. The math-core static libs are linked by build.rs unconditionally
+// on host (line 117-126), so re-exporting the bindings is type-safe.
+#[cfg(any(target_os = "android", feature = "wire_cuda_backend", feature = "wire_vulkan_backend"))]
 #[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, clippy::all)]
 pub mod ffi_l1 {
     include!(concat!(env!("OUT_DIR"), "/sp_bindings.rs"));
