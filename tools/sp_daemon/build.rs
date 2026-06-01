@@ -180,4 +180,68 @@ fn main() {
         println!("cargo:rerun-if-env-changed=HEXAGON_SDK_ROOT");
         println!("cargo:warning=WIRE-HEX: linking libsp_hex_daemon_backend.a + libcdsprpc.so + rpcmem.a");
     }
+
+    // ── Sprint WIRE-CPU: link the daemon-callable CPU AVX-512 backend ──
+    //
+    // When the `wire_cpu_backend` Cargo feature is on, link the standalone
+    // static lib built by `tools/sp_daemon/build-host-cpu-backend.bat`:
+    //   build-host-cpu-backend/Release/sp_cpu_daemon_backend.lib   (MSVC)
+    //   build-host-cpu-backend/sp_cpu_daemon_backend.lib           (MSVC, single-config)
+    //   build-host-cpu-backend/libsp_cpu_daemon_backend.a          (MinGW / Linux)
+    //
+    // That archive contains:
+    //   - src/backends/cpu/cpu_overlay.c     (matmul/embed_row/dot_f32/rmsnorm/etc.)
+    //   - src/backends/cpu/cpu_forward.c     (qwen3_forward_cpu_impl, renamed)
+    //   - src/backends/cpu/cpu_gemma3.c      (gemma3_forward_cpu_impl, renamed)
+    //   - src/backends/cpu/cpu_generate.c    (qwen3_generate_cpu_impl, renamed)
+    //   - src/backends/cpu/avx512/avx512_dispatch.c (g_avx512_caps CPU feature probe)
+    //   - On non-MSVC: avx512_{vnni,spinor,ifma,ternlog,persist}.c (intrinsics)
+    //   - tools/sp_daemon/c_backend_cpu/sp_daemon_cpu_glue.c (the L1 §6 dispatcher)
+    //
+    // The math-core archives are linked by the MODULES loop above; the engine
+    // cpu sources were renamed at compile time to avoid duplicate-symbol with
+    // math-core's reference forwards (see CMakeLists-cpu.txt header).
+    //
+    // HOST target — no FastRPC libs needed (unlike WIRE-HEX which links cdsprpc).
+    // Build order: scripts/build/build-cpu.bat first (math-core .lib archives),
+    // then build-host-cpu-backend.bat, then
+    // `cargo build --features wire_cpu_backend --release`.
+    let wire_cpu = env::var("CARGO_FEATURE_WIRE_CPU_BACKEND").is_ok();
+    if wire_cpu {
+        let cpu_lib_dir = env::var("SP_CPU_BACKEND_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| engine_root.join("build-host-cpu-backend"));
+
+        // CMake puts the lib in either {dir}/Release/{name}.lib (multi-config
+        // generators like Visual Studio) or {dir}/{name}.lib (Ninja, single-config).
+        // We don't know which generator was used; probe and pick.
+        let cpu_archive_msvc_release = cpu_lib_dir.join("Release").join("sp_cpu_daemon_backend.lib");
+        let cpu_archive_msvc_flat    = cpu_lib_dir.join("sp_cpu_daemon_backend.lib");
+        let cpu_archive_unix         = cpu_lib_dir.join("libsp_cpu_daemon_backend.a");
+
+        let (search_dir, link_name): (PathBuf, &str) = if cpu_archive_msvc_flat.exists() {
+            (cpu_lib_dir.clone(), "sp_cpu_daemon_backend")
+        } else if cpu_archive_msvc_release.exists() {
+            (cpu_lib_dir.join("Release"), "sp_cpu_daemon_backend")
+        } else if cpu_archive_unix.exists() {
+            (cpu_lib_dir.clone(), "sp_cpu_daemon_backend")
+        } else {
+            panic!(
+                "WIRE-CPU: backend archive not found under {} (tried {{,Release/}}sp_cpu_daemon_backend.lib + libsp_cpu_daemon_backend.a) — run build-host-cpu-backend.bat first",
+                cpu_lib_dir.display()
+            );
+        };
+        println!("cargo:rustc-link-search=native={}", search_dir.display());
+        if target_env == "msvc" {
+            // Same MSVC quirk as the math-core libs above: use a full-path
+            // -link arg so the binary link step receives the lib regardless
+            // of intermediate /LIBPATH lookup gaps.
+            let lib_path = search_dir.join(format!("{link_name}.lib"));
+            println!("cargo:rustc-link-arg={}", lib_path.display());
+        } else {
+            println!("cargo:rustc-link-lib=static={link_name}");
+        }
+        println!("cargo:rerun-if-env-changed=SP_CPU_BACKEND_DIR");
+        println!("cargo:warning=WIRE-CPU: linking sp_cpu_daemon_backend.lib (host CPU AVX2/AVX-512 backend)");
+    }
 }

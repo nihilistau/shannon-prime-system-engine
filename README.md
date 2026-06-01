@@ -63,7 +63,7 @@ through it at runtime.
 | Component | Built | Wired in `sp_daemon` | Notes |
 |-----------|:-----:|:--------------------:|-------|
 | Math-core reference forward | yes | **yes (default)** | byte-exact on host + aarch64-android; baseline tok/s in §4 below |
-| CPU backend (AVX-512 + cpu_overlay) | yes | no | symmetric to WIRE-HEX sprint; daemon hook landed, wiring pending |
+| CPU backend (AVX-512 + cpu_overlay) | yes | **yes (`SP_DAEMON_BACKEND=cpu`)** | sprint WIRE-CPU (2026-06-02): daemon registers `qwen3_forward_cpu` / `gemma3_forward_cpu` via L1 ABI §6 hook; `cpu_forward_count` increments per prefill; bit-exact vs reference (same byte stream); on i9-11900KB host wall-clock matches reference within ±1% (AVX-512 primitives present in lib, hot-path wiring is WIRE-CPU-V2 follow-on) |
 | CUDA backend (PTX MMA + NTT) | yes | no | desktop target; symmetric WIRE-HEX sprint |
 | Vulkan backend | yes | no | desktop target; symmetric WIRE-HEX sprint |
 | Hexagon HVX backend | yes | **partially** | sprint WIRE-HEX: daemon registers `gemma3_forward_hexagon` via L1 ABI §6 hook; `hex_forward_count` increments at first prefill; **`sp_hex_forward` returns non-zero on cDSP after weight upload — cDSP skel on device needs rebuild against current IDL** |
