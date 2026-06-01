@@ -120,6 +120,16 @@ bindgen = "0.70"
 #   `hex_forward_dispatch` module. Off by default — the daemon binary stays
 #   identical to pre-WIRE-HEX when this feature is unset. Turn ON via
 #   `cargo build --features wire_hex_backend` after running the bat.
+#
+# `wire_vulkan_backend` (Sprint WIRE-VULKAN, host-side): links
+#   libsp_vulkan_daemon_backend.{a,lib} (built by
+#   tools/sp_daemon/build-host-vulkan-backend.bat) and compiles the
+#   `vulkan_forward_dispatch` module. Off by default. Activates the
+#   gemma3_forward_vulkan / qwen3_forward_vulkan whole-forward dispatchers
+#   when SP_DAEMON_BACKEND=vulkan is set at daemon startup. Symmetric to
+#   wire_hex_backend (Hexagon V69 cDSP, android-only) but Vulkan is host
+#   GPU compute — Windows / Linux / macOS where vulkan-1.{dll,so} resolves.
 [features]
 default = []
 wire_hex_backend = []
+wire_vulkan_backend = []

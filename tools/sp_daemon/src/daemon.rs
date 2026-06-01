@@ -391,6 +391,68 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         info!("WIRE-HEX: feature linked but SP_DAEMON_BACKEND!=hex — staying on math-core reference forward");
     }
 
+    // ── Sprint WIRE-VULKAN: optional full-forward backend on TARGET session ──
+    //
+    // When SP_DAEMON_BACKEND=vulkan is set AND the daemon was built with
+    // --features wire_vulkan_backend (so libsp_vulkan_daemon_backend.{a,lib}
+    // is linked along with the Vulkan loader), register the engine's
+    // gemma3_forward_vulkan / qwen3_forward_vulkan dispatcher with the
+    // target session via the sp_l1.h:§6 hook. After registration,
+    // sp_prefill_chunk routes through the host GPU's Vulkan compute path
+    // instead of math-core's reference forward — host-side analog of the
+    // WIRE-HEX wiring on android.
+    //
+    // Decode (persistent KV) is NOT hooked — vulkan_forward.cpp re-runs the
+    // full forward over the accumulated history per call and has no
+    // persistent-KV API. Decode keeps using the math-core reference.
+    // Documented honestly in CLOSURE-WIRE-VULKAN.md.
+    //
+    // Unset env OR wrong feature set = skipped (existing reference path).
+    // Wrong arch (not Gemma3 / Qwen3) = the C glue's arch switch surfaces
+    // sp_set_error("vulkan: unsupported arch ...") and returns -1; the
+    // first prefill returns SP_EBADSTATE; daemon log shows the cause via
+    // sp_last_error.
+    //
+    // Known prior OOM bug: M_GEMMA3_VULKAN + M_QWEN3_VULKAN ctests fail with
+    // vkAllocateMemory: VkResult -2 on this host (RTX 2060, 6 GB VRAM).
+    // The wiring still registers cleanly; the first prefill may hit the
+    // same OOM. See ctest-vulkan-validate.log + WIRE-VULKAN-OOM-BUGFIX
+    // follow-on.
+    #[cfg(feature = "wire_vulkan_backend")]
+    let wire_vulkan_active = {
+        let env_set = std::env::var("SP_DAEMON_BACKEND")
+            .map(|v| v.trim().eq_ignore_ascii_case("vulkan"))
+            .unwrap_or(false);
+        if env_set {
+            // `session` here is the raw SpSession (not yet wrapped in Mutex);
+            // we own it exclusively so no locking needed. Same crate::ffi <->
+            // sp_daemon::ffi_l1 cast pattern as WIRE-HEX (both bindgen the
+            // same sp_l1.h header; byte-identical opaque structs; distinct
+            // Rust types). Cast through *mut to bridge the alias.
+            let session_raw: *mut sp_daemon::ffi_l1::sp_session =
+                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+            // SAFETY: we own `session` exclusively; no concurrent forward.
+            match unsafe { sp_daemon::vulkan_forward_dispatch::register_with_session(session_raw) } {
+                Ok(()) => {
+                    info!("WIRE-VULKAN: sp_session_register_forward_backend OK on TARGET session — prefill routes to gemma3_forward_vulkan / qwen3_forward_vulkan (host GPU compute)");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("WIRE-VULKAN: registration failed: {e} — falling back to math-core reference forward");
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    };
+    #[cfg(not(feature = "wire_vulkan_backend"))]
+    let wire_vulkan_active = false;
+    if !wire_vulkan_active {
+        #[cfg(feature = "wire_vulkan_backend")]
+        info!("WIRE-VULKAN: feature linked but SP_DAEMON_BACKEND!=vulkan — staying on math-core reference forward");
+    }
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -399,6 +461,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         draft_session,
         sessions: crate::sessions::Sessions::new(),
         wire_hex_active,
+        wire_vulkan_active,
         vocab_size,
         tokens_decoded: AtomicU64::new(0),
         started_at: Instant::now(),

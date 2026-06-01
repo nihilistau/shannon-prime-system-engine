@@ -149,6 +149,87 @@ fn main() {
     // Build order: `build-android-libs.bat` first (math-core archives the
     // hex glue depends on transitively), then `build-android-hex-backend.bat`,
     // then `cargo build --target aarch64-linux-android --features wire_hex_backend`.
+    // ── Sprint WIRE-VULKAN: link the daemon-callable Vulkan backend ──
+    //
+    // When the `wire_vulkan_backend` Cargo feature is on (host-side; no
+    // target_os gate — Vulkan is desktop GPU compute on Windows / Linux /
+    // macOS), link the standalone static lib built by
+    // `tools/sp_daemon/build-host-vulkan-backend.bat`:
+    //   build-host-vulkan-backend/sp_vulkan_daemon_backend.{a,lib}
+    //
+    // That archive contains:
+    //   - src/backends/vulkan/vulkan_backend.cpp  (instance/device/queue lifecycle)
+    //   - src/backends/vulkan/vulkan_forward.cpp  (gemma3_forward_vulkan + qwen3_forward_vulkan)
+    //   - 12 SPIR-V compute shader .spv.h embeds  (compiled by glslc at build time)
+    //   - tools/sp_daemon/c_backend/sp_daemon_vulkan_glue.c  (the §6 dispatcher)
+    //
+    // Plus the Vulkan loader at sp-daemon link time:
+    //   vulkan-1 (Windows: vulkan-1.lib -> vulkan-1.dll)
+    //   vulkan   (Linux/macOS: libvulkan.so / libvulkan.dylib)
+    //
+    // Build order: `build-host-vulkan-backend.bat` (or the symmetric
+    // `cmake -B build-host-vulkan-backend -S tools/sp_daemon/c_backend
+    //  -DSP_DAEMON_BUILD_VULKAN_BACKEND=ON` on Linux) first, then
+    // `cargo build --features wire_vulkan_backend` builds the daemon with
+    // the dispatcher wired in.
+    let wire_vulkan = env::var("CARGO_FEATURE_WIRE_VULKAN_BACKEND").is_ok();
+    if wire_vulkan {
+        let vk_lib_dir = env::var("SP_VULKAN_BACKEND_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| engine_root.join("build-host-vulkan-backend"));
+        // Archive name differs per platform (.lib MSVC; .a GNU/Clang/MinGW).
+        let vk_archive_msvc = vk_lib_dir.join("sp_vulkan_daemon_backend.lib");
+        let vk_archive_gnu  = vk_lib_dir.join("libsp_vulkan_daemon_backend.a");
+        if !vk_archive_msvc.exists() && !vk_archive_gnu.exists() {
+            panic!(
+                "WIRE-VULKAN: Vulkan backend archive not found at {} (neither {} nor {}) — run build-host-vulkan-backend.bat first",
+                vk_lib_dir.display(),
+                vk_archive_msvc.file_name().unwrap().to_string_lossy(),
+                vk_archive_gnu.file_name().unwrap().to_string_lossy(),
+            );
+        }
+        println!("cargo:rustc-link-search=native={}", vk_lib_dir.display());
+        if target_env == "msvc" && vk_archive_msvc.exists() {
+            // MSVC: pass the .lib by absolute path through rustc-link-arg
+            // (same pattern as the math-core MODULES loop above).
+            println!("cargo:rustc-link-arg={}", vk_archive_msvc.display());
+        } else {
+            println!("cargo:rustc-link-lib=static=sp_vulkan_daemon_backend");
+        }
+
+        // Vulkan loader. On Windows the import lib is vulkan-1.lib (no
+        // VULKAN_SDK on PATH at run time — only the DLL needs to be found
+        // by the dynamic loader). On Linux it's libvulkan.so.
+        let vulkan_loader_lib = if target_os == "windows" || target_env == "msvc" {
+            "vulkan-1"
+        } else {
+            "vulkan"
+        };
+        println!("cargo:rustc-link-lib=dylib={vulkan_loader_lib}");
+
+        // Vulkan SDK path lets us add the loader's link search dir on
+        // Windows (where the system PATH may not include $VULKAN_SDK\Lib).
+        if let Ok(vk_sdk) = env::var("VULKAN_SDK") {
+            let lib_subdir = if target_env == "msvc" { "Lib" } else { "lib" };
+            println!("cargo:rustc-link-search=native={vk_sdk}/{lib_subdir}");
+        }
+
+        // C++ standard library: vulkan_forward.cpp + vulkan_backend.cpp are
+        // C++17 TUs; link the appropriate C++ runtime.
+        if target_env == "msvc" {
+            // MSVC links msvcprt implicitly via the static archive's symbols.
+        } else if target_os == "macos" {
+            println!("cargo:rustc-link-lib=dylib=c++");
+        } else {
+            // GNU/Clang on Linux / MinGW: stdc++.
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
+
+        println!("cargo:rerun-if-env-changed=SP_VULKAN_BACKEND_DIR");
+        println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+        println!("cargo:warning=WIRE-VULKAN: linking sp_vulkan_daemon_backend + {vulkan_loader_lib}");
+    }
+
     let wire_hex = env::var("CARGO_FEATURE_WIRE_HEX_BACKEND").is_ok();
     if wire_hex && target_os == "android" {
         let hex_lib_dir = env::var("SP_HEX_BACKEND_DIR")
