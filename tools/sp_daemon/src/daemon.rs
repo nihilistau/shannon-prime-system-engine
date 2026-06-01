@@ -391,6 +391,62 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         info!("WIRE-HEX: feature linked but SP_DAEMON_BACKEND!=hex — staying on math-core reference forward");
     }
 
+    // ── Sprint WIRE-CPU: optional full-forward backend on the TARGET session ─
+    //
+    // When SP_DAEMON_BACKEND=cpu is set AND the daemon was built with
+    // --features wire_cpu_backend (so sp_cpu_daemon_backend is linked),
+    // register the engine's per-arch CPU forward dispatcher with the
+    // target session via the same sp_l1.h:§6 hook WIRE-HEX uses. After
+    // registration, sp_prefill_chunk routes through the engine's
+    // gemma3_forward_cpu / qwen3_forward_cpu / qwen25_forward_cpu_impl
+    // (cpu_overlay.c AVX2 dot_f32 + optional AVX-512 primitives) instead
+    // of math-core's reference forward.
+    //
+    // HOST target — no Android cross-compile. The CPU backend has no
+    // per-session statics (cpu_overlay.c reads gate-knob env vars at each
+    // call); release_for_model is a no-op.
+    //
+    // Decode (persistent KV) is NOT hooked, same architectural pattern as
+    // WIRE-HEX — gemma3_forward_cpu re-runs the full forward per call.
+    //
+    // Unset env OR wrong feature set = skipped (existing reference path).
+    #[cfg(feature = "wire_cpu_backend")]
+    let wire_cpu_active = {
+        let env_set = std::env::var("SP_DAEMON_BACKEND")
+            .map(|v| v.trim().eq_ignore_ascii_case("cpu"))
+            .unwrap_or(false);
+        if env_set {
+            // `session` here is the raw SpSession (not yet wrapped in Mutex);
+            // we own it exclusively so no locking needed.
+            //
+            // Unlike WIRE-HEX which had to bridge the binary-crate ffi to
+            // the lib-crate ffi_l1 via a pointer cast, WIRE-CPU's trampoline
+            // lives in the binary crate (host-only, no need for the
+            // lib-crate sibling). The raw pointer is passed straight through
+            // as `*mut crate::ffi::sp_session`.
+            let session_raw: *mut crate::ffi::sp_session = session.raw_ptr();
+            // SAFETY: we own `session` exclusively; no concurrent forward.
+            match unsafe { crate::cpu_forward_dispatch::register_with_session(session_raw) } {
+                Ok(()) => {
+                    info!("WIRE-CPU: sp_session_register_forward_backend OK on TARGET session — prefill routes to engine CPU AVX-512 backend (gemma3_forward_cpu / qwen3_forward_cpu)");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("WIRE-CPU: registration failed: {e} — falling back to math-core reference forward");
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    };
+    #[cfg(not(feature = "wire_cpu_backend"))]
+    let wire_cpu_active = false;
+    if !wire_cpu_active {
+        #[cfg(feature = "wire_cpu_backend")]
+        info!("WIRE-CPU: feature linked but SP_DAEMON_BACKEND!=cpu — staying on math-core reference forward");
+    }
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -399,6 +455,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         draft_session,
         sessions: crate::sessions::Sessions::new(),
         wire_hex_active,
+        wire_cpu_active,
         vocab_size,
         tokens_decoded: AtomicU64::new(0),
         started_at: Instant::now(),

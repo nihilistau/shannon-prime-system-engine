@@ -86,6 +86,16 @@ pub(crate) struct BackendCounts {
     /// is unset. Independent of WIRE-HEX (different ABI hook).
     ntt_hex_forward_count: u64,
     ntt_hex_inverse_count: u64,
+    /// Sprint WIRE-CPU: engine CPU AVX-512 backend dispatcher hit count
+    /// since process start. > 0 after one prefill when SP_DAEMON_BACKEND=cpu
+    /// is set AND the daemon was built with --features wire_cpu_backend.
+    /// Always 0 without the feature.
+    cpu_forward_count: u64,
+    /// Sprint WIRE-CPU: whether sp_session_register_forward_backend was
+    /// invoked successfully on the target session at startup. False when
+    /// SP_DAEMON_BACKEND is unset / != "cpu", when the feature was off at
+    /// build time, or when registration failed.
+    wire_cpu_active: bool,
 }
 
 pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json<BackendCounts> {
@@ -101,11 +111,23 @@ pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json
         #[cfg(not(target_os = "android"))]
         { (0u64, 0u64) }
     };
+    let cpu_forward_count = {
+        // crate::cpu_forward_dispatch lives in the BINARY crate (main.rs),
+        // not the lib crate, because WIRE-CPU is host-targeted and the
+        // binary already has L1 bindings via its own `mod ffi`. Routes is
+        // a binary-crate module, so `crate::cpu_forward_dispatch` resolves.
+        #[cfg(feature = "wire_cpu_backend")]
+        { crate::cpu_forward_dispatch::dispatch_count() }
+        #[cfg(not(feature = "wire_cpu_backend"))]
+        { 0u64 }
+    };
     Json(BackendCounts {
         hex_forward_count,
         wire_hex_active: state.wire_hex_active,
         ntt_hex_forward_count,
         ntt_hex_inverse_count,
+        cpu_forward_count,
+        wire_cpu_active: state.wire_cpu_active,
     })
 }
 

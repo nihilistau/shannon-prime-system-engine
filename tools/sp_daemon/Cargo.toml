@@ -114,12 +114,21 @@ libloading = "0.8"
 [build-dependencies]
 bindgen = "0.70"
 
-# ── Sprint WIRE-HEX features ────────────────────────────────────────────────
+# ── Sprint WIRE-HEX / WIRE-CPU features ─────────────────────────────────────
 # `wire_hex_backend`: links libsp_hex_daemon_backend.a (built by
 #   tools/sp_daemon/build-android-hex-backend.bat) and compiles the
 #   `hex_forward_dispatch` module. Off by default — the daemon binary stays
 #   identical to pre-WIRE-HEX when this feature is unset. Turn ON via
-#   `cargo build --features wire_hex_backend` after running the bat.
+#   `cargo build --features wire_hex_backend` after running the bat. Android only.
+#
+# `wire_cpu_backend`: links libsp_cpu_daemon_backend.lib (built by
+#   tools/sp_daemon/build-host-cpu-backend.bat) and compiles the
+#   `cpu_forward_dispatch` module. Off by default. Turn ON via
+#   `cargo build --features wire_cpu_backend --release` after running the bat.
+#   HOST target — works on Windows MSVC, Linux GCC/Clang. Activates the
+#   engine's CPU AVX-512 backend forward (Phase 2-CPU.AVX) behind the
+#   SP_DAEMON_BACKEND=cpu runtime env gate.
 [features]
 default = []
 wire_hex_backend = []
+wire_cpu_backend = []

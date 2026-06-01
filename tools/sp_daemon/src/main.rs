@@ -31,6 +31,13 @@ mod tokenizer;
 // through the existing crate::session::SpSession wrapper.
 mod dialogue_runner;
 
+// Sprint WIRE-CPU — host CPU AVX-512 full-forward backend dispatcher for
+// sp_l1.h:§6. Symmetric to the lib-crate's hex_forward_dispatch (android).
+// Activates when SP_DAEMON_BACKEND=cpu is set AND the daemon was built
+// with --features wire_cpu_backend so libsp_cpu_daemon_backend is linked.
+#[cfg(feature = "wire_cpu_backend")]
+mod cpu_forward_dispatch;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

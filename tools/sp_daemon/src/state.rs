@@ -69,6 +69,14 @@ pub struct AppState {
     /// false on host builds and on android builds without the feature).
     /// Surfaced via /v1/metrics so the headline tok/s diff is attributable.
     pub wire_hex_active: bool,
+    /// Sprint WIRE-CPU — true when the engine's CPU AVX-512 backend
+    /// (cpu_overlay.c + cpu_forward.c + cpu_gemma3.c) is registered on
+    /// `session` for sp_prefill_chunk. Toggled by SP_DAEMON_BACKEND=cpu at
+    /// startup (only meaningful when the daemon was built with the
+    /// `wire_cpu_backend` Cargo feature; always false without the feature).
+    /// HOST target — works on Windows MSVC + Linux GCC/Clang. Surfaced via
+    /// /v1/debug/backend_counts alongside `wire_hex_active`.
+    pub wire_cpu_active: bool,
     /// Lifetime token counter for rolling tps in /v1/metrics.
     pub tokens_decoded: AtomicU64,
     /// Daemon start time (for tps denominator).
