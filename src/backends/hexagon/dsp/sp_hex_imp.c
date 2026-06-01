@@ -747,10 +747,41 @@ typedef struct {
     uint32_t rsum_attn_n_layers;
     uint32_t rsum_attn_stride;        /* ints per layer = QD + KVD + KVD + E */
     uint8_t *rsum_attn_layer_ready;   /* malloc'd [n_layers] bool — 1 = rsum populated for this layer */
+
+    /* V5 FFN ping-pong tile-streaming additions.
+     * Two VTCM tile slots A + B, each SP_HEX_V5_TILE_BYTES, reside within the
+     * SAME single HAP_request_VTCM allocation right after the 2.96 MB attention
+     * sub-region. While compute consumes a tile in slot N, UDMA prefetches the
+     * next tile into slot N+1 (or N-1), achieving DMA/compute overlap.
+     *
+     * Per-FFN-tensor rsum table: lazy-populated on first FFN matmul invocation
+     * for each (layer, FFN-kind) pair, like rsum_attn. Sizing per Gemma3-1B:
+     *   26 layers × (WGATE[FF=6912] + WUP[FF=6912] + WDOWN[E=1152]) × sizeof(int32)
+     *   = 26 × 14976 × 4 = 1,557,504 B = 1.49 MB DDR malloc.
+     * Stride per layer = FF + FF + E ints. Per-tensor offset within the layer:
+     *   WGATE: 0
+     *   WUP:   FF
+     *   WDOWN: 2*FF
+     */
+    uint32_t tile_a_off;          /* offset within vtcm_base for tile slot A */
+    uint32_t tile_b_off;          /* offset within vtcm_base for tile slot B */
+    uint32_t tile_bytes;          /* bytes per tile slot */
+    int32_t *rsum_ffn;            /* malloc'd; NULL = unallocated; freed in hx_vtcm_release */
+    uint32_t rsum_ffn_stride;     /* ints per layer = FF + FF + E */
+    uint8_t *rsum_ffn_layer_ready;/* malloc'd [n_layers * 3] bool — 1 = rsum populated for (layer, [0=WGATE,1=WUP,2=WDOWN]) */
+    int      ffn_path_count;      /* number of FFN matmuls that used V5 tiled path; FARF-logged */
+    int      ffn_ddr_path_count;  /* number that fell back to V3 DDR (e.g. allocator denied tile_pool); FARF */
 } hx_vtcm_t;
 
+/* V5 — fixed tile slot size. Per PLAN-V5 D-A-2: WGATE/WUP need 768 rows × 1152 =
+ * 884,736 bytes int8 + alignment; WDOWN needs 128 rows × 6912 = 884,736 bytes.
+ * Both converge at ~864 KB. Round up to 1 MiB exact for clean alignment + slack. */
+#define SP_HEX_V5_TILE_BYTES   (1u << 20)   /* 1 MiB per slot; 2 MiB for both slots */
+
 static hx_vtcm_t g_hx_vtcm = { NULL, 0u, -1, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0, 0, {0},
-                               NULL, 0u, 0u, NULL };
+                               NULL, 0u, 0u, NULL,
+                               /* V5 fields */
+                               0u, 0u, 0u, NULL, 0u, NULL, 0, 0 };
 
 /* Per-attention-tensor rsum offsets within one layer's rsum_attn stripe. */
 static inline uint32_t hx_vtcm_rsum_off_wq(const sp_hex_cfg *c) { (void)c; return 0u; }
@@ -772,6 +803,18 @@ static uint32_t hx_vtcm_attn_set_bytes(const sp_hex_cfg *cfg) {
     return (uint32_t)bytes;
 }
 
+/* V5 — per-layer FFN rsum stride: WGATE rows + WUP rows + WDOWN rows
+ * = FF + FF + E. */
+static inline uint32_t hx_vtcm_rsum_ffn_stride(const sp_hex_cfg *c) {
+    return (uint32_t)(c->n_ff + c->n_ff + c->n_embd);
+}
+/* Per-FFN-tensor rsum offsets within one layer's rsum_ffn stripe. */
+static inline uint32_t hx_vtcm_rsum_ffn_off_wgate(const sp_hex_cfg *c) { (void)c; return 0u; }
+static inline uint32_t hx_vtcm_rsum_ffn_off_wup  (const sp_hex_cfg *c) { return (uint32_t)c->n_ff; }
+static inline uint32_t hx_vtcm_rsum_ffn_off_wdown(const sp_hex_cfg *c) { return (uint32_t)(2 * c->n_ff); }
+/* Tensor-index within the 3-wide rsum_ffn_layer_ready bool array per layer. */
+enum { HX_FFN_WGATE = 0, HX_FFN_WUP = 1, HX_FFN_WDOWN = 2 };
+
 /* Lazy-init: allocate the VTCM region once (sized for the model's attention
  * set). Idempotent — second call returns 0 if already allocated.
  * Returns 0 on success, nonzero on failure (caller falls back to DDR path). */
@@ -790,12 +833,21 @@ static int hx_vtcm_init(const sp_hex_cfg *cfg) {
              avail_block, max_page, num_pages);
     }
 
-    uint32_t bytes = hx_vtcm_attn_set_bytes(cfg);
+    /* V5: grow the single HAP_request_VTCM to cover (attention set + 2 tile slots).
+     * Tile slots are placed immediately after the attention sub-region; each is
+     * SP_HEX_V5_TILE_BYTES (1 MiB) and 128-byte aligned. Total V5 footprint
+     * for Gemma3-1B: ~2.96 MB attn + 2 MiB tiles = ~4.96 MB of 8 MB VTCM. */
+    uint32_t attn_bytes = hx_vtcm_attn_set_bytes(cfg);
+    /* sp_hex_align is 128B; attn_bytes is already 128B-aligned because each
+     * sp_hex_kind_bytes() returns a 128-aligned value, so tile_a_off is too. */
+    uint32_t tile_a_off = attn_bytes;
+    uint32_t tile_b_off = tile_a_off + SP_HEX_V5_TILE_BYTES;
+    uint32_t bytes      = tile_b_off + SP_HEX_V5_TILE_BYTES;
     /* Allocate with single_page_flag=0 (multi-page OK; we don't need
      * scatter/gather single-page constraint for plain vmem reads). */
     void *p = HAP_request_VTCM(bytes, 0u);
     if (!p) {
-        FARF(ERROR, "sp_hex V4: HAP_request_VTCM(%u, 0) FAILED -- falling back to DDR-only path",
+        FARF(ERROR, "sp_hex V5: HAP_request_VTCM(%u, 0) FAILED -- falling back to DDR-only path",
              bytes);
         return -1;
     }
@@ -818,6 +870,12 @@ static int hx_vtcm_init(const sp_hex_cfg *cfg) {
     g_hx_vtcm.off_wo = g_hx_vtcm.off_wv + g_hx_vtcm.bytes_wv;
     g_hx_vtcm.ddr_path_count = 0;
     g_hx_vtcm.vtcm_path_count = 0;
+    /* V5 tile slot offsets. */
+    g_hx_vtcm.tile_a_off = tile_a_off;
+    g_hx_vtcm.tile_b_off = tile_b_off;
+    g_hx_vtcm.tile_bytes = SP_HEX_V5_TILE_BYTES;
+    g_hx_vtcm.ffn_path_count = 0;
+    g_hx_vtcm.ffn_ddr_path_count = 0;
 
     /* V4 Stage 2: allocate per-layer per-attention-tensor rsum tables (DDR).
      * Compute at memcpy time (Stage 1 already touched every byte; rsum is
@@ -845,14 +903,46 @@ static int hx_vtcm_init(const sp_hex_cfg *cfg) {
     g_hx_vtcm.rsum_attn_n_layers = n_layers;
     g_hx_vtcm.rsum_attn_stride = stride;
 
-    FARF(RUNTIME_HIGH, "sp_hex V4: VTCM allocated base=%p size=%u "
-                       "WQ@%u(%u) WK@%u(%u) WV@%u(%u) WO@%u(%u) rsum_attn=%zu B",
+    /* V5 Stage 1: per-layer per-FFN-tensor rsum table. Same pattern as rsum_attn
+     * but with FFN-stride (WGATE + WUP + WDOWN) and a 3-wide layer_ready array
+     * (one bool per (layer, FFN-tensor) pair) since FFN tensors are populated
+     * INDEPENDENTLY in the tile-streaming kernel (we touch each FFN tensor's
+     * bytes only when its first matmul invocation arrives, NOT in a single
+     * layer-entry memcpy like attention). */
+    uint32_t ffn_stride = hx_vtcm_rsum_ffn_stride(cfg);
+    size_t   ffn_rsum_bytes = (size_t)n_layers * ffn_stride * sizeof(int32_t);
+    g_hx_vtcm.rsum_ffn = (int32_t *)malloc(ffn_rsum_bytes);
+    g_hx_vtcm.rsum_ffn_layer_ready = (uint8_t *)malloc((size_t)n_layers * 3u);
+    if (!g_hx_vtcm.rsum_ffn || !g_hx_vtcm.rsum_ffn_layer_ready) {
+        FARF(ERROR, "sp_hex V5: rsum_ffn malloc FAILED (rsum_ffn=%p ready=%p sz=%zu)",
+             g_hx_vtcm.rsum_ffn, g_hx_vtcm.rsum_ffn_layer_ready, ffn_rsum_bytes);
+        if (g_hx_vtcm.rsum_ffn)              free(g_hx_vtcm.rsum_ffn);
+        if (g_hx_vtcm.rsum_ffn_layer_ready)  free(g_hx_vtcm.rsum_ffn_layer_ready);
+        g_hx_vtcm.rsum_ffn = NULL;
+        g_hx_vtcm.rsum_ffn_layer_ready = NULL;
+        free(g_hx_vtcm.rsum_attn);
+        free(g_hx_vtcm.rsum_attn_layer_ready);
+        g_hx_vtcm.rsum_attn = NULL;
+        g_hx_vtcm.rsum_attn_layer_ready = NULL;
+        HAP_release_VTCM(p);
+        g_hx_vtcm.vtcm_base = NULL;
+        g_hx_vtcm.vtcm_size = 0u;
+        return -1;
+    }
+    memset(g_hx_vtcm.rsum_ffn_layer_ready, 0, (size_t)n_layers * 3u);
+    g_hx_vtcm.rsum_ffn_stride = ffn_stride;
+
+    FARF(RUNTIME_HIGH, "sp_hex V5: VTCM allocated base=%p size=%u "
+                       "WQ@%u(%u) WK@%u(%u) WV@%u(%u) WO@%u(%u) "
+                       "tile_a@%u tile_b@%u tile_bytes=%u "
+                       "rsum_attn=%zu B rsum_ffn=%zu B",
          p, bytes,
          g_hx_vtcm.off_wq, g_hx_vtcm.bytes_wq,
          g_hx_vtcm.off_wk, g_hx_vtcm.bytes_wk,
          g_hx_vtcm.off_wv, g_hx_vtcm.bytes_wv,
          g_hx_vtcm.off_wo, g_hx_vtcm.bytes_wo,
-         rsum_bytes);
+         g_hx_vtcm.tile_a_off, g_hx_vtcm.tile_b_off, g_hx_vtcm.tile_bytes,
+         rsum_bytes, ffn_rsum_bytes);
     return 0;
 }
 
@@ -940,10 +1030,12 @@ static const int32_t *hx_vtcm_rsum_for(int L, uint32_t off) {
 /* Release VTCM on session close. Called from sp_hex_close. */
 static void hx_vtcm_release(void) {
     if (g_hx_vtcm.vtcm_base) {
-        FARF(RUNTIME_HIGH, "sp_hex V4: VTCM release base=%p size=%u "
-                           "(usage: vtcm_matmul=%d ddr_fallback=%d)",
+        FARF(RUNTIME_HIGH, "sp_hex V5: VTCM release base=%p size=%u "
+                           "(attn: vtcm_matmul=%d ddr_fallback=%d) "
+                           "(ffn: vtcm_tiled=%d ddr_fallback=%d)",
              g_hx_vtcm.vtcm_base, g_hx_vtcm.vtcm_size,
-             g_hx_vtcm.vtcm_path_count, g_hx_vtcm.ddr_path_count);
+             g_hx_vtcm.vtcm_path_count, g_hx_vtcm.ddr_path_count,
+             g_hx_vtcm.ffn_path_count, g_hx_vtcm.ffn_ddr_path_count);
         HAP_release_VTCM(g_hx_vtcm.vtcm_base);
         g_hx_vtcm.vtcm_base = NULL;
         g_hx_vtcm.vtcm_size = 0u;
@@ -956,6 +1048,21 @@ static void hx_vtcm_release(void) {
         free(g_hx_vtcm.rsum_attn_layer_ready);
         g_hx_vtcm.rsum_attn_layer_ready = NULL;
     }
+    /* V5 FFN rsum tables. */
+    if (g_hx_vtcm.rsum_ffn) {
+        free(g_hx_vtcm.rsum_ffn);
+        g_hx_vtcm.rsum_ffn = NULL;
+    }
+    if (g_hx_vtcm.rsum_ffn_layer_ready) {
+        free(g_hx_vtcm.rsum_ffn_layer_ready);
+        g_hx_vtcm.rsum_ffn_layer_ready = NULL;
+    }
+    g_hx_vtcm.rsum_ffn_stride = 0u;
+    g_hx_vtcm.tile_a_off = 0u;
+    g_hx_vtcm.tile_b_off = 0u;
+    g_hx_vtcm.tile_bytes = 0u;
+    g_hx_vtcm.ffn_path_count = 0;
+    g_hx_vtcm.ffn_ddr_path_count = 0;
     g_hx_vtcm.rsum_attn_n_layers = 0u;
     g_hx_vtcm.rsum_attn_stride = 0u;
     g_hx_vtcm.cached_layer = -1;
