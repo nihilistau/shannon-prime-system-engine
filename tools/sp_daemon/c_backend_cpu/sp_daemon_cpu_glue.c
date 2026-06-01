@@ -34,13 +34,19 @@
 
 /* Forward declarations of the renamed engine entry points. The CMake build
  * compiles cpu_gemma3.c / cpu_forward.c with these -D defines so their
- * definitions land under these names: */
+ * definitions land under these names.
+ *
+ * NOTE: engine cpu sources only export qwen3_forward (handles Qwen3) +
+ * gemma3_forward (handles Gemma3). There is no qwen25_forward in the engine
+ * CPU backend (cpu_forward.c grep confirmed empty for "qwen25"). Stage 2
+ * verification 2026-06-01: removed the qwen25 branch from the arch switch
+ * below; SP_ARCH_QWEN25 routes through the engine's qwen3_forward path
+ * (which handles the Qwen2.5 family via runtime config differences, NOT a
+ * separate forward TU). Matches WIRE-HEX glue's two-arch routing. */
 extern int gemma3_forward_cpu_impl(const qwen3_model *m, const int32_t *tokens,
                                     int n_tok, float *logits);
 extern int qwen3_forward_cpu_impl(const qwen3_model *m, const int32_t *tokens,
                                    int n_tok, float *logits);
-extern int qwen25_forward_cpu_impl(const qwen3_model *m, const int32_t *tokens,
-                                    int n_tok, float *logits);
 
 /* Public "_cpu"-suffixed entries: simple delegations. Keep them as wrappers
  * (not pure aliases) so future per-arch instrumentation can land here without
@@ -63,11 +69,12 @@ typedef int (*sp_forward_dispatch_fn_t)(
     const int32_t *tokens, int n_tok, float *logits);
 
 /* L1 §6 dispatcher. Arch-routes on m->cfg.arch.
- *   - SP_ARCH_GEMMA3 -> gemma3_forward_cpu
- *   - SP_ARCH_QWEN3  -> qwen3_forward_cpu
- *   - SP_ARCH_QWEN25 -> qwen25_forward_cpu_impl  (the engine CPU TU still
- *                       handles qwen25 in cpu_forward.c's shared body)
- *   - other          -> 1 (error; sp_prefill_chunk maps non-zero to SP_EBADSTATE) */
+ *   - SP_ARCH_GEMMA3              -> gemma3_forward_cpu_impl
+ *   - SP_ARCH_QWEN3 / SP_ARCH_QWEN25 -> qwen3_forward_cpu_impl (engine cpu_forward.c
+ *                                       handles both Qwen3 and Qwen2.5 via runtime
+ *                                       config; there is no separate qwen25_forward
+ *                                       TU in src/backends/cpu/)
+ *   - other -> 1 (error; sp_prefill_chunk maps non-zero to SP_EBADSTATE) */
 int sp_daemon_cpu_forward(void *handle,
                           const void *qm_opaque,
                           const int32_t *tokens,
@@ -78,8 +85,8 @@ int sp_daemon_cpu_forward(void *handle,
     if (!qm) return 1;
     switch (qm->cfg.arch) {
         case SP_ARCH_GEMMA3:  return gemma3_forward_cpu_impl(qm, tokens, n_tok, logits);
-        case SP_ARCH_QWEN3:   return qwen3_forward_cpu_impl(qm, tokens, n_tok, logits);
-        case SP_ARCH_QWEN25:  return qwen25_forward_cpu_impl(qm, tokens, n_tok, logits);
+        case SP_ARCH_QWEN3:   /* fall-through */
+        case SP_ARCH_QWEN25:  return qwen3_forward_cpu_impl(qm, tokens, n_tok, logits);
         default:              return 1;
     }
 }

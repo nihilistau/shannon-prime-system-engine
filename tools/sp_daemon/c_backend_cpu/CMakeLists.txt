@@ -52,7 +52,6 @@ set(SP_CPU_RENAMES
     -Dgemma3_forward=gemma3_forward_cpu_impl
     -Dqwen3_forward=qwen3_forward_cpu_impl
     -Dqwen3_forward_ex=qwen3_forward_ex_cpu_impl
-    -Dqwen25_forward=qwen25_forward_cpu_impl
     -Dqwen3_generate=qwen3_generate_cpu_impl
     -Dqwen3_generate_kv=qwen3_generate_kv_cpu_impl
     -Dsp_kernels_read_env=sp_cpu_kernels_read_env
