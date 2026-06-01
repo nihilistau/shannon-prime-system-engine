@@ -1891,19 +1891,21 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
           for (int t = 0; t < n_tok; t++)
               hx_rmsnorm(resid + (size_t)t * E, fn, E, eps, nx + (size_t)t * E); }
 #ifdef __HVX__
-        /* V5 Stage 3: WGATE through tiled VTCM ping-pong path; WUP still V3 DDR
-         * (Stage 4 will extend to all 3 FFN matmuls after Stage 3 bit-exact
-         * decode verification). */
+        /* V5 Stage 4: ALL 3 FFN matmuls (WGATE/WUP/WDOWN) through tiled VTCM
+         * ping-pong path. Per-(layer,kind) rsum_ffn lazily populated; tile
+         * slots A+B alternated within each matmul (shared D-B per PLAN-V5). */
         hx_matmul_q8_vrmpy_dispatch_ffn(L, HX_FFN_WGATE, WPTR(SP_HEX_WGATE),
                                         FF, E, nx, n_tok, g);                  /* V5 WGATE tiled */
-        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* V3: WUP dual-HVX-context */
+        hx_matmul_q8_vrmpy_dispatch_ffn(L, HX_FFN_WUP,   WPTR(SP_HEX_WUP),
+                                        FF, E, nx, n_tok, up);                 /* V5 WUP tiled */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);
         hx_matmul_q8(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up);
 #endif
         for (size_t i = 0; i < (size_t)n_tok * FF; i++) g[i] = hx_gelu_tanh(g[i]) * up[i];
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);  /* V3: WDOWN dual-HVX-context */
+        hx_matmul_q8_vrmpy_dispatch_ffn(L, HX_FFN_WDOWN, WPTR(SP_HEX_WDOWN),
+                                        E, FF, g, n_tok, dn);                  /* V5 WDOWN tiled */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WDOWN), E, FF, g, n_tok, dn);
 #endif
