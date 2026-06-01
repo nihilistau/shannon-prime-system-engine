@@ -1,0 +1,28 @@
+06-01 19:15:14.144 26856 26867 V adsprpc : platform_qdi_stub.c:478:0xf64:775: Set loading vote for libsp_hex_skel.so
+06-01 19:15:14.144 26856 26865 I sp-daemon-wire-hex: vendor/qcom/proprietary/adsprpc/src/apps_std_imp.c:880: Successfully opened file libsp_hex_skel.so
+06-01 19:15:14.147 26856 26867 V adsprpc : mod_table.c:644:0xf64:775: open_mod_table_open_dynamic: Module sp_hex_skel_handle_invoke opened with handle 0xeb8f30
+06-01 19:15:14.147 26856 26867 V adsprpc : platform_qdi_stub.c:516:0xf64:775: Reset loading vote for sp_hex_skel_handle_invoke
+06-01 19:15:14.148 26856 26922 I sp-daemon-wire-hex: vendor/qcom/proprietary/adsprpc/src/fastrpc_apps_user.c:1493: remote_handle64_open: Successfully opened handle 0x32e0c6d0 for file:///libsp_hex_skel.so?sp_hex_skel_handle_invoke&_modver=1.0&_dom=cdsp on domain 3
+06-01 19:15:21.380 26856 26867 V adsprpc : D:\F\shannon-prime-repos\engine-hx-3b\src\backends\hexagon\dsp\sp_hex_imp.c:517:0xf64:775: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:16:22.156 26856 26867 V adsprpc : D:\F\shannon-prime-repos\engine-hx-3b\src\backends\hexagon\dsp\sp_hex_imp.c:517:0x1364:775: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:17:09.491 26856 26867 V adsprpc : D:\F\shannon-prime-repos\engine-hx-3b\src\backends\hexagon\dsp\sp_hex_imp.c:517:0x1364:775: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:17:56.537 26856 26867 V adsprpc : D:\F\shannon-prime-repos\engine-hx-3b\src\backends\hexagon\dsp\sp_hex_imp.c:517:0x1364:775: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:19:34.711 28045 28055 V adsprpc : platform_qdi_stub.c:478:0x1764:903: Set loading vote for libsp_hex_skel.so
+06-01 19:19:34.711 28045 28053 I sp-daemon-wire-hex: vendor/qcom/proprietary/adsprpc/src/apps_std_imp.c:880: Successfully opened file libsp_hex_skel.so
+06-01 19:19:34.719 28045 28055 V adsprpc : mod_table.c:644:0x1764:903: open_mod_table_open_dynamic: Module sp_hex_skel_handle_invoke opened with handle 0xeb4cd0
+06-01 19:19:34.719 28045 28055 V adsprpc : platform_qdi_stub.c:516:0x1764:903: Reset loading vote for sp_hex_skel_handle_invoke
+06-01 19:19:34.720 28045 28133 I sp-daemon-wire-hex: vendor/qcom/proprietary/adsprpc/src/fastrpc_apps_user.c:1493: remote_handle64_open: Successfully opened handle 0x45d64790 for file:///libsp_hex_skel.so?sp_hex_skel_handle_invoke&_modver=1.0&_dom=cdsp on domain 3
+06-01 19:19:34.896 28045 28055 V adsprpc : sysmon_vtcm_mgr_client.c:505:0x1764:903: HAP_query_total_VTCM: page_size: 8388608, page_count: 1, result 0
+06-01 19:19:34.896 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:785:0x1764:903: sp_hex V4: VTCM total page_size=8388608 page_count=1 total=8388608
+06-01 19:19:34.896 28045 28055 V adsprpc : sysmon_vtcm_mgr_client.c:587:0x1764:903: HAP_query_avail_VTCM: avail_block_size: 8388608,max_page_size: 8388608,num_pages: 1,result 0
+06-01 19:19:34.896 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:790:0x1764:903: sp_hex V4: VTCM avail block=8388608 max_page=8388608 num_pages=1
+06-01 19:19:34.896 28045 28055 V adsprpc : sysmon_vtcm_mgr_client.c:148:0x1764:903: HAP_request_VTCM: threadID: 5988, priority: 192, result: 0, size: 2959872,single_page_flag: 0 
+06-01 19:19:34.896 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:855:0x1764:903: sp_hex V4: VTCM allocated base=FF000000 size=2959872 WQ@0(1183744) WK@1183744(295936) WV@1479680(295936) WO@1775616(1184256) rsum_attn=279552 B
+06-01 19:19:34.912 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:594:0x1764:903: sp_hex V3: worker pool initialized (tid=10085)
+06-01 19:19:34.913 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:531:0x2765:903: sp_hex V3: worker thread started, qurt_hvx_lock OK
+06-01 19:19:34.915 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:1030:0x1764:903: sp_hex V4: dual_ctx_vtcm matmul out=1024 in=1152 n_tok=16 worker_pcyc=2521950 handler_pcyc=2546253 m_half=512 blk_vtcm=FF000000
+06-01 19:19:35.031 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:673:0x1764:903: sp_hex V3: dual_ctx matmul out=6912 in=1152 n_tok=16 worker_pcyc=55705021 handler_pcyc=55703965 m_half=3456
+06-01 19:19:42.195 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:1355:0x1764:903: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:20:54.740 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:1355:0x1b64:903: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:21:43.359 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:1355:0x1f64:903: sp_hex: forward n_tok=16 n_layers=26 done
+06-01 19:22:30.677 28045 28055 V adsprpc : D:\F\shannon-prime-repos\engine-trick-1-fwd-v4\src\backends\hexagon\dsp\sp_hex_imp.c:1355:0x2364:903: sp_hex: forward n_tok=16 n_layers=26 done
