@@ -42,70 +42,85 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Engine root = three levels up from this CMakeLists (tools/sp_daemon/c_backend/).
 get_filename_component(ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 
-# ── Hexagon SDK paths (mirrors src/backends/hexagon/CMakeLists.txt:32-36) ──
-if(NOT DEFINED ENV{HEXAGON_SDK_ROOT})
-    message(FATAL_ERROR "HEXAGON_SDK_ROOT not set — source env-hexagon.bat or pass -DHEXAGON_SDK_ROOT=...")
+# Sprint WIRE-VULKAN (2026-06-02 Stage 1 follow-up): the hex backend was the
+# original purpose of this CMakeLists. WIRE-VULKAN added a second STATIC
+# target gated by SP_DAEMON_BUILD_VULKAN_BACKEND. To let the host Vulkan
+# build path operate without the Hexagon SDK installed (the operator runs
+# build-host-vulkan-backend.bat on a Windows + Vulkan-SDK host without
+# HEXAGON_SDK_ROOT set), we also gate the hex block. Default = ON so the
+# existing WIRE-HEX build flow (build-android-hex-backend.bat) is byte-for-
+# byte unchanged. build-host-vulkan-backend.bat passes
+# -DSP_DAEMON_BUILD_HEX_BACKEND=OFF to skip the Hexagon SDK probe.
+option(SP_DAEMON_BUILD_HEX_BACKEND
+    "Build sp_hex_daemon_backend (aarch64-android Hexagon V69 backend daemon-link variant)"
+    ON)
+
+if(SP_DAEMON_BUILD_HEX_BACKEND)
+    # ── Hexagon SDK paths (mirrors src/backends/hexagon/CMakeLists.txt:32-36) ──
+    if(NOT DEFINED ENV{HEXAGON_SDK_ROOT})
+        message(FATAL_ERROR "HEXAGON_SDK_ROOT not set — source env-hexagon.bat or pass -DHEXAGON_SDK_ROOT=... (or -DSP_DAEMON_BUILD_HEX_BACKEND=OFF if building only the Vulkan/CPU/etc. variant)")
+    endif()
+    set(HEXSDK $ENV{HEXAGON_SDK_ROOT})
+
+    set(SP_HEX_RPCMEM_INC  "${HEXSDK}/ipc/fastrpc/rpcmem/inc")
+    set(SP_HEX_STDDEF_INC  "${HEXSDK}/incs/stddef")
+    set(SP_HEX_FASTRPC_INC "${HEXSDK}/incs")
+    set(SP_HEX_RPCMEM_LIB  "${HEXSDK}/ipc/fastrpc/rpcmem/prebuilt/android_aarch64/rpcmem.a")
+    set(SP_HEX_CDSPRPC_LIB "${HEXSDK}/ipc/fastrpc/remote/ship/android_aarch64/libcdsprpc.so")
+
+    # ── qaic codegen for sp_hex.idl → host stub + header ──
+    set(SP_HEX_IDL  "${ENGINE_ROOT}/src/backends/hexagon/inc/sp_hex.idl")
+    set(SP_HEX_GEN  "${CMAKE_CURRENT_BINARY_DIR}/idl_gen")
+    set(SP_HEX_QAIC "${HEXSDK}/ipc/fastrpc/qaic/WinNT/qaic.exe")
+    file(MAKE_DIRECTORY ${SP_HEX_GEN})
+
+    add_custom_command(
+        OUTPUT ${SP_HEX_GEN}/sp_hex.h ${SP_HEX_GEN}/sp_hex_stub.c ${SP_HEX_GEN}/sp_hex_skel.c
+        COMMAND "${SP_HEX_QAIC}" -mdll -o ${SP_HEX_GEN}
+                -I${HEXSDK}/incs/ -I${HEXSDK}/incs/stddef/ ${SP_HEX_IDL}
+        DEPENDS ${SP_HEX_IDL}
+        COMMENT "qaic sp_hex.idl -> host stub + header (daemon)"
+        VERBATIM)
+    add_custom_target(sp_hex_daemon_idl
+        DEPENDS ${SP_HEX_GEN}/sp_hex.h ${SP_HEX_GEN}/sp_hex_stub.c)
+
+    # ── The static library the daemon links ──
+    add_library(sp_hex_daemon_backend STATIC
+        ${ENGINE_ROOT}/src/backends/hexagon/sp_hex_host.c
+        # cpu_overlay.c omitted — math-core's libsp_forward_dispatch.a already
+        # exports sp_kernels_read_env + qwen3_q4_stats; the engine-name kernel
+        # surface (matmul/embed_row/as_f32) is shimmed in sp_daemon_hex_glue.c.
+        ${SP_HEX_GEN}/sp_hex_stub.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/sp_daemon_hex_glue.c
+    )
+    add_dependencies(sp_hex_daemon_backend sp_hex_daemon_idl)
+
+    target_include_directories(sp_hex_daemon_backend PUBLIC
+        ${ENGINE_ROOT}/include
+        ${ENGINE_ROOT}/lib/shannon-prime-system/include
+        ${ENGINE_ROOT}/src/backends/hexagon
+        ${SP_HEX_GEN}
+        ${SP_HEX_RPCMEM_INC}
+        ${SP_HEX_STDDEF_INC}
+        ${SP_HEX_FASTRPC_INC}
+    )
+
+    # cpu_overlay was conditionally AVX-gated in its production build; for the daemon
+    # backend we deliberately turn it OFF (sp_hex_host pushes the compute to the
+    # cDSP; the host side only needs portable C). Mirrors build-hexagon.bat:40 which
+    # passes -DSP_ENGINE_WITH_AVX2=OFF for the on-phone test_ppl variant.
+    target_compile_definitions(sp_hex_daemon_backend PRIVATE
+        SP_ENGINE_WITH_HEXAGON=1
+    )
+
+    # The daemon links cdsprpc + rpcmem at the binary level (build.rs cargo:rustc-link-lib).
+    # We just need them on the include path for the stub TU; the static lib is
+    # unresolved-symbol clean apart from these (resolved at sp-daemon link time).
+
+    message(STATUS "sp_hex_daemon_backend: hexagon V69 backend, daemon-link variant")
+    message(STATUS "  sources: sp_hex_host.c + cpu_overlay.c + qaic stub + glue")
+    message(STATUS "  output:  ${CMAKE_CURRENT_BINARY_DIR}/libsp_hex_daemon_backend.a")
 endif()
-set(HEXSDK $ENV{HEXAGON_SDK_ROOT})
-
-set(SP_HEX_RPCMEM_INC  "${HEXSDK}/ipc/fastrpc/rpcmem/inc")
-set(SP_HEX_STDDEF_INC  "${HEXSDK}/incs/stddef")
-set(SP_HEX_FASTRPC_INC "${HEXSDK}/incs")
-set(SP_HEX_RPCMEM_LIB  "${HEXSDK}/ipc/fastrpc/rpcmem/prebuilt/android_aarch64/rpcmem.a")
-set(SP_HEX_CDSPRPC_LIB "${HEXSDK}/ipc/fastrpc/remote/ship/android_aarch64/libcdsprpc.so")
-
-# ── qaic codegen for sp_hex.idl → host stub + header ──
-set(SP_HEX_IDL  "${ENGINE_ROOT}/src/backends/hexagon/inc/sp_hex.idl")
-set(SP_HEX_GEN  "${CMAKE_CURRENT_BINARY_DIR}/idl_gen")
-set(SP_HEX_QAIC "${HEXSDK}/ipc/fastrpc/qaic/WinNT/qaic.exe")
-file(MAKE_DIRECTORY ${SP_HEX_GEN})
-
-add_custom_command(
-    OUTPUT ${SP_HEX_GEN}/sp_hex.h ${SP_HEX_GEN}/sp_hex_stub.c ${SP_HEX_GEN}/sp_hex_skel.c
-    COMMAND "${SP_HEX_QAIC}" -mdll -o ${SP_HEX_GEN}
-            -I${HEXSDK}/incs/ -I${HEXSDK}/incs/stddef/ ${SP_HEX_IDL}
-    DEPENDS ${SP_HEX_IDL}
-    COMMENT "qaic sp_hex.idl -> host stub + header (daemon)"
-    VERBATIM)
-add_custom_target(sp_hex_daemon_idl
-    DEPENDS ${SP_HEX_GEN}/sp_hex.h ${SP_HEX_GEN}/sp_hex_stub.c)
-
-# ── The static library the daemon links ──
-add_library(sp_hex_daemon_backend STATIC
-    ${ENGINE_ROOT}/src/backends/hexagon/sp_hex_host.c
-    # cpu_overlay.c omitted — math-core's libsp_forward_dispatch.a already
-    # exports sp_kernels_read_env + qwen3_q4_stats; the engine-name kernel
-    # surface (matmul/embed_row/as_f32) is shimmed in sp_daemon_hex_glue.c.
-    ${SP_HEX_GEN}/sp_hex_stub.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/sp_daemon_hex_glue.c
-)
-add_dependencies(sp_hex_daemon_backend sp_hex_daemon_idl)
-
-target_include_directories(sp_hex_daemon_backend PUBLIC
-    ${ENGINE_ROOT}/include
-    ${ENGINE_ROOT}/lib/shannon-prime-system/include
-    ${ENGINE_ROOT}/src/backends/hexagon
-    ${SP_HEX_GEN}
-    ${SP_HEX_RPCMEM_INC}
-    ${SP_HEX_STDDEF_INC}
-    ${SP_HEX_FASTRPC_INC}
-)
-
-# cpu_overlay was conditionally AVX-gated in its production build; for the daemon
-# backend we deliberately turn it OFF (sp_hex_host pushes the compute to the
-# cDSP; the host side only needs portable C). Mirrors build-hexagon.bat:40 which
-# passes -DSP_ENGINE_WITH_AVX2=OFF for the on-phone test_ppl variant.
-target_compile_definitions(sp_hex_daemon_backend PRIVATE
-    SP_ENGINE_WITH_HEXAGON=1
-)
-
-# The daemon links cdsprpc + rpcmem at the binary level (build.rs cargo:rustc-link-lib).
-# We just need them on the include path for the stub TU; the static lib is
-# unresolved-symbol clean apart from these (resolved at sp-daemon link time).
-
-message(STATUS "sp_hex_daemon_backend: hexagon V69 backend, daemon-link variant")
-message(STATUS "  sources: sp_hex_host.c + cpu_overlay.c + qaic stub + glue")
-message(STATUS "  output:  ${CMAKE_CURRENT_BINARY_DIR}/libsp_hex_daemon_backend.a")
 
 # ============================================================================
 # Sprint WIRE-VULKAN — daemon-linkable Vulkan compute backend static library.

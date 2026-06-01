@@ -34,8 +34,13 @@ if not exist "%VULKAN_SDK%\Bin\glslc.exe" (
 
 set "BUILD_DIR=%ENGINE%\build-host-vulkan-backend"
 
+REM SP_DAEMON_BUILD_HEX_BACKEND=OFF skips the Hexagon SDK probe at the top of
+REM tools/sp_daemon/c_backend/CMakeLists.txt — the host Vulkan-only build path
+REM doesn't need HEXAGON_SDK_ROOT (cross-compile to aarch64-android is a
+REM different toolchain via build-android-hex-backend.bat).
 cmake -S "%ENGINE%\tools\sp_daemon\c_backend" -B "%BUILD_DIR%" -G Ninja ^
   -DCMAKE_BUILD_TYPE=Release ^
+  -DSP_DAEMON_BUILD_HEX_BACKEND=OFF ^
   -DSP_DAEMON_BUILD_VULKAN_BACKEND=ON || exit /b 1
 
 cmake --build "%BUILD_DIR%" --config Release || exit /b 1
