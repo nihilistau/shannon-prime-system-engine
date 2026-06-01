@@ -457,6 +457,27 @@ typedef struct {
     const int32_t       *rsum;    /* cached weight-row-sum for bias-128 correction */
 } hx_matmul_desc_t;
 
+/* V5 — tile-aware half-matmul descriptor (lives in pool so worker can dispatch
+ * via job_kind tag without an extra global). Set by hx_matmul_q8_vrmpy_dual_ctx_v5_tile
+ * before each per-tile seqno bump; read by the worker on the V5 branch. */
+typedef struct {
+    const unsigned char *blk_tile;     /* VTCM tile slot ptr */
+    int                  tile_row_base;
+    int                  tile_rows;
+    int                  out_total;
+    int                  in_dim;
+    const float         *X;
+    int                  n_tok;
+    float               *Y;
+    const float         *scales_full;
+    const int32_t       *rsum_full;
+    int                  j_start;      /* worker range — tile-local */
+    int                  j_end;
+} hx_matmul_tile_desc_t;
+
+/* V5 job-kind tag — worker uses to select kernel. */
+typedef enum { HX_JOB_NONE = 0, HX_JOB_V3_HALF = 1, HX_JOB_V5_TILE_HALF = 2 } hx_job_kind_t;
+
 /* Worker pool: single worker thread + main handler thread = 2 HVX clients = 2 SSR:XA contexts. */
 typedef struct {
     int                init_done;   /* 1 after qurt_thread_create succeeded; 0 = use single-ctx fallback */
@@ -466,7 +487,9 @@ typedef struct {
     atomic_uint        seqn;        /* producer increments; worker waits on this */
     atomic_uint        done;        /* worker increments on completion; handler waits */
     atomic_uint        killed;      /* 1 = worker should exit */
-    hx_matmul_desc_t   desc;        /* current job descriptor */
+    atomic_uint        job_kind;    /* V5: hx_job_kind_t — selects worker kernel */
+    hx_matmul_desc_t   desc;        /* V3 job descriptor (job_kind=HX_JOB_V3_HALF) */
+    hx_matmul_tile_desc_t tile_desc; /* V5 tile-aware desc (job_kind=HX_JOB_V5_TILE_HALF) */
     hx_worker_local_t  worker_local;  /* worker's per-thread buffer + pcycles */
     hx_worker_local_t  handler_local; /* handler's per-thread buffer + pcycles */
 } hx_worker_pool_t;
@@ -511,6 +534,18 @@ static void hx_matmul_q8_vrmpy_half(const unsigned char *blk, int out, int in_di
     }
 }
 
+/* V5 forward decl — tile-aware half-kernel, defined below alongside the V5
+ * UDMA primitive + dispatch. The worker thread dispatches on g_hx_pool.job_kind
+ * to either this or the V3 hx_matmul_q8_vrmpy_half. */
+static void hx_matmul_q8_vrmpy_half_tile(const unsigned char *blk_tile,
+                                         int tile_row_base, int tile_rows,
+                                         int out_total, int in_dim,
+                                         const float *X, int n_tok, float *Y,
+                                         const float *scales_full,
+                                         const int32_t *rsum_full,
+                                         int j_start, int j_end,
+                                         unsigned char *act_ub);
+
 /* Worker thread entry. Acquires its own HVX context (separate SSR:XA from
  * handler), spins waiting for job-seqno bumps, processes its half of each
  * matmul, signals done. */
@@ -540,13 +575,26 @@ static void hx_worker_main(void *arg) {
         prev_seqn = seqn;
         if (atomic_load(&g_hx_pool.killed)) break;
 
-        /* Execute our half of the matmul. */
-        const hx_matmul_desc_t *d = &g_hx_pool.desc;
+        /* Execute our half of the matmul. V5: dispatch on job_kind.
+         * Default (V3 path) is HX_JOB_V3_HALF — kept first for fast-path. */
+        unsigned int jk = atomic_load(&g_hx_pool.job_kind);
         g_hx_pool.worker_local.pcyc_start = HAP_perf_get_pcycles();
-        hx_matmul_q8_vrmpy_half(d->blk, d->out, d->in_dim,
-                                d->X, d->n_tok, d->Y, d->rsum,
-                                0, d->m_half,
-                                g_hx_pool.worker_local.act_ub);
+        if (jk == HX_JOB_V5_TILE_HALF) {
+            const hx_matmul_tile_desc_t *td = &g_hx_pool.tile_desc;
+            hx_matmul_q8_vrmpy_half_tile(td->blk_tile, td->tile_row_base, td->tile_rows,
+                                         td->out_total, td->in_dim,
+                                         td->X, td->n_tok, td->Y,
+                                         td->scales_full, td->rsum_full,
+                                         td->j_start, td->j_end,
+                                         g_hx_pool.worker_local.act_ub);
+        } else {
+            /* HX_JOB_V3_HALF (default) — handles V3/V4 dispatch unchanged. */
+            const hx_matmul_desc_t *d = &g_hx_pool.desc;
+            hx_matmul_q8_vrmpy_half(d->blk, d->out, d->in_dim,
+                                    d->X, d->n_tok, d->Y, d->rsum,
+                                    0, d->m_half,
+                                    g_hx_pool.worker_local.act_ub);
+        }
         g_hx_pool.worker_local.pcyc_end = HAP_perf_get_pcycles();
 
         atomic_fetch_add(&g_hx_pool.done, 1);
@@ -642,6 +690,7 @@ static int hx_matmul_q8_vrmpy_dual_ctx(const unsigned char *blk, int out, int in
     g_hx_pool.desc.n_tok   = n_tok;
     g_hx_pool.desc.Y       = Y;
     g_hx_pool.desc.rsum    = rsum;
+    atomic_store(&g_hx_pool.job_kind, HX_JOB_V3_HALF);  /* V5: tag dispatch kind */
 
     /* Reset done counter, bump seqno, wake worker. */
     atomic_store(&g_hx_pool.done, 0);
@@ -1110,6 +1159,7 @@ static int hx_matmul_q8_vrmpy_dual_ctx_v4(const unsigned char *blk_vtcm, int out
     g_hx_pool.desc.n_tok   = n_tok;
     g_hx_pool.desc.Y       = Y;
     g_hx_pool.desc.rsum    = rsum;       /* per-layer rsum from rsum_attn */
+    atomic_store(&g_hx_pool.job_kind, HX_JOB_V3_HALF);  /* V5: tag dispatch kind (worker runs V3 half-kernel) */
 
     atomic_store(&g_hx_pool.done, 0);
     atomic_fetch_add(&g_hx_pool.seqn, 1);
@@ -1160,6 +1210,151 @@ static int hx_matmul_q8_vrmpy_dispatch(const unsigned char *blk_ddr,
     }
     g_hx_vtcm.ddr_path_count++;
     return hx_matmul_q8_vrmpy_dual_ctx(blk_ddr, out, in_dim, X, n_tok, Y);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * V5 (TRICK-1-FORWARD-V5): UDMA-driven FFN tile-streaming.
+ *
+ * The V69 user-DMA engine moves bytes between DDR and VTCM independently of
+ * HVX, allowing DMA prefetch of tile N+1 to overlap with HVX compute on tile
+ * N. See Hexagon V69 PRM §"User DMA"; intrinsics in <hexagon_protos.h>:
+ *   - Q6_dmstart_A(desc)   — kick UDMA, builtin_HEXAGON_Y6_dmstart, descriptor VA
+ *   - Q6_R_dmwait()        — block until current queue completes (DM0 IDLE)
+ *   - Q6_R_dmpoll()        — non-blocking status read
+ *   - Q6_dmlink_AA(tail,nx)— chain new descriptor onto existing queue
+ *   - Q6_R_dmsyncht()      — full barrier (TLB sync + DMA complete)
+ *
+ * V5 uses single-descriptor pattern per prefetch (no chaining): one
+ * type0 linear copy DDR→VTCM, dmstart+dmwait pair. The dmwait is the
+ * memory-visibility barrier: after dmwait returns, VTCM contents are
+ * coherent for HVX vmem reads on the SAME thread; cross-thread visibility
+ * is then propagated via the qurt_futex_wake at handler→worker signal
+ * (futex_wake is a full memory barrier on V69; the worker's vmem reads
+ * happen-after the dmwait).
+ *
+ * Descriptor type0 layout per SDK libnative/include/udma.h (inlined here to
+ * avoid SDK include-path dependency):
+ *   - next:8B — 0 = end of chain
+ *   - length:24 / desctype:2 / dstcomp:1 / srccomp:1 / dstbypass:1 / srcbypass:1 / order:1 / dstate:1
+ *   - src:8B, dst:8B
+ * Total = 24 bytes type0 descriptor. Must be 8-byte aligned.
+ * ──────────────────────────────────────────────────────────────────── */
+
+typedef struct hx_udma_desc_type0_s {
+    void    *next;           /* 0 = end of chain */
+    uint32_t flags;          /* length:24, desctype:2, dstcomp:1, srccomp:1, dstbypass:1, srcbypass:1, order:1, dstate:1 */
+    void    *src;
+    void    *dst;
+} __attribute__((aligned(8))) hx_udma_desc_type0_t;
+
+/* HEXAGON_UDMA_DM0_STATUS_* per udma.h */
+#define HX_UDMA_DM0_IDLE   0x0
+#define HX_UDMA_DM0_RUN    0x1
+#define HX_UDMA_DM0_ERROR  0x2
+
+/* Build the flags word for a type0 linear copy.
+ *   length    : bytes (<= 16M-1)
+ *   desctype  : 0 (type0)
+ *   dstcomp/srccomp : 0 (no DLBC compression)
+ *   dstbypass/srcbypass : 0 (use coherent path for ARM-shared DDR src; VTCM dst is already uncached)
+ *   order     : 0 (no ordering with other descriptors)
+ *   dstate    : 0 initially; engine sets to 1 on completion (we use dmwait anyway)
+ */
+static inline uint32_t hx_udma_flags_type0(uint32_t length_bytes) {
+    return (length_bytes & 0x00FFFFFFu);   /* all other fields = 0 */
+}
+
+/* Per-handler stack-allocated descriptor scratch — 24 bytes, 8-byte aligned.
+ * Each prefetch builds a fresh descriptor; UDMA engine reads it once via
+ * dmstart and we may reuse the slot for the next dmstart only after dmwait
+ * returns (engine completion guarantees descriptor read is finished). */
+
+/* V5 prefetch: kick a single DDR→VTCM linear copy.
+ * Returns immediately after dmstart; CALLER MUST call hx_udma_wait()
+ * before reading the VTCM destination.
+ * Cache-coherency note: DDR src is rpcmem-registered (host already flushed
+ * at registration); UDMA bypass=0 reads through the coherent fabric. VTCM
+ * dst is single-port uncached; no flush needed. */
+static inline void hx_udma_prefetch(hx_udma_desc_type0_t *desc,
+                                    const void *src_ddr, void *dst_vtcm,
+                                    uint32_t length_bytes) {
+    desc->next  = NULL;
+    desc->flags = hx_udma_flags_type0(length_bytes);
+    desc->src   = (void *)src_ddr;
+    desc->dst   = dst_vtcm;
+    /* Issue: tell the engine where the descriptor lives. */
+    Q6_dmstart_A(desc);
+}
+
+/* Block until ALL outstanding UDMA descriptors queued on THIS THREAD's engine
+ * complete. Returns the DM0 status (0 = IDLE; 2 = ERROR). */
+static inline uint32_t hx_udma_wait(void) {
+    return (uint32_t)Q6_R_dmwait();
+}
+
+/* T_V5_DMA_PINGPONG_OBSERVED evidence sample state — populated by stage 5 wrapper. */
+static int      v5_dma_sampled_once __attribute__((unused)) = 0;
+static uint64_t v5_dma_total_pcyc   __attribute__((unused)) = 0;
+static uint64_t v5_dma_compute_pcyc __attribute__((unused)) = 0;
+static int      v5_dma_tile_count   __attribute__((unused)) = 0;
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * V5 tile-aware half-kernel.
+ *
+ * Reads int8 codes from a VTCM tile slot starting at `blk_tile` (no scales
+ * sub-block — scales come from DDR scales array; rsum comes from per-layer
+ * rsum_ffn). Computes Y[t * out + (tile_row_base + j_local)] for j_local in
+ * [j_start, j_end).
+ *
+ * The tile contains rows [tile_row_base, tile_row_base + tile_rows) of the
+ * global output index space. tile_rows = (j_end_max for this tile call).
+ *
+ * Arithmetic is IDENTICAL to hx_matmul_q8_vrmpy_half (V3 silicon-validated):
+ * same vrmpy + bias-128 + hsum + scale reconstruction. Differences vs V3:
+ *   - codes pointer = VTCM tile slot (not DDR weight blob)
+ *   - row stride = in_dim (NOT sp_hex_align(out*in_dim) blob layout — the
+ *     tile is JUST the int8 codes for `tile_rows` rows, contiguous)
+ *   - scales[] array supplied separately (DDR address); indexed by GLOBAL
+ *     output row (tile_row_base + j_local)
+ *   - rsum[] array supplied separately (DDR address); same indexing as scales
+ * ──────────────────────────────────────────────────────────────────── */
+static void hx_matmul_q8_vrmpy_half_tile(const unsigned char *blk_tile,
+                                         int tile_row_base,
+                                         int tile_rows,
+                                         int out_total,
+                                         int in_dim,
+                                         const float *X, int n_tok, float *Y,
+                                         const float *scales_full,
+                                         const int32_t *rsum_full,
+                                         int j_start, int j_end,
+                                         unsigned char *act_ub) {
+    const signed char *codes = (const signed char *)blk_tile;
+    int nb = in_dim & ~127;
+
+    for (int t = 0; t < n_tok; t++) {
+        const float *x = X + (size_t)t * in_dim;
+        float S_act = hx_quant_act_ub(x, in_dim, act_ub);
+        for (int j_local = j_start; j_local < j_end; j_local++) {
+            int j_global = tile_row_base + j_local;
+            const signed char *row = codes + (size_t)j_local * in_dim;
+            HVX_Vector acc_dot = Q6_V_vzero();
+            for (int i = 0; i < nb; i += 128) {
+                HVX_Vector w_v   = *(const HVX_Vector *)(row    + i);
+                HVX_Vector act_v = *(const HVX_Vector *)(act_ub + i);
+                acc_dot = Q6_Vw_vrmpyacc_VwVubVb(acc_dot, act_v, w_v);
+            }
+            int32_t dot_b = hx_hsum_w(acc_dot);
+            for (int i = nb; i < in_dim; i++) {
+                int a = (int)act_ub[i];
+                int w = (int)row[i];
+                dot_b += a * w;
+            }
+            int32_t true_dot = dot_b - 128 * rsum_full[j_global];
+            float y = (float)true_dot * (S_act * scales_full[j_global] / 127.0f);
+            Y[(size_t)t * out_total + j_global] = y;
+            (void)tile_rows; /* suppress unused-parameter warning; reserved for tail-row clamping */
+        }
+    }
 }
 
 #endif /* __HVX__ */
