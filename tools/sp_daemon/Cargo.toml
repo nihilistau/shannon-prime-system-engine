@@ -132,3 +132,11 @@ bindgen = "0.70"
 default = []
 wire_hex_backend = []
 wire_cpu_backend = []
+# `wire_cuda_backend`: links libsp_cuda_daemon_backend.lib (built by
+#   tools/sp_daemon/build-host-cuda-backend.bat) and compiles the
+#   `cuda_forward_dispatch` module. Off by default -- the daemon binary
+#   stays identical to pre-WIRE-CUDA when this feature is unset. Turn ON
+#   via `cargo build --features wire_cuda_backend` after running the bat.
+#   Symmetric to wire_hex_backend (host x86_64 instead of android aarch64;
+#   CUDA::cudart/cublas instead of FastRPC).
+wire_cuda_backend = []

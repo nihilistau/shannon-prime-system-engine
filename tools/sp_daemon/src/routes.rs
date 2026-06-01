@@ -96,6 +96,16 @@ pub(crate) struct BackendCounts {
     /// SP_DAEMON_BACKEND is unset / != "cpu", when the feature was off at
     /// build time, or when registration failed.
     wire_cpu_active: bool,
+    /// Sprint WIRE-CUDA: gemma3_forward_cuda / qwen3_forward_cuda dispatcher
+    /// hit count since process start. > 0 after one prefill when
+    /// SP_DAEMON_BACKEND=cuda is set AND the daemon was built with
+    /// --features wire_cuda_backend. Always 0 on builds without the feature.
+    cuda_forward_count: u64,
+    /// Sprint WIRE-CUDA: whether sp_session_register_forward_backend was
+    /// invoked successfully on the target session at startup. False when
+    /// SP_DAEMON_BACKEND is unset / != "cuda", when the feature was off at
+    /// build time, or when registration failed (see daemon log).
+    wire_cuda_active: bool,
 }
 
 pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json<BackendCounts> {
@@ -121,6 +131,12 @@ pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json
         #[cfg(not(feature = "wire_cpu_backend"))]
         { 0u64 }
     };
+    let cuda_forward_count = {
+        #[cfg(feature = "wire_cuda_backend")]
+        { sp_daemon::cuda_forward_dispatch::dispatch_count() }
+        #[cfg(not(feature = "wire_cuda_backend"))]
+        { 0u64 }
+    };
     Json(BackendCounts {
         hex_forward_count,
         wire_hex_active: state.wire_hex_active,
@@ -128,6 +144,8 @@ pub async fn v1_debug_backend_counts(State(state): State<Arc<AppState>>) -> Json
         ntt_hex_inverse_count,
         cpu_forward_count,
         wire_cpu_active: state.wire_cpu_active,
+        cuda_forward_count,
+        wire_cuda_active: state.wire_cuda_active,
     })
 }
 

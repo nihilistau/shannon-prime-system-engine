@@ -244,4 +244,77 @@ fn main() {
         println!("cargo:rerun-if-env-changed=SP_CPU_BACKEND_DIR");
         println!("cargo:warning=WIRE-CPU: linking sp_cpu_daemon_backend.lib (host CPU AVX2/AVX-512 backend)");
     }
+
+    // ── Sprint WIRE-CUDA: link the daemon-callable CUDA PTX backend ──
+    //
+    // When the `wire_cuda_backend` Cargo feature is on (host x86_64; CUDA is
+    // host-only), link the standalone static lib built by
+    // `tools/sp_daemon/build-host-cuda-backend.bat`:
+    //   build-host-cuda-backend/sp_cuda_daemon_backend.lib  (MSVC)
+    //   build-host-cuda-backend/libsp_cuda_daemon_backend.a (GNU)
+    //
+    // That archive contains:
+    //   - src/backends/cuda/cuda_backend.cu   (device mgmt + error mapping)
+    //   - src/backends/cuda/cuda_forward.cu   (gemma3_forward_cuda + qwen3_forward_cuda)
+    //   - tools/sp_daemon/c_backend_cuda/sp_daemon_cuda_glue.c (the §6 dispatcher)
+    //
+    // Plus CUDA runtime libs (cudart + cublas) discovered via CUDA_PATH.
+    //
+    // Build order: build-host-cuda-backend.bat first (which itself calls the
+    // engine's env-cuda.bat for vcvars64 + CUDA on PATH + SP_CUDA_ARCH), then
+    // `cargo build --features wire_cuda_backend --release`.
+    let wire_cuda = env::var("CARGO_FEATURE_WIRE_CUDA_BACKEND").is_ok();
+    if wire_cuda {
+        let cuda_lib_dir = env::var("SP_CUDA_BACKEND_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| engine_root.join("build-host-cuda-backend"));
+        // MSVC: sp_cuda_daemon_backend.lib (no "lib" prefix).
+        // GNU/Linux: libsp_cuda_daemon_backend.a.
+        let cuda_archive = if target_env == "msvc" {
+            cuda_lib_dir.join("sp_cuda_daemon_backend.lib")
+        } else {
+            cuda_lib_dir.join("libsp_cuda_daemon_backend.a")
+        };
+        if !cuda_archive.exists() {
+            panic!(
+                "WIRE-CUDA: CUDA backend archive not found at {} — run build-host-cuda-backend.bat first",
+                cuda_archive.display()
+            );
+        }
+        println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
+        if target_env == "msvc" {
+            // Match the MSVC pattern used for math-core libs above (absolute path,
+            // bypasses /LIBPATH lookup quirks when the lib doesn't reference any
+            // symbol the host crate uses directly).
+            println!("cargo:rustc-link-arg={}", cuda_archive.display());
+        } else {
+            println!("cargo:rustc-link-lib=static=sp_cuda_daemon_backend");
+        }
+
+        // CUDA runtime libs. CUDA_PATH is set by scripts/env/env-cuda.bat
+        // (NVIDIA's standard env var); fall back to the canonical
+        // SP_PIN_CUDA_ROOT pin used by the engine for build reproducibility.
+        let cuda_root = env::var("CUDA_PATH")
+            .or_else(|_| env::var("SP_PIN_CUDA_ROOT"))
+            .unwrap_or_else(|_| {
+                // Default for VS2019 BT + CUDA 13.2 host build.
+                String::from("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2")
+            });
+        if target_env == "msvc" {
+            println!("cargo:rustc-link-search=native={cuda_root}/lib/x64");
+            println!("cargo:rustc-link-lib=cudart");
+            println!("cargo:rustc-link-lib=cublas");
+            println!("cargo:rustc-link-lib=cublasLt");
+        } else {
+            // Linux: cudart + cublas dylibs from CUDA_PATH/lib64.
+            println!("cargo:rustc-link-search=native={cuda_root}/lib64");
+            println!("cargo:rustc-link-lib=dylib=cudart");
+            println!("cargo:rustc-link-lib=dylib=cublas");
+            println!("cargo:rustc-link-lib=dylib=cublasLt");
+        }
+        println!("cargo:rerun-if-env-changed=SP_CUDA_BACKEND_DIR");
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
+        println!("cargo:rerun-if-env-changed=SP_PIN_CUDA_ROOT");
+        println!("cargo:warning=WIRE-CUDA: linking sp_cuda_daemon_backend + cudart + cublas + cublasLt");
+    }
 }

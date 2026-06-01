@@ -77,6 +77,13 @@ pub struct AppState {
     /// HOST target — works on Windows MSVC + Linux GCC/Clang. Surfaced via
     /// /v1/debug/backend_counts alongside `wire_hex_active`.
     pub wire_cpu_active: bool,
+    /// Sprint WIRE-CUDA — true when the engine's `gemma3_forward_cuda` /
+    /// `qwen3_forward_cuda` dispatcher is registered on `session` for
+    /// sp_prefill_chunk. Toggled by SP_DAEMON_BACKEND=cuda at startup (only
+    /// meaningful when the daemon was built with the `wire_cuda_backend`
+    /// Cargo feature; always false on builds without the feature). Surfaced
+    /// via /v1/debug/backend_counts.
+    pub wire_cuda_active: bool,
     /// Lifetime token counter for rolling tps in /v1/metrics.
     pub tokens_decoded: AtomicU64,
     /// Daemon start time (for tps denominator).
