@@ -106,3 +106,115 @@ target_compile_definitions(sp_hex_daemon_backend PRIVATE
 message(STATUS "sp_hex_daemon_backend: hexagon V69 backend, daemon-link variant")
 message(STATUS "  sources: sp_hex_host.c + cpu_overlay.c + qaic stub + glue")
 message(STATUS "  output:  ${CMAKE_CURRENT_BINARY_DIR}/libsp_hex_daemon_backend.a")
+
+# ============================================================================
+# Sprint WIRE-VULKAN — daemon-linkable Vulkan compute backend static library.
+#
+# Builds `libsp_vulkan_daemon_backend.{a,lib}` for the host toolchain (Windows
+# VS2019 + Vulkan SDK; Linux GCC/Clang + libvulkan). Consumed by sp_daemon's
+# build.rs link step when SP_DAEMON_BACKEND=vulkan is intended.
+#
+# Companion to the engine's own SP_ENGINE_WITH_VULKAN sp_engine_vulkan target
+# (src/CMakeLists.txt:160-181) but compiled STANDALONE so the daemon can link
+# it WITHOUT pulling in the entire sp_engine library (which would duplicate
+# qwen3_forward / gemma3_forward / matmul / embed_row / as_f32 symbols the
+# math-core forward path already provides via sp_session).
+#
+# Sources (same as src/CMakeLists.txt:160-163 sp_engine_vulkan):
+#   src/backends/vulkan/vulkan_backend.cpp  -- instance/device/queue lifecycle
+#   src/backends/vulkan/vulkan_forward.cpp  -- gemma3_forward_vulkan + qwen3_forward_vulkan
+#                                              entry points + the SPIR-V dispatch path
+#   sp_daemon_vulkan_glue.c                 -- L1 forward dispatcher
+#                                              (sp_daemon_vulkan_forward -> arch-route to
+#                                              gemma3_forward_vulkan / qwen3_forward_vulkan)
+#
+# Shaders: 12 GLSL compute shaders under src/backends/vulkan/shaders/ are
+# compiled to SPIR-V .spv.h C-initializer headers via glslc, then #include'd
+# directly by vulkan_forward.cpp (no runtime .spv loading). Same custom_command
+# pattern as src/CMakeLists.txt:142-158.
+#
+# The daemon binary links Vulkan::Vulkan (the loader: vulkan-1.lib on Windows,
+# libvulkan.so on Linux/macOS) at sp-daemon link time via build.rs's
+# wire_vulkan_backend block.
+#
+# Build target:   host (x86_64 / aarch64 desktop)
+# Output path:    build-host-vulkan-backend/libsp_vulkan_daemon_backend.{a,lib}
+# Activation:     -DSP_DAEMON_BUILD_VULKAN_BACKEND=ON
+# ============================================================================
+
+option(SP_DAEMON_BUILD_VULKAN_BACKEND
+    "Build sp_vulkan_daemon_backend (host Vulkan backend daemon-link variant)"
+    OFF)
+
+if(SP_DAEMON_BUILD_VULKAN_BACKEND)
+    enable_language(CXX)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+    find_package(Vulkan REQUIRED)
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        find_program(Vulkan_GLSLC_EXECUTABLE glslc
+            HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+    endif()
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "sp_vulkan_daemon_backend: glslc not found "
+                            "(need the Vulkan SDK on PATH)")
+    endif()
+
+    # ── glslc: compile every .comp to a .spv.h C-initializer header ──
+    # Same set as src/CMakeLists.txt:142-144 (kept in sync MANUALLY; if the
+    # engine's shader set grows, mirror the new name here AND #include in
+    # vulkan_forward.cpp upstream).
+    set(SP_VK_SHADER_DIR ${ENGINE_ROOT}/src/backends/vulkan/shaders)
+    set(SP_VK_SPV_DIR    ${CMAKE_CURRENT_BINARY_DIR}/vk_spv)
+    file(MAKE_DIRECTORY ${SP_VK_SPV_DIR})
+    set(SP_VK_SHADERS
+        gemm embed_scale rmsnorm rmsnorm_head rope attn attn_ntt
+        gelu_mul silu_mul add dequant_arena round_f16)
+    set(SP_VK_SPV_HEADERS)
+    foreach(s ${SP_VK_SHADERS})
+        set(_src ${SP_VK_SHADER_DIR}/${s}.comp)
+        set(_hdr ${SP_VK_SPV_DIR}/${s}.spv.h)
+        add_custom_command(
+            OUTPUT ${_hdr}
+            COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O --target-env=vulkan1.1
+                    -mfmt=c -o ${_hdr} ${_src}
+            DEPENDS ${_src}
+            COMMENT "glslc ${s}.comp -> ${s}.spv.h (daemon)"
+            VERBATIM)
+        list(APPEND SP_VK_SPV_HEADERS ${_hdr})
+    endforeach()
+    add_custom_target(sp_vk_daemon_shaders DEPENDS ${SP_VK_SPV_HEADERS})
+
+    # ── The static library the daemon links ──
+    add_library(sp_vulkan_daemon_backend STATIC
+        ${ENGINE_ROOT}/src/backends/vulkan/vulkan_backend.cpp
+        ${ENGINE_ROOT}/src/backends/vulkan/vulkan_forward.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/sp_daemon_vulkan_glue.c
+    )
+    add_dependencies(sp_vulkan_daemon_backend sp_vk_daemon_shaders)
+    set_source_files_properties(${ENGINE_ROOT}/src/backends/vulkan/vulkan_forward.cpp
+        PROPERTIES OBJECT_DEPENDS "${SP_VK_SPV_HEADERS}")
+
+    target_include_directories(sp_vulkan_daemon_backend PUBLIC
+        ${ENGINE_ROOT}/include
+        ${ENGINE_ROOT}/lib/shannon-prime-system/include
+        ${ENGINE_ROOT}/src/backends/vulkan
+        ${SP_VK_SPV_DIR}
+    )
+
+    target_compile_definitions(sp_vulkan_daemon_backend PRIVATE
+        SP_ENGINE_WITH_VULKAN=1
+    )
+
+    # The Vulkan loader is resolved at sp-daemon binary link time via
+    # build.rs's cargo:rustc-link-lib=vulkan-1 (Windows) / vulkan (Linux).
+    # Here we just need the headers on the include path for both TUs (the
+    # Vulkan::Vulkan target provides Vulkan_INCLUDE_DIRS).
+    target_link_libraries(sp_vulkan_daemon_backend PUBLIC Vulkan::Vulkan)
+
+    message(STATUS "sp_vulkan_daemon_backend: Vulkan backend, daemon-link variant")
+    message(STATUS "  sources: vulkan_backend.cpp + vulkan_forward.cpp + 12 SPIR-V shaders + glue")
+    message(STATUS "  glslc:   ${Vulkan_GLSLC_EXECUTABLE}")
+    message(STATUS "  output:  ${CMAKE_CURRENT_BINARY_DIR}/sp_vulkan_daemon_backend.{a,lib}")
+endif()
