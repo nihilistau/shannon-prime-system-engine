@@ -1357,6 +1357,271 @@ static void hx_matmul_q8_vrmpy_half_tile(const unsigned char *blk_tile,
     }
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * V5 — per-(layer, FFN-kind) rsum lazy population.
+ *
+ * On first invocation of an FFN matmul for a given (layer, kind) pair,
+ * compute the per-row int8 sum over the DDR-resident weight blob and store
+ * in rsum_ffn[L * stride + offset_for_kind .. + out_rows). Subsequent
+ * invocations skip via rsum_ffn_layer_ready[L * 3 + kind] bool.
+ *
+ * Identical arithmetic to V4 hx_compute_rsum (line 944 region).
+ * Returns the rsum table pointer or NULL if unavailable.
+ * ──────────────────────────────────────────────────────────────────── */
+static const int32_t *hx_vtcm_ensure_ffn_rsum(int L, int kind /* HX_FFN_W{GATE,UP,DOWN} */,
+                                              const unsigned char *blk_ddr,
+                                              int out, int in_dim) {
+    if (!g_hx_vtcm.rsum_ffn || !g_hx_vtcm.rsum_ffn_layer_ready) return NULL;
+    if ((uint32_t)L >= g_hx_vtcm.rsum_attn_n_layers) return NULL;  /* n_layers shared */
+    if (kind < 0 || kind > 2) return NULL;
+
+    uint32_t off;
+    switch (kind) {
+        case HX_FFN_WGATE: off = hx_vtcm_rsum_ffn_off_wgate(&g_hx_vtcm.cfg); break;
+        case HX_FFN_WUP:   off = hx_vtcm_rsum_ffn_off_wup  (&g_hx_vtcm.cfg); break;
+        case HX_FFN_WDOWN: off = hx_vtcm_rsum_ffn_off_wdown(&g_hx_vtcm.cfg); break;
+        default: return NULL;
+    }
+    int32_t *table = g_hx_vtcm.rsum_ffn
+                   + (size_t)L * g_hx_vtcm.rsum_ffn_stride
+                   + off;
+    uint8_t *ready_flag = &g_hx_vtcm.rsum_ffn_layer_ready[L * 3 + kind];
+    if (!*ready_flag) {
+        hx_compute_rsum(blk_ddr, out, in_dim, table);
+        *ready_flag = 1u;
+    }
+    return table;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * V5 tiled dual-context matmul — the ping-pong FFN streaming path.
+ *
+ * Strategy (per PLAN-V5 D-A through D-E):
+ *   - Two VTCM tile slots A + B (1 MiB each). Tile i goes into slot (i%2).
+ *   - Tile i contains rows_per_tile contiguous int8 rows of the DDR weight blob.
+ *   - Pipeline:
+ *       prefetch tile 0 into slot 0 (synchronous dmwait)
+ *       for i in 0..N-1:
+ *           if i+1 < N: prefetch tile i+1 into slot ((i+1)%2)  [ASYNC]
+ *           dispatch dual-context matmul on tile i (slot i%2)
+ *           if i+1 < N: dmwait (ensures prefetch i+1 completed before we use slot)
+ *
+ *   The handler also runs its compute half ([m_half..tile_rows)) while the
+ *   worker runs [0..m_half) on the same tile via the V5_TILE_HALF job_kind.
+ *
+ * Inputs:
+ *   blk_ddr     — DDR-resident weight blob (codes + scales appended)
+ *   out         — total output rows M
+ *   in_dim      — K
+ *   X, n_tok, Y — activations + output buffer
+ *   scales_full — DDR ptr to scales[out] (within the DDR blob; we look this up)
+ *   rsum_full   — DDR ptr to rsum[out] (caller-supplied per-(layer,kind))
+ *
+ * Returns:
+ *   0 = V5 tiled path succeeded
+ *   1 = fell back (worker pool denied or VTCM tile slots unavailable)
+ *
+ * ──────────────────────────────────────────────────────────────────── */
+static int hx_matmul_q8_vrmpy_dual_ctx_v5_tiled(const unsigned char *blk_ddr,
+                                                int out, int in_dim,
+                                                const float *X, int n_tok, float *Y,
+                                                const float *scales_full,
+                                                const int32_t *rsum_full) {
+    /* Sanity: tile slots allocated? */
+    if (!g_hx_vtcm.vtcm_base || g_hx_vtcm.tile_bytes == 0u) return 1;
+    if (hx_worker_pool_ensure() != 0) return 1;
+
+    /* Tile sizing: rows per tile = floor(tile_bytes / sp_hex_align(in_dim)).
+     * For Gemma3-1B: in=1152 → 1MiB/1152 = ~910 rows (round down to 768);
+     *                in=6912 → 1MiB/6912 = ~151 rows (round down to 128).
+     * We pick rows_per_tile = largest multiple of 4 that fits, capped so that
+     * (rows_per_tile * sp_hex_align(in_dim)) <= tile_bytes. Half-row split
+     * for dual-context requires even rows_per_tile (m_half = rows_per_tile/2).
+     * Stage 3 simple choice: power-of-2 friendly multiples. */
+    uint32_t row_stride_bytes = (uint32_t)sp_hex_align((size_t)in_dim);
+    if (row_stride_bytes == 0) return 1;
+    uint32_t rows_per_tile = g_hx_vtcm.tile_bytes / row_stride_bytes;
+    /* Round DOWN to multiple of 4 for clean halving + vrmpy block boundary.
+     * For our Gemma3-1B shapes (in=1152: rows_per_tile=910→908; in=6912: 151→148)
+     * this is safe. Better: cap rows_per_tile so tiles divide M evenly. */
+    rows_per_tile &= ~3u;
+    if (rows_per_tile == 0) return 1;
+    /* Cap rows_per_tile so that ceil(out / rows_per_tile) tiles is reasonable.
+     * For perf we want few tiles with most work; for divisibility we want
+     * rows_per_tile to divide out, or close to it. The simplest empirical
+     * choice: floor cap then last-tile clamp. */
+    if ((uint32_t)out < rows_per_tile) rows_per_tile = (uint32_t)out;
+
+    int n_tiles = (out + (int)rows_per_tile - 1) / (int)rows_per_tile;
+
+    /* Tile DMA descriptors (one per slot — alternated). The DMA engine
+     * consumes the descriptor on dmstart; we may overwrite the slot's
+     * descriptor only after dmwait returns. Stack-allocate, 8-byte aligned. */
+    hx_udma_desc_type0_t desc_a __attribute__((aligned(8)));
+    hx_udma_desc_type0_t desc_b __attribute__((aligned(8)));
+
+    unsigned char *vtcm_base = (unsigned char *)g_hx_vtcm.vtcm_base;
+    unsigned char *slot_a    = vtcm_base + g_hx_vtcm.tile_a_off;
+    unsigned char *slot_b    = vtcm_base + g_hx_vtcm.tile_b_off;
+    unsigned char *slots[2]  = { slot_a, slot_b };
+    hx_udma_desc_type0_t *descs[2] = { &desc_a, &desc_b };
+
+    /* DDR row-base for tile i: blk_ddr + i * rows_per_tile * row_stride_bytes.
+     * Tile last-row count: out - i*rows_per_tile (clamped to rows_per_tile). */
+    const unsigned char *codes_ddr = blk_ddr;  /* int8 codes start at blob base */
+
+    /* Step 1: synchronously prefetch tile 0 into slot 0. */
+    uint32_t t0_rows  = (rows_per_tile <= (uint32_t)out) ? rows_per_tile : (uint32_t)out;
+    uint32_t t0_bytes = t0_rows * row_stride_bytes;
+    hx_udma_prefetch(descs[0], codes_ddr, slots[0], t0_bytes);
+    uint32_t st = hx_udma_wait();
+    if (st == HX_UDMA_DM0_ERROR) {
+        /* DMA engine threw an error on first descriptor — surface UPSTREAM
+         * via FARF and degrade to V3 DDR path. */
+        FARF(ERROR, "sp_hex V5: UDMA prefetch tile-0 ERROR (st=0x%x) — falling back to V3 DDR for this matmul",
+             st);
+        g_hx_vtcm.ffn_ddr_path_count++;
+        return 1;
+    }
+
+    /* Step 2..N: ping-pong loop. */
+    for (int i = 0; i < n_tiles; i++) {
+        int cur_slot = i & 1;
+        int nxt_slot = (i + 1) & 1;
+        int tile_row_base = i * (int)rows_per_tile;
+        int rows_this_tile = (int)((uint32_t)tile_row_base + rows_per_tile <= (uint32_t)out
+                                   ? rows_per_tile
+                                   : (uint32_t)(out - tile_row_base));
+
+        /* Kick prefetch for tile i+1 (if any) into the OTHER slot — ASYNC. */
+        int have_next = (i + 1 < n_tiles);
+        if (have_next) {
+            int nxt_row_base = (i + 1) * (int)rows_per_tile;
+            uint32_t nxt_rows = (uint32_t)((nxt_row_base + (int)rows_per_tile <= out)
+                                           ? (int)rows_per_tile
+                                           : (out - nxt_row_base));
+            uint32_t nxt_bytes = nxt_rows * row_stride_bytes;
+            const unsigned char *nxt_src = codes_ddr + (size_t)nxt_row_base * row_stride_bytes;
+            hx_udma_prefetch(descs[nxt_slot], nxt_src, slots[nxt_slot], nxt_bytes);
+        }
+
+        /* Dispatch dual-context matmul on tile i. */
+        int m_half = (rows_this_tile + 1) / 2;
+        /* Populate V5 worker desc — worker takes [0, m_half) tile-local. */
+        g_hx_pool.tile_desc.blk_tile      = slots[cur_slot];
+        g_hx_pool.tile_desc.tile_row_base = tile_row_base;
+        g_hx_pool.tile_desc.tile_rows     = rows_this_tile;
+        g_hx_pool.tile_desc.out_total     = out;
+        g_hx_pool.tile_desc.in_dim        = in_dim;
+        g_hx_pool.tile_desc.X             = X;
+        g_hx_pool.tile_desc.n_tok         = n_tok;
+        g_hx_pool.tile_desc.Y             = Y;
+        g_hx_pool.tile_desc.scales_full   = scales_full;
+        g_hx_pool.tile_desc.rsum_full     = rsum_full;
+        g_hx_pool.tile_desc.j_start       = 0;
+        g_hx_pool.tile_desc.j_end         = m_half;
+        atomic_store(&g_hx_pool.job_kind, HX_JOB_V5_TILE_HALF);
+
+        atomic_store(&g_hx_pool.done, 0);
+        atomic_fetch_add(&g_hx_pool.seqn, 1);
+        qurt_futex_wake(&g_hx_pool.seqn, 1);
+
+        /* Handler runs [m_half, rows_this_tile) on the same tile. */
+        hx_matmul_q8_vrmpy_half_tile(slots[cur_slot], tile_row_base, rows_this_tile,
+                                     out, in_dim,
+                                     X, n_tok, Y,
+                                     scales_full, rsum_full,
+                                     m_half, rows_this_tile,
+                                     g_hx_pool.handler_local.act_ub);
+
+        /* Wait for worker's tile-half compute to complete. */
+        while (atomic_load(&g_hx_pool.done) == 0) {
+            qurt_futex_wait(&g_hx_pool.done, 0);
+        }
+
+        /* If we kicked a prefetch for i+1, dmwait now to guarantee its
+         * VTCM destination is fully written before next iteration uses it. */
+        if (have_next) {
+            uint32_t s2 = hx_udma_wait();
+            if (s2 == HX_UDMA_DM0_ERROR) {
+                FARF(ERROR, "sp_hex V5: UDMA prefetch tile-%d ERROR (st=0x%x) — aborting tiled path",
+                     i + 1, s2);
+                /* Partial completion — Y values for tile <= i are written; tiles > i would
+                 * read stale data. Caller should not use this output. We surface error by
+                 * returning failure; sp_hex_forward currently doesn't have an error path
+                 * for matmul failure, so to keep decode-determinism we MUST not return
+                 * partially-computed output. Best fallback: zero the remaining Y rows
+                 * NOT YET COMPUTED and trust the V3 fallback on the NEXT layer. Stage 3
+                 * note: we don't expect this in production (single-tile smoke validated
+                 * UDMA in Stage 2). */
+                for (int t = 0; t < n_tok; t++) {
+                    for (int j = tile_row_base + rows_this_tile; j < out; j++) {
+                        Y[(size_t)t * out + j] = 0.0f;
+                    }
+                }
+                g_hx_vtcm.ffn_ddr_path_count++;
+                return 1;
+            }
+        }
+    }
+
+    g_hx_vtcm.ffn_path_count++;
+
+    /* First-FFN-V5-matmul-per-session evidence sample (T_V5_DMA_PINGPONG_OBSERVED
+     * proxy at this stage: just log shape + tile count; pcycle breakdown is
+     * Stage 5 instrumentation). */
+    static int v5_sampled_once = 0;
+    if (!v5_sampled_once) {
+        v5_sampled_once = 1;
+        FARF(RUNTIME_HIGH, "sp_hex V5: tiled FFN matmul out=%d in=%d n_tok=%d "
+                           "n_tiles=%d rows_per_tile=%u row_stride_bytes=%u",
+             out, in_dim, n_tok,
+             n_tiles, rows_per_tile, row_stride_bytes);
+    }
+    return 0;
+}
+
+/* V5 dispatch: try tiled VTCM path; on any unavailability fall back to V3 DDR.
+ * Caller passes (L, kind) so the per-(layer,kind) rsum_ffn table can be
+ * located + lazy-populated.
+ *
+ * Bit-exactness contract: tile bytes (= DDR codes contiguous, copied via UDMA)
+ * are byte-identical to DDR codes; rsum bytes (= per-row int8 sum, identical
+ * arithmetic to V4 hx_compute_rsum); scales come from the SAME DDR scales
+ * sub-block both paths read; half-kernel arithmetic identical (same vrmpy +
+ * bias-128 + scale*S_act/127 reconstruction). Therefore tile and DDR paths
+ * produce byte-identical Y[j] values. Decode argmax preserved per
+ * reference-lattice-decode-determinism. */
+static int hx_matmul_q8_vrmpy_dispatch_ffn(int L, int kind,
+                                           const unsigned char *blk_ddr,
+                                           int out, int in_dim,
+                                           const float *X, int n_tok, float *Y) {
+    if (!g_hx_vtcm.vtcm_base || g_hx_vtcm.tile_bytes == 0u) {
+        /* V5 disabled — fall through to V3 DDR path. */
+        g_hx_vtcm.ffn_ddr_path_count++;
+        return hx_matmul_q8_vrmpy_dual_ctx(blk_ddr, out, in_dim, X, n_tok, Y);
+    }
+    /* Lazy-populate per-(L, kind) rsum table from DDR codes. */
+    const int32_t *rsum_full = hx_vtcm_ensure_ffn_rsum(L, kind, blk_ddr, out, in_dim);
+    if (!rsum_full) {
+        g_hx_vtcm.ffn_ddr_path_count++;
+        return hx_matmul_q8_vrmpy_dual_ctx(blk_ddr, out, in_dim, X, n_tok, Y);
+    }
+    /* Locate the scales sub-block in DDR (right after the int8 codes per
+     * sp_hex_q8_bytes layout). */
+    const float *scales_full = (const float *)(blk_ddr + sp_hex_align((size_t)out * in_dim));
+
+    int rc = hx_matmul_q8_vrmpy_dual_ctx_v5_tiled(blk_ddr, out, in_dim,
+                                                  X, n_tok, Y,
+                                                  scales_full, rsum_full);
+    if (rc == 0) return 0;
+    /* Tiled path declined (worker pool denied or first-tile UDMA error) —
+     * V3 DDR fallback already happened inside dual_ctx_v5_tiled's prefetch
+     * failure path OR worker_pool_ensure() failure routes here. Make sure
+     * Y is correctly computed via V3. */
+    return hx_matmul_q8_vrmpy_dual_ctx(blk_ddr, out, in_dim, X, n_tok, Y);
+}
+
 #endif /* __HVX__ */
 
 int sp_hex_open(const char *uri, remote_handle64 *h) {
@@ -1626,7 +1891,11 @@ int sp_hex_forward(remote_handle64 hdl, int n_layers, int n_embd, int n_ff, int 
           for (int t = 0; t < n_tok; t++)
               hx_rmsnorm(resid + (size_t)t * E, fn, E, eps, nx + (size_t)t * E); }
 #ifdef __HVX__
-        hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);  /* V3: WGATE dual-HVX-context */
+        /* V5 Stage 3: WGATE through tiled VTCM ping-pong path; WUP still V3 DDR
+         * (Stage 4 will extend to all 3 FFN matmuls after Stage 3 bit-exact
+         * decode verification). */
+        hx_matmul_q8_vrmpy_dispatch_ffn(L, HX_FFN_WGATE, WPTR(SP_HEX_WGATE),
+                                        FF, E, nx, n_tok, g);                  /* V5 WGATE tiled */
         hx_matmul_q8_vrmpy_dual_ctx(WPTR(SP_HEX_WUP),   FF, E, nx, n_tok, up); /* V3: WUP dual-HVX-context */
 #else
         hx_matmul_q8(WPTR(SP_HEX_WGATE), FF, E, nx, n_tok, g);
