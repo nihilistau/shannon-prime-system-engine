@@ -70,6 +70,29 @@ static void kv_spinor_roundtrip(float *vec, int d) {
     (void)sp_spinor_decode_vec(blks, d, vec);   /* own freshly-encoded blocks: CRC valid */
 }
 
+/* ── C2.1 recall-router sidecar (±1 Rademacher projection). Default OFF (g_recall_b==0)
+ * => attention is the exact full-context baseline (parity). When SP_RECALL_B>0, the
+ * decode attention restricts to recent-W ∪ top-(B-W) cached tokens by projected score.
+ * R is FROZEN: deterministic from a pinned seed via integer SplitMix64 -> identical
+ * across steps/backends/runs (stored projections recall correctly). r×head_dim, ±1. */
+static int g_recall_b = 0;   /* SP_RECALL_B: recall budget (0 = off = full attention) */
+static int g_recall_r = 16;  /* SP_RECALL_R: projection rank */
+static int g_recall_w = 64;  /* SP_RECALL_W: always-keep recent window */
+#define SP_RECALL_R_MAX 64
+#define SP_RECALL_SEED 0x5350524F4A2BULL   /* "SPROJ+" frozen seed; bump = SP_RECALL_PROJ_VERSION */
+static uint64_t splitmix64(uint64_t *s) { uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL; z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL; return z ^ (z >> 31); }
+/* fill R[r*hd] with ±1 deterministically from the frozen seed. */
+static void recall_build_R(signed char *R, int r, int hd) {
+    uint64_t s = SP_RECALL_SEED;
+    for (int i = 0; i < r * hd; i++) R[i] = (splitmix64(&s) & 1) ? 1 : -1;
+}
+/* proj[p] = R[p,:]·vec  (r outputs, ±1 matrix → add/sub). */
+static void recall_project(const signed char *R, int r, int hd, const float *vec, float *proj) {
+    for (int p = 0; p < r; p++) { const signed char *Rp = R + (size_t)p * hd; float a = 0.0f;
+        for (int d = 0; d < hd; d++) a += (float)Rp[d] * vec[d]; proj[p] = a; }
+}
+
 /* dot_f32, matmul/matmul_arena, row_bytes, and the SP_CPU_SCALAR/F16_ACT/FROB
  * knobs moved to kernels.{h,c} (shared with gemma3.c). */
 
@@ -83,6 +106,9 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_ENGINE_NTT_ATTN"); g_ntt_attn = (e && e[0] == '1'); }
     { const char *e = getenv("SP_KV_SPINOR");       g_kv_spinor = (e && e[0] == '1'); }
     { const char *e = getenv("SP_KV_SPINOR_REF");   g_kv_spinor_ref = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_RECALL_B");        g_recall_b = e ? atoi(e) : 0; if (g_recall_b < 0) g_recall_b = 0; }
+    { const char *e = getenv("SP_RECALL_R");        g_recall_r = e ? atoi(e) : 16; if (g_recall_r < 1 || g_recall_r > SP_RECALL_R_MAX) g_recall_r = 16; }
+    { const char *e = getenv("SP_RECALL_W");        g_recall_w = e ? atoi(e) : 64; if (g_recall_w < 0) g_recall_w = 0; }
 }
 
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
@@ -287,6 +313,7 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
     float *kdec = NULL, *vdec = NULL;             /* per-layer decode scratch (use_blocks) */
     float *x = NULL, *nx = NULL, *q = NULL, *knew = NULL, *vnew = NULL, *ao = NULL;
     float *ap = NULL, *gg = NULL, *up = NULL, *dn = NULL, *sc = NULL, *lg = NULL;
+    signed char *recallR = NULL; float *projk = NULL;   /* C2.1 recall sidecar (g_recall_b>0) */
 
     if (use_blocks) {
         size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
@@ -320,6 +347,14 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
     lg   = (float *)malloc((size_t)V * sizeof(float));
     if (!x || !nx || !q || !knew || !vnew || !ao || !ap || !gg || !up || !dn || !sc || !lg)
         goto done;
+    if (g_recall_b > 0) {
+        recallR = (signed char *)malloc((size_t)g_recall_r * HD);
+        projk   = (float *)malloc((size_t)c->n_layers * P * NKV * (size_t)g_recall_r * sizeof(float));
+        if (!recallR || !projk) goto done;
+        recall_build_R(recallR, g_recall_r, HD);   /* frozen ±1 matrix, deterministic */
+        fprintf(stderr, "    [recall] sidecar ON: r=%d B=%d W=%d (post-RoPE ±1 projection router)\n",
+                g_recall_r, g_recall_b, g_recall_w);
+    }
 
     for (int pos = 0; pos < P; pos++) {
         int tok = seq[pos];
@@ -339,6 +374,11 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
               #pragma omp parallel for
               for (h = 0; h < NKV; h++) { float *kh = knew + (size_t)h * HD; rmsnorm_head(kh, kn, HD, eps); rope_neox(kh, HD, pos, base); }
             }
+            /* C2.1: project the post-RoPE K of this (layer,pos) per kv-head into the recall sidecar. */
+            if (g_recall_b > 0)
+                for (int hh = 0; hh < NKV; hh++)
+                    recall_project(recallR, g_recall_r, HD, knew + (size_t)hh * HD,
+                                   projk + (((size_t)L * P + pos) * NKV + hh) * (size_t)g_recall_r);
             /* Store the position-finalized K/V; KC/VC then point at the f32 the
              * attention reads as KC[s*KVD + kvh*HD]. Block path: encode into the
              * persistent block cache, decode [0,pos] of this layer into the per-
@@ -378,32 +418,57 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
             #pragma omp parallel
             {
                 float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
-                if (scl) {
+                int   *ri  = (int   *)malloc((size_t)(pos + 1) * sizeof(int));
+                if (scl && ri) {
                     int h;
                     #pragma omp for
                     for (h = 0; h < NH; h++) {
                         int kvh = h / group;
                         const float *qh = q + (size_t)h * HD;
+                        /* Recall set ri[0,m): full [0,pos] (EXACT baseline) unless g_recall_b>0 AND
+                         * context exceeds the budget, then recent-W ∪ top-(B-W) by ±1-projected score. */
+                        int m;
+                        if (g_recall_b <= 0 || pos + 1 <= g_recall_b) {
+                            m = pos + 1; for (int s = 0; s <= pos; s++) ri[s] = s;
+                        } else {
+                            float pq[SP_RECALL_R_MAX];
+                            recall_project(recallR, g_recall_r, HD, qh, pq);
+                            int W = g_recall_w; if (W > pos + 1) W = pos + 1;
+                            int cand_hi = pos + 1 - W;               /* candidates [0,cand_hi); recent [cand_hi,pos] kept */
+                            int topk = g_recall_b - W; if (topk < 0) topk = 0; if (topk > cand_hi) topk = cand_hi;
+                            for (int s = 0; s < cand_hi; s++) {       /* projected score per candidate */
+                                const float *pk = projk + (((size_t)L * P + s) * NKV + kvh) * (size_t)g_recall_r;
+                                float a = 0.0f; for (int p = 0; p < g_recall_r; p++) a += pq[p] * pk[p];
+                                scl[s] = a;
+                            }
+                            m = 0;
+                            for (int t = 0; t < topk; t++) {          /* select top-`topk` (simple max-extract) */
+                                int best = -1; float bv = -INFINITY;
+                                for (int s = 0; s < cand_hi; s++) if (scl[s] > bv) { bv = scl[s]; best = s; }
+                                if (best < 0) break; ri[m++] = best; scl[best] = -INFINITY;
+                            }
+                            for (int s = cand_hi; s <= pos; s++) ri[m++] = s;   /* recent window */
+                        }
                         float maxs = -INFINITY;
-                        for (int s = 0; s <= pos; s++) {
-                            const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
+                        for (int jj = 0; jj < m; jj++) {
+                            const float *kh = KC + (size_t)ri[jj] * KVD + (size_t)kvh * HD;
                             float acc = 0.0f;
                             for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
-                            float d = acc * ascale; scl[s] = d; if (d > maxs) maxs = d;
+                            float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
                         }
                         float sum = 0.0f;
-                        for (int s = 0; s <= pos; s++) { scl[s] = expf(scl[s] - maxs); sum += scl[s]; }
+                        for (int jj = 0; jj < m; jj++) { scl[jj] = expf(scl[jj] - maxs); sum += scl[jj]; }
                         float inv = 1.0f / sum;
                         float *out = ao + (size_t)h * HD;
                         for (int i = 0; i < HD; i++) out[i] = 0.0f;
-                        for (int s = 0; s <= pos; s++) {
-                            float w = scl[s] * inv;
-                            const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
+                        for (int jj = 0; jj < m; jj++) {
+                            float w = scl[jj] * inv;
+                            const float *vh = VC + (size_t)ri[jj] * KVD + (size_t)kvh * HD;
                             for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                         }
                     }
-                    free(scl);
                 }
+                free(scl); free(ri);
             }
             if (matmul(m, ly->attn_output, ao, 1, QD, E, ap)) goto done;
             for (int i = 0; i < E; i++) x[i] += ap[i];
@@ -431,5 +496,6 @@ done:
     free(kcb); free(vcb); free(kdec); free(vdec);
     free(kc); free(vc); free(x); free(nx); free(q); free(knew); free(vnew);
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
+    free(recallR); free(projk);
     return rc;
 }
