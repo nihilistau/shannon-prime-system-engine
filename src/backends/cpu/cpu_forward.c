@@ -300,13 +300,47 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
  * path is prefill-only and not wired here. Greedy argmax must match qwen3_generate
  * up to the float-reassociation floor (different softmax-sum lengths) — GEN_KV
  * gates on argmax/sequence identity, not bit-equal logits. */
+/* [score,index] pair for the quickselect router (sort scores, carry the token index). */
+typedef struct { float s; int i; } sidx;
+static void sidx_swap(sidx *a, int i, int j) { sidx t = a[i]; a[i] = a[j]; a[j] = t; }
+/* Lomuto partition of a[lo..hi] DESCENDING around a median-of-three pivot (the
+ * median-of-three guards the O(n^2) worst case on clustered ±1-projection scores).
+ * Returns pivot's final index p: a[lo..p) > pivot, a[p] = pivot, a[p+1..hi] <= pivot. */
+static int qsel_partition(sidx *a, int lo, int hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (a[mid].s > a[lo].s)  sidx_swap(a, lo, mid);
+    if (a[hi].s  > a[lo].s)  sidx_swap(a, lo, hi);
+    if (a[hi].s  > a[mid].s) sidx_swap(a, mid, hi);
+    float pivot = a[mid].s;
+    sidx_swap(a, mid, hi);                                  /* park pivot at hi */
+    int store = lo;
+    for (int j = lo; j < hi; j++) if (a[j].s > pivot) { sidx_swap(a, j, store); store++; }
+    sidx_swap(a, store, hi);                                /* pivot to final slot */
+    return store;
+}
+/* Quickselect (Hoare): permute so a[0..k) hold the k largest by score (unordered).
+ * Expected O(n) vs the old O(k*n) max-extract — the compute-wall fix. */
+static void qsel_topk(sidx *a, int n, int k) {
+    if (k <= 0 || k >= n) return;
+    int lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int p = qsel_partition(a, lo, hi);
+        if (p == k) break;
+        else if (p < k) lo = p + 1;
+        else hi = p - 1;
+    }
+}
+
 /* Compute one query head's recall set into ri[0,m): full [0,pos] (exact baseline)
  * unless B>0 and context exceeds budget, then sinks ∪ top-(B-W-sink candidates) ∪
- * recent-W, by ±1-projected score. `scl` is (pos+1)-float scratch. Returns m.
- * Shared by the RAM/no-Ring-2 inline path and the disk phase-split — one selection. */
+ * recent-W, by ±1-projected score. `cand` is (pos+1)-sidx scratch (per-thread).
+ * Returns m. Shared by the RAM inline path and the disk phase-split. Selection is
+ * now expected O(N) via quickselect (was O(topk*N)). The top-topk SET is identical
+ * to the old max-extract except possibly at exact score ties (float projections ~never
+ * tie); attention output is tie-robust, and B=0 (GEN_KV) skips this entirely. */
 static int recall_select(const signed char *R, int rr, int hd, const float *qh,
                          const float *projk, size_t L, int P, int NKV, int kvh,
-                         int B, int W0, int sink0, int pos, float *scl, int *ri) {
+                         int B, int W0, int sink0, int pos, sidx *cand, int *ri) {
     if (B <= 0 || pos + 1 <= B) { for (int s = 0; s <= pos; s++) ri[s] = s; return pos + 1; }
     float pq[SP_RECALL_R_MAX];
     recall_project(R, rr, hd, qh, pq);
@@ -317,19 +351,17 @@ static int recall_select(const signed char *R, int rr, int hd, const float *qh,
     if (cand_hi > pos + 1) cand_hi = pos + 1;
     int topk = B - W - sink; if (topk < 0) topk = 0;
     if (topk > cand_hi - sink) topk = cand_hi - sink;
+    int nc = 0;                                             /* score candidates → [score,index] pairs */
     for (int s = sink; s < cand_hi; s++) {
         const float *pk = projk + (((size_t)L * P + s) * NKV + kvh) * (size_t)rr;
         float a = 0.0f; for (int p = 0; p < rr; p++) a += pq[p] * pk[p];
-        scl[s] = a;
+        cand[nc].s = a; cand[nc].i = s; nc++;
     }
+    qsel_topk(cand, nc, topk);                              /* O(N) partial selection */
     int m = 0;
-    for (int s = 0; s < sink; s++) ri[m++] = s;            /* pinned sink anchors */
-    for (int t = 0; t < topk; t++) {                       /* top-topk candidates (max-extract) */
-        int best = -1; float bv = -INFINITY;
-        for (int s = sink; s < cand_hi; s++) if (scl[s] > bv) { bv = scl[s]; best = s; }
-        if (best < 0) break; ri[m++] = best; scl[best] = -INFINITY;
-    }
-    for (int s = cand_hi; s <= pos; s++) ri[m++] = s;      /* recent window */
+    for (int s = 0; s < sink; s++) ri[m++] = s;             /* pinned sink anchors */
+    for (int t = 0; t < topk; t++) ri[m++] = cand[t].i;     /* top-topk (any order; softmax is order-free) */
+    for (int s = cand_hi; s <= pos; s++) ri[m++] = s;       /* recent window */
     return m;
 }
 
@@ -526,16 +558,16 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                 /* PHASE 1: per-head selection only (parallel, no I/O). */
                 #pragma omp parallel
                 {
-                    float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
-                    if (scl) {
+                    sidx *cand = (sidx *)malloc((size_t)(pos + 1) * sizeof(sidx));
+                    if (cand) {
                         int h;
                         #pragma omp for
                         for (h = 0; h < NH; h++)
                             m_all[h] = recall_select(recallR, g_recall_r, HD, q + (size_t)h * HD,
                                 projk, (size_t)L, P, NKV, h / group, g_recall_b, g_recall_w,
-                                g_recall_sink, pos, scl, ri_all + (size_t)h * P);
+                                g_recall_sink, pos, cand, ri_all + (size_t)h * P);
                     }
-                    free(scl);
+                    free(cand);
                 }
                 /* PHASE 2: union the old-non-sink positions across heads, fetch each block
                  * ONCE off Optane into the per-layer RAM staging (v1a: serial blocking). */
@@ -596,13 +628,14 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                 {
                     float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
                     int   *ri  = (int   *)malloc((size_t)(pos + 1) * sizeof(int));
-                    if (scl && ri) {
+                    sidx  *cand = (sidx *)malloc((size_t)(pos + 1) * sizeof(sidx));
+                    if (scl && ri && cand) {
                         int h;
                         #pragma omp for
                         for (h = 0; h < NH; h++) {
                             int kvh = h / group; const float *qh = q + (size_t)h * HD;
                             int m = recall_select(recallR, g_recall_r, HD, qh, projk, (size_t)L, P,
-                                NKV, kvh, g_recall_b, g_recall_w, g_recall_sink, pos, scl, ri);
+                                NKV, kvh, g_recall_b, g_recall_w, g_recall_sink, pos, cand, ri);
                             float maxs = -INFINITY;
                             for (int jj = 0; jj < m; jj++) {
                                 int s = ri[jj];
@@ -625,7 +658,7 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                             }
                         }
                     }
-                    free(scl); free(ri);
+                    free(scl); free(ri); free(cand);
                 }
             }
             if (matmul(m, ly->attn_output, ao, 1, QD, E, ap)) goto done;
