@@ -117,6 +117,56 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     return 0;
 }
 
+/* Add a matmul weight as OK_Q4 (nibble-packed, 2 codes/byte) + ".scale" sibling.
+ * The REDUCING codec for k-quant-source models (C1): ~0.5 B/weight on disk. Per-row
+ * Frobenius scale; codes in [-7,7] two's-complement; low nibble = even col, high = odd.
+ * Layout is exactly what build_packed_q4 (bridge) reads. Rank-3 expert tensors
+ * [cols,rows,n_expert] pack as (rows*n_expert) rows (bridge slices expert e). */
+static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
+    const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
+    if (!base || W->n_dims < 2) { fprintf(stderr, "bad weight %s\n", W->name); return 1; }
+    int cols = (int)W->dims[0], rows = (int)W->dims[1];
+    int ne2 = (W->n_dims >= 3) ? (int)W->dims[2] : 1;
+    int total_rows = rows * ne2;
+    size_t rb = ggml_row_bytes(W->type, cols);
+    if (rb == 0) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
+    size_t nib_cols = ((size_t)cols + 1u) / 2u;
+
+    float  *wrow  = (float *)malloc((size_t)cols * sizeof(float));
+    int8_t *codes = (int8_t *)malloc((size_t)cols);
+    float  *scales = (float *)malloc((size_t)total_rows * sizeof(float));
+    if (!wrow || !codes || !scales) { free(wrow); free(codes); free(scales); return 1; }
+
+    emit_tensor *q = el_push(L);
+    snprintf(q->name, sizeof q->name, "%s", W->name);
+    q->dtype_id = SP_DT_OK_Q4; q->n_dims = W->n_dims;
+    q->dims[0] = (uint64_t)cols; q->dims[1] = (uint64_t)rows;
+    if (W->n_dims >= 3) q->dims[2] = (uint64_t)ne2;
+    q->block_size = 1; q->size_bytes = (uint64_t)total_rows * nib_cols;
+    q->bytes = (uint8_t *)malloc(q->size_bytes ? q->size_bytes : 1);
+    if (!q->bytes) { free(wrow); free(codes); free(scales); return 1; }
+    for (int r = 0; r < total_rows; r++) {
+        if (sp_dequant_row(base + (size_t)r * rb, W->type, cols, wrow)) {
+            free(wrow); free(codes); free(scales); return 1;
+        }
+        float s = sp_frob_row_scale(wrow, cols);
+        scales[r] = s;
+        for (int c = 0; c < cols; c++) codes[c] = sp_frob_quant1_q4(wrow[c], s);
+        sp_frob_q4_pack(codes, cols, q->bytes + (size_t)r * nib_cols);
+    }
+    /* ".scale" sibling (total_rows fp32). NOTE: el_push may realloc — q is filled
+     * above and not touched after this point. */
+    emit_tensor *sc = el_push(L);
+    snprintf(sc->name, sizeof sc->name, "%s.scale", W->name);
+    sc->dtype_id = SP_DT_FROBENIUS_SCALE_FP32; sc->n_dims = 1; sc->dims[0] = (uint64_t)total_rows;
+    sc->block_size = 4; sc->size_bytes = (uint64_t)total_rows * sizeof(float);
+    sc->bytes = (uint8_t *)malloc(sc->size_bytes ? sc->size_bytes : 1);
+    if (!sc->bytes) { free(wrow); free(codes); free(scales); return 1; }
+    memcpy(sc->bytes, scales, (size_t)sc->size_bytes);
+    free(wrow); free(codes); free(scales);
+    return 0;
+}
+
 /* Add a tensor as F32 (norms etc.): dequant from F32/F16 to F32. */
 static int add_f32(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
@@ -460,9 +510,27 @@ int main(int argc, char **argv) {
      * then per-layer blocks in GGUF order, then output_norm. */
     emit_list L = {0};
     int rc = 0;
+    /* Codec by source (C1: the converter REDUCES — never emit a wider codec than the
+     * source). Sub-Q8 k-quant source (e.g. Q4_K_M) -> OK_Q4; Q8_0/F16/F32 -> OK_Q8.
+     * Decided from token_embd's source type; overridable via --q4 / --q8. */
+    int use_q4 = 0;
+    {
+        const gguf_tensor *te = gguf_find_tensor(g, "token_embd.weight");
+        if (te) switch (te->type) {
+            case GGML_T_Q4_0: case GGML_T_Q4_1: case GGML_T_Q4_K:
+            case GGML_T_Q5_0: case GGML_T_Q5_1: case GGML_T_Q5_K:
+            case GGML_T_Q6_K: use_q4 = 1; break;
+            default: use_q4 = 0;
+        }
+        for (int a = 4; a < argc; a++) {
+            if      (strcmp(argv[a], "--q4") == 0) use_q4 = 1;
+            else if (strcmp(argv[a], "--q8") == 0) use_q4 = 0;
+        }
+        fprintf(stderr, "transcode codec: matmul weights -> %s\n", use_q4 ? "OK_Q4 (reducing)" : "OK_Q8");
+    }
     for (uint64_t i = 0; i < gguf_n_tensors(g) && rc == 0; i++) {
         const gguf_tensor *W = gguf_tensor_at(g, i);
-        if (is_matmul_weight(W->name)) rc = add_q8(&L, g, W);
+        if (is_matmul_weight(W->name)) rc = use_q4 ? add_q4(&L, g, W) : add_q8(&L, g, W);
         else                            rc = add_f32(&L, g, W);
     }
     if (rc) { el_free(&L); gguf_close(g); return 1; }
