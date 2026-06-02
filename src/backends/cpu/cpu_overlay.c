@@ -63,6 +63,36 @@ float dot_f32(const float *a, const float *b, int n) {
     return s;
 }
 
+/* int8-weight × f32-activation dot (WIRE-CPU-V2 step: AVX2 widen-int8→f32 + FMA).
+ * Numerics-preserved vs the scalar `(float)w[i]*x[i]` up to FMA reassociation (ULP);
+ * the scalar branch (SP_CPU_SCALAR=1 or no-AVX2) is the bit-exact oracle. Pure fn,
+ * thread-safe inside the OpenMP matmul_arena region. (VNNI int8×int8 is the next
+ * step — needs int8 activations + an accuracy gate; see sp_avx512_vnni_matvec.) */
+static float dot_i8_f32(const int8_t *w, const float *x, int n) {
+#if defined(SP_ENGINE_AVX2)
+    if (!g_scalar) {
+        __m256 acc = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m128i w8  = _mm_loadl_epi64((const __m128i *)(w + i));  /* 8 int8 */
+            __m256  wf  = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(w8)); /* sign-ext → 8 f32 */
+            acc = _mm256_fmadd_ps(wf, _mm256_loadu_ps(x + i), acc);
+        }
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        float s = _mm_cvtss_f32(lo);
+        for (; i < n; i++) s += (float)w[i] * x[i];   /* scalar tail */
+        return s;
+    }
+#endif
+    float s = 0.0f;
+    for (int i = 0; i < n; i++) s += (float)w[i] * x[i];
+    return s;
+}
+
 /* bytes occupied by `n` contiguous elements of a ggml weight row. */
 static size_t row_bytes(uint32_t type, int n) {
     switch (type) {
@@ -99,9 +129,7 @@ static int matmul_arena(const sp_arena_tensor *at, const float *X,
                 else { sp_frob_q4_unpack(rcw, in, unp); cp = unp; inv = pt->row_scale[j] / 7.0f; }
                 for (int t = 0; t < n_tok; t++) {
                     const float *x = X + (size_t)t * in;
-                    float acc = 0.0f;
-                    for (int i = 0; i < in; i++) acc += (float)cp[i] * x[i];
-                    Y[(size_t)t * out + j] = acc * inv;
+                    Y[(size_t)t * out + j] = dot_i8_f32(cp, x, in) * inv;
                 }
             }
             free(unp);
