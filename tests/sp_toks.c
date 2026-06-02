@@ -34,17 +34,22 @@ int main(void) {
     int n_gen = ng ? atoi(ng) : 64;
     if (n_gen < 1) n_gen = 64;
 
+    fprintf(stderr, "[sp_toks] A: before qwen3_load\n"); fflush(stderr);
     qwen3_model *m = qwen3_load(SP_QWEN3_GGUF);
     if (!m) { fprintf(stderr, "[sp_toks] load FAIL: %s\n", SP_QWEN3_GGUF); return 1; }
+    fprintf(stderr, "[sp_toks] B: model loaded OK (n_layers=%d head_dim=%d)\n",
+            (int)m->cfg.n_layers, (int)m->cfg.head_dim); fflush(stderr);
 
     const int n_prompt = 4;
     int32_t *seq = (int32_t *)malloc((size_t)(n_prompt + n_gen) * sizeof(int32_t));
     if (!seq) { fprintf(stderr, "[sp_toks] OOM\n"); return 1; }
     seq[0] = 1; seq[1] = 2; seq[2] = 3; seq[3] = 4;
 
+    fprintf(stderr, "[sp_toks] C: before warm qwen3_generate_kv\n"); fflush(stderr);
     /* warm pass: page weights in + amortize first-touch, so timing is steady-state decode */
     int warm = qwen3_generate_kv(m, seq, n_prompt, 4, -1);
     (void)warm;
+    fprintf(stderr, "[sp_toks] D: warm generate returned %d\n", warm); fflush(stderr);
 
     seq[0] = 1; seq[1] = 2; seq[2] = 3; seq[3] = 4;
     double t0 = now_s();
