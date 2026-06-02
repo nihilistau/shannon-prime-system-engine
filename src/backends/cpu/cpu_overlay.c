@@ -73,28 +73,41 @@ static size_t row_bytes(uint32_t type, int n) {
     }
 }
 
-/* Arena matmul: inline-lift the packed Q8/Q4 codes (the §4.8 production path). */
+/* Arena matmul: inline-lift the packed Q8/Q4 codes (the §4.8 production path).
+ * WIRE-CPU-V2: the per-output-row (j) loop is OpenMP-parallel. Each Y[j] is an
+ * independent single-threaded dot, so the result is BIT-IDENTICAL to the serial
+ * path for any thread count (no cross-thread reduction). The Q4 unpack scratch is
+ * per-thread (allocated inside the parallel region). Without OpenMP the pragmas
+ * are ignored and this is the original serial loop. */
 static int matmul_arena(const sp_arena_tensor *at, const float *X,
                         int n_tok, int in, int out, float *Y) {
     const sp_frob_packed_tensor *pt = &at->pt;
     if (pt->rows != out || pt->cols != in) return 1;
-    int8_t *unp = (int8_t *)malloc((size_t)in);   /* Q4 unpack scratch */
-    if (!unp) return 1;
-    for (int j = 0; j < out; j++) {
-        const uint8_t *rc = pt->codes + pt->row_off[j];
-        const int8_t *cp;
-        float inv;
-        if (pt->row_prec[j] == 8) { cp = (const int8_t *)rc; inv = pt->row_scale[j] / 127.0f; }
-        else { sp_frob_q4_unpack(rc, in, unp); cp = unp; inv = pt->row_scale[j] / 7.0f; }
-        for (int t = 0; t < n_tok; t++) {
-            const float *x = X + (size_t)t * in;
-            float acc = 0.0f;
-            for (int i = 0; i < in; i++) acc += (float)cp[i] * x[i];
-            Y[(size_t)t * out + j] = acc * inv;
+    int rc = 0;
+    #pragma omp parallel
+    {
+        int8_t *unp = (int8_t *)malloc((size_t)in);   /* per-thread Q4 unpack scratch */
+        if (!unp) { rc = 1; }
+        else {
+            int j;   /* MSVC OpenMP 2.0: loop var must be declared outside the for-init */
+            #pragma omp for
+            for (j = 0; j < out; j++) {
+                const uint8_t *rcw = pt->codes + pt->row_off[j];
+                const int8_t *cp;
+                float inv;
+                if (pt->row_prec[j] == 8) { cp = (const int8_t *)rcw; inv = pt->row_scale[j] / 127.0f; }
+                else { sp_frob_q4_unpack(rcw, in, unp); cp = unp; inv = pt->row_scale[j] / 7.0f; }
+                for (int t = 0; t < n_tok; t++) {
+                    const float *x = X + (size_t)t * in;
+                    float acc = 0.0f;
+                    for (int i = 0; i < in; i++) acc += (float)cp[i] * x[i];
+                    Y[(size_t)t * out + j] = acc * inv;
+                }
+            }
+            free(unp);
         }
     }
-    free(unp);
-    return 0;
+    return rc;
 }
 
 int matmul(const qwen3_model *m, const gguf_tensor *W,

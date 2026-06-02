@@ -36,6 +36,16 @@ target_link_libraries(sp_engine PUBLIC
     sp_frobenius sp_ntt_crt sp_poly_ring sp_kste sp_vht2
     sp_gguf sp_weight_dtype sp_io_hash sp_io_format sp_model sp_arena)
 
+# WIRE-CPU-V2 (2026-06-02): OpenMP parallelizes the per-output-row matmul loop
+# (matmul / matmul_arena). Parity-safe: each output element stays a single-threaded
+# dot, so results are bit-identical to the serial path regardless of thread count.
+# If OpenMP isn't found the #pragma is ignored -> serial fallback (no breakage).
+find_package(OpenMP QUIET COMPONENTS C)
+if(OpenMP_C_FOUND)
+    target_link_libraries(sp_engine PRIVATE OpenMP::OpenMP_C)
+    target_compile_definitions(sp_engine PRIVATE SP_ENGINE_OPENMP=1)
+endif()
+
 if(MSVC)
     target_compile_options(sp_engine PRIVATE /W4)
 else()
