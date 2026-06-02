@@ -78,6 +78,9 @@ static void kv_spinor_roundtrip(float *vec, int d) {
 static int g_recall_b = 0;   /* SP_RECALL_B: recall budget (0 = off = full attention) */
 static int g_recall_r = 16;  /* SP_RECALL_R: projection rank */
 static int g_recall_w = 64;  /* SP_RECALL_W: always-keep recent window */
+static int g_recall_sink = 4;/* SP_RECALL_SINK: StreamingLLM attention-sink anchors — first `sink` tokens
+                              * pinned in Ring-1 (Mobius cold-start), never evicted/routed. Protects the
+                              * softmax denominator (without sinks, hard top-B truncation detonates PPL). */
 static int g_ring2    = 0;   /* SP_RING2=1 (Step 2a): tokens older than W spill to a mock Ring-2 byte
                               * store (RAM); in-RAM kc/vc are POISONED on window-exit so attention MUST
                               * fetch old tokens from Ring-2 (else NaN). Parity test of spill→fetch. */
@@ -112,6 +115,7 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_RECALL_B");        g_recall_b = e ? atoi(e) : 0; if (g_recall_b < 0) g_recall_b = 0; }
     { const char *e = getenv("SP_RECALL_R");        g_recall_r = e ? atoi(e) : 16; if (g_recall_r < 1 || g_recall_r > SP_RECALL_R_MAX) g_recall_r = 16; }
     { const char *e = getenv("SP_RECALL_W");        g_recall_w = e ? atoi(e) : 64; if (g_recall_w < 0) g_recall_w = 0; }
+    { const char *e = getenv("SP_RECALL_SINK");     g_recall_sink = e ? atoi(e) : 4; if (g_recall_sink < 0) g_recall_sink = 0; }
     { const char *e = getenv("SP_RING2");           g_ring2 = (e && e[0] == '1'); }
 }
 
@@ -362,8 +366,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         projk   = (float *)malloc((size_t)c->n_layers * P * NKV * (size_t)g_recall_r * sizeof(float));
         if (!recallR || !projk) goto done;
         recall_build_R(recallR, g_recall_r, HD);   /* frozen ±1 matrix, deterministic */
-        fprintf(stderr, "    [recall] sidecar ON: r=%d B=%d W=%d (post-RoPE ±1 projection router)\n",
-                g_recall_r, g_recall_b, g_recall_w);
+        fprintf(stderr, "    [recall] sidecar ON: r=%d B=%d W=%d sink=%d (post-RoPE ±1 projection router + StreamingLLM sinks)\n",
+                g_recall_r, g_recall_b, g_recall_w, g_recall_sink);
     }
     ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);   /* Step 2a: f32-cache path only */
     if (ring2_on) {
@@ -381,8 +385,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         /* Step 2a: the token that just left the recent-W window (pos-W) is now "spilled" —
          * POISON its in-RAM kc/vc (all layers) so any attention read of it MUST come from
          * Ring-2 (a stale Ring-1 read → NaN → divergent tokens → test fails loudly). */
-        if (ring2_on && pos - g_recall_w >= 0) {
-            int et = pos - g_recall_w;
+        if (ring2_on && pos - g_recall_w >= 0 && (pos - g_recall_w) >= g_recall_sink) {
+            int et = pos - g_recall_w;   /* sink tokens (et < g_recall_sink) stay pinned in Ring-1, never poisoned */
             for (uint32_t L = 0; L < c->n_layers; L++) {
                 float *pk = kc + ((size_t)L * P + et) * KVD, *pv = vc + ((size_t)L * P + et) * KVD;
                 for (int i = 0; i < KVD; i++) { pk[i] = NAN; pv[i] = NAN; }
@@ -467,17 +471,24 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                             float pq[SP_RECALL_R_MAX];
                             recall_project(recallR, g_recall_r, HD, qh, pq);
                             int W = g_recall_w; if (W > pos + 1) W = pos + 1;
-                            int cand_hi = pos + 1 - W;               /* candidates [0,cand_hi); recent [cand_hi,pos] kept */
-                            int topk = g_recall_b - W; if (topk < 0) topk = 0; if (topk > cand_hi) topk = cand_hi;
-                            for (int s = 0; s < cand_hi; s++) {       /* projected score per candidate */
+                            int sink = g_recall_sink; if (sink > pos + 1) sink = pos + 1;
+                            /* three disjoint partitions of [0,pos]: pinned sinks [0,sink),
+                             * scored candidates [sink,cand_hi), recent window [cand_hi,pos]. */
+                            int cand_hi = pos + 1 - W;
+                            if (cand_hi < sink)   cand_hi = sink;     /* recent window reaches sinks: no candidates */
+                            if (cand_hi > pos + 1) cand_hi = pos + 1;
+                            int topk = g_recall_b - W - sink; if (topk < 0) topk = 0;
+                            if (topk > cand_hi - sink) topk = cand_hi - sink;
+                            for (int s = sink; s < cand_hi; s++) {    /* projected score per candidate (sinks excluded) */
                                 const float *pk = projk + (((size_t)L * P + s) * NKV + kvh) * (size_t)g_recall_r;
                                 float a = 0.0f; for (int p = 0; p < g_recall_r; p++) a += pq[p] * pk[p];
                                 scl[s] = a;
                             }
                             m = 0;
-                            for (int t = 0; t < topk; t++) {          /* select top-`topk` (simple max-extract) */
+                            for (int s = 0; s < sink; s++) ri[m++] = s;   /* pinned sink anchors (StreamingLLM) */
+                            for (int t = 0; t < topk; t++) {          /* select top-`topk` from candidates (max-extract) */
                                 int best = -1; float bv = -INFINITY;
-                                for (int s = 0; s < cand_hi; s++) if (scl[s] > bv) { bv = scl[s]; best = s; }
+                                for (int s = sink; s < cand_hi; s++) if (scl[s] > bv) { bv = scl[s]; best = s; }
                                 if (best < 0) break; ri[m++] = best; scl[best] = -INFINITY;
                             }
                             for (int s = cand_hi; s <= pos; s++) ri[m++] = s;   /* recent window */
@@ -486,9 +497,9 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         float maxs = -INFINITY;
                         for (int jj = 0; jj < m; jj++) {
                             int s = ri[jj];
-                            const float *kbase = (ring2_on && s < winlo)   /* old token → Ring-2 */
+                            const float *kbase = (ring2_on && s < winlo && s >= g_recall_sink)  /* old non-sink → Ring-2 */
                                 ? ring2k + ((size_t)L * P + s) * KVD
-                                : KC + (size_t)s * KVD;                    /* recent → Ring-1 */
+                                : KC + (size_t)s * KVD;                    /* recent + pinned sinks → Ring-1 */
                             const float *kh = kbase + (size_t)kvh * HD;
                             float acc = 0.0f;
                             for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
@@ -502,9 +513,9 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         for (int jj = 0; jj < m; jj++) {
                             int s = ri[jj];
                             float w = scl[jj] * inv;
-                            const float *vbase = (ring2_on && s < winlo)
+                            const float *vbase = (ring2_on && s < winlo && s >= g_recall_sink)  /* old non-sink → Ring-2 */
                                 ? ring2v + ((size_t)L * P + s) * KVD
-                                : VC + (size_t)s * KVD;
+                                : VC + (size_t)s * KVD;                    /* recent + pinned sinks → Ring-1 */
                             const float *vh = vbase + (size_t)kvh * HD;
                             for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                         }
