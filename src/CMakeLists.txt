@@ -11,6 +11,7 @@ add_library(sp_engine STATIC
     backends/cpu/cpu_forward.c
     backends/cpu/cpu_gemma3.c
     backends/cpu/cpu_generate.c
+    backends/cpu/ring2_disk.c   # C2.1 Step 2b: physical Optane-backed Ring-2
     # Engine-side pieces the relocation did NOT move: the perplexity / T_FRO_4 eval harness,
     # the tokenizer, and the .sp-model -> qwen3 adapter (the §8.7.3 HANDLE work — stays for now).
     forward/ppl.c

@@ -13,6 +13,7 @@
 #include "sp/frobenius_lift.h"
 #include "sp/poly_ring.h"
 #include "sp/spinor_block.h"
+#include "sp_engine/ring2_disk.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +85,8 @@ static int g_recall_sink = 4;/* SP_RECALL_SINK: StreamingLLM attention-sink anch
 static int g_ring2    = 0;   /* SP_RING2=1 (Step 2a): tokens older than W spill to a mock Ring-2 byte
                               * store (RAM); in-RAM kc/vc are POISONED on window-exit so attention MUST
                               * fetch old tokens from Ring-2 (else NaN). Parity test of spill→fetch. */
+static int g_ring2_disk = 0;        /* SP_RING2_DISK=1 (Step 2b): physical Optane file store (else RAM mock) */
+static const char *g_ring2_dir = 0; /* SP_RING2_DIR: store directory (default "E:\\") */
 #define SP_RECALL_R_MAX 64
 #define SP_RECALL_SEED 0x5350524F4A2BULL   /* "SPROJ+" frozen seed; bump = SP_RECALL_PROJ_VERSION */
 static uint64_t splitmix64(uint64_t *s) { uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
@@ -117,6 +120,8 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_RECALL_W");        g_recall_w = e ? atoi(e) : 64; if (g_recall_w < 0) g_recall_w = 0; }
     { const char *e = getenv("SP_RECALL_SINK");     g_recall_sink = e ? atoi(e) : 4; if (g_recall_sink < 0) g_recall_sink = 0; }
     { const char *e = getenv("SP_RING2");           g_ring2 = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_RING2_DISK");      g_ring2_disk = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_RING2_DIR");       g_ring2_dir = (e && e[0]) ? e : "E:\\"; }
 }
 
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
@@ -328,6 +333,7 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     signed char *recallR = NULL; float *projk = NULL;   /* C2.1 recall sidecar (g_recall_b>0) */
     float *ring2k = NULL, *ring2v = NULL;                /* C2.1 Step 2a mock Ring-2 byte store (g_ring2) */
     int ring2_on = 0;
+    ring2_disk *r2disk = NULL; int ring2_disk_on = 0;    /* C2.1 Step 2b physical Optane store (g_ring2_disk) */
 
     if (use_blocks) {
         size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
@@ -369,14 +375,21 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         fprintf(stderr, "    [recall] sidecar ON: r=%d B=%d W=%d sink=%d (post-RoPE ±1 projection router + StreamingLLM sinks)\n",
                 g_recall_r, g_recall_b, g_recall_w, g_recall_sink);
     }
-    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);   /* Step 2a: f32-cache path only */
-    if (ring2_on) {
+    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);   /* Step 2a/2b: f32-cache path only */
+    ring2_disk_on = (ring2_on && g_ring2_disk);
+    if (ring2_on && !ring2_disk_on) {
         size_t kvn = (size_t)c->n_layers * P * KVD;
         ring2k = (float *)malloc(kvn * sizeof(float));
         ring2v = (float *)malloc(kvn * sizeof(float));
         if (!ring2k || !ring2v) goto done;
-        fprintf(stderr, "    [ring2] mock spill ON: tokens older than W=%d spilled to RAM byte-store; "
+        fprintf(stderr, "    [ring2] mock RAM spill ON: tokens older than W=%d spilled to RAM byte-store; "
                 "kc/vc poisoned on window-exit (old reads MUST hit Ring-2)\n", g_recall_w);
+    } else if (ring2_disk_on) {
+        size_t bytes = (size_t)c->n_layers * P * (size_t)KVD * sizeof(float);
+        r2disk = ring2_disk_open(g_ring2_dir, bytes, (size_t)KVD * sizeof(float));
+        if (!r2disk) goto done;
+        fprintf(stderr, "    [ring2] PHYSICAL Optane spill ON (W=%d, sinks pinned in Ring-1, kc/vc poisoned -> "
+                "old reads MUST come off disk)\n", g_recall_w);
     }
 
     for (int pos = 0; pos < P; pos++) {
@@ -443,7 +456,10 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                 KC = kc + (size_t)L * P * KVD;
                 VC = vc + (size_t)L * P * KVD;
             }
-            if (ring2_on) {   /* spill this (layer,token) K/V to the mock Ring-2 byte store */
+            if (ring2_disk_on) {   /* Step 2b: spill this (layer,token) K/V to the physical Optane store */
+                size_t boff = ((size_t)L * P + pos) * (size_t)KVD * sizeof(float);
+                if (ring2_disk_write(r2disk, 0, boff, knew) || ring2_disk_write(r2disk, 1, boff, vnew)) goto done;
+            } else if (ring2_on) {   /* Step 2a: spill to the mock RAM byte store */
                 memcpy(ring2k + ((size_t)L * P + pos) * KVD, knew, (size_t)KVD * sizeof(float));
                 memcpy(ring2v + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
             }
@@ -456,7 +472,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
             {
                 float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
                 int   *ri  = (int   *)malloc((size_t)(pos + 1) * sizeof(int));
-                if (scl && ri) {
+                ring2_scratch *r2s = ring2_disk_on ? ring2_disk_scratch_new(r2disk) : NULL;  /* per-thread disk read scratch */
+                if (scl && ri && (!ring2_disk_on || r2s)) {
                     int h;
                     #pragma omp for
                     for (h = 0; h < NH; h++) {
@@ -497,9 +514,14 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         float maxs = -INFINITY;
                         for (int jj = 0; jj < m; jj++) {
                             int s = ri[jj];
-                            const float *kbase = (ring2_on && s < winlo && s >= g_recall_sink)  /* old non-sink → Ring-2 */
-                                ? ring2k + ((size_t)L * P + s) * KVD
-                                : KC + (size_t)s * KVD;                    /* recent + pinned sinks → Ring-1 */
+                            const float *kbase;
+                            if (ring2_on && s < winlo && s >= g_recall_sink) {           /* old non-sink → Ring-2 */
+                                if (ring2_disk_on) {
+                                    size_t boff = ((size_t)L * P + s) * (size_t)KVD * sizeof(float);
+                                    kbase = (const float *)ring2_disk_read(r2disk, 0, boff, r2s);
+                                    if (!kbase) kbase = KC + (size_t)s * KVD;            /* read fail → poisoned Ring-1 → loud NaN */
+                                } else kbase = ring2k + ((size_t)L * P + s) * KVD;
+                            } else kbase = KC + (size_t)s * KVD;                          /* recent + pinned sinks → Ring-1 */
                             const float *kh = kbase + (size_t)kvh * HD;
                             float acc = 0.0f;
                             for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
@@ -513,9 +535,14 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         for (int jj = 0; jj < m; jj++) {
                             int s = ri[jj];
                             float w = scl[jj] * inv;
-                            const float *vbase = (ring2_on && s < winlo && s >= g_recall_sink)  /* old non-sink → Ring-2 */
-                                ? ring2v + ((size_t)L * P + s) * KVD
-                                : VC + (size_t)s * KVD;                    /* recent + pinned sinks → Ring-1 */
+                            const float *vbase;
+                            if (ring2_on && s < winlo && s >= g_recall_sink) {           /* old non-sink → Ring-2 */
+                                if (ring2_disk_on) {
+                                    size_t boff = ((size_t)L * P + s) * (size_t)KVD * sizeof(float);
+                                    vbase = (const float *)ring2_disk_read(r2disk, 1, boff, r2s);
+                                    if (!vbase) vbase = VC + (size_t)s * KVD;
+                                } else vbase = ring2v + ((size_t)L * P + s) * KVD;
+                            } else vbase = VC + (size_t)s * KVD;                          /* recent + pinned sinks → Ring-1 */
                             const float *vh = vbase + (size_t)kvh * HD;
                             for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                         }
@@ -569,6 +596,12 @@ done:
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
     free(recallR); free(projk);
     free(ring2k); free(ring2v);
+    if (r2disk) {
+        unsigned long long nr = 0; double rs = 0; ring2_disk_stats(r2disk, &nr, &rs);
+        fprintf(stderr, "    [ring2-disk] %llu blocking reads, %.3f s total, %.2f us/read avg\n",
+                nr, rs, nr ? rs * 1e6 / (double)nr : 0.0);
+        ring2_disk_close(r2disk);
+    }
     return rc;
 }
 
