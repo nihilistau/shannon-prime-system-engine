@@ -333,8 +333,12 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
             if (matmul(m, ly->attn_v, nx, 1, E, KVD, vnew)) goto done;
 
             const float *qn = as_f32(m, ly->attn_q_norm), *kn = as_f32(m, ly->attn_k_norm);
-            for (int h = 0; h < NH;  h++) { float *qh = q    + (size_t)h * HD; rmsnorm_head(qh, qn, HD, eps); rope_neox(qh, HD, pos, base); }
-            for (int h = 0; h < NKV; h++) { float *kh = knew + (size_t)h * HD; rmsnorm_head(kh, kn, HD, eps); rope_neox(kh, HD, pos, base); }
+            { int h;   /* per-head QK-norm+RoPE: each head writes a distinct slice → parallel-safe */
+              #pragma omp parallel for
+              for (h = 0; h < NH;  h++) { float *qh = q    + (size_t)h * HD; rmsnorm_head(qh, qn, HD, eps); rope_neox(qh, HD, pos, base); }
+              #pragma omp parallel for
+              for (h = 0; h < NKV; h++) { float *kh = knew + (size_t)h * HD; rmsnorm_head(kh, kn, HD, eps); rope_neox(kh, HD, pos, base); }
+            }
             /* Store the position-finalized K/V; KC/VC then point at the f32 the
              * attention reads as KC[s*KVD + kvh*HD]. Block path: encode into the
              * persistent block cache, decode [0,pos] of this layer into the per-
@@ -367,25 +371,38 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
                 VC = vc + (size_t)L * P * KVD;
             }
 
-            for (int h = 0; h < NH; h++) {                     /* attention over cached [0,pos] */
-                int kvh = h / group;
-                const float *qh = q + (size_t)h * HD;
-                float maxs = -INFINITY;
-                for (int s = 0; s <= pos; s++) {
-                    const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
-                    float acc = 0.0f;
-                    for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
-                    float d = acc * ascale; sc[s] = d; if (d > maxs) maxs = d;
-                }
-                float sum = 0.0f;
-                for (int s = 0; s <= pos; s++) { sc[s] = expf(sc[s] - maxs); sum += sc[s]; }
-                float inv = 1.0f / sum;
-                float *out = ao + (size_t)h * HD;
-                for (int i = 0; i < HD; i++) out[i] = 0.0f;
-                for (int s = 0; s <= pos; s++) {
-                    float w = sc[s] * inv;
-                    const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
-                    for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+            /* Attention over cached [0,pos], parallel over heads. Each head writes a
+             * distinct ao[h*HD] slice + uses its OWN score scratch (per-thread `scl`,
+             * replacing the shared `sc`), so the result is bit-identical to serial for
+             * any thread count. This is the lever that pays at long context (O(pos)/tok). */
+            #pragma omp parallel
+            {
+                float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
+                if (scl) {
+                    int h;
+                    #pragma omp for
+                    for (h = 0; h < NH; h++) {
+                        int kvh = h / group;
+                        const float *qh = q + (size_t)h * HD;
+                        float maxs = -INFINITY;
+                        for (int s = 0; s <= pos; s++) {
+                            const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
+                            float acc = 0.0f;
+                            for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+                            float d = acc * ascale; scl[s] = d; if (d > maxs) maxs = d;
+                        }
+                        float sum = 0.0f;
+                        for (int s = 0; s <= pos; s++) { scl[s] = expf(scl[s] - maxs); sum += scl[s]; }
+                        float inv = 1.0f / sum;
+                        float *out = ao + (size_t)h * HD;
+                        for (int i = 0; i < HD; i++) out[i] = 0.0f;
+                        for (int s = 0; s <= pos; s++) {
+                            float w = scl[s] * inv;
+                            const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
+                            for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+                        }
+                    }
+                    free(scl);
                 }
             }
             if (matmul(m, ly->attn_output, ao, 1, QD, E, ap)) goto done;
