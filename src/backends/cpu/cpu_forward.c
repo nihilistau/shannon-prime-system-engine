@@ -87,6 +87,9 @@ static int g_ring2    = 0;   /* SP_RING2=1 (Step 2a): tokens older than W spill 
                               * fetch old tokens from Ring-2 (else NaN). Parity test of spill→fetch. */
 static int g_ring2_disk = 0;        /* SP_RING2_DISK=1 (Step 2b): physical Optane file store (else RAM mock) */
 static const char *g_ring2_dir = 0; /* SP_RING2_DIR: store directory (default "E:\\") */
+static int g_recall_decode_only = 0;/* SP_RECALL_DECODE_ONLY=1: prefill = dense exact (full RAM, no offload),
+                                     * router/sparse-attention engages only at decode (pos >= n_prompt).
+                                     * Production-correct: ingest dense, then route. Disables offload (full RAM). */
 #define SP_RECALL_R_MAX 64
 #define SP_RECALL_SEED 0x5350524F4A2BULL   /* "SPROJ+" frozen seed; bump = SP_RECALL_PROJ_VERSION */
 static uint64_t splitmix64(uint64_t *s) { uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
@@ -122,6 +125,7 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_RING2");           g_ring2 = (e && e[0] == '1'); }
     { const char *e = getenv("SP_RING2_DISK");      g_ring2_disk = (e && e[0] == '1'); }
     { const char *e = getenv("SP_RING2_DIR");       g_ring2_dir = (e && e[0]) ? e : "E:\\"; }
+    { const char *e = getenv("SP_RECALL_DECODE_ONLY"); g_recall_decode_only = (e && e[0] == '1'); }
 }
 
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
@@ -417,7 +421,9 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
      * structurally evicted (slot reused by s+W) exactly when s < winlo, which is the
      * same condition the router uses to route it to Ring-2. Baseline (ring2 off) keeps
      * the full P-slot absolute cache, so parity is untouched. */
-    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);
+    /* decode_only disables offload entirely (full RAM cache, dense exact prefill);
+     * the router still engages, but only during decode (gated below by phase). */
+    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks && !g_recall_decode_only);
     ring2_disk_on = ring2_on && g_ring2_disk;
     const int r1W = (g_recall_w > 0) ? g_recall_w : 1;
     const int r1cap = ring2_on ? (g_recall_sink + r1W) : P;
@@ -568,6 +574,9 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
              * each head writes a distinct ao slice + per-thread score scratch). winlo = recent
              * window start; old non-sink positions (s < winlo, s >= sink) live in Ring-2. */
             int winlo = (pos + 1 > g_recall_w) ? (pos + 1 - g_recall_w) : 0;
+            /* prefill/decode split: in decode_only mode, prefill (pos < n_prompt) is dense
+             * (eB=0 -> recall_select returns the full set); the router engages only at decode. */
+            int eB = (g_recall_decode_only && pos < n_prompt) ? 0 : g_recall_b;
             if (ring2_disk_on) {
                 /* v1 disk path: 3-phase to DEDUP the per-query-head reads. Blocks are
                  * per-token (all kv-heads), so one fetch serves every head that picked it. */
@@ -580,7 +589,7 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         #pragma omp for
                         for (h = 0; h < NH; h++)
                             m_all[h] = recall_select(recallR, g_recall_r, HD, q + (size_t)h * HD,
-                                projk, (size_t)L, P, NKV, h / group, g_recall_b, g_recall_w,
+                                projk, (size_t)L, P, NKV, h / group, eB, g_recall_w,
                                 g_recall_sink, pos, cand, ri_all + (size_t)h * P);
                     }
                     free(cand);
@@ -653,7 +662,7 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         for (h = 0; h < NH; h++) {
                             int kvh = h / group; const float *qh = q + (size_t)h * HD;
                             int m = recall_select(recallR, g_recall_r, HD, qh, projk, (size_t)L, P,
-                                NKV, kvh, g_recall_b, g_recall_w, g_recall_sink, pos, cand, ri);
+                                NKV, kvh, eB, g_recall_w, g_recall_sink, pos, cand, ri);
                             float maxs = -INFINITY;
                             for (int jj = 0; jj < m; jj++) {
                                 int s = ri[jj];
