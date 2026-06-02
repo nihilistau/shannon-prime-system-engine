@@ -17,14 +17,16 @@ SP_TARGET("avx512f,avx512vnni,avx512bw")
 void sp_avx512_vnni_matvec(const int8_t *w_codes, const uint8_t *act_u8,
                             const float *row_scale, const int32_t *bias,
                             int rows, int cols, float *out) {
-    for (int i = 0; i < rows; i++) {
+    int i;   /* hoisted: MSVC OpenMP 2.0 requires the loop var outside the for-init */
+    #pragma omp parallel for
+    for (i = 0; i < rows; i++) {
         __m512i acc = _mm512_setzero_si512();
 
         const int8_t  *wi = w_codes + (ptrdiff_t)i * cols;
 
         for (int k = 0; k < cols; k += 64) {
-            __m512i a64 = _mm512_load_si512((const __m512i *)(act_u8 + k));
-            __m512i w64 = _mm512_load_si512((const __m512i *)(wi + k));
+            __m512i a64 = _mm512_loadu_si512((const __m512i *)(act_u8 + k));
+            __m512i w64 = _mm512_loadu_si512((const __m512i *)(wi + k));
             acc = _mm512_dpbusd_epi32(acc, a64, w64);
         }
 

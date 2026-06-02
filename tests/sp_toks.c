@@ -48,6 +48,10 @@ int main(void) {
     fprintf(stderr,
         "[sp_toks] gen %d tokens in %.3f s = %.2f tok/s (prompt=%d, total=%d, model=%s)\n",
         n_gen, dt, (dt > 0 ? n_gen / dt : 0.0), n_prompt, n, SP_QWEN3_GGUF);
+    /* token IDs for the top-1 accuracy gate (diff VNNI vs scalar oracle) */
+    fprintf(stderr, "[sp_toks] tokens:");
+    for (int i = n_prompt; i < n && i < n_prompt + 24; i++) fprintf(stderr, " %d", seq[i]);
+    fprintf(stderr, "\n");
     free(seq);
     return 0;
 }

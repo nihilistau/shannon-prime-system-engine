@@ -4,6 +4,9 @@
 #include "sp_engine/kernels.h"
 #include "sp_engine/arena.h"
 #include "sp/frobenius_lift.h"
+#if defined(SP_ENGINE_AVX512)
+#include "sp_engine/avx512.h"   /* sp_avx512_vnni_matvec + g_avx512_caps (VNNI int8 path) */
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +26,7 @@ static int   g_frob    = 0;   /* SP_ENGINE_FROB: 0 f32, 1/2 Q8 inline/dequant, 3
 static float g_q4_promote = 0.25f;   /* promote a Q4 row to Q8 if its round-trip rel-L2 exceeds this */
 static long  g_q4_promoted = 0;
 static long  g_q4_rows = 0;
+static int   g_vnni    = 0;   /* SP_VNNI=1: AVX-512 VNNI int8×int8 matmul_arena path (dyn act-quant) */
 
 /* round one f32 to the nearest IEEE binary16 value and back (fp16 working precision). */
 static inline float r16(float v) { return sp_f16_to_f32(sp_f32_to_f16(v)); }
@@ -34,6 +38,10 @@ void sp_kernels_read_env(void) {
     { const char *e = getenv("SP_Q4_PROMOTE");      if (e) g_q4_promote = (float)atof(e);
       g_q4_promoted = 0; g_q4_rows = 0; }
     { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_VNNI");            g_vnni     = (e && e[0] == '1'); }
+#if defined(SP_ENGINE_AVX512)
+    if (g_vnni) sp_avx512_init();   /* populate g_avx512_caps.has_vnni before dispatch */
+#endif
 }
 
 void qwen3_q4_stats(long *promoted, long *rows) {
@@ -103,6 +111,44 @@ static size_t row_bytes(uint32_t type, int n) {
     }
 }
 
+#if defined(SP_ENGINE_AVX512)
+/* Per-tensor VNNI side data, computed once (weights are const across tokens),
+ * keyed by the codes pointer: per-row bias = 128*sum(int8 codes) (the dpbusd
+ * zero-shift correction) and per-row scale = row_scale/127. `all_q8` caches
+ * eligibility (every row Q8 + contiguous stride=in). */
+typedef struct { const void *key; int all_q8; int32_t *bias; float *rs; } vnni_cache_t;
+#define VNNI_CACHE_N 1024
+static vnni_cache_t g_vnni_cache[VNNI_CACHE_N];
+static int g_vnni_cache_used = 0;
+static uint8_t *g_act_u8 = NULL; static int g_act_cap = 0;   /* act-quant scratch (single-thread call site) */
+
+static const vnni_cache_t *vnni_get(const sp_frob_packed_tensor *pt, int in, int out) {
+    for (int i = 0; i < g_vnni_cache_used; i++)
+        if (g_vnni_cache[i].key == (const void *)pt->codes) return &g_vnni_cache[i];
+    if (g_vnni_cache_used >= VNNI_CACHE_N) return NULL;
+    int all_q8 = 1;
+    for (int j = 0; j < out; j++)
+        if (pt->row_prec[j] != 8 || (size_t)pt->row_off[j] != (size_t)j * (size_t)in) { all_q8 = 0; break; }
+    vnni_cache_t *c = &g_vnni_cache[g_vnni_cache_used++];
+    c->key = (const void *)pt->codes; c->all_q8 = all_q8; c->bias = NULL; c->rs = NULL;
+    if (all_q8) {
+        c->bias = (int32_t *)malloc((size_t)out * sizeof(int32_t));
+        c->rs   = (float   *)malloc((size_t)out * sizeof(float));
+        if (!c->bias || !c->rs) { free(c->bias); free(c->rs); c->bias = NULL; c->rs = NULL; c->all_q8 = 0; }
+        else {
+            const int8_t *codes = (const int8_t *)pt->codes;
+            for (int j = 0; j < out; j++) {
+                const int8_t *w = codes + (size_t)j * (size_t)in;
+                int s = 0; for (int k = 0; k < in; k++) s += w[k];
+                c->bias[j] = 128 * s;
+                c->rs[j]   = pt->row_scale[j] / 127.0f;
+            }
+        }
+    }
+    return c;
+}
+#endif
+
 /* Arena matmul: inline-lift the packed Q8/Q4 codes (the §4.8 production path).
  * WIRE-CPU-V2: the per-output-row (j) loop is OpenMP-parallel. Each Y[j] is an
  * independent single-threaded dot, so the result is BIT-IDENTICAL to the serial
@@ -113,6 +159,35 @@ static int matmul_arena(const sp_arena_tensor *at, const float *X,
                         int n_tok, int in, int out, float *Y) {
     const sp_frob_packed_tensor *pt = &at->pt;
     if (pt->rows != out || pt->cols != in) return 1;
+#if defined(SP_ENGINE_AVX512)
+    /* VNNI int8×int8 path (SP_VNNI=1). Dynamic per-vector activation quant → dpbusd.
+     * NOT bit-exact to the f32-activation path (lossy act-quant) → gated by a top-1/PPL
+     * gate, not a byte-match. Falls through to the AVX2/scalar path if ineligible. */
+    if (g_vnni && !g_scalar && g_avx512_caps.has_vnni && (in % 64 == 0)) {
+        const vnni_cache_t *vc = vnni_get(pt, in, out);
+        if (vc && vc->all_q8) {
+            if (g_act_cap < in) { free(g_act_u8); g_act_u8 = (uint8_t *)malloc((size_t)in); g_act_cap = g_act_u8 ? in : 0; }
+            if (g_act_u8) {
+                const int8_t *codes = (const int8_t *)pt->codes;
+                for (int t = 0; t < n_tok; t++) {
+                    const float *x = X + (size_t)t * in;
+                    float ma = 0.0f; for (int i = 0; i < in; i++) { float a = fabsf(x[i]); if (a > ma) ma = a; }
+                    float *yt = Y + (size_t)t * out;
+                    if (ma <= 0.0f) { for (int i = 0; i < out; i++) yt[i] = 0.0f; continue; }
+                    float as = ma / 127.0f, invas = 127.0f / ma;
+                    for (int i = 0; i < in; i++) {
+                        int q = (int)lrintf(x[i] * invas);
+                        if (q > 127) q = 127; else if (q < -127) q = -127;
+                        g_act_u8[i] = (uint8_t)(q + 128);
+                    }
+                    sp_avx512_vnni_matvec(codes, g_act_u8, vc->rs, vc->bias, out, in, yt);
+                    for (int i = 0; i < out; i++) yt[i] *= as;
+                }
+                return 0;
+            }
+        }
+    }
+#endif
     int rc = 0;
     #pragma omp parallel
     {
