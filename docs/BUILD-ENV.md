@@ -7,7 +7,10 @@ Pinned toolchains, hard paths, version-locked. Set in stone for the project; not
 | Component | Pinned version | Path |
 |-----------|----------------|------|
 | **MinGW gcc (CPU primary)** | **15.2** | `C:\ProgramData\mingw64\mingw64\bin` (on PATH) |
-| Visual Studio Build Tools | 2019 | `C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools` |
+| Visual Studio Build Tools (CUDA host) | 2019 | `C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools` |
+| **VS18 BuildTools (Tier-3 MSVC-parity only)** | **18 / MSVC v14.50 (cl 19.50)** | `D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools` |
+
+> **VS18/2022 path saved (2026-06-02).** There is **no "VS2022"** installed on this host — vswhere shows only 2019 BT and **18 BT** (on D:, MSVC v14.50, ships `<stdatomic.h>`). VS18 is the toolchain for the **Tier-3 MSVC-parity** build only — it is NOT the CPU backend (= MinGW gcc 15.2) and NOT the CUDA host (= VS2019 BT, tightly pinned with CUDA). Pinned as `SP_PIN_VS2022_BUILDTOOLS` in `env-common.bat`, separate from the CUDA-host `SP_PIN_VS_BUILDTOOLS`.
 
 **CPU toolchain re-pin (2026-06-02, operator-approved).** The canonical CPU
 backend build uses **MinGW gcc 15.2**, not MSVC. This matches roadmap §3.7's
@@ -66,6 +69,8 @@ All four output dirs coexist. Switching backends does not invalidate the others.
 
 - Build with **MinGW gcc 15.2** (the `build/` dir), not MSVC. AVX2 is the compile floor; AVX512 paths are guarded by `__cpuid()` and dispatched at runtime so binaries run on any AVX2-capable host.
 - **MSVC (VS2019 BT) cannot build the CPU backend.** `avx512_{spinor,ternlog,persist}.c` use GCC `__attribute__((target("avx512f")))` and `__atomic_*` / `__ATOMIC_*` builtins (cl.exe: `error C2059/C2143/C2065`). `core/sp_channel/sp_hedge.c` needs `<stdatomic.h>`, absent before VS2022. Tier-3 MSVC parity therefore requires VS2022 + porting the GCC intrinsics to `<intrin.h>` (`_mm512_*` + `_Interlocked*`) — tracked, not yet done. Verified clean on gcc: math-core 19/19 ctest, engine 95/96 link (2026-06-02).
+
+> **Tier-3 MSVC-parity progress (2026-06-02, partial).** Using the VS18 toolchain above, the engine library + `sp_toks` now **compile AND link** under MSVC. Done (committed): `SP_TARGET(s)` macro in `avx512.h` (empty on MSVC, `__attribute__((target))` on GCC) applied to all per-fn target attrs (engine `db84bf3`); `avx512_persist.c` `__atomic_*`→`_Interlocked*` shim (`33c6a27`); ternlog `aligned()`→C11 `alignas`; `sp_channel` `/experimental:c11atomics` (core submodule `777a10e`). **Remaining for full MSVC parity:** (1) two micro-bench TUs still GCC-only and unported — `tests/test_avx512_persist.c` (`__ATOMIC_*`), `tests/bench_avx_spinor_sweep.c` (`stream_nt`); (2) **OPEN: the MSVC binary SEGFAULTS at runtime** — `test_kv_spinor` (E_CPU_8) which RUNS as the gcc/older binary crashes (0xC0000005) rebuilt under VS18, so MSVC AVX512 codegen / the de-GCC port has a runtime defect to debug before Tier-3 parity is real. **None of this affects the CPU backend (= MinGW gcc) or CUDA — both unchanged.**
 
 ### Vulkan
 
