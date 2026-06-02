@@ -167,6 +167,17 @@ else()
     target_compile_options(sp_toks PRIVATE -Wall -Wextra)
 endif()
 
+# G1 NIAH: recall-router retrieval gate on the decode path (driver-script sweep
+# over depth x N x budget; not in the fast suite). Exit 0=HIT, 3=MISS.
+add_executable(niah niah.c)
+target_link_libraries(niah PRIVATE sp_engine)
+target_compile_definitions(niah PRIVATE SP_QWEN3_GGUF="${SP_QWEN3_GGUF}")
+if(MSVC)
+    target_compile_options(niah PRIVATE /W4)
+else()
+    target_compile_options(niah PRIVATE -Wall -Wextra)
+endif()
+
 add_executable(test_arena test_arena.c)
 target_link_libraries(test_arena PRIVATE sp_engine)
 target_compile_definitions(test_arena PRIVATE
