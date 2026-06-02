@@ -178,6 +178,17 @@ else()
     target_compile_options(niah PRIVATE -Wall -Wextra)
 endif()
 
+# G2 PPL: autoregressive (decode-path) perplexity; deflection recall-on vs full-attn.
+# SLOW by design (full forward + vocab projection per position) — bake detached.
+add_executable(ppl_ar ppl_ar.c)
+target_link_libraries(ppl_ar PRIVATE sp_engine)
+target_compile_definitions(ppl_ar PRIVATE SP_QWEN3_GGUF="${SP_QWEN3_GGUF}")
+if(MSVC)
+    target_compile_options(ppl_ar PRIVATE /W4)
+else()
+    target_compile_options(ppl_ar PRIVATE -Wall -Wextra)
+endif()
+
 add_executable(test_arena test_arena.c)
 target_link_libraries(test_arena PRIVATE sp_engine)
 target_compile_definitions(test_arena PRIVATE

@@ -202,6 +202,16 @@ int qwen3_generate(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
 int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
                       int eos_id);
 
+/* G2 (C2.1 Step 3): teacher-forced autoregressive perplexity over the DECODE path,
+ * so the recall router (SP_RECALL_*) + two-ring (SP_RING2) are exercised exactly as
+ * production generates — unlike sp_perplexity, which runs the dense prefill
+ * qwen3_forward (no recall knobs). `toks[0,n_toks)` is the full corpus slice; the
+ * positions [n_warm, n_toks-1) are scored (predict toks[pos+1] from logits at pos).
+ * On success returns 0, sets *ppl = exp(mean NLL) and *n_scored. Shares the exact
+ * generate_kv decode body (one forward, no path divergence). */
+int qwen3_ppl_decode(const qwen3_model *m, int32_t *toks, int n_toks, int n_warm,
+                     double *ppl, long *n_scored);
+
 /* Q4 calibration stats from the most recent forward on the Q4 weight path
  * (SP_ENGINE_FROB=3 or 4): how many weight rows the mixed-precision calibration
  * promoted to Q8, out of the total rows seen. Both 0 otherwise. (E_CPU_7.) */

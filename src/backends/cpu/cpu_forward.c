@@ -291,8 +291,12 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
  * path is prefill-only and not wired here. Greedy argmax must match qwen3_generate
  * up to the float-reassociation floor (different softmax-sum lengths) — GEN_KV
  * gates on argmax/sequence identity, not bit-equal logits. */
-int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
-                      int eos_id) {
+/* Shared decode body for qwen3_generate_kv (ppl_mode=0, argmax emit) and
+ * qwen3_ppl_decode (ppl_mode=1, teacher-forced NLL of seq[pos+1] over [n_warm,P-2]).
+ * ONE forward path — the recall router + two-ring are identical in both modes. */
+static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                            int eos_id, int ppl_mode, int n_warm,
+                            double *nll_out, long *nscored_out) {
     if (!m || !seq || n_prompt <= 0 || n_gen < 0) return -1;
     read_env_knobs();
     const qwen3_config *c = &m->cfg;
@@ -519,7 +523,25 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
             for (int i = 0; i < E; i++) x[i] += dn[i];
         }
 
-        if (pos >= n_prompt - 1 && produced < n_gen) {         /* emit next token */
+        if (ppl_mode) {
+            /* G2: teacher-forced autoregressive PPL — logits at EVERY pos, accumulate
+             * -log p(seq[pos+1]) for pos in [n_warm, P-2]. The recall/Ring-2 path above
+             * is exercised exactly as in production decode (the whole point of G2). */
+            if (pos + 1 < P && pos >= n_warm) {
+                rmsnorm(x, as_f32(m, m->output_norm), E, eps, nx);
+                if (matmul(m, m->output, nx, 1, E, V, lg)) goto done;
+                int tgt = seq[pos + 1];
+                if (tgt >= 0 && tgt < V) {
+                    float maxl = lg[0];
+                    for (int j = 1; j < V; j++) if (lg[j] > maxl) maxl = lg[j];
+                    double sumexp = 0.0;
+                    for (int j = 0; j < V; j++) sumexp += exp((double)lg[j] - (double)maxl);
+                    double logp = (double)lg[tgt] - (double)maxl - log(sumexp);
+                    if (nll_out)     *nll_out += -logp;
+                    if (nscored_out) (*nscored_out)++;
+                }
+            }
+        } else if (pos >= n_prompt - 1 && produced < n_gen) {   /* emit next token */
             rmsnorm(x, as_f32(m, m->output_norm), E, eps, nx);
             if (matmul(m, m->output, nx, 1, E, V, lg)) goto done;
             int amax = 0;
@@ -537,4 +559,23 @@ done:
     free(recallR); free(projk);
     free(ring2k); free(ring2v);
     return rc;
+}
+
+int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                      int eos_id) {
+    return generate_kv_impl(m, seq, n_prompt, n_gen, eos_id, /*ppl_mode=*/0, 0, NULL, NULL);
+}
+
+int qwen3_ppl_decode(const qwen3_model *m, int32_t *toks, int n_toks, int n_warm,
+                     double *ppl, long *n_scored) {
+    if (!m || !toks || n_toks < 4 || !ppl) return 1;
+    if (n_warm < 1) n_warm = 1;
+    if (n_warm > n_toks - 2) n_warm = n_toks - 2;
+    double nll = 0.0; long ns = 0;
+    int rc = generate_kv_impl(m, toks, n_toks, /*n_gen=*/0, /*eos=*/-1,
+                              /*ppl_mode=*/1, n_warm, &nll, &ns);
+    if (rc < 0 || ns <= 0) return 1;
+    *ppl = exp(nll / (double)ns);
+    if (n_scored) *n_scored = ns;
+    return 0;
 }
