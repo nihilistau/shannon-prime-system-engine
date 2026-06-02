@@ -300,6 +300,39 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
  * path is prefill-only and not wired here. Greedy argmax must match qwen3_generate
  * up to the float-reassociation floor (different softmax-sum lengths) — GEN_KV
  * gates on argmax/sequence identity, not bit-equal logits. */
+/* Compute one query head's recall set into ri[0,m): full [0,pos] (exact baseline)
+ * unless B>0 and context exceeds budget, then sinks ∪ top-(B-W-sink candidates) ∪
+ * recent-W, by ±1-projected score. `scl` is (pos+1)-float scratch. Returns m.
+ * Shared by the RAM/no-Ring-2 inline path and the disk phase-split — one selection. */
+static int recall_select(const signed char *R, int rr, int hd, const float *qh,
+                         const float *projk, size_t L, int P, int NKV, int kvh,
+                         int B, int W0, int sink0, int pos, float *scl, int *ri) {
+    if (B <= 0 || pos + 1 <= B) { for (int s = 0; s <= pos; s++) ri[s] = s; return pos + 1; }
+    float pq[SP_RECALL_R_MAX];
+    recall_project(R, rr, hd, qh, pq);
+    int W = W0;       if (W > pos + 1) W = pos + 1;
+    int sink = sink0; if (sink > pos + 1) sink = pos + 1;
+    int cand_hi = pos + 1 - W;
+    if (cand_hi < sink) cand_hi = sink;
+    if (cand_hi > pos + 1) cand_hi = pos + 1;
+    int topk = B - W - sink; if (topk < 0) topk = 0;
+    if (topk > cand_hi - sink) topk = cand_hi - sink;
+    for (int s = sink; s < cand_hi; s++) {
+        const float *pk = projk + (((size_t)L * P + s) * NKV + kvh) * (size_t)rr;
+        float a = 0.0f; for (int p = 0; p < rr; p++) a += pq[p] * pk[p];
+        scl[s] = a;
+    }
+    int m = 0;
+    for (int s = 0; s < sink; s++) ri[m++] = s;            /* pinned sink anchors */
+    for (int t = 0; t < topk; t++) {                       /* top-topk candidates (max-extract) */
+        int best = -1; float bv = -INFINITY;
+        for (int s = sink; s < cand_hi; s++) if (scl[s] > bv) { bv = scl[s]; best = s; }
+        if (best < 0) break; ri[m++] = best; scl[best] = -INFINITY;
+    }
+    for (int s = cand_hi; s <= pos; s++) ri[m++] = s;      /* recent window */
+    return m;
+}
+
 /* Shared decode body for qwen3_generate_kv (ppl_mode=0, argmax emit) and
  * qwen3_ppl_decode (ppl_mode=1, teacher-forced NLL of seq[pos+1] over [n_warm,P-2]).
  * ONE forward path — the recall router + two-ring are identical in both modes. */
@@ -334,6 +367,11 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     float *ring2k = NULL, *ring2v = NULL;                /* C2.1 Step 2a mock Ring-2 byte store (g_ring2) */
     int ring2_on = 0;
     ring2_disk *r2disk = NULL; int ring2_disk_on = 0;    /* C2.1 Step 2b physical Optane store (g_ring2_disk) */
+    /* v1 dedupe: per-layer staging of the UNION of all heads' recalled blocks (read once, not per-head) */
+    float *stgK = NULL, *stgV = NULL;
+    int *stg_stamp = NULL, *stg_slot = NULL, *stg_pos = NULL;   /* position->slot map, generation-stamped */
+    int *ri_all = NULL, *m_all = NULL;                          /* per-head recall sets: phase 1 -> phase 3 */
+    ring2_scratch *r2s_io = NULL; int stg_gen = 0;             /* phase-2 read scratch (v1a blocking) */
 
     if (use_blocks) {
         size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
@@ -388,8 +426,20 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         size_t bytes = (size_t)c->n_layers * P * (size_t)KVD * sizeof(float);
         r2disk = ring2_disk_open(g_ring2_dir, bytes, (size_t)KVD * sizeof(float));
         if (!r2disk) goto done;
+        /* v1 dedupe staging: union of recalled blocks read ONCE per layer into RAM, then all heads
+         * read their kv-head slice from here (eliminates the per-query-head redundant disk reads). */
+        stgK = (float *)malloc((size_t)P * KVD * sizeof(float));
+        stgV = (float *)malloc((size_t)P * KVD * sizeof(float));
+        stg_stamp = (int *)malloc((size_t)P * sizeof(int));
+        stg_slot  = (int *)malloc((size_t)P * sizeof(int));
+        stg_pos   = (int *)malloc((size_t)P * sizeof(int));
+        ri_all = (int *)malloc((size_t)NH * P * sizeof(int));
+        m_all  = (int *)malloc((size_t)NH * sizeof(int));
+        r2s_io = ring2_disk_scratch_new(r2disk);
+        if (!stgK || !stgV || !stg_stamp || !stg_slot || !stg_pos || !ri_all || !m_all || !r2s_io) goto done;
+        for (int i = 0; i < P; i++) stg_stamp[i] = -1;
         fprintf(stderr, "    [ring2] PHYSICAL Optane spill ON (W=%d, sinks pinned in Ring-1, kc/vc poisoned -> "
-                "old reads MUST come off disk)\n", g_recall_w);
+                "old reads MUST come off disk; v1 per-layer dedupe staging)\n", g_recall_w);
     }
 
     for (int pos = 0; pos < P; pos++) {
@@ -464,91 +514,118 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                 memcpy(ring2v + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
             }
 
-            /* Attention over cached [0,pos], parallel over heads. Each head writes a
-             * distinct ao[h*HD] slice + uses its OWN score scratch (per-thread `scl`,
-             * replacing the shared `sc`), so the result is bit-identical to serial for
-             * any thread count. This is the lever that pays at long context (O(pos)/tok). */
-            #pragma omp parallel
-            {
-                float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
-                int   *ri  = (int   *)malloc((size_t)(pos + 1) * sizeof(int));
-                ring2_scratch *r2s = ring2_disk_on ? ring2_disk_scratch_new(r2disk) : NULL;  /* per-thread disk read scratch */
-                if (scl && ri && (!ring2_disk_on || r2s)) {
-                    int h;
-                    #pragma omp for
-                    for (h = 0; h < NH; h++) {
-                        int kvh = h / group;
-                        const float *qh = q + (size_t)h * HD;
-                        /* Recall set ri[0,m): full [0,pos] (EXACT baseline) unless g_recall_b>0 AND
-                         * context exceeds the budget, then recent-W ∪ top-(B-W) by ±1-projected score. */
-                        int m;
-                        if (g_recall_b <= 0 || pos + 1 <= g_recall_b) {
-                            m = pos + 1; for (int s = 0; s <= pos; s++) ri[s] = s;
-                        } else {
-                            float pq[SP_RECALL_R_MAX];
-                            recall_project(recallR, g_recall_r, HD, qh, pq);
-                            int W = g_recall_w; if (W > pos + 1) W = pos + 1;
-                            int sink = g_recall_sink; if (sink > pos + 1) sink = pos + 1;
-                            /* three disjoint partitions of [0,pos]: pinned sinks [0,sink),
-                             * scored candidates [sink,cand_hi), recent window [cand_hi,pos]. */
-                            int cand_hi = pos + 1 - W;
-                            if (cand_hi < sink)   cand_hi = sink;     /* recent window reaches sinks: no candidates */
-                            if (cand_hi > pos + 1) cand_hi = pos + 1;
-                            int topk = g_recall_b - W - sink; if (topk < 0) topk = 0;
-                            if (topk > cand_hi - sink) topk = cand_hi - sink;
-                            for (int s = sink; s < cand_hi; s++) {    /* projected score per candidate (sinks excluded) */
-                                const float *pk = projk + (((size_t)L * P + s) * NKV + kvh) * (size_t)g_recall_r;
-                                float a = 0.0f; for (int p = 0; p < g_recall_r; p++) a += pq[p] * pk[p];
-                                scl[s] = a;
-                            }
-                            m = 0;
-                            for (int s = 0; s < sink; s++) ri[m++] = s;   /* pinned sink anchors (StreamingLLM) */
-                            for (int t = 0; t < topk; t++) {          /* select top-`topk` from candidates (max-extract) */
-                                int best = -1; float bv = -INFINITY;
-                                for (int s = sink; s < cand_hi; s++) if (scl[s] > bv) { bv = scl[s]; best = s; }
-                                if (best < 0) break; ri[m++] = best; scl[best] = -INFINITY;
-                            }
-                            for (int s = cand_hi; s <= pos; s++) ri[m++] = s;   /* recent window */
-                        }
-                        int winlo = (pos + 1 > g_recall_w) ? (pos + 1 - g_recall_w) : 0;  /* recent window start */
-                        float maxs = -INFINITY;
-                        for (int jj = 0; jj < m; jj++) {
-                            int s = ri[jj];
-                            const float *kbase;
-                            if (ring2_on && s < winlo && s >= g_recall_sink) {           /* old non-sink → Ring-2 */
-                                if (ring2_disk_on) {
-                                    size_t boff = ((size_t)L * P + s) * (size_t)KVD * sizeof(float);
-                                    kbase = (const float *)ring2_disk_read(r2disk, 0, boff, r2s);
-                                    if (!kbase) kbase = KC + (size_t)s * KVD;            /* read fail → poisoned Ring-1 → loud NaN */
-                                } else kbase = ring2k + ((size_t)L * P + s) * KVD;
-                            } else kbase = KC + (size_t)s * KVD;                          /* recent + pinned sinks → Ring-1 */
-                            const float *kh = kbase + (size_t)kvh * HD;
-                            float acc = 0.0f;
-                            for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
-                            float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
-                        }
-                        float sum = 0.0f;
-                        for (int jj = 0; jj < m; jj++) { scl[jj] = expf(scl[jj] - maxs); sum += scl[jj]; }
-                        float inv = 1.0f / sum;
-                        float *out = ao + (size_t)h * HD;
-                        for (int i = 0; i < HD; i++) out[i] = 0.0f;
-                        for (int jj = 0; jj < m; jj++) {
-                            int s = ri[jj];
-                            float w = scl[jj] * inv;
-                            const float *vbase;
-                            if (ring2_on && s < winlo && s >= g_recall_sink) {           /* old non-sink → Ring-2 */
-                                if (ring2_disk_on) {
-                                    size_t boff = ((size_t)L * P + s) * (size_t)KVD * sizeof(float);
-                                    vbase = (const float *)ring2_disk_read(r2disk, 1, boff, r2s);
-                                    if (!vbase) vbase = VC + (size_t)s * KVD;
-                                } else vbase = ring2v + ((size_t)L * P + s) * KVD;
-                            } else vbase = VC + (size_t)s * KVD;                          /* recent + pinned sinks → Ring-1 */
-                            const float *vh = vbase + (size_t)kvh * HD;
-                            for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+            /* Attention over cached [0,pos], parallel over heads (bit-identical to serial:
+             * each head writes a distinct ao slice + per-thread score scratch). winlo = recent
+             * window start; old non-sink positions (s < winlo, s >= sink) live in Ring-2. */
+            int winlo = (pos + 1 > g_recall_w) ? (pos + 1 - g_recall_w) : 0;
+            if (ring2_disk_on) {
+                /* v1 disk path: 3-phase to DEDUP the per-query-head reads. Blocks are
+                 * per-token (all kv-heads), so one fetch serves every head that picked it. */
+                /* PHASE 1: per-head selection only (parallel, no I/O). */
+                #pragma omp parallel
+                {
+                    float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
+                    if (scl) {
+                        int h;
+                        #pragma omp for
+                        for (h = 0; h < NH; h++)
+                            m_all[h] = recall_select(recallR, g_recall_r, HD, q + (size_t)h * HD,
+                                projk, (size_t)L, P, NKV, h / group, g_recall_b, g_recall_w,
+                                g_recall_sink, pos, scl, ri_all + (size_t)h * P);
+                    }
+                    free(scl);
+                }
+                /* PHASE 2: union the old-non-sink positions across heads, fetch each block
+                 * ONCE off Optane into the per-layer RAM staging (v1a: serial blocking). */
+                stg_gen++;
+                int nstage = 0;
+                for (int h = 0; h < NH; h++) {
+                    const int *rih = ri_all + (size_t)h * P;
+                    for (int jj = 0; jj < m_all[h]; jj++) {
+                        int s = rih[jj];
+                        if (s < winlo && s >= g_recall_sink && stg_stamp[s] != stg_gen) {
+                            stg_stamp[s] = stg_gen; stg_slot[s] = nstage; stg_pos[nstage] = s; nstage++;
                         }
                     }
                 }
-                free(scl); free(ri);
+                for (int i = 0; i < nstage; i++) {
+                    size_t boff = ((size_t)L * P + stg_pos[i]) * (size_t)KVD * sizeof(float);
+                    const void *kp = ring2_disk_read(r2disk, 0, boff, r2s_io);
+                    if (kp) memcpy(stgK + (size_t)i * KVD, kp, (size_t)KVD * sizeof(float));
+                    const void *vp = ring2_disk_read(r2disk, 1, boff, r2s_io);
+                    if (vp) memcpy(stgV + (size_t)i * KVD, vp, (size_t)KVD * sizeof(float));
+                }
+                /* PHASE 3: attention reading old blocks from the RAM staging (parallel). */
+                #pragma omp parallel
+                {
+                    float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
+                    if (scl) {
+                        int h;
+                        #pragma omp for
+                        for (h = 0; h < NH; h++) {
+                            int kvh = h / group; const float *qh = q + (size_t)h * HD;
+                            const int *rih = ri_all + (size_t)h * P; int m = m_all[h];
+                            float maxs = -INFINITY;
+                            for (int jj = 0; jj < m; jj++) {
+                                int s = rih[jj];
+                                const float *kbase = (s < winlo && s >= g_recall_sink)
+                                    ? stgK + (size_t)stg_slot[s] * KVD : KC + (size_t)s * KVD;
+                                const float *kh = kbase + (size_t)kvh * HD;
+                                float acc = 0.0f; for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+                                float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
+                            }
+                            float sum = 0.0f;
+                            for (int jj = 0; jj < m; jj++) { scl[jj] = expf(scl[jj] - maxs); sum += scl[jj]; }
+                            float inv = 1.0f / sum; float *out = ao + (size_t)h * HD;
+                            for (int i = 0; i < HD; i++) out[i] = 0.0f;
+                            for (int jj = 0; jj < m; jj++) {
+                                int s = rih[jj]; float w = scl[jj] * inv;
+                                const float *vbase = (s < winlo && s >= g_recall_sink)
+                                    ? stgV + (size_t)stg_slot[s] * KVD : VC + (size_t)s * KVD;
+                                const float *vh = vbase + (size_t)kvh * HD;
+                                for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+                            }
+                        }
+                    }
+                    free(scl);
+                }
+            } else {
+                /* Non-disk path (RAM mock / no Ring-2): selection + attention inline. */
+                #pragma omp parallel
+                {
+                    float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
+                    int   *ri  = (int   *)malloc((size_t)(pos + 1) * sizeof(int));
+                    if (scl && ri) {
+                        int h;
+                        #pragma omp for
+                        for (h = 0; h < NH; h++) {
+                            int kvh = h / group; const float *qh = q + (size_t)h * HD;
+                            int m = recall_select(recallR, g_recall_r, HD, qh, projk, (size_t)L, P,
+                                NKV, kvh, g_recall_b, g_recall_w, g_recall_sink, pos, scl, ri);
+                            float maxs = -INFINITY;
+                            for (int jj = 0; jj < m; jj++) {
+                                int s = ri[jj];
+                                const float *kbase = (ring2_on && s < winlo && s >= g_recall_sink)
+                                    ? ring2k + ((size_t)L * P + s) * KVD : KC + (size_t)s * KVD;
+                                const float *kh = kbase + (size_t)kvh * HD;
+                                float acc = 0.0f; for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+                                float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
+                            }
+                            float sum = 0.0f;
+                            for (int jj = 0; jj < m; jj++) { scl[jj] = expf(scl[jj] - maxs); sum += scl[jj]; }
+                            float inv = 1.0f / sum; float *out = ao + (size_t)h * HD;
+                            for (int i = 0; i < HD; i++) out[i] = 0.0f;
+                            for (int jj = 0; jj < m; jj++) {
+                                int s = ri[jj]; float w = scl[jj] * inv;
+                                const float *vbase = (ring2_on && s < winlo && s >= g_recall_sink)
+                                    ? ring2v + ((size_t)L * P + s) * KVD : VC + (size_t)s * KVD;
+                                const float *vh = vbase + (size_t)kvh * HD;
+                                for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+                            }
+                        }
+                    }
+                    free(scl); free(ri);
+                }
             }
             if (matmul(m, ly->attn_output, ao, 1, QD, E, ap)) goto done;
             for (int i = 0; i < E; i++) x[i] += ap[i];
@@ -596,6 +673,8 @@ done:
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
     free(recallR); free(projk);
     free(ring2k); free(ring2v);
+    free(stgK); free(stgV); free(stg_stamp); free(stg_slot); free(stg_pos); free(ri_all); free(m_all);
+    if (r2s_io) ring2_disk_scratch_free(r2s_io);
     if (r2disk) {
         unsigned long long nr = 0; double rs = 0; ring2_disk_stats(r2disk, &nr, &rs);
         fprintf(stderr, "    [ring2-disk] %llu blocking reads, %.3f s total, %.2f us/read avg\n",
