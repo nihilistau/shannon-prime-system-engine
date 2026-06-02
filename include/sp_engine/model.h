@@ -21,7 +21,13 @@ extern "C" {
 /* Model architecture. Selects the forward pass + which optional config fields and
  * per-layer tensors are populated. Default 0 = Qwen3 (calloc-zeroed configs and
  * existing callers get the right value with no churn). */
-typedef enum { SP_ARCH_QWEN3 = 0, SP_ARCH_GEMMA3 = 1, SP_ARCH_QWEN25 = 2 } sp_arch_t;
+/* NOTE 2026-06-02: these three structs MUST stay byte-identical to the core's
+ * lib/shannon-prime-system/include/sp/model.h — qwen3_load (core) fills the core
+ * layout, the backends read THIS one. A stale copy here (missing the gemma4/qwen36
+ * fields the core added) made sizeof(qwen3_config) differ, shifting token_embd's
+ * offset -> the backend read it as NULL -> segfault in embed_row. Synced to core. */
+typedef enum { SP_ARCH_QWEN3 = 0, SP_ARCH_GEMMA3 = 1, SP_ARCH_QWEN25 = 2, SP_ARCH_GEMMA4 = 3,
+               SP_ARCH_QWEN36 = 4 /* qwen35moe: Gated DeltaNet + MoE hybrid */ } sp_arch_t;
 
 typedef struct {
     sp_arch_t arch;           /* SP_ARCH_QWEN3 (default) | SP_ARCH_GEMMA3 */
@@ -38,6 +44,31 @@ typedef struct {
     float    rms_eps;         /* {arch}.attention.layer_norm_rms_epsilon */
     int      has_qk_norm;     /* per-head Q/K RMSNorm present            */
     int      tied_embedding;  /* output.weight absent -> reuse token_embd*/
+    /* ── Gemma4 (SP_ARCH_GEMMA4) extras; zero on all other archs. ── */
+    uint32_t g4_hd_swa;          /* SWA head_dim (256)            */
+    uint32_t g4_nh_swa;          /* SWA n_head (8)                */
+    uint32_t g4_nkv_swa;         /* SWA n_head_kv (2)             */
+    float    g4_rope_base_swa;   /* SWA RoPE base (1e4)           */
+    uint32_t g4_n_embd_per_layer;/* per-layer-input width (256); 0 = no AltUp path */
+    uint32_t g4_n_kv_from_start; /* layers [0,this) own KV; the rest reuse (shared-KV) */
+    float    g4_logit_softcap;   /* final-logit softcap (30); 0 = none */
+    uint32_t g4_swa_period;      /* SWA/global period (6); global when L%period==period-1 */
+    /* ── Qwen3.6 / qwen35moe (SP_ARCH_QWEN36) extras; zero on other archs. ── */
+    uint32_t q36_full_attn_interval; /* full-attn iff (L+1)%this==0 (4) */
+    uint32_t q36_n_expert;           /* routed experts (256)            */
+    uint32_t q36_n_expert_used;      /* top-k routing (8)               */
+    uint32_t q36_n_ff_exp;           /* per-expert FFN dim (512)        */
+    uint32_t q36_n_ff_shexp;         /* shared-expert FFN dim (512)     */
+    float    q36_expert_weights_scale;/* scale on renormed top-k weights (1.0) */
+    uint32_t q36_gdn_conv_k;     /* causal conv kernel (4)              */
+    uint32_t q36_gdn_state;      /* GDN head_dim S (128)               */
+    uint32_t q36_gdn_n_k_heads;  /* k/q heads H_k (16)                 */
+    uint32_t q36_gdn_n_v_heads;  /* v heads H_v / dt_rank (32)         */
+    uint32_t q36_gdn_inner;      /* d_inner = H_v*head_v_dim (4096)    */
+    int32_t  q36_rope_sections[4];/* [11,11,10,0]                       */
+    uint32_t q36_rope_dim;        /* rope.dimension_count (64)          */
+    float    q36_rope_base;       /* rope.freq_base (1e7)               */
+    uint32_t q36_nextn_predict_layers; /* trailing NextN/MTP blocks loaded-not-run (1) */
 } qwen3_config;
 
 typedef struct {
@@ -57,6 +88,30 @@ typedef struct {
     const gguf_tensor *attn_q_bias;  /* [n_head*head_dim] qwen25; NULL otherwise */
     const gguf_tensor *attn_k_bias;  /* [n_head_kv*head_dim] qwen25; NULL otherwise */
     const gguf_tensor *attn_v_bias;  /* [n_head_kv*head_dim] qwen25; NULL otherwise */
+    /* ── Gemma4 per-layer-input (AltUp) block; NULL on other archs ── */
+    const gguf_tensor *per_layer_inp_gate;  /* [n_embd, n_embd_per_layer] (GGUF inp_gate) */
+    const gguf_tensor *per_layer_proj;       /* [n_embd_per_layer, n_embd] (GGUF proj)    */
+    const gguf_tensor *per_layer_post_norm;  /* [n_embd] (GGUF post_norm)                 */
+    const gguf_tensor *out_scale;            /* [1] (GGUF layer_output_scale)             */
+    /* ── Qwen3.6 / qwen35moe (SP_ARCH_QWEN36); NULL/0 on other archs ── */
+    int q36_is_recurrent;
+    const gguf_tensor *gdn_qkv;       /* attn_qkv  [n_embd, key_dim*2+value_dim]   */
+    const gguf_tensor *gdn_gate;      /* attn_gate [n_embd, value_dim] (z proj)    */
+    const gguf_tensor *gdn_conv1d;    /* ssm_conv1d [conv_k, conv_channels]        */
+    const gguf_tensor *gdn_dt_bias;   /* ssm_dt bias [dt_rank]                     */
+    const gguf_tensor *gdn_a;         /* ssm_a [dt_rank] (A_log; gate = a*softplus)*/
+    const gguf_tensor *gdn_alpha;     /* ssm_alpha [n_embd, dt_rank]               */
+    const gguf_tensor *gdn_beta;      /* ssm_beta  [n_embd, dt_rank]               */
+    const gguf_tensor *gdn_norm;      /* ssm_norm  [head_v_dim] gated output norm  */
+    const gguf_tensor *gdn_out;       /* ssm_out   [value_dim, n_embd]             */
+    const gguf_tensor *ffn_gate_inp;  /* router [n_embd, n_expert]                 */
+    const gguf_tensor *ffn_gate_exps; /* [n_embd, n_ff_exp, n_expert] rank-3       */
+    const gguf_tensor *ffn_up_exps;   /* [n_embd, n_ff_exp, n_expert] rank-3       */
+    const gguf_tensor *ffn_down_exps; /* [n_ff_exp, n_embd, n_expert] rank-3       */
+    const gguf_tensor *ffn_gate_inp_shexp; /* shared-expert gate [n_embd]          */
+    const gguf_tensor *ffn_gate_shexp;/* [n_embd, n_ff_shexp]                      */
+    const gguf_tensor *ffn_up_shexp;  /* [n_embd, n_ff_shexp]                      */
+    const gguf_tensor *ffn_down_shexp;/* [n_ff_shexp, n_embd]                      */
 } qwen3_layer;
 
 struct sp_arena;   /* sp_engine/arena.h — packed-weight arena (Phase 1a) */
@@ -69,18 +124,16 @@ typedef struct qwen3_model {
     const gguf_tensor *output;        /* [n_embd, n_vocab] (==token_embd if tied) */
     qwen3_layer       *layers;        /* n_layers */
     struct sp_arena   *arena;         /* packed Q8/Q4 matmul weights when SP_ARENA set; else NULL */
-    /* source-release state (Phase 1b): after qwen3_release_source the GGUF data
-     * mapping is unmapped; norms are served from owned f32 copies and the
-     * embedding + all matmul weights from the arena. */
     int                 released;
     const gguf_tensor **norm_src;     /* [n_norm] keys (norm tensors) */
     float             **norm_buf;     /* [n_norm] owned f32 copies */
     int                 n_norm;
-    /* .sp-model adapter path (Phase 2-FMT): when a model is reconstructed from a
-     * .sp-model (sp_model_to_qwen3), gguf is NULL and the layer pointers reference
-     * this owned synthetic gguf_tensor array instead of a GGUF mapping. NULL for
-     * GGUF-loaded models. Freed by qwen3_free. */
     gguf_tensor        *synth_tensors;
+    /* ── Gemma4 model-global tensors; NULL on other archs ── */
+    const gguf_tensor  *per_layer_token_embd; /* [n_embd_per_layer*n_layers, n_vocab] */
+    const gguf_tensor  *per_layer_model_proj; /* [n_embd, n_embd_per_layer*n_layers]  */
+    const gguf_tensor  *per_layer_proj_norm;  /* [n_embd_per_layer]                   */
+    const gguf_tensor  *rope_freqs;           /* [head_dim/2] global-layer freq factors */
 } qwen3_model;
 
 /* Open the GGUF, read the qwen3 config, and bind every weight. Returns NULL on
