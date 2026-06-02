@@ -55,6 +55,19 @@ const void *ring2_disk_read(ring2_disk *r, int which, size_t off, ring2_scratch 
 ring2_scratch *ring2_disk_scratch_new(ring2_disk *r);
 void ring2_disk_scratch_free(ring2_scratch *sc);
 
+/* v1b: batched async read via an I/O Completion Port. Submit all `n` requests as
+ * overlapped reads (no 64-handle WaitForMultipleObjects cap), then drain the
+ * completion port — exploits the device's random-read queue depth. Each `dst`
+ * must be sector-aligned (use ring2_disk_alloc_aligned) and hold block_bytes.
+ * Blocking: returns only when the whole batch has landed. 0 on success.
+ * (POSIX fallback: serial pread loop.) */
+typedef struct { int which; size_t off; void *dst; } ring2_req;
+int ring2_disk_read_batch(ring2_disk *r, const ring2_req *reqs, int n);
+
+/* Sector-aligned (4 KB) allocation for direct-IO staging buffers. */
+void *ring2_disk_alloc_aligned(size_t bytes);
+void  ring2_disk_free_aligned(void *p);
+
 size_t ring2_disk_block_bytes(const ring2_disk *r);
 /* Aggregate read counters for the latency report (total blocking reads + nanoseconds). */
 void ring2_disk_stats(const ring2_disk *r, unsigned long long *n_reads, double *read_seconds);

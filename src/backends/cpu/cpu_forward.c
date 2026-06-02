@@ -371,7 +371,7 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     float *stgK = NULL, *stgV = NULL;
     int *stg_stamp = NULL, *stg_slot = NULL, *stg_pos = NULL;   /* position->slot map, generation-stamped */
     int *ri_all = NULL, *m_all = NULL;                          /* per-head recall sets: phase 1 -> phase 3 */
-    ring2_scratch *r2s_io = NULL; int stg_gen = 0;             /* phase-2 read scratch (v1a blocking) */
+    ring2_req *r2reqs = NULL; int stg_gen = 0;                 /* phase-2 batched IOCP request list (v1b) */
 
     if (use_blocks) {
         size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
@@ -428,15 +428,17 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         if (!r2disk) goto done;
         /* v1 dedupe staging: union of recalled blocks read ONCE per layer into RAM, then all heads
          * read their kv-head slice from here (eliminates the per-query-head redundant disk reads). */
-        stgK = (float *)malloc((size_t)P * KVD * sizeof(float));
-        stgV = (float *)malloc((size_t)P * KVD * sizeof(float));
+        /* stgK/stgV are the direct-IO landing buffers (IOCP reads write into them), so
+         * they must be sector-aligned for NO_BUFFERING; KVD*4 = one 4 KB block. */
+        stgK = (float *)ring2_disk_alloc_aligned((size_t)P * KVD * sizeof(float));
+        stgV = (float *)ring2_disk_alloc_aligned((size_t)P * KVD * sizeof(float));
         stg_stamp = (int *)malloc((size_t)P * sizeof(int));
         stg_slot  = (int *)malloc((size_t)P * sizeof(int));
         stg_pos   = (int *)malloc((size_t)P * sizeof(int));
         ri_all = (int *)malloc((size_t)NH * P * sizeof(int));
         m_all  = (int *)malloc((size_t)NH * sizeof(int));
-        r2s_io = ring2_disk_scratch_new(r2disk);
-        if (!stgK || !stgV || !stg_stamp || !stg_slot || !stg_pos || !ri_all || !m_all || !r2s_io) goto done;
+        r2reqs = (ring2_req *)malloc((size_t)2 * P * sizeof(ring2_req));   /* K+V reqs per layer */
+        if (!stgK || !stgV || !stg_stamp || !stg_slot || !stg_pos || !ri_all || !m_all || !r2reqs) goto done;
         for (int i = 0; i < P; i++) stg_stamp[i] = -1;
         fprintf(stderr, "    [ring2] PHYSICAL Optane spill ON (W=%d, sinks pinned in Ring-1, kc/vc poisoned -> "
                 "old reads MUST come off disk; v1 per-layer dedupe staging)\n", g_recall_w);
@@ -548,13 +550,12 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                         }
                     }
                 }
-                for (int i = 0; i < nstage; i++) {
+                for (int i = 0; i < nstage; i++) {          /* one batch: all K+V reads, deep IOCP queue */
                     size_t boff = ((size_t)L * P + stg_pos[i]) * (size_t)KVD * sizeof(float);
-                    const void *kp = ring2_disk_read(r2disk, 0, boff, r2s_io);
-                    if (kp) memcpy(stgK + (size_t)i * KVD, kp, (size_t)KVD * sizeof(float));
-                    const void *vp = ring2_disk_read(r2disk, 1, boff, r2s_io);
-                    if (vp) memcpy(stgV + (size_t)i * KVD, vp, (size_t)KVD * sizeof(float));
+                    r2reqs[2 * i].which = 0; r2reqs[2 * i].off = boff;     r2reqs[2 * i].dst     = stgK + (size_t)i * KVD;
+                    r2reqs[2 * i + 1].which = 1; r2reqs[2 * i + 1].off = boff; r2reqs[2 * i + 1].dst = stgV + (size_t)i * KVD;
                 }
+                if (nstage && ring2_disk_read_batch(r2disk, r2reqs, 2 * nstage)) goto done;
                 /* PHASE 3: attention reading old blocks from the RAM staging (parallel). */
                 #pragma omp parallel
                 {
@@ -673,8 +674,8 @@ done:
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
     free(recallR); free(projk);
     free(ring2k); free(ring2v);
-    free(stgK); free(stgV); free(stg_stamp); free(stg_slot); free(stg_pos); free(ri_all); free(m_all);
-    if (r2s_io) ring2_disk_scratch_free(r2s_io);
+    ring2_disk_free_aligned(stgK); ring2_disk_free_aligned(stgV);
+    free(stg_stamp); free(stg_slot); free(stg_pos); free(ri_all); free(m_all); free(r2reqs);
     if (r2disk) {
         unsigned long long nr = 0; double rs = 0; ring2_disk_stats(r2disk, &nr, &rs);
         fprintf(stderr, "    [ring2-disk] %llu blocking reads, %.3f s total, %.2f us/read avg\n",

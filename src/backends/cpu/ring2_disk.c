@@ -27,11 +27,15 @@ struct ring2_disk {
     volatile long long n_reads;
     volatile long long read_ns;
 #ifdef _WIN32
-    HANDLE hK, hV;
+    HANDLE hK, hV;          /* write handles (spill) — NOT IOCP-bound, synchronous via GetOverlappedResult */
+    HANDLE hKr, hVr;        /* read handles (recall) — IOCP-bound for batched async reads */
     HANDLE wevent;          /* event for the single-writer spill path */
     void  *wbounce;         /* aligned bounce buffer for NO_BUFFERING writes */
     CRITICAL_SECTION wlock; /* serialize the shared bounce buffer */
     LARGE_INTEGER qpf;      /* QPC frequency */
+    HANDLE iocp;            /* v1b: I/O completion port for batched async reads */
+    OVERLAPPED *ovpool;     /* reusable OVERLAPPED array for the batch (phase-2 is single-threaded) */
+    int ovcap;
 #else
     int fdK, fdV;
 #endif
@@ -71,6 +75,13 @@ static HANDLE open_store(const char *dir, const char *name, size_t bytes) {
     return h;
 }
 
+static HANDLE open_read(const char *dir, const char *name) {  /* separate IOCP-bound read handle */
+    char path[1024]; snprintf(path, sizeof path, "%s%s", dir, name);
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, NULL);
+    return (h == INVALID_HANDLE_VALUE) ? NULL : h;
+}
+
 ring2_disk *ring2_disk_open(const char *dir, size_t bytes_per_file, size_t block_bytes) {
     if (!dir || block_bytes == 0) return NULL;
     ring2_disk *r = (ring2_disk *)calloc(1, sizeof *r);
@@ -83,7 +94,18 @@ ring2_disk *ring2_disk_open(const char *dir, size_t bytes_per_file, size_t block
     r->hK = open_store(dir, "sp_ring2_k.bin", bytes_per_file);
     r->hV = open_store(dir, "sp_ring2_v.bin", bytes_per_file);
     if (!r->wevent || !r->wbounce || !r->hK || !r->hV) { ring2_disk_close(r); return NULL; }
-    fprintf(stderr, "    [ring2-disk] Optane store @ %s (NO_BUFFERING, %zu B/block, %.2f GB/file)\n",
+    /* v1b: SEPARATE read handles bound to the IOCP (keys 0=K, 1=V). Writes use hK/hV,
+     * which stay UNBOUND so the synchronous spill path (GetOverlappedResult + event) is
+     * safe — binding write handles to the port corrupts it (async write lands post-return). */
+    r->hKr = open_read(dir, "sp_ring2_k.bin");
+    r->hVr = open_read(dir, "sp_ring2_v.bin");
+    r->iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    if (!r->hKr || !r->hVr || !r->iocp
+            || !CreateIoCompletionPort(r->hKr, r->iocp, 0, 0)
+            || !CreateIoCompletionPort(r->hVr, r->iocp, 1, 0)) {
+        fprintf(stderr, "    [ring2-disk] IOCP/read-handle bind FAIL\n"); ring2_disk_close(r); return NULL;
+    }
+    fprintf(stderr, "    [ring2-disk] Optane store @ %s (NO_BUFFERING + IOCP, %zu B/block, %.2f GB/file)\n",
             dir, block_bytes, (double)bytes_per_file / 1e9);
     return r;
 }
@@ -134,12 +156,48 @@ void ring2_disk_scratch_free(ring2_scratch *sc) {
     if (sc->ev)  CloseHandle(sc->ev);
     free(sc);
 }
+void *ring2_disk_alloc_aligned(size_t bytes) { return _aligned_malloc(bytes, 4096); }
+void  ring2_disk_free_aligned(void *p)        { if (p) _aligned_free(p); }
+
+int ring2_disk_read_batch(ring2_disk *r, const ring2_req *reqs, int n) {
+    if (!r || n <= 0) return 0;
+    if (n > r->ovcap) {                         /* grow the reusable OVERLAPPED pool */
+        OVERLAPPED *np = (OVERLAPPED *)realloc(r->ovpool, (size_t)n * sizeof(OVERLAPPED));
+        if (!np) return 1;
+        r->ovpool = np; r->ovcap = n;
+    }
+    LARGE_INTEGER t0, t1; QueryPerformanceCounter(&t0);
+    int submitted = 0;
+    for (int i = 0; i < n; i++) {               /* submit all reads — fill the device queue */
+        OVERLAPPED *ov = &r->ovpool[i]; memset(ov, 0, sizeof *ov);
+        ov->Offset = (DWORD)(reqs[i].off & 0xFFFFFFFFu); ov->OffsetHigh = (DWORD)(reqs[i].off >> 32);
+        HANDLE h = reqs[i].which ? r->hVr : r->hKr;   /* IOCP-bound read handles */
+        BOOL ok = ReadFile(h, reqs[i].dst, (DWORD)r->block, NULL, ov);
+        if (ok || GetLastError() == ERROR_IO_PENDING) submitted++;   /* completion will post to the IOCP */
+    }
+    int done = 0;                                /* drain the completion port */
+    for (int i = 0; i < submitted; i++) {
+        DWORD bytes = 0; ULONG_PTR key = 0; OVERLAPPED *pov = NULL;
+        BOOL ok = GetQueuedCompletionStatus(r->iocp, &bytes, &key, &pov, INFINITE);
+        if (ok && bytes == (DWORD)r->block) done++;
+    }
+    QueryPerformanceCounter(&t1);
+    InterlockedExchangeAdd64(&r->n_reads, submitted);
+    InterlockedExchangeAdd64(&r->read_ns,
+        (LONGLONG)((double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)r->qpf.QuadPart));
+    return (done == n) ? 0 : 1;
+}
+
 void ring2_disk_close(ring2_disk *r) {
     if (!r) return;
     if (r->hK) CloseHandle(r->hK);
     if (r->hV) CloseHandle(r->hV);
+    if (r->hKr) CloseHandle(r->hKr);
+    if (r->hVr) CloseHandle(r->hVr);
     if (r->wevent) CloseHandle(r->wevent);
+    if (r->iocp) CloseHandle(r->iocp);
     if (r->wbounce) _aligned_free(r->wbounce);
+    free(r->ovpool);
     DeleteCriticalSection(&r->wlock);
     free(r);
 }
@@ -195,6 +253,20 @@ ring2_scratch *ring2_disk_scratch_new(ring2_disk *r) {
     return sc;
 }
 void ring2_disk_scratch_free(ring2_scratch *sc) { if (!sc) return; free(sc->buf); free(sc); }
+void *ring2_disk_alloc_aligned(size_t bytes) { void *p = NULL; if (posix_memalign(&p, 4096, bytes)) return NULL; return p; }
+void  ring2_disk_free_aligned(void *p)        { free(p); }
+int ring2_disk_read_batch(ring2_disk *r, const ring2_req *reqs, int n) {  /* no IOCP: serial pread */
+    if (!r || n <= 0) return 0;
+    double t0 = now_ns(); int done = 0;
+    for (int i = 0; i < n; i++) {
+        int fd = reqs[i].which ? r->fdV : r->fdK;
+        if (pread(fd, reqs[i].dst, r->block, (off_t)reqs[i].off) == (ssize_t)r->block) done++;
+    }
+    double dt = now_ns() - t0;
+    __sync_fetch_and_add(&r->n_reads, n);
+    __sync_fetch_and_add(&r->read_ns, (long long)dt);
+    return (done == n) ? 0 : 1;
+}
 void ring2_disk_close(ring2_disk *r) {
     if (!r) return;
     if (r->fdK >= 0) close(r->fdK);
