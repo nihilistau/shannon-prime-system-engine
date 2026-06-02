@@ -78,6 +78,9 @@ static void kv_spinor_roundtrip(float *vec, int d) {
 static int g_recall_b = 0;   /* SP_RECALL_B: recall budget (0 = off = full attention) */
 static int g_recall_r = 16;  /* SP_RECALL_R: projection rank */
 static int g_recall_w = 64;  /* SP_RECALL_W: always-keep recent window */
+static int g_ring2    = 0;   /* SP_RING2=1 (Step 2a): tokens older than W spill to a mock Ring-2 byte
+                              * store (RAM); in-RAM kc/vc are POISONED on window-exit so attention MUST
+                              * fetch old tokens from Ring-2 (else NaN). Parity test of spill→fetch. */
 #define SP_RECALL_R_MAX 64
 #define SP_RECALL_SEED 0x5350524F4A2BULL   /* "SPROJ+" frozen seed; bump = SP_RECALL_PROJ_VERSION */
 static uint64_t splitmix64(uint64_t *s) { uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
@@ -109,6 +112,7 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_RECALL_B");        g_recall_b = e ? atoi(e) : 0; if (g_recall_b < 0) g_recall_b = 0; }
     { const char *e = getenv("SP_RECALL_R");        g_recall_r = e ? atoi(e) : 16; if (g_recall_r < 1 || g_recall_r > SP_RECALL_R_MAX) g_recall_r = 16; }
     { const char *e = getenv("SP_RECALL_W");        g_recall_w = e ? atoi(e) : 64; if (g_recall_w < 0) g_recall_w = 0; }
+    { const char *e = getenv("SP_RING2");           g_ring2 = (e && e[0] == '1'); }
 }
 
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
@@ -314,6 +318,8 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
     float *x = NULL, *nx = NULL, *q = NULL, *knew = NULL, *vnew = NULL, *ao = NULL;
     float *ap = NULL, *gg = NULL, *up = NULL, *dn = NULL, *sc = NULL, *lg = NULL;
     signed char *recallR = NULL; float *projk = NULL;   /* C2.1 recall sidecar (g_recall_b>0) */
+    float *ring2k = NULL, *ring2v = NULL;                /* C2.1 Step 2a mock Ring-2 byte store (g_ring2) */
+    int ring2_on = 0;
 
     if (use_blocks) {
         size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
@@ -355,10 +361,29 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
         fprintf(stderr, "    [recall] sidecar ON: r=%d B=%d W=%d (post-RoPE ±1 projection router)\n",
                 g_recall_r, g_recall_b, g_recall_w);
     }
+    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);   /* Step 2a: f32-cache path only */
+    if (ring2_on) {
+        size_t kvn = (size_t)c->n_layers * P * KVD;
+        ring2k = (float *)malloc(kvn * sizeof(float));
+        ring2v = (float *)malloc(kvn * sizeof(float));
+        if (!ring2k || !ring2v) goto done;
+        fprintf(stderr, "    [ring2] mock spill ON: tokens older than W=%d spilled to RAM byte-store; "
+                "kc/vc poisoned on window-exit (old reads MUST hit Ring-2)\n", g_recall_w);
+    }
 
     for (int pos = 0; pos < P; pos++) {
         int tok = seq[pos];
         if (embed_row(m, tok, E, x)) goto done;
+        /* Step 2a: the token that just left the recent-W window (pos-W) is now "spilled" —
+         * POISON its in-RAM kc/vc (all layers) so any attention read of it MUST come from
+         * Ring-2 (a stale Ring-1 read → NaN → divergent tokens → test fails loudly). */
+        if (ring2_on && pos - g_recall_w >= 0) {
+            int et = pos - g_recall_w;
+            for (uint32_t L = 0; L < c->n_layers; L++) {
+                float *pk = kc + ((size_t)L * P + et) * KVD, *pv = vc + ((size_t)L * P + et) * KVD;
+                for (int i = 0; i < KVD; i++) { pk[i] = NAN; pv[i] = NAN; }
+            }
+        }
 
         for (uint32_t L = 0; L < c->n_layers; L++) {
             const qwen3_layer *ly = &m->layers[L];
@@ -410,6 +435,10 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
                 KC = kc + (size_t)L * P * KVD;
                 VC = vc + (size_t)L * P * KVD;
             }
+            if (ring2_on) {   /* spill this (layer,token) K/V to the mock Ring-2 byte store */
+                memcpy(ring2k + ((size_t)L * P + pos) * KVD, knew, (size_t)KVD * sizeof(float));
+                memcpy(ring2v + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
+            }
 
             /* Attention over cached [0,pos], parallel over heads. Each head writes a
              * distinct ao[h*HD] slice + uses its OWN score scratch (per-thread `scl`,
@@ -449,9 +478,14 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
                             }
                             for (int s = cand_hi; s <= pos; s++) ri[m++] = s;   /* recent window */
                         }
+                        int winlo = (pos + 1 > g_recall_w) ? (pos + 1 - g_recall_w) : 0;  /* recent window start */
                         float maxs = -INFINITY;
                         for (int jj = 0; jj < m; jj++) {
-                            const float *kh = KC + (size_t)ri[jj] * KVD + (size_t)kvh * HD;
+                            int s = ri[jj];
+                            const float *kbase = (ring2_on && s < winlo)   /* old token → Ring-2 */
+                                ? ring2k + ((size_t)L * P + s) * KVD
+                                : KC + (size_t)s * KVD;                    /* recent → Ring-1 */
+                            const float *kh = kbase + (size_t)kvh * HD;
                             float acc = 0.0f;
                             for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
                             float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
@@ -462,8 +496,12 @@ int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_ge
                         float *out = ao + (size_t)h * HD;
                         for (int i = 0; i < HD; i++) out[i] = 0.0f;
                         for (int jj = 0; jj < m; jj++) {
+                            int s = ri[jj];
                             float w = scl[jj] * inv;
-                            const float *vh = VC + (size_t)ri[jj] * KVD + (size_t)kvh * HD;
+                            const float *vbase = (ring2_on && s < winlo)
+                                ? ring2v + ((size_t)L * P + s) * KVD
+                                : VC + (size_t)s * KVD;
+                            const float *vh = vbase + (size_t)kvh * HD;
                             for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                         }
                     }
@@ -497,5 +535,6 @@ done:
     free(kc); free(vc); free(x); free(nx); free(q); free(knew); free(vnew);
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
     free(recallR); free(projk);
+    free(ring2k); free(ring2v);
     return rc;
 }
