@@ -241,9 +241,10 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     const char *arch_str = gguf_get_str(g, "general.architecture");
     if (!arch_str) { fprintf(stderr, "fill_arch_struct: missing general.architecture\n"); return 1; }
     int is_gemma3 = (strcmp(arch_str, "gemma3") == 0);
+    int is_gemma4 = (strcmp(arch_str, "gemma4") == 0);
     int is_qwen25 = (strcmp(arch_str, "qwen2")  == 0);
     int is_qwen3  = (strcmp(arch_str, "qwen3")  == 0);
-    if (!is_gemma3 && !is_qwen25 && !is_qwen3) {
+    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3) {
         fprintf(stderr, "fill_arch_struct: unsupported arch '%s'\n", arch_str); return 1;
     }
 
@@ -290,6 +291,7 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     sp_arch_info ai;
     memset(&ai, 0, sizeof ai);
     ai.arch_id          = is_gemma3 ? (uint32_t)SP_ARCH_ID_GEMMA3 :
+                          is_gemma4 ? (uint32_t)SP_ARCH_ID_GEMMA4 :
                           is_qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 : (uint32_t)SP_ARCH_ID_QWEN3;
     ai.vocab_size       = (uint32_t)n_vocab;
     ai.hidden_dim       = (uint32_t)n_embd;
@@ -300,13 +302,55 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     ai.max_context      = (uint32_t)context_length;
     ai.swa_window       = (uint32_t)swa_window;
     ai.rope_freq_base   = rope_freq_base;
-    ai.ffn_variant      = is_gemma3 ? 1u : 0u;   /* 1=GeGLU(gemma3), 0=SwiGLU(qwen3/qwen25) */
-    ai.norm_variant     = is_gemma3 ? 1u : 0u;   /* 1=sandwich(gemma3), 0=pre-norm(qwen3/qwen25) */
+    ai.ffn_variant      = (is_gemma3 || is_gemma4) ? 1u : 0u;   /* 1=GeGLU(gemma3/4), 0=SwiGLU(qwen3/qwen25) */
+    ai.norm_variant     = (is_gemma3 || is_gemma4) ? 1u : 0u;   /* 1=sandwich(gemma3/4), 0=pre-norm(qwen3/qwen25) */
     ai.tied_embeddings  = (uint32_t)tied;
     ai.has_qk_norm      = (uint32_t)has_qk_norm;
     ai.n_ff             = (uint32_t)n_ff;
     ai.rms_eps          = rms_eps;
     ai.preferred_precision = (uint32_t)SP_PRECISION_FP16;
+
+    /* ── Gemma4 g4_* fields (mirror qwen3_load): per-layer SWA geometry + AltUp +
+     * shared-KV + softcap + period. head_dim above holds key_length (GLOBAL); the
+     * per-layer head_dim/n_ff differences are recovered at load time from the
+     * emitted per-layer tensor dims. ── */
+    if (is_gemma4) {
+        uint64_t gv = 0; float gf = 0.0f;
+        uint64_t hd_swa = 0;
+        gguf_get_u64(g, "gemma4.attention.key_length_swa", &hd_swa);
+        ai.g4_hd_swa  = (uint32_t)(hd_swa ? hd_swa : head_dim);
+        ai.g4_nh_swa  = (uint32_t)n_head;      /* n_head constant across layer types  */
+        ai.g4_nkv_swa = (uint32_t)n_head_kv;   /* n_head_kv constant                   */
+        ai.g4_rope_base_swa = gguf_get_f32(g, "gemma4.rope.freq_base_swa", &gf) ? gf : 1e4f;
+        if (gguf_get_u64(g, "gemma4.embedding_length_per_layer_input", &gv)) ai.g4_n_embd_per_layer = (uint32_t)gv;
+        ai.g4_logit_softcap = gguf_get_f32(g, "gemma4.final_logit_softcapping", &gf) ? gf : 0.0f;
+        if (gguf_get_u64(g, "gemma4.attention.shared_kv_layers", &gv))
+            ai.g4_n_kv_from_start = (n_layers > gv) ? (uint32_t)(n_layers - gv) : (uint32_t)n_layers;
+        else
+            ai.g4_n_kv_from_start = (uint32_t)n_layers;
+        {
+            const gguf_kv *kv = gguf_find_kv(g, "gemma4.attention.sliding_window_pattern");
+            uint32_t period = 0;
+            if (kv && kv->type == GGUF_T_ARRAY && kv->arr_type == GGUF_T_BOOL &&
+                kv->arr_len == n_layers && kv->arr_data) {
+                const uint8_t *pat = (const uint8_t *)kv->arr_data;  /* 1=SWA, 0=global */
+                int first_global = -1;
+                for (uint64_t L = 0; L < n_layers; L++) if (!pat[L]) { first_global = (int)L; break; }
+                if (first_global >= 0) {
+                    period = (uint32_t)first_global + 1u;
+                    for (uint64_t L = 0; L < n_layers; L++)
+                        if ((int)((L % period) == period - 1u) != (int)(!pat[L])) { period = 0; break; }
+                }
+            }
+            if (period == 0) { fprintf(stderr, "fill_arch_struct: gemma4 non-periodic SWA pattern\n"); return 1; }
+            ai.g4_swa_period = period;
+        }
+        if (ai.n_ff == 0) {   /* feed_forward_length is a per-layer array; n_ff scalar fallback = layer 0 */
+            const gguf_tensor *fg0 = gguf_find_tensor(g, "blk.0.ffn_gate.weight");
+            if (fg0 && fg0->n_dims >= 2) ai.n_ff = (uint32_t)fg0->dims[1];
+        }
+        ai.has_qk_norm = 1u;
+    }
 
     memset(arch_struct, 0, 256);
     memcpy(arch_struct, &ai, sizeof ai);
@@ -330,6 +374,11 @@ static int is_matmul_weight(const char *name) {
         strstr(name, "attn_v.weight") || strstr(name, "attn_output.weight") ||
         strstr(name, "ffn_gate.weight") || strstr(name, "ffn_up.weight") ||
         strstr(name, "ffn_down.weight")) return 1;
+    /* Gemma4 AltUp matmul weights (per-layer inp_gate/proj + the model-global
+     * per_layer_token_embd / per_layer_model_proj). rope_freqs + layer_output_scale
+     * stay F32 (freq table / scalar); *_norm caught above. */
+    if (strstr(name, "inp_gate.weight") || strstr(name, "proj.weight") ||
+        strstr(name, "per_layer_token_embd.weight")) return 1;
     return 0;
 }
 

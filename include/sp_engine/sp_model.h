@@ -57,7 +57,8 @@ typedef enum {
     SP_ARCH_ID_LLAMA3 = 1, SP_ARCH_ID_QWEN3 = 2, SP_ARCH_ID_GEMMA3 = 3,
     SP_ARCH_ID_DEEPSEEK_V4 = 4,
     /* 5 = SP_ARCH_ID_QWEN35 reserved (Phase 3-SSM) */
-    SP_ARCH_ID_QWEN25 = 6
+    SP_ARCH_ID_QWEN25 = 6,
+    SP_ARCH_ID_GEMMA4 = 7
 } sp_arch_id;
 
 /* §7 tokenizer type_id. */
