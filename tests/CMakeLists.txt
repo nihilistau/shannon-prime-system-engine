@@ -296,6 +296,41 @@ endif()
 add_test(NAME T_FRO_4 COMMAND test_ppl)
 set_tests_properties(T_FRO_4 PROPERTIES LABELS "SLOW" TIMEOUT 3600)
 
+# M_GEMMA4 — Phase 3-G4 closure gate. The engine gemma4 forward (per-layer
+# elastic-FFN + AltUp + shared-KV), already proven argmax bit-exact top-1 to the
+# llama.cpp oracle, must also match the oracle's corpus PERPLEXITY within the
+# §8.6.1 floor — distributional confirmation through sp_perplexity's production
+# gemma4 dispatch. Oracle PPL is the methodology-matched g4_ppl_oracle (single
+# window, BOS re-anchor, score [n_ctx/2, n_ctx-1)) on the same corpus + n_ctx.
+# Desktop-only (E2B Q8_0 is out-of-tree); skips cleanly when the model is absent.
+# SLOW / phase-close. Override any default via SP_GEMMA4_GGUF/SP_PPL_*.
+if(NOT SP_ENGINE_TARGET_ANDROID)
+    # Links the CORE sp_session target directly (NOT sp_engine): the gemma4
+    # production path (sp_model_load -> sp_model_to_gemma4 -> gemma4_forward) is
+    # the canonical math-core inference lane. sp_session PUBLIC-links sp_forward
+    # (gemma4_forward) + sp_io_format (sp_model_load) + model/arena/frobenius, and
+    # propagates the core include dir. sp_engine is deliberately NOT linked — its
+    # own gemma3_forward/qwen3_forward would collide with the core's.
+    add_executable(test_gemma4_ppl test_gemma4_ppl.c)
+    target_link_libraries(test_gemma4_ppl PRIVATE sp_session)
+    target_compile_definitions(test_gemma4_ppl PRIVATE
+        SP_PPL_TOKENS_DEF="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ppl/wiki.tiny.g4tokens.txt")
+    if(MSVC)
+        target_compile_options(test_gemma4_ppl PRIVATE /W4)
+    else()
+        target_compile_options(test_gemma4_ppl PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME M_GEMMA4 COMMAND test_gemma4_ppl)
+    # n_ctx + oracle PPL match the methodology-matched g4_ppl_oracle (single
+    # window, BOS re-anchor, score [n_ctx/2, n_ctx-1)) on wiki.tiny @ n_ctx=84.
+    # Gate 8% = the inherent f32-SP-vs-Q8-native-oracle precision floor (only Q8
+    # E2B weights exist; SP dequantizes Q8->f32, oracle runs Q8 kernels). This is
+    # the DISTRIBUTIONAL smoke bound; the bit-exact correctness gate is the gemma4
+    # top-1 argmax sequence (tests/gemma4_sp_model_top1.c). See test header.
+    set_tests_properties(M_GEMMA4 PROPERTIES LABELS "SLOW" TIMEOUT 1800
+        ENVIRONMENT "SP_PPL_NCTX=84;SP_PPL_ORACLE=90.715809;SP_PPL_GATE=8e-2")
+endif()
+
 # ── HX.3a parity gate (on the phone): cDSP Q8 layers-forward vs CPU Q8. Android
 # exe, pushed + run via adb (not a desktop ctest). ──
 if(SP_ENGINE_TARGET_ANDROID AND SP_ENGINE_WITH_HEXAGON)
