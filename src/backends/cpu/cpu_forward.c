@@ -365,6 +365,12 @@ static int recall_select(const signed char *R, int rr, int hd, const float *qh,
     return m;
 }
 
+/* Physical Ring-1 slot for logical token position s: sinks pinned at [0,sink), the
+ * W-window at [sink, sink+W) by modulo. Identity when not offloading (full cache). */
+static inline int r1slot(int s, int ring2_on, int sink, int w) {
+    return ring2_on ? (s < sink ? s : sink + (s - sink) % w) : s;
+}
+
 /* Shared decode body for qwen3_generate_kv (ppl_mode=0, argmax emit) and
  * qwen3_ppl_decode (ppl_mode=1, teacher-forced NLL of seq[pos+1] over [n_warm,P-2]).
  * ONE forward path — the recall router + two-ring are identical in both modes. */
@@ -405,6 +411,17 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     int *ri_all = NULL, *m_all = NULL;                          /* per-head recall sets: phase 1 -> phase 3 */
     ring2_req *r2reqs = NULL; int stg_gen = 0;                 /* phase-2 batched IOCP request list (v1b) */
 
+    /* Ring-1 footprint: when offloading (ring2_on), the f32 kc/vc cache holds ONLY the
+     * pinned sinks + the W-window (a ring buffer, cap = sink + W) — the rest of the
+     * history lives on Optane / the mock store. Token s -> slot r1slot(s); a token is
+     * structurally evicted (slot reused by s+W) exactly when s < winlo, which is the
+     * same condition the router uses to route it to Ring-2. Baseline (ring2 off) keeps
+     * the full P-slot absolute cache, so parity is untouched. */
+    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);
+    ring2_disk_on = ring2_on && g_ring2_disk;
+    const int r1W = (g_recall_w > 0) ? g_recall_w : 1;
+    const int r1cap = ring2_on ? (g_recall_sink + r1W) : P;
+
     if (use_blocks) {
         size_t nb = (size_t)c->n_layers * P * NKV * NBLK;
         kcb  = (sp_spinor_block_t *)malloc(nb * sizeof(sp_spinor_block_t));
@@ -419,9 +436,15 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                 (double)((size_t)c->n_layers * P * NKV * NBLK * sizeof(sp_spinor_block_t)),
                 NBLK, (int)sizeof(sp_spinor_block_t));
     } else {
-        kc = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* K cache */
-        vc = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float)); /* V cache */
+        kc = (float *)malloc((size_t)c->n_layers * r1cap * KVD * sizeof(float)); /* K cache (ring buffer if offloading) */
+        vc = (float *)malloc((size_t)c->n_layers * r1cap * KVD * sizeof(float)); /* V cache */
         if (!kc || !vc) goto done;
+        if (ring2_on)
+            fprintf(stderr, "    [ring1] f32 cache SHRUNK to window: %d slots/layer (sink %d + W %d) = %.1f MB vs full %.1f MB (%.0fx)\n",
+                    r1cap, g_recall_sink, r1W,
+                    2.0 * c->n_layers * r1cap * KVD * sizeof(float) / 1e6,
+                    2.0 * c->n_layers * P * KVD * sizeof(float) / 1e6,
+                    (double)P / (double)r1cap);
     }
     x    = (float *)malloc((size_t)E * sizeof(float));   /* single-token residual */
     nx   = (float *)malloc((size_t)E * sizeof(float));
@@ -445,15 +468,13 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         fprintf(stderr, "    [recall] sidecar ON: r=%d B=%d W=%d sink=%d (post-RoPE ±1 projection router + StreamingLLM sinks)\n",
                 g_recall_r, g_recall_b, g_recall_w, g_recall_sink);
     }
-    ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks);   /* Step 2a/2b: f32-cache path only */
-    ring2_disk_on = (ring2_on && g_ring2_disk);
     if (ring2_on && !ring2_disk_on) {
         size_t kvn = (size_t)c->n_layers * P * KVD;
         ring2k = (float *)malloc(kvn * sizeof(float));
         ring2v = (float *)malloc(kvn * sizeof(float));
         if (!ring2k || !ring2v) goto done;
-        fprintf(stderr, "    [ring2] mock RAM spill ON: tokens older than W=%d spilled to RAM byte-store; "
-                "kc/vc poisoned on window-exit (old reads MUST hit Ring-2)\n", g_recall_w);
+        fprintf(stderr, "    [ring2] mock RAM spill ON: full history in RAM byte-store; Ring-1 holds only "
+                "sink+W=%d slots (older tokens structurally evicted -> served from Ring-2)\n", g_recall_sink + r1W);
     } else if (ring2_disk_on) {
         size_t bytes = (size_t)c->n_layers * P * (size_t)KVD * sizeof(float);
         r2disk = ring2_disk_open(g_ring2_dir, bytes, (size_t)KVD * sizeof(float));
@@ -479,16 +500,10 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     for (int pos = 0; pos < P; pos++) {
         int tok = seq[pos];
         if (embed_row(m, tok, E, x)) goto done;
-        /* Step 2a: the token that just left the recent-W window (pos-W) is now "spilled" —
-         * POISON its in-RAM kc/vc (all layers) so any attention read of it MUST come from
-         * Ring-2 (a stale Ring-1 read → NaN → divergent tokens → test fails loudly). */
-        if (ring2_on && pos - g_recall_w >= 0 && (pos - g_recall_w) >= g_recall_sink) {
-            int et = pos - g_recall_w;   /* sink tokens (et < g_recall_sink) stay pinned in Ring-1, never poisoned */
-            for (uint32_t L = 0; L < c->n_layers; L++) {
-                float *pk = kc + ((size_t)L * P + et) * KVD, *pv = vc + ((size_t)L * P + et) * KVD;
-                for (int i = 0; i < KVD; i++) { pk[i] = NAN; pv[i] = NAN; }
-            }
-        }
+        /* (Ring-1 is now a sink+W ring buffer when offloading: token pos-W's slot is
+         * STRUCTURALLY overwritten by token pos below — no explicit poison needed. A
+         * broken Ring-2 fetch would read the wrong slot occupant -> wrong answer -> the
+         * NIAH gate fails, so correctness is still proven structurally.) */
 
         for (uint32_t L = 0; L < c->n_layers; L++) {
             const qwen3_layer *ly = &m->layers[L];
@@ -535,10 +550,11 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
             } else {
                 if (g_kv_spinor)   /* SP_KV_SPINOR_REF: f32 cache with the lossy round-trip */
                     for (int h = 0; h < NKV; h++) { kv_spinor_roundtrip(knew + (size_t)h * HD, HD); kv_spinor_roundtrip(vnew + (size_t)h * HD, HD); }
-                memcpy(kc + ((size_t)L * P + pos) * KVD, knew, (size_t)KVD * sizeof(float));
-                memcpy(vc + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
-                KC = kc + (size_t)L * P * KVD;
-                VC = vc + (size_t)L * P * KVD;
+                int wslot = r1slot(pos, ring2_on, g_recall_sink, r1W);   /* ring slot (overwrites token pos-W) */
+                memcpy(kc + ((size_t)L * r1cap + wslot) * KVD, knew, (size_t)KVD * sizeof(float));
+                memcpy(vc + ((size_t)L * r1cap + wslot) * KVD, vnew, (size_t)KVD * sizeof(float));
+                KC = kc + (size_t)L * r1cap * KVD;
+                VC = vc + (size_t)L * r1cap * KVD;
             }
             if (ring2_disk_on) {   /* Step 2b: spill this (layer,token) K/V to the physical Optane store */
                 size_t boff = ((size_t)L * P + pos) * (size_t)KVD * sizeof(float);
@@ -602,7 +618,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                             for (int jj = 0; jj < m; jj++) {
                                 int s = rih[jj];
                                 const float *kbase = (s < winlo && s >= g_recall_sink)
-                                    ? stgK + (size_t)stg_slot[s] * KVD : KC + (size_t)s * KVD;
+                                    ? stgK + (size_t)stg_slot[s] * KVD
+                                    : KC + (size_t)r1slot(s, ring2_on, g_recall_sink, r1W) * KVD;
                                 const float *kh = kbase + (size_t)kvh * HD;
                                 float acc = 0.0f; for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
                                 float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
@@ -614,7 +631,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                             for (int jj = 0; jj < m; jj++) {
                                 int s = rih[jj]; float w = scl[jj] * inv;
                                 const float *vbase = (s < winlo && s >= g_recall_sink)
-                                    ? stgV + (size_t)stg_slot[s] * KVD : VC + (size_t)s * KVD;
+                                    ? stgV + (size_t)stg_slot[s] * KVD
+                                    : VC + (size_t)r1slot(s, ring2_on, g_recall_sink, r1W) * KVD;
                                 const float *vh = vbase + (size_t)kvh * HD;
                                 for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                             }
@@ -640,7 +658,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                             for (int jj = 0; jj < m; jj++) {
                                 int s = ri[jj];
                                 const float *kbase = (ring2_on && s < winlo && s >= g_recall_sink)
-                                    ? ring2k + ((size_t)L * P + s) * KVD : KC + (size_t)s * KVD;
+                                    ? ring2k + ((size_t)L * P + s) * KVD
+                                    : KC + (size_t)r1slot(s, ring2_on, g_recall_sink, r1W) * KVD;
                                 const float *kh = kbase + (size_t)kvh * HD;
                                 float acc = 0.0f; for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
                                 float d = acc * ascale; scl[jj] = d; if (d > maxs) maxs = d;
@@ -652,7 +671,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                             for (int jj = 0; jj < m; jj++) {
                                 int s = ri[jj]; float w = scl[jj] * inv;
                                 const float *vbase = (ring2_on && s < winlo && s >= g_recall_sink)
-                                    ? ring2v + ((size_t)L * P + s) * KVD : VC + (size_t)s * KVD;
+                                    ? ring2v + ((size_t)L * P + s) * KVD
+                                    : VC + (size_t)r1slot(s, ring2_on, g_recall_sink, r1W) * KVD;
                                 const float *vh = vbase + (size_t)kvh * HD;
                                 for (int i = 0; i < HD; i++) out[i] += w * vh[i];
                             }
