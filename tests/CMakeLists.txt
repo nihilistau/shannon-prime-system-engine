@@ -157,6 +157,16 @@ else()
 endif()
 add_test(NAME GEN_KV COMMAND test_gen_kv)
 
+# SPEED_BASELINE: tok/s timing of qwen3_generate_kv (not a pass/fail gate; prints tok/s).
+add_executable(sp_toks sp_toks.c)
+target_link_libraries(sp_toks PRIVATE sp_engine)
+target_compile_definitions(sp_toks PRIVATE SP_QWEN3_GGUF="${SP_QWEN3_GGUF}")
+if(MSVC)
+    target_compile_options(sp_toks PRIVATE /W4)
+else()
+    target_compile_options(sp_toks PRIVATE -Wall -Wextra)
+endif()
+
 add_executable(test_arena test_arena.c)
 target_link_libraries(test_arena PRIVATE sp_engine)
 target_compile_definitions(test_arena PRIVATE

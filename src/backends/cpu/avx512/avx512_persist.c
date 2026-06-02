@@ -20,6 +20,21 @@
 #  include <windows.h>
 #endif
 
+/* Portable acquire-load / release-fetch-add over a uint32_t.
+ * GCC/Clang: __atomic builtins. MSVC (VS18, no __atomic): Interlocked ops, which
+ * are full barriers (>= acquire/release) and return the prior value, matching
+ * __atomic_fetch_add semantics. long is 32-bit on Win64 (LLP64), so the cast is
+ * size-exact. Added 2026-06-02 to unbreak the MSVC/VS18 CPU build (the file was
+ * GCC-only; that is why the tree built on MinGW but not MSVC). */
+#if defined(_MSC_VER)
+#  include <intrin.h>
+#  define SP_ATOMIC_LOAD_ACQ(p)         ((uint32_t)_InterlockedOr((volatile long *)(p), 0))
+#  define SP_ATOMIC_FETCH_ADD_REL(p, v) ((uint32_t)_InterlockedExchangeAdd((volatile long *)(p), (long)(v)))
+#else
+#  define SP_ATOMIC_LOAD_ACQ(p)         __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#  define SP_ATOMIC_FETCH_ADD_REL(p, v) __atomic_fetch_add((p), (v), __ATOMIC_RELEASE)
+#endif
+
 /* Internal layout: 64-byte cache-line at the start of a VirtualLock'd 4KB page. */
 struct sp_avx512_persist_sentinel {
     volatile uint32_t trigger;  /* written by _wake; monitored by _wait */
@@ -108,12 +123,12 @@ __attribute__((target("waitpkg")))
 static void persist_wait_waitpkg(volatile uint32_t *p, uint32_t expect,
                                   uint64_t timeout_ns) {
     uint64_t deadline = (uint64_t)__rdtsc() + ns_to_tsc(timeout_ns);
-    while (__atomic_load_n(p, __ATOMIC_ACQUIRE) == expect) {
+    while (SP_ATOMIC_LOAD_ACQ(p) == expect) {
         _umonitor((void *)(uintptr_t)p);
         /* Re-check after arming the monitor — the producer may have written
          * between the load above and _umonitor; without this check we would
          * sleep past an already-fired write. */
-        if (__atomic_load_n(p, __ATOMIC_ACQUIRE) != expect) break;
+        if (SP_ATOMIC_LOAD_ACQ(p) != expect) break;
         _umwait(0, deadline);  /* C0.2: fastest exit */
         if ((uint64_t)__rdtsc() >= deadline) break;
     }
@@ -124,7 +139,7 @@ static void persist_wait_waitpkg(volatile uint32_t *p, uint32_t expect,
 static void persist_wait_spin(volatile uint32_t *p, uint32_t expect,
                                uint64_t timeout_ns) {
     uint64_t deadline = (uint64_t)__rdtsc() + ns_to_tsc(timeout_ns);
-    while (__atomic_load_n(p, __ATOMIC_ACQUIRE) == expect) {
+    while (SP_ATOMIC_LOAD_ACQ(p) == expect) {
         _mm_pause();
         if ((uint64_t)__rdtsc() >= deadline) break;
     }
@@ -133,7 +148,7 @@ static void persist_wait_spin(volatile uint32_t *p, uint32_t expect,
 /* ---- Public API ---------------------------------------------------------- */
 
 void sp_avx512_persist_wait(sp_avx512_persist_sentinel *s, uint64_t timeout_ns) {
-    uint32_t old = __atomic_load_n(&s->trigger, __ATOMIC_ACQUIRE);
+    uint32_t old = SP_ATOMIC_LOAD_ACQ(&s->trigger);
     if (g_avx512_caps.has_waitpkg)
         persist_wait_waitpkg(&s->trigger, old, timeout_ns);
     else
@@ -141,5 +156,5 @@ void sp_avx512_persist_wait(sp_avx512_persist_sentinel *s, uint64_t timeout_ns) 
 }
 
 void sp_avx512_persist_wake(sp_avx512_persist_sentinel *s) {
-    __atomic_fetch_add(&s->trigger, 1u, __ATOMIC_RELEASE);
+    (void)SP_ATOMIC_FETCH_ADD_REL(&s->trigger, 1u);
 }
