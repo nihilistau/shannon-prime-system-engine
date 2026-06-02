@@ -58,7 +58,8 @@ typedef enum {
     SP_ARCH_ID_DEEPSEEK_V4 = 4,
     /* 5 = SP_ARCH_ID_QWEN35 reserved (Phase 3-SSM) */
     SP_ARCH_ID_QWEN25 = 6,
-    SP_ARCH_ID_GEMMA4 = 7
+    SP_ARCH_ID_GEMMA4 = 7,
+    SP_ARCH_ID_QWEN36 = 8   /* qwen35moe: Gated DeltaNet + MoE hybrid (Qwen3.6-35B-A3B) */
 } sp_arch_id;
 
 /* §7 tokenizer type_id. */

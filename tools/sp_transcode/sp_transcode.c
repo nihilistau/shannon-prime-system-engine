@@ -65,6 +65,8 @@ static size_t ggml_row_bytes(uint32_t type, int n) {
         case GGML_T_F32:  return (size_t)n * 4;
         case GGML_T_F16:  return (size_t)n * 2;
         case GGML_T_Q8_0: return (size_t)(n / 32) * 34;
+        case GGML_T_Q4_K: return (size_t)(n / 256) * 144;  /* qwen35moe Q4_K_M source */
+        case GGML_T_Q6_K: return (size_t)(n / 256) * 210;
         default:          return 0;
     }
 }
@@ -78,18 +80,27 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
     if (!base || W->n_dims < 2) { fprintf(stderr, "bad weight %s\n", W->name); return 1; }
     int cols = (int)W->dims[0], rows = (int)W->dims[1];
+    /* Rank-3 MoE expert tensors [cols, rows, n_expert]: pack as (rows*n_expert)
+     * contiguous 2D Frobenius rows — the source row (e,r) is at element
+     * (e*rows + r)*cols, so a single linear pass over total_rows is exact and the
+     * existing 2D frobenius_lift applies per expert. The bridge slices expert e as
+     * rows [e*rows, (e+1)*rows). */
+    int ne2 = (W->n_dims >= 3) ? (int)W->dims[2] : 1;
+    int total_rows = rows * ne2;
     size_t rb = ggml_row_bytes(W->type, cols);
     if (rb == 0) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
     row_ctx ctx = { base, W->type, rb, cols };
     sp_frob_packed_tensor pt;
-    if (sp_frob_pack_tensor(rows, cols, 8, 0.0f, get_row, &ctx, &pt, NULL)) {
+    if (sp_frob_pack_tensor(total_rows, cols, 8, 0.0f, get_row, &ctx, &pt, NULL)) {
         fprintf(stderr, "pack failed %s\n", W->name); return 1;
     }
-    /* OK_Q8 codes (rows*cols int8, row-major) */
+    /* OK_Q8 codes (total_rows*cols int8, row-major) */
     emit_tensor *q = el_push(L);
     snprintf(q->name, sizeof q->name, "%s", W->name);
-    q->dtype_id = SP_DT_OK_Q8; q->n_dims = 2; q->dims[0] = (uint64_t)cols; q->dims[1] = (uint64_t)rows;
-    q->block_size = 1; q->size_bytes = (uint64_t)rows * cols;
+    q->dtype_id = SP_DT_OK_Q8; q->n_dims = W->n_dims;
+    q->dims[0] = (uint64_t)cols; q->dims[1] = (uint64_t)rows;
+    if (W->n_dims >= 3) q->dims[2] = (uint64_t)ne2;
+    q->block_size = 1; q->size_bytes = (uint64_t)total_rows * cols;
     q->bytes = (uint8_t *)malloc(q->size_bytes ? q->size_bytes : 1);
     if (!q->bytes) { sp_frob_packed_free(&pt); return 1; }
     memcpy(q->bytes, pt.codes, q->size_bytes);
@@ -97,8 +108,8 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
      * in the data region after layout (§9). */
     emit_tensor *s = el_push(L);
     snprintf(s->name, sizeof s->name, "%s.scale", W->name);
-    s->dtype_id = SP_DT_FROBENIUS_SCALE_FP32; s->n_dims = 1; s->dims[0] = (uint64_t)rows;
-    s->block_size = 4; s->size_bytes = (uint64_t)rows * sizeof(float);
+    s->dtype_id = SP_DT_FROBENIUS_SCALE_FP32; s->n_dims = 1; s->dims[0] = (uint64_t)total_rows;
+    s->block_size = 4; s->size_bytes = (uint64_t)total_rows * sizeof(float);
     s->bytes = (uint8_t *)malloc(s->size_bytes ? s->size_bytes : 1);
     if (!s->bytes) { sp_frob_packed_free(&pt); return 1; }
     memcpy(s->bytes, pt.row_scale, s->size_bytes);
@@ -244,7 +255,8 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     int is_gemma4 = (strcmp(arch_str, "gemma4") == 0);
     int is_qwen25 = (strcmp(arch_str, "qwen2")  == 0);
     int is_qwen3  = (strcmp(arch_str, "qwen3")  == 0);
-    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3) {
+    int is_qwen36 = (strcmp(arch_str, "qwen35moe") == 0);
+    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3 && !is_qwen36) {
         fprintf(stderr, "fill_arch_struct: unsupported arch '%s'\n", arch_str); return 1;
     }
 
@@ -292,7 +304,8 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     memset(&ai, 0, sizeof ai);
     ai.arch_id          = is_gemma3 ? (uint32_t)SP_ARCH_ID_GEMMA3 :
                           is_gemma4 ? (uint32_t)SP_ARCH_ID_GEMMA4 :
-                          is_qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 : (uint32_t)SP_ARCH_ID_QWEN3;
+                          is_qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 :
+                          is_qwen36 ? (uint32_t)SP_ARCH_ID_QWEN36 : (uint32_t)SP_ARCH_ID_QWEN3;
     ai.vocab_size       = (uint32_t)n_vocab;
     ai.hidden_dim       = (uint32_t)n_embd;
     ai.n_layers         = (uint32_t)n_layers;
@@ -352,6 +365,35 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
         ai.has_qk_norm = 1u;
     }
 
+    /* ── qwen35moe q36_* fields (mirror qwen3_load): GDN geometry + MoE params +
+     * IMRoPE sections. Base head_dim/n_heads/n_kv_heads hold the FULL-ATTN geometry. ── */
+    if (is_qwen36) {
+        uint64_t qv = 0; float qf2 = 0.0f;
+        ai.q36_full_attn_interval = gguf_get_u64(g, "qwen35moe.full_attention_interval", &qv) ? (uint32_t)qv : 4u;
+        if (gguf_get_u64(g, "qwen35moe.expert_count", &qv))                      ai.q36_n_expert      = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.expert_used_count", &qv))                 ai.q36_n_expert_used = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.expert_feed_forward_length", &qv))        ai.q36_n_ff_exp      = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.expert_shared_feed_forward_length", &qv)) ai.q36_n_ff_shexp    = (uint32_t)qv;
+        ai.q36_expert_weights_scale = gguf_get_f32(g, "qwen35moe.expert_weights_scale", &qf2) ? qf2 : 1.0f;
+        if (gguf_get_u64(g, "qwen35moe.ssm.conv_kernel", &qv))    ai.q36_gdn_conv_k    = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.ssm.state_size", &qv))     ai.q36_gdn_state     = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.ssm.group_count", &qv))    ai.q36_gdn_n_k_heads = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.ssm.time_step_rank", &qv)) ai.q36_gdn_n_v_heads = (uint32_t)qv;
+        if (gguf_get_u64(g, "qwen35moe.ssm.inner_size", &qv))     ai.q36_gdn_inner     = (uint32_t)qv;
+        ai.q36_rope_dim  = gguf_get_u64(g, "qwen35moe.rope.dimension_count", &qv) ? (uint32_t)qv : 64u;
+        ai.q36_rope_base = rope_freq_base;
+        {
+            const gguf_kv *kv = gguf_find_kv(g, "qwen35moe.rope.dimension_sections");
+            if (kv && kv->type == GGUF_T_ARRAY && kv->arr_type == GGUF_T_INT32 && kv->arr_data) {
+                const int32_t *sec = (const int32_t *)kv->arr_data;
+                for (int s = 0; s < 4; s++) ai.q36_rope_sections[s] = (s < (int)kv->arr_len) ? sec[s] : 0;
+            }
+        }
+        if (gguf_get_u64(g, "qwen35moe.nextn_predict_layers", &qv)) ai.q36_nextn_predict_layers = (uint32_t)qv;
+        ai.has_qk_norm = 1u;
+        if (ai.n_ff == 0) ai.n_ff = ai.q36_n_ff_exp;   /* nonzero sentinel (MoE has no dense FFN) */
+    }
+
     memset(arch_struct, 0, 256);
     memcpy(arch_struct, &ai, sizeof ai);
     *arch_id   = ai.arch_id;
@@ -379,6 +421,17 @@ static int is_matmul_weight(const char *name) {
      * stay F32 (freq table / scalar); *_norm caught above. */
     if (strstr(name, "inp_gate.weight") || strstr(name, "proj.weight") ||
         strstr(name, "per_layer_token_embd.weight")) return 1;
+    /* qwen35moe (Qwen3.6): GDN + MoE matmul weights -> Q8. The router gates
+     * (ffn_gate_inp.weight, ffn_gate_inp_shexp.weight) and ssm_conv1d/a/dt/norm
+     * stay F32 (discrete top-k cliff / conv kernel / scalars; *_norm caught above).
+     * ffn_{gate,up,down}_exps are rank-3 [cols,rows,n_expert] (handled in add_q8). */
+    if (strstr(name, "attn_qkv.weight")  || strstr(name, "attn_gate.weight") ||
+        strstr(name, "ssm_alpha.weight") || strstr(name, "ssm_beta.weight")  ||
+        strstr(name, "ssm_out.weight")   ||
+        strstr(name, "ffn_gate_exps.weight") || strstr(name, "ffn_up_exps.weight") ||
+        strstr(name, "ffn_down_exps.weight") ||
+        strstr(name, "ffn_gate_shexp.weight") || strstr(name, "ffn_up_shexp.weight") ||
+        strstr(name, "ffn_down_shexp.weight")) return 1;
     return 0;
 }
 
