@@ -13,7 +13,7 @@
  * rows and cols must be multiples of 64.
  * w_codes and act_u8 must be 64-byte aligned.
  */
-__attribute__((target("avx512f,avx512vnni,avx512bw")))
+SP_TARGET("avx512f,avx512vnni,avx512bw")
 void sp_avx512_vnni_matvec(const int8_t *w_codes, const uint8_t *act_u8,
                             const float *row_scale, const int32_t *bias,
                             int rows, int cols, float *out) {

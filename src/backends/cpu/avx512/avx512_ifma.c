@@ -17,7 +17,7 @@
  * N must be a multiple of 8 (8 uint64 lanes per ZMM after 32->64 widening).
  * Caller must check g_avx512_caps.has_ifma before calling on Zen 4.
  */
-__attribute__((target("avx512f,avx512ifma,avx512dq")))
+SP_TARGET("avx512f,avx512ifma,avx512dq")
 void sp_avx512_ifma_modmul(const uint32_t *a, const uint32_t *b,
                             uint32_t q, uint64_t mu, uint32_t N, uint32_t *out) {
     __m512i vq   = _mm512_set1_epi64((int64_t)(uint64_t)q);

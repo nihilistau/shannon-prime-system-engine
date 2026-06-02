@@ -5,6 +5,17 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Per-function ISA target. GCC/Clang gate codegen per function via
+ * __attribute__((target(...))); MSVC has no equivalent and instead relies on the
+ * TU being compiled with /arch:AVX512 (set in the avx512 CMakeLists), so the
+ * attribute is empty there. Added 2026-06-02 to build the avx512 TUs on the
+ * pinned VS18 (MSVC) toolchain — they were GCC-only. */
+#if defined(_MSC_VER)
+#  define SP_TARGET(s)
+#else
+#  define SP_TARGET(s) __attribute__((target(s)))
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

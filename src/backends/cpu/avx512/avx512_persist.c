@@ -119,7 +119,7 @@ void sp_avx512_persist_free(sp_avx512_persist_sentinel *s) {
 /* ---- Wait (WAITPKG path) ------------------------------------------------- */
 
 /* Function-level target so the TU can be compiled without -mwaitpkg globally. */
-__attribute__((target("waitpkg")))
+SP_TARGET("waitpkg")
 static void persist_wait_waitpkg(volatile uint32_t *p, uint32_t expect,
                                   uint64_t timeout_ns) {
     uint64_t deadline = (uint64_t)__rdtsc() + ns_to_tsc(timeout_ns);

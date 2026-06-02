@@ -5,7 +5,7 @@
 /* Hot path: aligned load + prefetch next slot into L1.
  * `slot` must be 64-byte aligned (arena allocator guarantees this).
  * Prefetches slot+128 (two blocks ahead) to hide DRAM latency in sequential scans. */
-__attribute__((target("avx512f")))
+SP_TARGET("avx512f")
 int sp_avx512_spinor_load_check(const void *slot) {
     _mm_prefetch((const char *)slot + 128, _MM_HINT_T0);  /* two blocks ahead */
     __m512i zmm = _mm512_load_si512((const __m512i *)slot);
@@ -18,7 +18,7 @@ int sp_avx512_spinor_load_check(const void *slot) {
 /* Cold/NT path: non-temporal load, bypasses L1+L2.
  * Use for full-arena sweeps where blocks won't be reused soon.
  * `slot` must be 64-byte aligned. */
-__attribute__((target("avx512f")))
+SP_TARGET("avx512f")
 int sp_avx512_spinor_nt_load_check(const void *slot) {
     __m512i zmm     = _mm512_stream_load_si512((void *)slot);
     __m128i hi      = _mm512_extracti32x4_epi32(zmm, 3);

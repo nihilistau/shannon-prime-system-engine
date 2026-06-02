@@ -1,10 +1,11 @@
 #include "sp_engine/avx512.h"
 #include <immintrin.h>
 #include <stdint.h>
+#include <stdalign.h>
 
 /* popcnt across 8 x uint64 = 512 bits.
  * Requires AVX-512F + AVX-512VPOPCNTDQ. */
-__attribute__((target("avx512f,avx512vpopcntdq")))
+SP_TARGET("avx512f,avx512vpopcntdq")
 uint64_t sp_avx512_ternlog_popcnt512(const uint64_t *v8) {
     __m512i v   = _mm512_loadu_si512((const __m512i *)v8);
     __m512i cnt = _mm512_popcnt_epi64(v);
@@ -15,13 +16,13 @@ uint64_t sp_avx512_ternlog_popcnt512(const uint64_t *v8) {
  * lane[i] ^= lane[(i+1)%16] ^ lane[(i+5)%16]   =>  imm8=0x96 (XOR3).
  * The permute indices for +1 and +5 rotations are frozen constants.
  * state must be 64-byte aligned. */
-__attribute__((target("avx512f,avx512bw")))
+SP_TARGET("avx512f,avx512bw")
 void sp_avx512_ternlog_kste_round(uint32_t *state) {
     /* Rotation by +1 (mod 16): indices 1,2,...,15,0 */
-    static const int32_t rot1_idx[16] __attribute__((aligned(64))) =
+    alignas(64) static const int32_t rot1_idx[16] =
         {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0};
     /* Rotation by +5 (mod 16): indices 5,6,...,15,0,1,2,3,4 */
-    static const int32_t rot5_idx[16] __attribute__((aligned(64))) =
+    alignas(64) static const int32_t rot5_idx[16] =
         {5,6,7,8,9,10,11,12,13,14,15,0,1,2,3,4};
 
     __m512i a    = _mm512_load_si512((const __m512i *)state);
