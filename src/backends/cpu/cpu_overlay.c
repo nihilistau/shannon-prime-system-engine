@@ -15,6 +15,9 @@
 #if defined(SP_ENGINE_AVX2) || defined(SP_ENGINE_AVX512)
 #include <immintrin.h>
 #endif
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* ── runtime gate knobs honored by these kernels (default OFF = pure-f32) ── */
 static int   g_scalar  = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
@@ -32,7 +35,26 @@ static int   g_avx512dot = 0; /* SP_CPU_AVX512DOT=1: 16-wide AVX-512 int8×f32 d
 /* round one f32 to the nearest IEEE binary16 value and back (fp16 working precision). */
 static inline float r16(float v) { return sp_f16_to_f32(sp_f32_to_f16(v)); }
 
+/* Cap OpenMP threads to the physical-core count by default. The decode matmul is
+ * memory-bound past ~physical cores; the OMP default of ALL logical threads
+ * (2× on HT) oversubscribes and runs ~1.5× SLOWER than physical-core count
+ * (measured: 16 logical = 16.5 tok/s, 5-6 threads = 25.8 on an 8-physical box).
+ * Override with OMP_NUM_THREADS (wins) or SP_OMP_THREADS. One-time. */
+static void sp_set_thread_default(void) {
+#ifdef _OPENMP
+    static int done = 0;
+    if (done) return; done = 1;
+    if (getenv("OMP_NUM_THREADS")) return;            /* explicit OMP override wins */
+    const char *e = getenv("SP_OMP_THREADS");
+    int n = (e && atoi(e) > 0) ? atoi(e)
+                               : (omp_get_num_procs() > 2 ? omp_get_num_procs() / 2 : omp_get_num_procs());
+    if (n < 1) n = 1;
+    omp_set_num_threads(n);
+#endif
+}
+
 void sp_kernels_read_env(void) {
+    sp_set_thread_default();
     { const char *e = getenv("SP_ENGINE_F16_ACT");  g_f16_act  = (e && e[0] == '1'); }
     { const char *e = getenv("SP_ENGINE_FP16");     g_fp16     = (e && e[0] == '1'); }
     { const char *e = getenv("SP_ENGINE_FROB");     g_frob     = e ? atoi(e) : 0; }
