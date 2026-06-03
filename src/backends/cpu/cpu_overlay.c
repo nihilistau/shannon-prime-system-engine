@@ -18,6 +18,57 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <stdio.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+/* Enable SeLockMemoryPrivilege once (required for MEM_LARGE_PAGES). */
+static int sp_enable_lock_mem(void) {
+    HANDLE tok; TOKEN_PRIVILEGES tp; LUID luid;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) return 0;
+    int ok = 0;
+    if (LookupPrivilegeValueA(NULL, "SeLockMemoryPrivilege", &luid)) {
+        tp.PrivilegeCount = 1; tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        AdjustTokenPrivileges(tok, FALSE, &tp, 0, NULL, NULL);
+        ok = (GetLastError() == ERROR_SUCCESS);
+    }
+    CloseHandle(tok);
+    return ok;
+}
+/* Allocate `bytes` backed by 2 MB large pages; NULL if unavailable (no privilege). */
+static void *sp_largepage_alloc(size_t bytes) {
+    SIZE_T lp = GetLargePageMinimum();
+    if (lp == 0) return NULL;
+    size_t rounded = (bytes + lp - 1) & ~((size_t)lp - 1);
+    return VirtualAlloc(NULL, rounded, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
+}
+/* Lazily move one packed tensor's codes into a 2 MB-large-page buffer (once).
+ * Cuts TLB pressure on the per-token weight stream. Old buffer is leaked
+ * (model-lifetime; this is a measured perf overlay, gated by SP_HUGEPAGE). */
+static const void *g_hp_seen[1024]; static int g_hp_n = 0; static int g_hp_priv = -1;
+static long g_hp_done = 0, g_hp_fail = 0;
+static void sp_hp_repack(sp_frob_packed_tensor *pt, int in, int out) {
+    if (g_hp_priv < 0) g_hp_priv = sp_enable_lock_mem();
+    if (!g_hp_priv) { g_hp_fail++; return; }
+    for (int i = 0; i < g_hp_n; i++) if (g_hp_seen[i] == pt->codes) return;
+    if (g_hp_n >= 1024) return;
+    size_t cb = 0;
+    for (int j = 0; j < out; j++) {
+        size_t end = pt->row_off[j] + (pt->row_prec[j] == 8 ? (size_t)in : ((size_t)in + 1) / 2);
+        if (end > cb) cb = end;
+    }
+    if (cb == 0) return;
+    void *lp = sp_largepage_alloc(cb);
+    if (!lp) { if (!g_hp_fail) fprintf(stderr, "[hugepage] priv=%d alloc FAILED (cb=%zu, err=%lu) -> fallback\n", g_hp_priv, cb, (unsigned long)GetLastError()); g_hp_fail++; return; }
+    memcpy(lp, pt->codes, cb);
+    pt->codes = (uint8_t *)lp;
+    g_hp_seen[g_hp_n++] = lp;
+    if (!g_hp_done) fprintf(stderr, "[hugepage] LIVE: weight codes on 2MB large pages (priv=%d, first tensor cb=%zu)\n", g_hp_priv, cb);
+    g_hp_done++;
+}
+#endif
 
 /* ── runtime gate knobs honored by these kernels (default OFF = pure-f32) ── */
 static int   g_scalar  = 0;   /* SP_CPU_SCALAR=1 forces the scalar reduction */
@@ -32,6 +83,7 @@ static long  g_q4_rows = 0;
 static int   g_vnni    = 0;   /* SP_VNNI=1: AVX-512 VNNI int8×int8 matmul_arena path (dyn act-quant) */
 static int   g_avx512dot = 0; /* SP_CPU_AVX512DOT=1: 16-wide AVX-512 int8×f32 dot (vs AVX2's 8-wide) */
 static int   g_q8blk   = 0;   /* SP_Q8BLK=1: Q8_0-faithful int8×int8 dot w/ per-32-block act scale (accuracy-safe) */
+static int   g_hugepage = 0;  /* SP_HUGEPAGE=1: move weight codes to 2MB large pages (cut TLB pressure) */
 
 /* round one f32 to the nearest IEEE binary16 value and back (fp16 working precision). */
 static inline float r16(float v) { return sp_f16_to_f32(sp_f32_to_f16(v)); }
@@ -65,6 +117,7 @@ void sp_kernels_read_env(void) {
     { const char *e = getenv("SP_VNNI");            g_vnni     = (e && e[0] == '1'); }
     { const char *e = getenv("SP_CPU_AVX512DOT");   g_avx512dot = (e && e[0] == '1'); }
     { const char *e = getenv("SP_Q8BLK");           g_q8blk    = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_HUGEPAGE");        g_hugepage = (e && e[0] == '1'); }
 #if defined(SP_ENGINE_AVX512)
     if (g_vnni) sp_avx512_init();   /* populate g_avx512_caps.has_vnni before dispatch */
 #endif
@@ -217,6 +270,9 @@ static int matmul_arena(const sp_arena_tensor *at, const float *X,
                         int n_tok, int in, int out, float *Y) {
     const sp_frob_packed_tensor *pt = &at->pt;
     if (pt->rows != out || pt->cols != in) return 1;
+#ifdef _WIN32
+    if (g_hugepage) sp_hp_repack((sp_frob_packed_tensor *)pt, in, out);
+#endif
 #if defined(SP_ENGINE_AVX512)
     /* Q8_0-faithful int8×int8 with PER-32-BLOCK activation scales (SP_Q8BLK=1).
      * The accuracy-safe VNNI (per-block, not per-vector) — closes the per-element

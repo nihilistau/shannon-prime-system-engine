@@ -52,20 +52,25 @@ void sp_avx512_q8blk_matvec(const int8_t *w_codes, const uint8_t *act_u8,
     for (i = 0; i < rows; i++) {
         const int8_t  *wi  = w_codes   + (ptrdiff_t)i * cols;
         const int32_t *wbs = wblk_bias + (ptrdiff_t)i * nblk;
-        float accf = 0.0f;
+        /* Deferred reduction (llama-style): keep 8 float lanes, fmadd each block's
+         * scaled partials, hsum ONCE per row — no per-block cross-lane hadd. The
+         * per-block scalar bias (128*sum_w) is summed separately, also deferred. */
+        __m256 accv = _mm256_setzero_ps();
+        float biasf = 0.0f;
         for (int b = 0; b < nblk; b++) {
             const int k = b * 32;
             __m256i a = _mm256_loadu_si256((const __m256i *)(act_u8 + k));
             __m256i w = _mm256_loadu_si256((const __m256i *)(wi + k));
-            __m256i acc = _mm256_dpbusd_epi32(_mm256_setzero_si256(), a, w);
-            __m128i lo = _mm256_castsi256_si128(acc);
-            __m128i hi = _mm256_extracti128_si256(acc, 1);
-            __m128i s  = _mm_add_epi32(lo, hi);
-            s = _mm_hadd_epi32(s, s);
-            s = _mm_hadd_epi32(s, s);
-            int32_t dot = _mm_cvtsi128_si32(s);
-            accf += (float)(dot - wbs[b]) * blk_scale[b];
+            __m256i p = _mm256_dpbusd_epi32(_mm256_setzero_si256(), a, w);  /* 8 int32 partials */
+            __m256  sc = _mm256_set1_ps(blk_scale[b]);
+            accv = _mm256_fmadd_ps(sc, _mm256_cvtepi32_ps(p), accv);
+            biasf += blk_scale[b] * (float)wbs[b];
         }
-        out[i] = accf * row_scale[i];
+        __m128 lo = _mm256_castps256_ps128(accv);
+        __m128 hi = _mm256_extractf128_ps(accv, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        out[i] = (_mm_cvtss_f32(lo) - biasf) * row_scale[i];
     }
 }
