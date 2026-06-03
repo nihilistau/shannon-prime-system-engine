@@ -25,6 +25,12 @@ static double now_s(void) {
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
+static int argmax_row(const float *row, int n) {
+    int bi = 0; float bv = row[0];
+    for (int i = 1; i < n; i++) if (row[i] > bv) { bv = row[i]; bi = i; }
+    return bi;
+}
+
 int main(void) {
     const char *ng = getenv("SP_TOKS_N");
     int n_gen = ng ? atoi(ng) : 32;
@@ -62,6 +68,49 @@ int main(void) {
             }
         }
         free(tk); free(lg); free(seq); return 0;
+    }
+
+    /* MTP speculative decode (T8): prompt-lookup draft -> ONE batched verify
+     * forward -> byte-exact greedy accept -> corrected token -> O(1) advance.
+     * Acceptance is argmax equality, so the output is BIT-IDENTICAL to plain
+     * greedy decode (the regression invariant). Reports accept rate + forwards
+     * saved; the wall-clock win = (forwards saved) x the batched-forward ceiling
+     * (1.71x at K=8, measured by SP_MTP_CEIL), realized once verify reuses KV. */
+    if (getenv("SP_MTP")) {
+        const int V = (int)m->cfg.n_vocab, N = 48, K = 8, NG = 2;
+        const int cap = n_prompt + N + K + 8;
+        int32_t *gd = (int32_t *)malloc((size_t)cap * sizeof(int32_t));
+        int32_t *mp = (int32_t *)malloc((size_t)cap * sizeof(int32_t));
+        float *lg = (float *)malloc((size_t)cap * (size_t)V * sizeof(float));
+        if (gd && mp && lg) {
+            /* greedy reference: 1 forward per token */
+            int L = n_prompt; for (int i = 0; i < n_prompt; i++) gd[i] = i + 1;
+            int gfwd = 0;
+            while (L < n_prompt + N) { (void)qwen3_forward(m, gd, L, lg); gfwd++;
+                gd[L] = argmax_row(lg + (size_t)(L - 1) * V, V); L++; }
+            /* MTP: draft K via prompt-lookup, verify in one batched forward */
+            L = n_prompt; for (int i = 0; i < n_prompt; i++) mp[i] = i + 1;
+            int mfwd = 0; long acc_sum = 0, acc_steps = 0;
+            while (L < n_prompt + N) {
+                int32_t draft[16]; int Kd = 0;
+                for (int j = L - NG - 1; j >= 0; j--) {            /* rightmost NG-gram match */
+                    int mt = 1; for (int g = 0; g < NG; g++) if (mp[j + g] != mp[L - NG + g]) { mt = 0; break; }
+                    if (mt) { for (int d = 0; d < K && j + NG + d < L; d++) draft[Kd++] = mp[j + NG + d]; break; }
+                }
+                int cl = L; for (int d = 0; d < Kd; d++) mp[cl + d] = draft[d]; cl += Kd;
+                (void)qwen3_forward(m, mp, cl, lg); mfwd++;
+                int na = 0;                                        /* accept longest argmax-matching prefix */
+                for (int i = 0; i < Kd; i++) { if (argmax_row(lg + (size_t)(L - 1 + i) * V, V) == draft[i]) na++; else break; }
+                mp[L + na] = argmax_row(lg + (size_t)(L - 1 + na) * V, V);   /* corrected token */
+                L += na + 1; acc_sum += na; acc_steps++;
+            }
+            int identical = 1; for (int i = 0; i < n_prompt + N; i++) if (gd[i] != mp[i]) { identical = 0; break; }
+            fprintf(stderr, "[mtp] N=%d K=%d : greedy_forwards=%d  mtp_forwards=%d  mean_accept=%.2f/%d  bit_identical_to_greedy=%d\n",
+                    N, K, gfwd, mfwd, acc_steps ? (double)acc_sum / acc_steps : 0.0, K, identical);
+            fprintf(stderr, "[mtp] forwards saved = %.2fx fewer; realized wall-win = that x the batched ceiling (~1.7x at K=8 with KV-reuse verify)\n",
+                    mfwd ? (double)gfwd / mfwd : 0.0);
+        }
+        free(gd); free(mp); free(lg); free(seq); return 0;
     }
 
     seq[0] = 1; seq[1] = 2; seq[2] = 3; seq[3] = 4;
