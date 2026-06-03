@@ -40,6 +40,30 @@ int main(void) {
     seq[0] = 1; seq[1] = 2; seq[2] = 3; seq[3] = 4;
     (void)qwen3_generate_kv(m, seq, n_prompt, 2, -1);   /* warm: page weights in */
 
+    /* MTP ceiling probe: does forwarding K tokens cost ~the same wall as 1?
+     * If yes, the weight read is amortized across K -> speculative MTP buys ~K×
+     * tok/s on accept (one weight pass verifies K draft tokens). */
+    if (getenv("SP_MTP_CEIL")) {
+        const int V = (int)m->cfg.n_vocab, maxK = 8, iters = 8;
+        int32_t *tk = (int32_t *)malloc((size_t)maxK * sizeof(int32_t));
+        float *lg = (float *)malloc((size_t)maxK * (size_t)V * sizeof(float));
+        if (tk && lg) {
+            for (int i = 0; i < maxK; i++) tk[i] = i + 1;
+            (void)qwen3_forward(m, tk, maxK, lg);   /* warm */
+            const int Ks[4] = {1, 2, 4, 8};
+            fprintf(stderr, "[mtp-ceil] forwarding K tokens in one pass (matmul weight-read amortization):\n");
+            for (int ki = 0; ki < 4; ki++) {
+                int K = Ks[ki];
+                double t0 = now_s();
+                for (int it = 0; it < iters; it++) (void)qwen3_forward(m, tk, K, lg);
+                double dt = (now_s() - t0) / iters;
+                fprintf(stderr, "[mtp-ceil] K=%d : %.2f ms/forward  =  %.2f ms/token  (ceiling %.2fx vs K=1-per-token)\n",
+                        K, dt * 1000.0, dt * 1000.0 / K, 0.0);
+            }
+        }
+        free(tk); free(lg); free(seq); return 0;
+    }
+
     seq[0] = 1; seq[1] = 2; seq[2] = 3; seq[3] = 4;
     double t0 = now_s();
     int n = qwen3_generate_kv(m, seq, n_prompt, n_gen, -1);
