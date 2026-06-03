@@ -10,7 +10,7 @@ PoUW-ledger + QUIC-mesh surface that every UI binds to.
 The math-core lives at `lib/shannon-prime-system/` as a Git submodule.
 That submodule pin is what every engine build links against.
 
-License: AGPL-3.0-or-later. See `LICENSE`. Commercial licensing available.
+License: MIT. See `LICENSE`.
 
 ---
 
@@ -1108,5 +1108,4 @@ the up-to-date status of record.
 
 ## License
 
-AGPL-3.0-or-later. See `LICENSE`. Commercial licensing available — contact
-the copyright holder.
+MIT. See `LICENSE`.
