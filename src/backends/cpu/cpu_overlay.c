@@ -514,3 +514,34 @@ int embed_row(const qwen3_model *m, int32_t tok, int E, float *dst) {
     if (!emb || rb == 0) return 1;
     return sp_dequant_row(emb + (size_t)tok * rb, m->token_embd->type, E, dst);
 }
+
+/* ── Stage C: the math-core dispatch surface, engine-implemented ─────────────
+ * The CANONICAL decode (lib core/forward/decode.c — single source of truth;
+ * the engine's duplicate generate_kv_impl is deleted) consumes sp_matmul /
+ * sp_embed_row / sp_as_f32 / sp_rmsnorm / sp_rmsnorm_head / sp_rope_neox.
+ * Defining them HERE (cpu_overlay.c.obj is pulled into every engine binary)
+ * makes the linker resolve the decode's kernels to the engine's OpenMP/AVX
+ * implementations, and the math-core scalar-reference forward_dispatch /
+ * forward_kernels archive members are never pulled (their sp_kernels_read_env
+ * / qwen3_q4_stats would collide with this TU's). Net: canonical two-ring
+ * decode at engine kernel speed. Signatures mirror sp/forward_dispatch.h +
+ * sp/forward_kernels.h exactly. */
+int sp_matmul(const qwen3_model *m, const gguf_tensor *W,
+              const float *X, int n_tok, int in, int out, float *Y) {
+    return matmul(m, W, X, n_tok, in, out, Y);
+}
+int sp_embed_row(const qwen3_model *m, int32_t tok, int E, float *dst) {
+    return embed_row(m, tok, E, dst);
+}
+const float *sp_as_f32(const qwen3_model *m, const gguf_tensor *t) {
+    return as_f32(m, t);
+}
+void sp_rmsnorm(const float *x, const float *w, int n, float eps, float *out) {
+    rmsnorm(x, w, n, eps, out);
+}
+void sp_rmsnorm_head(float *v, const float *w, int d, float eps) {
+    rmsnorm_head(v, w, d, eps);
+}
+void sp_rope_neox(float *v, int d, int p, float base) {
+    rope_neox(v, d, p, base);
+}

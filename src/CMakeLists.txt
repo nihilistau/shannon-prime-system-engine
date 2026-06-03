@@ -9,6 +9,8 @@ add_library(sp_engine STATIC
     # cpu_overlay.c carries the CPU kernel surface incl. the SP_ENGINE_AVX2-guarded dot_f32.
     backends/cpu/cpu_overlay.c
     backends/cpu/cpu_forward.c
+    # Stage C: Optane NO_BUFFERING+IOCP store wrapped as the math-core ARM Ring-2 backend
+    backends/cpu/ring2_arm_backend.c
     backends/cpu/cpu_gemma3.c
     backends/cpu/cpu_generate.c
     backends/cpu/ring2_disk.c   # C2.1 Step 2b: physical Optane-backed Ring-2
@@ -31,11 +33,16 @@ target_link_libraries(sp_engine PUBLIC
     # (sp_model), packed-weight arena (sp_arena), GGUF v3 parser (sp_gguf), weight-dtype
     # dequant (sp_weight_dtype), the .sp-model loader (sp_io_format) and its hash primitives
     # (sp_io_hash). The same-named symbols satisfy the engine's kept sp_engine/* declaration
-    # headers. The math-core FORWARD libraries (sp_forward / sp_forward_dispatch /
-    # sp_forward_kernels) are the reference twin and are deliberately NOT linked — linking them
-    # would duplicate the CPU backend's qwen3_forward / gemma3_forward symbols.
+    # headers.
+    # Stage C (single-source decode): the engine's duplicate generate_kv_impl is DELETED;
+    # qwen3_generate_kv / qwen3_ppl_decode now resolve from the math-core sp_forward archive,
+    # whose decode lives in its own TU (core/forward/decode.c) — the linker pulls EXACTLY that
+    # object, so the engine's fast prefill (qwen3_forward*) does not collide with the math-core
+    # prefill objects. sp_arm is the ARM two-ring core the decode consumes; the engine registers
+    # its Optane store through sp_arm_ring2_register (ring2_arm_backend.c).
     sp_frobenius sp_ntt_crt sp_poly_ring sp_kste sp_vht2
-    sp_gguf sp_weight_dtype sp_io_hash sp_io_format sp_model sp_arena)
+    sp_gguf sp_weight_dtype sp_io_hash sp_io_format sp_model sp_arena
+    sp_arm sp_forward)
 
 # WIRE-CPU-V2 (2026-06-02): OpenMP parallelizes the per-output-row matmul loop
 # (matmul / matmul_arena). Parity-safe: each output element stays a single-threaded
