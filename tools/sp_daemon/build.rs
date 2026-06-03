@@ -5,6 +5,7 @@ use std::path::PathBuf;
 // Each entry: (subdir_name, link_lib_name).
 // Paths: {SP_SYSTEM_BUILD_DIR}/core/{subdir}/[lib]{link_lib_name}.[a|lib]
 const MODULES: &[(&str, &str)] = &[
+    ("arm",              "sp_arm"),
     ("session",          "sp_session"),
     ("forward",          "sp_forward"),
     ("forward_dispatch", "sp_forward_dispatch"),
@@ -62,7 +63,7 @@ fn main() {
     std::fs::write(
         &wrapper_path,
         "/* Auto-generated bindgen wrapper. */\n\
-         #include \"sp/sp_l1.h\"\n\
+         #include \"sp/sp_l1.h\"\n#include \"sp/arm.h\"\n\
          /* M.5 (routing): KSTE encoder + Tier-0/Tier-1 dominance API. */\n\
          #include \"sp/kste.h\"\n",
     ).expect("could not write sp_bindgen_wrapper.h");

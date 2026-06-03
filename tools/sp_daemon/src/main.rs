@@ -136,6 +136,23 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.daemon_inner {
+        // Trick #8: arm a remote peer as THE ARM Ring-2 backend before serving.
+        // SP_RING2_PEER=<host:port> -> the canonical decode's spilled K-residue
+        // blocks travel the QUIC socket instead of the local store. Registered
+        // from a plain thread: the client owns its own runtime (block_on would
+        // panic inside this tokio context).
+        if let Ok(peer_addr) = std::env::var("SP_RING2_PEER") {
+            if let Ok(sock) = peer_addr.parse::<std::net::SocketAddr>() {
+                let _ = std::thread::spawn(move || {
+                    match sp_daemon::network::ring2_quic::register_ring2_quic(sock) {
+                        Ok(()) => tracing::info!("SP_INFO: SP_RING2_PEER registered: {sock}"),
+                        Err(e) => tracing::warn!("SP_WARN: SP_RING2_PEER registration failed: {e}"),
+                    }
+                }).join();
+            } else {
+                tracing::warn!("SP_WARN: SP_RING2_PEER unparsable: {peer_addr}");
+            }
+        }
         daemon::run_inner(
             &cli.model, &cli.tokenizer,
             &cli.draft_model, &cli.draft_tokenizer,

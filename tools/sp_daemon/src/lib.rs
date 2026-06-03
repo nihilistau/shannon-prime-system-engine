@@ -71,7 +71,9 @@ pub mod vulkan_forward_dispatch;
 // can call `sp_session_register_forward_backend` via the lib-crate L1
 // bindings. The math-core static libs are linked by build.rs unconditionally
 // on host (line 117-126), so re-exporting the bindings is type-safe.
-#[cfg(any(target_os = "android", feature = "wire_cuda_backend", feature = "wire_vulkan_backend"))]
+// Trick #8 (ring2_quic): the ARM Ring-2 registry bindings are needed on every
+// host build now, and build.rs links the math-core libs unconditionally on
+// host — so the cfg gate is dropped (it predated the network tier).
 #[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, clippy::all)]
 pub mod ffi_l1 {
     include!(concat!(env!("OUT_DIR"), "/sp_bindings.rs"));
