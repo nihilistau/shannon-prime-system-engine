@@ -10,6 +10,24 @@ PoUW-ledger + QUIC-mesh surface that every UI binds to.
 The math-core lives at `lib/shannon-prime-system/` as a Git submodule.
 That submodule pin is what every engine build links against.
 
+**The headline capability lives here:** the **two-ring long-context memory
+(PPT-ARM)** — a query-directed recall router (±1 Rademacher projection) plus
+a byte-addressable KV offload to NVMe/Optane — is implemented in the CPU
+backend (`src/backends/cpu/cpu_forward.c` + `ring2_disk.c`). Measured at 32k
+context: **910× resident KV-cache shrink** (7.5 GB → 8.3 MB), needle
+retrieved **off a physical drive** at **7.57 µs/read**, **8× KV
+sparsification at +0.69% perplexity**, bit-exact when disabled. The
+**reducing loader** (`tools/sp_transcode`) makes the on-disk model **~50%
+smaller with a bit-faithful forward**. The receipts-first writeup, with
+one-command reproductions, is at
+**[Position Is Arithmetic](https://github.com/nihilistau/Position_Is_Arithmetic)**
+(live site: https://nihilistau.github.io/Position_Is_Arithmetic/).
+
+The four backends (CPU / CUDA / Vulkan / Hexagon HVX) are the acceleration
+substrate; Hexagon is one of them, not the focus. Raw throughput is the
+known gap (~1.34× behind a tuned llama.cpp at Q8 on desktop CPU) and is the
+explicit **P1 SPEED / WIRE** work — the value today is the memory envelope.
+
 License: MIT. See `LICENSE`.
 
 ---
@@ -38,6 +56,7 @@ License: MIT. See `LICENSE`.
 |------|------|--------|
 | **Math-core submodule** | `lib/shannon-prime-system/` | linked into every backend; frozen L1 ABI |
 | **CPU backend** | `src/backends/cpu/` (`cpu_forward.c`, `cpu_overlay.c`, `cpu_gemma3.c`, `avx512/`) | built |
+| **Two-ring memory (PPT-ARM)** | `src/backends/cpu/cpu_forward.c` (±1 recall router + window shrink + compact-and-spill fusion) + `ring2_disk.c` (Optane NO_BUFFERING + IOCP) | shipped + measured (910× @32k, 7.57 µs/read) |
 | **CUDA backend** | `src/backends/cuda/` (`cuda_forward.cu`, `ptx_mma*.cuh`, `ptx_ntt.cuh`, `ptx_spinor.cuh`, `ptx_hash.cuh`) | built |
 | **Vulkan backend** | `src/backends/vulkan/` (`vulkan_forward.cpp`, `shaders/`) | built |
 | **Hexagon HVX backend (host)** | `src/backends/hexagon/sp_hex_host.c` + `sp_hex_rt.c` + `inc/` | built |
@@ -54,14 +73,15 @@ License: MIT. See `LICENSE`.
 
 ## 2. Current status — honest table
 
-Snapshot 2026-05-31. The user has been frustrated by hours of work
-that turned out to bypass the production critical path; this table
-exists to prevent that. **Built** means the artefact compiles and
+Snapshot 2026-06-03. **Built** means the artefact compiles and
 passes its own gates. **Wired** means the daemon routes inference
 through it at runtime.
 
 | Component | Built | Wired in `sp_daemon` | Notes |
 |-----------|:-----:|:--------------------:|-------|
+| **Two-ring memory (recall router + Optane Ring-2 + fusion)** | yes | yes (`SP_RECALL_*` + `SP_RING2_*`) | 910× resident KV shrink @32k; needle off NVMe @7.57 µs/read; 8×@+0.69% PPL; bit-exact when off; fusion verified N=512 + timed N=8192, 32k (R9) in flight |
+| **Reducing loader** (`sp_transcode` GGUF → ~50%-smaller `.sp-model`) | yes | yes | bit-faithful forward, 6/6 E_FMT gates (gemma-3 + Qwen3) |
+| Model coverage | yes | yes | Qwen3-0.6B, Qwen2.5-Coder-0.5B, Gemma3-1B, Gemma4, Qwen3.6-35B-A3B MoE (Gated DeltaNet) — byte-exact forward |
 | Math-core reference forward | yes | **yes (default)** | byte-exact on host + aarch64-android; baseline tok/s in §4 below |
 | CPU backend (AVX-512 + cpu_overlay) | yes | **yes (`SP_DAEMON_BACKEND=cpu`)** | sprint WIRE-CPU (2026-06-02): daemon registers `qwen3_forward_cpu` / `gemma3_forward_cpu` via L1 ABI §6 hook; `cpu_forward_count` increments per prefill; bit-exact vs reference (same byte stream); on i9-11900KB host wall-clock matches reference within ±1% (AVX-512 primitives present in lib, hot-path wiring is WIRE-CPU-V2 follow-on) |
 | CUDA backend (PTX MMA + NTT) | yes | no | desktop target; symmetric WIRE-HEX sprint |
