@@ -142,15 +142,28 @@ int main(void) {
      * two token streams are byte-identical, then reports tok/s for both. */
     if (getenv("SP_MTP_KV")) {
         const int N = 96, K = 8, NG = 2;
-        int32_t *g0 = (int32_t *)malloc((size_t)(n_prompt + N) * sizeof(int32_t));
-        int32_t *gk = (int32_t *)malloc((size_t)(n_prompt + N) * sizeof(int32_t));
+        /* SP_PROMPT_IDS=<file of whitespace-separated token IDs>: use a REAL
+         * tokenized prompt instead of the synthetic [1,2,3,4]. A real prompt makes
+         * the model emit natural (non-degenerate) text, so prompt-lookup accept is
+         * honest, not inflated by a repetitive warm-up sequence. */
+        int rp_n = 0; int32_t rp[512];
+        const char *rp_path = getenv("SP_PROMPT_IDS");
+        if (rp_path) {
+            FILE *f = fopen(rp_path, "r");
+            if (f) { while (rp_n < 512 && fscanf(f, "%d", &rp[rp_n]) == 1) rp_n++; fclose(f); }
+            if (rp_n < 2) { fprintf(stderr, "[mtp-kv] bad SP_PROMPT_IDS: %s\n", rp_path); return 1; }
+        }
+        int np = rp_n ? rp_n : n_prompt;
+        int32_t *g0 = (int32_t *)malloc((size_t)(np + N) * sizeof(int32_t));
+        int32_t *gk = (int32_t *)malloc((size_t)(np + N) * sizeof(int32_t));
         if (g0 && gk) {
-            for (int i = 0; i < n_prompt; i++) { g0[i] = i + 1; gk[i] = i + 1; }
+            for (int i = 0; i < np; i++) { int32_t t = rp_n ? rp[i] : (i + 1); g0[i] = t; gk[i] = t; }
+            int n_prompt = np;  /* shadow: the MTP run uses the real prompt length */
             long f0 = 0, fk = 0, as = 0, ast = 0, dummy = 0;
             /* warm both paths once (page weights, prime allocator) */
             (void)qwen3_mtp_decode(m, g0, n_prompt, 8, -1, 0, NG, &dummy, &dummy, &dummy);
             (void)qwen3_mtp_decode(m, gk, n_prompt, 8, -1, K, NG, &dummy, &dummy, &dummy);
-            for (int i = 0; i < n_prompt; i++) { g0[i] = i + 1; gk[i] = i + 1; }
+            for (int i = 0; i < n_prompt; i++) { int32_t t = rp_n ? rp[i] : (i + 1); g0[i] = t; gk[i] = t; }
 
             double tb0 = now_s();
             int nb0 = qwen3_mtp_decode(m, g0, n_prompt, N, -1, 0, NG, &f0, &dummy, &dummy);
