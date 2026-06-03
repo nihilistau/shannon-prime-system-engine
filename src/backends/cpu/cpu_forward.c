@@ -90,6 +90,12 @@ static const char *g_ring2_dir = 0; /* SP_RING2_DIR: store directory (default "E
 static int g_recall_decode_only = 0;/* SP_RECALL_DECODE_ONLY=1: prefill = dense exact (full RAM, no offload),
                                      * router/sparse-attention engages only at decode (pos >= n_prompt).
                                      * Production-correct: ingest dense, then route. Disables offload (full RAM). */
+static int g_recall_fuse = 0;       /* SP_RECALL_FUSE=1 (compact-and-spill): streaming mode + a dense-prefill
+                                     * override. Prefill runs dense in a full-P buffer (fast, exact, no disk);
+                                     * at the prefill->decode boundary the whole history is bulk-spilled to
+                                     * Optane, the window+sinks copied into the (sink+W) cache, and the full-P
+                                     * buffer FREED. Decode then runs the normal window+disk path. Fast prefill
+                                     * AND ~window-sized resident RAM at decode. Requires SP_RING2_DISK + recall. */
 #define SP_RECALL_R_MAX 64
 #define SP_RECALL_SEED 0x5350524F4A2BULL   /* "SPROJ+" frozen seed; bump = SP_RECALL_PROJ_VERSION */
 static uint64_t splitmix64(uint64_t *s) { uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
@@ -126,6 +132,7 @@ static void read_env_knobs(void) {
     { const char *e = getenv("SP_RING2_DISK");      g_ring2_disk = (e && e[0] == '1'); }
     { const char *e = getenv("SP_RING2_DIR");       g_ring2_dir = (e && e[0]) ? e : "E:\\"; }
     { const char *e = getenv("SP_RECALL_DECODE_ONLY"); g_recall_decode_only = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_RECALL_FUSE");        g_recall_fuse = (e && e[0] == '1'); }
 }
 
 int qwen3_forward_ex(const qwen3_model *m, const int32_t *tokens, int n_tok,
@@ -401,7 +408,8 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     int rc = -1, n = n_prompt, produced = 0;
     /* All pointers NULL-first so any early `goto done` frees only NULLs. */
     sp_spinor_block_t *kcb = NULL, *vcb = NULL;   /* block KV cache (use_blocks) */
-    float *kc = NULL, *vc = NULL;                 /* f32 KV cache (ref / gate-off) */
+    float *kc = NULL, *vc = NULL;                 /* f32 KV cache (ref / gate-off; window-sized when offloading) */
+    float *kpre = NULL, *vpre = NULL;             /* SP_RECALL_FUSE: full-P dense prefill buffer, freed at transition */
     float *kdec = NULL, *vdec = NULL;             /* per-layer decode scratch (use_blocks) */
     float *x = NULL, *nx = NULL, *q = NULL, *knew = NULL, *vnew = NULL, *ao = NULL;
     float *ap = NULL, *gg = NULL, *up = NULL, *dn = NULL, *sc = NULL, *lg = NULL;
@@ -425,6 +433,9 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
      * the router still engages, but only during decode (gated below by phase). */
     ring2_on = (g_ring2 && g_recall_b > 0 && !use_blocks && !g_recall_decode_only);
     ring2_disk_on = ring2_on && g_ring2_disk;
+    /* FUSE is a subtype of the disk streaming config: same window cache + Optane, but prefill is
+     * done dense in a full-P buffer and freed at the boundary (compact-and-spill). */
+    const int fuse = (g_recall_fuse && ring2_disk_on);
     const int r1W = (g_recall_w > 0) ? g_recall_w : 1;
     const int r1cap = ring2_on ? (g_recall_sink + r1W) : P;
 
@@ -499,6 +510,14 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
         r2reqs = (ring2_req *)malloc((size_t)2 * P * sizeof(ring2_req));   /* K+V reqs per layer */
         if (!stgK || !stgV || !stg_stamp || !stg_slot || !stg_pos || !ri_all || !m_all || !r2reqs) goto done;
         for (int i = 0; i < P; i++) stg_stamp[i] = -1;
+        if (fuse) {
+            kpre = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float));
+            vpre = (float *)malloc((size_t)c->n_layers * P * KVD * sizeof(float));
+            if (!kpre || !vpre) goto done;
+            fprintf(stderr, "    [fuse] compact-and-spill: dense prefill in a full-P RAM buffer (%.1f MB), "
+                    "freed at the prefill->decode boundary; decode in the %d-slot window + Optane\n",
+                    2.0 * c->n_layers * P * KVD * sizeof(float) / 1e6, r1cap);
+        }
         fprintf(stderr, "    [ring2] PHYSICAL Optane spill ON (W=%d, sinks pinned in Ring-1, kc/vc poisoned -> "
                 "old reads MUST come off disk; v1 per-layer dedupe staging)\n", g_recall_w);
     }
@@ -510,6 +529,36 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
          * STRUCTURALLY overwritten by token pos below — no explicit poison needed. A
          * broken Ring-2 fetch would read the wrong slot occupant -> wrong answer -> the
          * NIAH gate fails, so correctness is still proven structurally.) */
+
+        if (fuse && pos == n_prompt) {
+            /* FUSE prefill->decode boundary: bulk-spill the whole prefill history to Optane,
+             * copy sinks + the recent W-window into the (sink+W) cache, and FREE the full-P
+             * buffer. Resident RAM drops from full-P to the window for the rest of the run. */
+            int W = r1W, sink = g_recall_sink;
+            int wlo = n_prompt - W; if (wlo < sink) wlo = sink;
+            for (uint32_t L = 0; L < c->n_layers; L++) {
+                const float *kpL = kpre + (size_t)L * P * KVD, *vpL = vpre + (size_t)L * P * KVD;
+                for (int s = 0; s < n_prompt; s++) {
+                    size_t boff = ((size_t)L * P + s) * (size_t)KVD * sizeof(float);
+                    if (ring2_disk_write(r2disk, 0, boff, kpL + (size_t)s * KVD) ||
+                        ring2_disk_write(r2disk, 1, boff, vpL + (size_t)s * KVD)) goto done;
+                }
+                float *kcL = kc + (size_t)L * r1cap * KVD, *vcL = vc + (size_t)L * r1cap * KVD;
+                for (int s = 0; s < sink && s < n_prompt; s++) {
+                    int sl = r1slot(s, 1, sink, W);
+                    memcpy(kcL + (size_t)sl * KVD, kpL + (size_t)s * KVD, (size_t)KVD * sizeof(float));
+                    memcpy(vcL + (size_t)sl * KVD, vpL + (size_t)s * KVD, (size_t)KVD * sizeof(float));
+                }
+                for (int s = wlo; s < n_prompt; s++) {
+                    int sl = r1slot(s, 1, sink, W);
+                    memcpy(kcL + (size_t)sl * KVD, kpL + (size_t)s * KVD, (size_t)KVD * sizeof(float));
+                    memcpy(vcL + (size_t)sl * KVD, vpL + (size_t)s * KVD, (size_t)KVD * sizeof(float));
+                }
+            }
+            free(kpre); free(vpre); kpre = NULL; vpre = NULL;
+            fprintf(stderr, "    [fuse] boundary @ pos=%d: spilled %d tok/layer to Optane, freed the prefill "
+                    "buffer; resident KV now %d-slot window\n", n_prompt, n_prompt, r1cap);
+        }
 
         for (uint32_t L = 0; L < c->n_layers; L++) {
             const qwen3_layer *ly = &m->layers[L];
@@ -553,6 +602,12 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                     }
                 }
                 KC = kdec; VC = vdec;
+            } else if (fuse && pos < n_prompt) {
+                /* FUSE dense prefill: write the full-P buffer; no window write, no disk spill. */
+                memcpy(kpre + ((size_t)L * P + pos) * KVD, knew, (size_t)KVD * sizeof(float));
+                memcpy(vpre + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
+                KC = kpre + (size_t)L * P * KVD;
+                VC = vpre + (size_t)L * P * KVD;
             } else {
                 if (g_kv_spinor)   /* SP_KV_SPINOR_REF: f32 cache with the lossy round-trip */
                     for (int h = 0; h < NKV; h++) { kv_spinor_roundtrip(knew + (size_t)h * HD, HD); kv_spinor_roundtrip(vnew + (size_t)h * HD, HD); }
@@ -562,10 +617,10 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
                 KC = kc + (size_t)L * r1cap * KVD;
                 VC = vc + (size_t)L * r1cap * KVD;
             }
-            if (ring2_disk_on) {   /* Step 2b: spill this (layer,token) K/V to the physical Optane store */
+            if (ring2_disk_on && !(fuse && pos < n_prompt)) {   /* spill K/V to Optane (skipped during fuse dense prefill) */
                 size_t boff = ((size_t)L * P + pos) * (size_t)KVD * sizeof(float);
                 if (ring2_disk_write(r2disk, 0, boff, knew) || ring2_disk_write(r2disk, 1, boff, vnew)) goto done;
-            } else if (ring2_on) {   /* Step 2a: spill to the mock RAM byte store */
+            } else if (ring2_on && !ring2_disk_on) {   /* Step 2a: spill to the mock RAM byte store */
                 memcpy(ring2k + ((size_t)L * P + pos) * KVD, knew, (size_t)KVD * sizeof(float));
                 memcpy(ring2v + ((size_t)L * P + pos) * KVD, vnew, (size_t)KVD * sizeof(float));
             }
@@ -577,7 +632,35 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
             /* prefill/decode split: in decode_only mode, prefill (pos < n_prompt) is dense
              * (eB=0 -> recall_select returns the full set); the router engages only at decode. */
             int eB = (g_recall_decode_only && pos < n_prompt) ? 0 : g_recall_b;
-            if (ring2_disk_on) {
+            if (fuse && pos < n_prompt) {
+                /* FUSE dense prefill: full attention over the full-P buffer (KC/VC = kpre/vpre
+                 * slice, absolute slot s), no recall, no disk. Fast + exact ingest. */
+                #pragma omp parallel
+                {
+                    float *scl = (float *)malloc((size_t)(pos + 1) * sizeof(float));
+                    if (scl) {
+                        int h;
+                        #pragma omp for
+                        for (h = 0; h < NH; h++) {
+                            int kvh = h / group; const float *qh = q + (size_t)h * HD;
+                            float maxs = -INFINITY;
+                            for (int s = 0; s <= pos; s++) {
+                                const float *kh = KC + (size_t)s * KVD + (size_t)kvh * HD;
+                                float acc = 0.0f; for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+                                float d = acc * ascale; scl[s] = d; if (d > maxs) maxs = d;
+                            }
+                            float sum = 0.0f; for (int s = 0; s <= pos; s++) { scl[s] = expf(scl[s] - maxs); sum += scl[s]; }
+                            float inv = 1.0f / sum; float *out = ao + (size_t)h * HD;
+                            for (int i = 0; i < HD; i++) out[i] = 0.0f;
+                            for (int s = 0; s <= pos; s++) {
+                                float w = scl[s] * inv; const float *vh = VC + (size_t)s * KVD + (size_t)kvh * HD;
+                                for (int i = 0; i < HD; i++) out[i] += w * vh[i];
+                            }
+                        }
+                    }
+                    free(scl);
+                }
+            } else if (ring2_disk_on) {
                 /* v1 disk path: 3-phase to DEDUP the per-query-head reads. Blocks are
                  * per-token (all kv-heads), so one fetch serves every head that picked it. */
                 /* PHASE 1: per-head selection only (parallel, no I/O). */
@@ -732,7 +815,7 @@ static int generate_kv_impl(const qwen3_model *m, int32_t *seq, int n_prompt, in
     rc = n;
 done:
     free(kcb); free(vcb); free(kdec); free(vdec);
-    free(kc); free(vc); free(x); free(nx); free(q); free(knew); free(vnew);
+    free(kc); free(vc); free(kpre); free(vpre); free(x); free(nx); free(q); free(knew); free(vnew);
     free(ao); free(ap); free(gg); free(up); free(dn); free(sc); free(lg);
     free(recallR); free(projk);
     free(ring2k); free(ring2v);
