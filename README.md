@@ -52,6 +52,8 @@ License: MIT. See `LICENSE`.
 
 ## 1. What this repo provides
 
+This repo wires the math-core forward onto four accelerator backends plus the `sp_daemon` server. **Measured here:** the **two-ring memory envelope** (910× resident KV @32k, 7.57 µs/read off Optane) and the **WIRE-CPU integer pipe** (Qwen3-0.6B 0.84 → 39.52 tok/s, 47×, ~1.34× behind llama.cpp Q8_0) — both on the CPU backend — over a forward that is bit-exact on **5 arch families** (Qwen3, Qwen2.5-Coder, Gemma3, Gemma4, Qwen3.6-35B-A3B MoE).
+
 | Slot | Path | Status |
 |------|------|--------|
 | **Math-core submodule** | `lib/shannon-prime-system/` | linked into every backend; frozen L1 ABI |
@@ -104,6 +106,15 @@ through it at runtime.
 |-------|---------:|-------:|------:|
 | Gemma3-1B | 18.06 | 16 | 0.89 | 
 | Qwen3-0.6B | 11.21 | 16 | 1.43 | 
+
+**Desktop CPU — the WIRE-CPU production path** (i9-11900KB, Qwen3-0.6B, ctx = 4 + 32 decode). This *is* the daemon's accelerated path (`SP_DAEMON_BACKEND=cpu`, Q8 arena + OpenMP-threaded matmul + AVX2 int8×f32 dot):
+
+| Model | path | Wall (s) | Tokens | tok/s |
+|-------|------|---------:|-------:|------:|
+| Qwen3-0.6B | f16 reference (as-is) | 38.1 | 32 | 0.84 |
+| Qwen3-0.6B | **Q8 + threaded + AVX2 (WIRE-CPU)** | 0.81 | 32 | **39.52** |
+
+**47× over the f16 baseline; ~1.34× behind llama.cpp Q8_0 (52.8 tok/s)** on the same host — the remaining gap is **memory layout, not ALU** (VNNI tested + falsified). Full ladder: `shannon-prime-lattice/papers/CONTRACT-SPEED-wire-tok-s.md`; next step `…/PLAN-SPEED-WIRE-CPU-V3-memory-layout.md`. The two-ring memory envelope (910× resident @32k, 7.57 µs/read off Optane) is realized on this same backend (§1).
 
 The HVX backend wiring is in place daemon-side (LLVM-nm on the
 android binary shows `gemma3_forward_hexagon` + `sp_hex_forward` +
@@ -286,6 +297,11 @@ The three SpinorReceipts are appended to the PoUW ledger if
    math-core scalar reference via T_*_BIT_EXACT tests. Math is in Z_q;   │
    floating point is plumbing.                                           ▼
 ```
+
+**Two layers the diagram doesn't show (both in the CPU backend):**
+
+- **The two-ring memory (PPT-ARM, the C2.1 headline)** — `src/backends/cpu/cpu_forward.c` + `ring2_disk.c`. A ±1 Rademacher recall router + a `sink + W` **Ring-1** resident window, backed by a **Ring-2** spill to NVMe / Optane (`FILE_FLAG_NO_BUFFERING` + IOCP). At 32k context the resident KV cache is **8.3 MB (910× smaller than 7.5 GB)**, the needle is served back off the physical drive at **7.57 µs/read**, bit-exact when disabled, with a compact-and-spill fusion mode. Env: `SP_RECALL_*` + `SP_RING2_*`.
+- **The WIRE-CPU integer pipe** — Q8 packed arena + OpenMP-threaded matmul + AVX2 int8×f32 dot takes Qwen3-0.6B decode **0.84 → 39.52 tok/s (47×)**, ~1.34× behind llama.cpp Q8_0. CUDA / Vulkan / Hexagon are symmetric `WIRE-*` follow-ons.
 
 ---
 
