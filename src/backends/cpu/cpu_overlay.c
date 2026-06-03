@@ -545,3 +545,51 @@ void sp_rmsnorm_head(float *v, const float *w, int d, float eps) {
 void sp_rope_neox(float *v, int d, int p, float base) {
     rope_neox(v, d, p, base);
 }
+
+/* ── SIMD/Barrett pass: the keystore residue-dot, engine AVX2 kernel ─────────
+ * Overrides math-core's sp_pr_resdot (resdot.c is its own archive member, so
+ * this always-pulled definition wins in engine links — the same seam as the
+ * sp_ dispatch shims above). Contract: EXACT integer equality with the
+ * portable reference (T_PR_RESDOT semantics).
+ *
+ * Deferred reduction: residues < 2^30 => products < 2^60; FIFTEEN accumulate
+ * exactly below 2^64. Vector form: 8 u32 lanes per iteration, even/odd lanes
+ * multiplied via _mm256_mul_epu32 into 2x (4x u64) accumulators; after 15
+ * vector iterations (120 elements) each u64 lane holds <= 15 products, the 8
+ * lanes are folded scalar (one % each — 8 divisions per 120 elements vs 120
+ * for the naive loop). Chunking never changes the value: integer adds below
+ * 2^64 + mod-sum associativity. */
+#if defined(SP_ENGINE_AVX2) || defined(SP_ENGINE_AVX512)
+uint32_t sp_pr_resdot(const uint32_t *a, const uint32_t *b, uint32_t n, uint32_t q) {
+    uint64_t acc = 0;
+    uint32_t i = 0;
+    const uint32_t vec_n = n & ~7u;            /* 8-lane vector body */
+    while (i < vec_n) {
+        uint32_t lim = i + 15u * 8u; if (lim > vec_n) lim = vec_n;
+        __m256i acc_even = _mm256_setzero_si256();
+        __m256i acc_odd  = _mm256_setzero_si256();
+        for (; i < lim; i += 8) {
+            __m256i va = _mm256_loadu_si256((const __m256i *)(a + i));
+            __m256i vb = _mm256_loadu_si256((const __m256i *)(b + i));
+            /* even lanes (0,2,4,6) as u64 products */
+            acc_even = _mm256_add_epi64(acc_even, _mm256_mul_epu32(va, vb));
+            /* odd lanes (1,3,5,7): shift down 32 then widening multiply */
+            __m256i va_h = _mm256_srli_epi64(va, 32);
+            __m256i vb_h = _mm256_srli_epi64(vb, 32);
+            acc_odd = _mm256_add_epi64(acc_odd, _mm256_mul_epu32(va_h, vb_h));
+        }
+        uint64_t lanes[8];
+        _mm256_storeu_si256((__m256i *)lanes,     acc_even);
+        _mm256_storeu_si256((__m256i *)(lanes+4), acc_odd);
+        for (int l = 0; l < 8; l++) acc = (acc + lanes[l] % q) % q;
+    }
+    /* scalar tail (n % 8 elements) with the same 15-chunk deferral */
+    while (i < n) {
+        uint32_t lim = i + 15u; if (lim > n) lim = n;
+        uint64_t t = 0;
+        for (; i < lim; i++) t += (uint64_t)a[i] * b[i];
+        acc = (acc + t % q) % q;
+    }
+    return (uint32_t)acc;
+}
+#endif /* SP_ENGINE_AVX2 || SP_ENGINE_AVX512 */
