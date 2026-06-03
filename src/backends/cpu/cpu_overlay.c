@@ -27,6 +27,7 @@ static float g_q4_promote = 0.25f;   /* promote a Q4 row to Q8 if its round-trip
 static long  g_q4_promoted = 0;
 static long  g_q4_rows = 0;
 static int   g_vnni    = 0;   /* SP_VNNI=1: AVX-512 VNNI int8×int8 matmul_arena path (dyn act-quant) */
+static int   g_avx512dot = 0; /* SP_CPU_AVX512DOT=1: 16-wide AVX-512 int8×f32 dot (vs AVX2's 8-wide) */
 
 /* round one f32 to the nearest IEEE binary16 value and back (fp16 working precision). */
 static inline float r16(float v) { return sp_f16_to_f32(sp_f32_to_f16(v)); }
@@ -39,6 +40,7 @@ void sp_kernels_read_env(void) {
       g_q4_promoted = 0; g_q4_rows = 0; }
     { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
     { const char *e = getenv("SP_VNNI");            g_vnni     = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_CPU_AVX512DOT");   g_avx512dot = (e && e[0] == '1'); }
 #if defined(SP_ENGINE_AVX512)
     if (g_vnni) sp_avx512_init();   /* populate g_avx512_caps.has_vnni before dispatch */
 #endif
@@ -100,6 +102,26 @@ static float dot_i8_f32(const int8_t *w, const float *x, int n) {
     for (int i = 0; i < n; i++) s += (float)w[i] * x[i];
     return s;
 }
+
+#if defined(SP_ENGINE_AVX512)
+/* AVX-512 widen of dot_i8_f32: 16 int8 -> 16 f32 per step (vs AVX2's 8). Same f32
+ * accumulate, parity-safe up to FMA reassociation (top-1 gate). Gated by
+ * SP_CPU_AVX512DOT — a measurement of whether wider SIMD helps the int8×f32 decode
+ * dot (Stage 0 predicts marginal: the loop is bandwidth/convert-bound, not ALU). */
+SP_TARGET("avx512f,fma")
+static float dot_i8_f32_avx512(const int8_t *w, const float *x, int n) {
+    __m512 acc = _mm512_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i w16 = _mm_loadu_si128((const __m128i *)(w + i));     /* 16 int8 */
+        __m512  wf  = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(w16)); /* sign-ext 16 -> f32 */
+        acc = _mm512_fmadd_ps(wf, _mm512_loadu_ps(x + i), acc);
+    }
+    float s = _mm512_reduce_add_ps(acc);
+    for (; i < n; i++) s += (float)w[i] * x[i];   /* scalar tail */
+    return s;
+}
+#endif
 
 /* bytes occupied by `n` contiguous elements of a ggml weight row. */
 static size_t row_bytes(uint32_t type, int n) {
@@ -204,7 +226,11 @@ static int matmul_arena(const sp_arena_tensor *at, const float *X,
                 else { sp_frob_q4_unpack(rcw, in, unp); cp = unp; inv = pt->row_scale[j] / 7.0f; }
                 for (int t = 0; t < n_tok; t++) {
                     const float *x = X + (size_t)t * in;
+#if defined(SP_ENGINE_AVX512)
+                    Y[(size_t)t * out + j] = (g_avx512dot && !g_scalar ? dot_i8_f32_avx512(cp, x, in) : dot_i8_f32(cp, x, in)) * inv;
+#else
                     Y[(size_t)t * out + j] = dot_i8_f32(cp, x, in) * inv;
+#endif
                 }
             }
             free(unp);
