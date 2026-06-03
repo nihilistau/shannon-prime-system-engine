@@ -31,6 +31,7 @@ static long  g_q4_promoted = 0;
 static long  g_q4_rows = 0;
 static int   g_vnni    = 0;   /* SP_VNNI=1: AVX-512 VNNI int8×int8 matmul_arena path (dyn act-quant) */
 static int   g_avx512dot = 0; /* SP_CPU_AVX512DOT=1: 16-wide AVX-512 int8×f32 dot (vs AVX2's 8-wide) */
+static int   g_q8blk   = 0;   /* SP_Q8BLK=1: Q8_0-faithful int8×int8 dot w/ per-32-block act scale (accuracy-safe) */
 
 /* round one f32 to the nearest IEEE binary16 value and back (fp16 working precision). */
 static inline float r16(float v) { return sp_f16_to_f32(sp_f32_to_f16(v)); }
@@ -63,6 +64,7 @@ void sp_kernels_read_env(void) {
     { const char *e = getenv("SP_CPU_SCALAR");      g_scalar   = (e && e[0] == '1'); }
     { const char *e = getenv("SP_VNNI");            g_vnni     = (e && e[0] == '1'); }
     { const char *e = getenv("SP_CPU_AVX512DOT");   g_avx512dot = (e && e[0] == '1'); }
+    { const char *e = getenv("SP_Q8BLK");           g_q8blk    = (e && e[0] == '1'); }
 #if defined(SP_ENGINE_AVX512)
     if (g_vnni) sp_avx512_init();   /* populate g_avx512_caps.has_vnni before dispatch */
 #endif
@@ -160,11 +162,12 @@ static size_t row_bytes(uint32_t type, int n) {
  * keyed by the codes pointer: per-row bias = 128*sum(int8 codes) (the dpbusd
  * zero-shift correction) and per-row scale = row_scale/127. `all_q8` caches
  * eligibility (every row Q8 + contiguous stride=in). */
-typedef struct { const void *key; int all_q8; int32_t *bias; float *rs; } vnni_cache_t;
+typedef struct { const void *key; int all_q8; int32_t *bias; float *rs; int32_t *wblk; } vnni_cache_t;
 #define VNNI_CACHE_N 1024
 static vnni_cache_t g_vnni_cache[VNNI_CACHE_N];
 static int g_vnni_cache_used = 0;
 static uint8_t *g_act_u8 = NULL; static int g_act_cap = 0;   /* act-quant scratch (single-thread call site) */
+static float *g_blk_scale = NULL; static int g_blk_cap = 0;  /* per-32-block act-scale scratch (q8blk path) */
 
 static const vnni_cache_t *vnni_get(const sp_frob_packed_tensor *pt, int in, int out) {
     for (int i = 0; i < g_vnni_cache_used; i++)
@@ -174,7 +177,7 @@ static const vnni_cache_t *vnni_get(const sp_frob_packed_tensor *pt, int in, int
     for (int j = 0; j < out; j++)
         if (pt->row_prec[j] != 8 || (size_t)pt->row_off[j] != (size_t)j * (size_t)in) { all_q8 = 0; break; }
     vnni_cache_t *c = &g_vnni_cache[g_vnni_cache_used++];
-    c->key = (const void *)pt->codes; c->all_q8 = all_q8; c->bias = NULL; c->rs = NULL;
+    c->key = (const void *)pt->codes; c->all_q8 = all_q8; c->bias = NULL; c->rs = NULL; c->wblk = NULL;
     if (all_q8) {
         c->bias = (int32_t *)malloc((size_t)out * sizeof(int32_t));
         c->rs   = (float   *)malloc((size_t)out * sizeof(float));
@@ -186,6 +189,17 @@ static const vnni_cache_t *vnni_get(const sp_frob_packed_tensor *pt, int in, int
                 int s = 0; for (int k = 0; k < in; k++) s += w[k];
                 c->bias[j] = 128 * s;
                 c->rs[j]   = pt->row_scale[j] / 127.0f;
+            }
+            if (in % 32 == 0) {                 /* per-(row,block) 128*sum(w) for the q8blk path */
+                int nblk = in / 32;
+                c->wblk = (int32_t *)malloc((size_t)out * (size_t)nblk * sizeof(int32_t));
+                if (c->wblk) for (int j = 0; j < out; j++) {
+                    const int8_t *w = codes + (size_t)j * (size_t)in;
+                    for (int b = 0; b < nblk; b++) {
+                        int s = 0; for (int k = 0; k < 32; k++) s += w[(size_t)b*32 + k];
+                        c->wblk[(size_t)j*nblk + b] = 128 * s;
+                    }
+                }
             }
         }
     }
@@ -204,6 +218,38 @@ static int matmul_arena(const sp_arena_tensor *at, const float *X,
     const sp_frob_packed_tensor *pt = &at->pt;
     if (pt->rows != out || pt->cols != in) return 1;
 #if defined(SP_ENGINE_AVX512)
+    /* Q8_0-faithful int8×int8 with PER-32-BLOCK activation scales (SP_Q8BLK=1).
+     * The accuracy-safe VNNI (per-block, not per-vector) — closes the per-element
+     * f32-convert gap to llama.cpp. Top-1 parity-gated, not byte-exact. */
+    if (g_q8blk && !g_scalar && g_avx512_caps.has_vnni && (in % 32 == 0)) {
+        const vnni_cache_t *vc = vnni_get(pt, in, out);
+        if (vc && vc->all_q8 && vc->wblk) {
+            int nblk = in / 32;
+            if (g_act_cap < in) { free(g_act_u8); g_act_u8 = (uint8_t *)malloc((size_t)in); g_act_cap = g_act_u8 ? in : 0; }
+            if (g_blk_cap < nblk) { free(g_blk_scale); g_blk_scale = (float *)malloc((size_t)nblk * sizeof(float)); g_blk_cap = g_blk_scale ? nblk : 0; }
+            if (g_act_u8 && g_blk_scale) {
+                const int8_t *codes = (const int8_t *)pt->codes;
+                for (int t = 0; t < n_tok; t++) {
+                    const float *x = X + (size_t)t * in;
+                    float *yt = Y + (size_t)t * out;
+                    for (int b = 0; b < nblk; b++) {
+                        const float *xb = x + (size_t)b * 32;
+                        float ma = 0.0f; for (int kk = 0; kk < 32; kk++) { float a = fabsf(xb[kk]); if (a > ma) ma = a; }
+                        if (ma <= 0.0f) { g_blk_scale[b] = 0.0f; for (int kk = 0; kk < 32; kk++) g_act_u8[(size_t)b*32+kk] = 128; continue; }
+                        float as = ma / 127.0f, invas = 127.0f / ma;
+                        g_blk_scale[b] = as;
+                        for (int kk = 0; kk < 32; kk++) {
+                            int q = (int)lrintf(xb[kk] * invas);
+                            if (q > 127) q = 127; else if (q < -127) q = -127;
+                            g_act_u8[(size_t)b*32+kk] = (uint8_t)(q + 128);
+                        }
+                    }
+                    sp_avx512_q8blk_matvec(codes, g_act_u8, g_blk_scale, vc->rs, vc->wblk, out, in, yt);
+                }
+                return 0;
+            }
+        }
+    }
     /* VNNI int8×int8 path (SP_VNNI=1). Dynamic per-vector activation quant → dpbusd.
      * NOT bit-exact to the f32-activation path (lossy act-quant) → gated by a top-1/PPL
      * gate, not a byte-match. Falls through to the AVX2/scalar path if ineligible. */

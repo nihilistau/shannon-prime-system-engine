@@ -53,6 +53,14 @@ void sp_avx512_vnni_matvec(const int8_t *w_codes, const uint8_t *act_u8,
                             const float *row_scale, const int32_t *bias,
                             int rows, int cols, float *out);
 
+/* §18.2b VNNI per-32-block: Q8_0-faithful int8×int8 with per-block activation
+ * scales (the accuracy-preserving fix). blk_scale[b] = per-32-block act scale;
+ * wblk_bias[i*nblk+b] = 128*sum_{k in block} w_codes[i][k]; row_scale[i]=weight/127.
+ * cols must be a multiple of 32. Needs AVX512VL. */
+void sp_avx512_q8blk_matvec(const int8_t *w_codes, const uint8_t *act_u8,
+                            const float *blk_scale, const float *row_scale,
+                            const int32_t *wblk_bias, int rows, int cols, float *out);
+
 /* §18.3 IFMA: pointwise Barrett multiply of two length-N residue arrays mod q.
  * N must be a multiple of 8. q must be a 30-bit prime; mu = floor(2^60/q).
  * Equivalent to ntt_pointwise_mul for one prime channel. */
