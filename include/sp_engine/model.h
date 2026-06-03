@@ -202,6 +202,33 @@ int qwen3_generate(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
 int qwen3_generate_kv(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
                       int eos_id);
 
+/* ── MTP (Theorem T8): persistent-KV speculative decode ──────────────────────
+ * qwen3_mtp_forward: batched APPEND-forward. Computes `nb` tokens at absolute
+ * positions [basePos .. basePos+nb-1] over the caller's persistent f32 K/V cache
+ * (kc/vc, layout [layer][slot][KVD], `cap` slots/layer). The prefix [0..basePos-1]
+ * must already hold the confirmed post-RoPE K/V; this writes the new K/V into
+ * slots [basePos..basePos+nb-1] and runs full causal attention over [0..basePos+t]
+ * for each batch token t. logits[nb*n_vocab] receives every token's LM-head row.
+ * Each position's math (RoPE pos, QK-norm, full causal attention, the batched
+ * matmuls) is identical to the one-token path, so argmax is bit-identical to plain
+ * greedy. Plain f32 path only (no Ring-2/recall/fuse/Spinor/KSTE overlays).
+ * Returns 0 on success, non-zero on error. */
+int qwen3_mtp_forward(const qwen3_model *m, const int32_t *batch, int nb,
+                      int basePos, float *kc, float *vc, int cap, float *logits);
+
+/* qwen3_mtp_decode: greedy decode realized via prompt-lookup speculation on top
+ * of qwen3_mtp_forward. `seq` holds n_prompt prompt tokens, capacity >= n_prompt
+ * + n_gen. K = draft depth (K=0 ⇒ plain incremental KV greedy on the same cache —
+ * the apples-to-apples baseline); NG = prompt-lookup n-gram order. The emitted
+ * sequence is byte-identical to greedy by construction (acceptance is argmax
+ * equality). On success returns the new total length; *out_forwards (if non-NULL)
+ * gets the number of append-forwards, *out_accept_sum / *out_accept_steps the mean
+ * accept stats. The wall-clock win = (forwards saved) × the batched weight-read
+ * amortization, because each verify reuses the cached prefix K/V. */
+int qwen3_mtp_decode(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                     int eos_id, int K, int NG,
+                     long *out_forwards, long *out_accept_sum, long *out_accept_steps);
+
 /* G2 (C2.1 Step 3): teacher-forced autoregressive perplexity over the DECODE path,
  * so the recall router (SP_RECALL_*) + two-ring (SP_RING2) are exercised exactly as
  * production generates — unlike sp_perplexity, which runs the dense prefill

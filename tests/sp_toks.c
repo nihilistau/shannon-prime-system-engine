@@ -9,10 +9,12 @@
  *      forces the scalar path; default uses SP's best current CPU path.
  */
 #include "sp_engine/model.h"
+#include "sp_engine/sp_model.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #ifndef SP_QWEN3_GGUF
@@ -36,8 +38,28 @@ int main(void) {
     int n_gen = ng ? atoi(ng) : 32;
     if (n_gen < 1) n_gen = 32;
 
-    qwen3_model *m = qwen3_load(SP_QWEN3_GGUF);
-    if (!m) { fprintf(stderr, "[sp_toks] load FAIL: %s\n", SP_QWEN3_GGUF); return 1; }
+    /* Production path: SP_TOKS_SP=<file.sp-model> loads via the reducing-converter
+     * .sp-model + swivel adapter (sp_model_load -> sp_model_to_qwen3): packed OK_Q8
+     * arena, gguf==NULL, zero quant inflation. The paired .sp-tokenizer is the same
+     * path with the extension swapped. Falls back to the raw-GGUF reference loader
+     * (qwen3_load) when SP_TOKS_SP is unset. */
+    sp_model *spm = NULL;
+    qwen3_model *m = NULL;
+    const char *sp_path = getenv("SP_TOKS_SP");
+    if (sp_path) {
+        char tok_path[1024];
+        snprintf(tok_path, sizeof(tok_path), "%s", sp_path);
+        char *dot = strrchr(tok_path, '.');
+        if (dot && strcmp(dot, ".sp-model") == 0) strcpy(dot, ".sp-tokenizer");
+        sp_status st = sp_model_load(sp_path, tok_path, &spm);
+        if (st != SP_OK || !spm) { fprintf(stderr, "[sp_toks] sp_model_load FAIL (%d): %s\n", (int)st, sp_path); return 1; }
+        m = sp_model_to_qwen3(spm);
+        if (!m) { fprintf(stderr, "[sp_toks] sp_model_to_qwen3 FAIL: %s\n", sp_path); return 1; }
+        fprintf(stderr, "[sp_toks] loaded via swivel: %s (.sp-model OK_Q8 arena, zero-inflation)\n", sp_path);
+    } else {
+        m = qwen3_load(SP_QWEN3_GGUF);
+        if (!m) { fprintf(stderr, "[sp_toks] load FAIL: %s\n", SP_QWEN3_GGUF); return 1; }
+    }
 
     const int n_prompt = 4;
     int32_t *seq = (int32_t *)malloc((size_t)(n_prompt + n_gen) * sizeof(int32_t));
@@ -111,6 +133,45 @@ int main(void) {
                     mfwd ? (double)gfwd / mfwd : 0.0);
         }
         free(gd); free(mp); free(lg); free(seq); return 0;
+    }
+
+    /* MTP KV-reuse (T8 production path): qwen3_mtp_decode reuses the persistent
+     * K/V cache across the batched verify, so the forward-count reduction turns
+     * into WALL-CLOCK. Baseline K=0 = incremental-KV greedy on the SAME cache
+     * substrate (apples-to-apples); K=8 = prompt-lookup speculation. Asserts the
+     * two token streams are byte-identical, then reports tok/s for both. */
+    if (getenv("SP_MTP_KV")) {
+        const int N = 96, K = 8, NG = 2;
+        int32_t *g0 = (int32_t *)malloc((size_t)(n_prompt + N) * sizeof(int32_t));
+        int32_t *gk = (int32_t *)malloc((size_t)(n_prompt + N) * sizeof(int32_t));
+        if (g0 && gk) {
+            for (int i = 0; i < n_prompt; i++) { g0[i] = i + 1; gk[i] = i + 1; }
+            long f0 = 0, fk = 0, as = 0, ast = 0, dummy = 0;
+            /* warm both paths once (page weights, prime allocator) */
+            (void)qwen3_mtp_decode(m, g0, n_prompt, 8, -1, 0, NG, &dummy, &dummy, &dummy);
+            (void)qwen3_mtp_decode(m, gk, n_prompt, 8, -1, K, NG, &dummy, &dummy, &dummy);
+            for (int i = 0; i < n_prompt; i++) { g0[i] = i + 1; gk[i] = i + 1; }
+
+            double tb0 = now_s();
+            int nb0 = qwen3_mtp_decode(m, g0, n_prompt, N, -1, 0, NG, &f0, &dummy, &dummy);
+            double db0 = now_s() - tb0;
+
+            double tbk = now_s();
+            int nbk = qwen3_mtp_decode(m, gk, n_prompt, N, -1, K, NG, &fk, &as, &ast);
+            double dbk = now_s() - tbk;
+
+            int identical = (nb0 == nbk);
+            for (int i = 0; identical && i < nb0; i++) if (g0[i] != gk[i]) identical = 0;
+
+            fprintf(stderr, "[mtp-kv] greedy(K=0): %d tok in %.3fs = %.2f tok/s  (forwards=%ld)\n",
+                    nb0 - n_prompt, db0, db0 > 0 ? (nb0 - n_prompt) / db0 : 0.0, f0);
+            fprintf(stderr, "[mtp-kv] MTP(K=%d):   %d tok in %.3fs = %.2f tok/s  (forwards=%ld, mean_accept=%.2f/%d)\n",
+                    K, nbk - n_prompt, dbk, dbk > 0 ? (nbk - n_prompt) / dbk : 0.0, fk,
+                    ast ? (double)as / ast : 0.0, K);
+            fprintf(stderr, "[mtp-kv] speedup = %.2fx wall-clock   bit_identical_to_greedy=%d   forwards %ld->%ld (%.2fx fewer)\n",
+                    db0 > 0 && dbk > 0 ? db0 / dbk : 0.0, identical, f0, fk, fk ? (double)f0 / fk : 0.0);
+        }
+        free(g0); free(gk); free(seq); return 0;
     }
 
     seq[0] = 1; seq[1] = 2; seq[2] = 3; seq[3] = 4;

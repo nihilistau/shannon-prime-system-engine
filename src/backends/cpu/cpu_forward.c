@@ -300,6 +300,183 @@ int qwen3_forward(const qwen3_model *m, const int32_t *tokens, int n_tok, float 
     return qwen3_forward_ex(m, tokens, n_tok, logits, NULL);
 }
 
+static int mtp_argmax(const float *row, int n) {
+    int bi = 0; float bv = row[0];
+    for (int i = 1; i < n; i++) if (row[i] > bv) { bv = row[i]; bi = i; }
+    return bi;
+}
+
+/* ── MTP (T8): persistent-KV batched append-forward ─────────────────────────
+ * Append `nb` tokens at absolute positions [basePos .. basePos+nb-1] into the
+ * caller's f32 K/V cache. K/V projections write straight into the cache slots
+ * (which are contiguous: KC + basePos*KVD is exactly nb*KVD floats), so the new
+ * post-RoPE K/V land in place and attention reads the unified [0..pos] window
+ * the same way the one-token path does — argmax is bit-identical to greedy. */
+int qwen3_mtp_forward(const qwen3_model *m, const int32_t *batch, int nb,
+                      int basePos, float *kc, float *vc, int cap, float *logits) {
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, FF = (int)c->n_ff, HD = (int)c->head_dim;
+    const int NH = (int)c->n_head, NKV = (int)c->n_head_kv;
+    const int QD = NH * HD, KVD = NKV * HD, group = NH / NKV, V = (int)c->n_vocab;
+    const float eps = c->rms_eps, base = c->rope_freq_base;
+    const float ascale = 1.0f / sqrtf((float)HD);
+    if (nb < 1 || basePos < 0 || basePos + nb > cap) return 1;
+
+    int rc = 1;
+    float *x  = (float *)malloc((size_t)nb * E * sizeof(float));
+    float *nx = (float *)malloc((size_t)nb * E * sizeof(float));
+    float *q  = (float *)malloc((size_t)nb * QD * sizeof(float));
+    float *ao = (float *)malloc((size_t)nb * QD * sizeof(float));
+    float *ap = (float *)malloc((size_t)nb * E * sizeof(float));
+    float *gg = (float *)malloc((size_t)nb * FF * sizeof(float));
+    float *up = (float *)malloc((size_t)nb * FF * sizeof(float));
+    float *dn = (float *)malloc((size_t)nb * E * sizeof(float));
+    if (!x || !nx || !q || !ao || !ap || !gg || !up || !dn) goto done;
+
+    for (int t = 0; t < nb; t++)
+        if (embed_row(m, batch[t], E, x + (size_t)t * E)) goto done;
+
+    for (uint32_t L = 0; L < c->n_layers; L++) {
+        const qwen3_layer *ly = &m->layers[L];
+        float *KC = kc + (size_t)L * cap * KVD;
+        float *VC = vc + (size_t)L * cap * KVD;
+
+        for (int t = 0; t < nb; t++)
+            rmsnorm(x + (size_t)t * E, as_f32(m, ly->attn_norm), E, eps, nx + (size_t)t * E);
+
+        if (matmul(m, ly->attn_q, nx, nb, E, QD, q)) goto done;
+        /* K/V projections write straight into the cache slots [basePos..basePos+nb-1] */
+        if (matmul(m, ly->attn_k, nx, nb, E, KVD, KC + (size_t)basePos * KVD)) goto done;
+        if (matmul(m, ly->attn_v, nx, nb, E, KVD, VC + (size_t)basePos * KVD)) goto done;
+
+        const float *qn = as_f32(m, ly->attn_q_norm), *kn = as_f32(m, ly->attn_k_norm);
+        for (int t = 0; t < nb; t++) {
+            const int pos = basePos + t;
+            for (int h = 0; h < NH; h++) {
+                float *qh = q + (size_t)t * QD + (size_t)h * HD;
+                rmsnorm_head(qh, qn, HD, eps); rope_neox(qh, HD, pos, base);
+            }
+            for (int h = 0; h < NKV; h++) {
+                float *kh = KC + (size_t)pos * KVD + (size_t)h * HD;
+                rmsnorm_head(kh, kn, HD, eps); rope_neox(kh, HD, pos, base);
+            }
+        }
+        /* attention: each batch token attends the unified cache [0..pos] (win=-1).
+         * parallel over the nb*NH (token,head) pairs — each writes a distinct ao
+         * slice with its own score scratch, so it is bit-identical to serial. */
+        {
+            int th;
+            #pragma omp parallel
+            {
+                float *sc = (float *)malloc((size_t)(basePos + nb) * sizeof(float));
+                if (sc) {
+                    #pragma omp for
+                    for (th = 0; th < nb * NH; th++) {
+                        int t = th / NH, h = th % NH, kvh = h / group, pos = basePos + t;
+                        const float *qh = q + (size_t)t * QD + (size_t)h * HD;
+                        float *out = ao + (size_t)t * QD + (size_t)h * HD;
+                        kernels_attn_head(qh, KC, VC, pos, KVD, kvh, HD, ascale, -1, sc, out);
+                    }
+                }
+                free(sc);
+            }
+        }
+
+        if (matmul(m, ly->attn_output, ao, nb, QD, E, ap)) goto done;
+        for (size_t i = 0; i < (size_t)nb * E; i++) x[i] += ap[i];
+
+        for (int t = 0; t < nb; t++)
+            rmsnorm(x + (size_t)t * E, as_f32(m, ly->ffn_norm), E, eps, nx + (size_t)t * E);
+        if (matmul(m, ly->ffn_gate, nx, nb, E, FF, gg)) goto done;
+        if (matmul(m, ly->ffn_up,   nx, nb, E, FF, up)) goto done;
+        for (size_t i = 0; i < (size_t)nb * FF; i++) { float gv = gg[i]; gg[i] = gv / (1.0f + expf(-gv)) * up[i]; }
+        if (matmul(m, ly->ffn_down, gg, nb, FF, E, dn)) goto done;
+        for (size_t i = 0; i < (size_t)nb * E; i++) x[i] += dn[i];
+    }
+
+    for (int t = 0; t < nb; t++)
+        rmsnorm(x + (size_t)t * E, as_f32(m, m->output_norm), E, eps, nx + (size_t)t * E);
+    if (matmul(m, m->output, nx, nb, E, V, logits)) goto done;
+    rc = 0;
+done:
+    free(x); free(nx); free(q); free(ao); free(ap); free(gg); free(up); free(dn);
+    return rc;
+}
+
+/* prompt-lookup: rightmost match of the NG-gram ending at h[hn-1]; draft the
+ * up-to-K tokens that followed it. Returns draft length (0 if no match). */
+static int mtp_draft_lookup(const int32_t *h, int hn, int NG, int K, int32_t *draft) {
+    if (K <= 0 || hn < NG + 1) return 0;
+    for (int j = hn - NG - 1; j >= 0; j--) {
+        int mt = 1;
+        for (int g = 0; g < NG; g++) if (h[j + g] != h[hn - NG + g]) { mt = 0; break; }
+        if (mt) {
+            int Kd = 0;
+            for (int d = 0; d < K && j + NG + d < hn; d++) draft[Kd++] = h[j + NG + d];
+            return Kd;
+        }
+    }
+    return 0;
+}
+
+int qwen3_mtp_decode(const qwen3_model *m, int32_t *seq, int n_prompt, int n_gen,
+                     int eos_id, int K, int NG,
+                     long *out_forwards, long *out_accept_sum, long *out_accept_steps) {
+    if (!m || !seq || n_prompt < 1 || n_gen < 0) return -1;
+    if (K < 0) K = 0;
+    if (NG < 1) NG = 1;
+    const qwen3_config *c = &m->cfg;
+    const int V = (int)c->n_vocab, KVD = (int)c->n_head_kv * (int)c->head_dim;
+    const int cap = n_prompt + n_gen + K + 8;
+    const int maxnb = (n_prompt > K + 1) ? n_prompt : (K + 1);
+
+    float *kc = (float *)malloc((size_t)c->n_layers * cap * KVD * sizeof(float));
+    float *vc = (float *)malloc((size_t)c->n_layers * cap * KVD * sizeof(float));
+    float *lg = (float *)malloc((size_t)maxnb * (size_t)V * sizeof(float));
+    int32_t *batch = (int32_t *)malloc((size_t)(K + 1) * sizeof(int32_t));
+    int32_t *draft = (int32_t *)malloc((size_t)(K + 1) * sizeof(int32_t));
+    long fwd = 0, acc_sum = 0, acc_steps = 0;
+    int produced = 0, n = n_prompt, rc_n = -1;
+    if (!kc || !vc || !lg || !batch || !draft) goto done;
+
+    /* prefill: cache [0..n_prompt-1], first generated token = argmax of last row */
+    if (qwen3_mtp_forward(m, seq, n_prompt, 0, kc, vc, cap, lg)) goto done;
+    fwd++;
+    int C = n_prompt;
+    int32_t cur = (int32_t)mtp_argmax(lg + (size_t)(n_prompt - 1) * V, V);
+
+    while (produced < n_gen) {
+        seq[n_prompt + produced] = cur; produced++; n = n_prompt + produced;
+        if ((eos_id >= 0 && cur == eos_id) || produced >= n_gen) break;
+
+        int hn = n_prompt + produced;                 /* history incl. cur at hn-1 */
+        int Kd = mtp_draft_lookup(seq, hn, NG, K, draft);
+        batch[0] = cur; for (int d = 0; d < Kd; d++) batch[1 + d] = draft[d];
+        if (qwen3_mtp_forward(m, batch, Kd + 1, C, kc, vc, cap, lg)) goto done;
+        fwd++;
+
+        int na = 0;                                    /* longest argmax-matching prefix */
+        for (int i = 0; i < Kd; i++) {
+            if ((int32_t)mtp_argmax(lg + (size_t)i * V, V) == draft[i]) na++; else break;
+        }
+        for (int i = 0; i < na && produced < n_gen; i++) {
+            seq[n_prompt + produced] = draft[i]; produced++; n = n_prompt + produced;
+            if (eos_id >= 0 && draft[i] == eos_id) { acc_sum += na; acc_steps++; goto stop; }
+        }
+        acc_sum += na; acc_steps++;
+        cur = (int32_t)mtp_argmax(lg + (size_t)na * V, V);   /* corrected/next token */
+        C += na + 1;
+    }
+stop:
+    rc_n = n;
+done:
+    if (out_forwards)     *out_forwards     = fwd;
+    if (out_accept_sum)   *out_accept_sum   = acc_sum;
+    if (out_accept_steps) *out_accept_steps = acc_steps;
+    free(kc); free(vc); free(lg); free(batch); free(draft);
+    return rc_n;
+}
+
 /* Persistent-KV O(n) greedy decode (GEN_KV). Same result as qwen3_generate but
  * each token is processed once: per-layer K/V are computed for the single new
  * token, stored post-RoPE into a position-indexed cache, and attention reads the
