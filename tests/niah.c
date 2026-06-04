@@ -28,6 +28,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "sp_engine/gguf.h"
 #include "sp_engine/model.h"
+#include "sp_engine/sp_model.h"   /* SP_NIAH_SP: production swivel loader */
 #include "sp_engine/tokenizer.h"
 
 #include <stdio.h>
@@ -68,7 +69,26 @@ int main(void) {
 
     gguf_ctx *g = gguf_open(gguf);
     if (!g) { fprintf(stderr, "[niah] gguf_open FAIL: %s\n", gguf); free(text); return 1; }
-    qwen3_model *m = qwen3_load(gguf);
+    /* SP_NIAH_SP=<file.sp-model>: load weights via the production swivel path
+     * (packed OK_Q8 arena, ~20x faster prefill than the raw-f16 reference) —
+     * the same loader sp_toks uses. Tokenizer still read from the GGUF (same
+     * vocab; the gguf stays the tokenizer source either way). */
+    qwen3_model *m = NULL;
+    const char *sp_path = getenv("SP_NIAH_SP");
+    if (sp_path && sp_path[0]) {
+        char tok_path[1024];
+        snprintf(tok_path, sizeof(tok_path), "%s", sp_path);
+        char *dot = strrchr(tok_path, '.');
+        if (dot && strcmp(dot, ".sp-model") == 0) strcpy(dot, ".sp-tokenizer");
+        sp_model *spm = NULL;
+        if (sp_model_load(sp_path, tok_path, &spm) != SP_OK || !spm ||
+            !(m = sp_model_to_qwen3(spm))) {
+            fprintf(stderr, "[niah] SP_NIAH_SP load FAIL: %s\n", sp_path); return 1;
+        }
+        fprintf(stderr, "[niah] weights via swivel: %s (.sp-model OK_Q8 arena)\n", sp_path);
+    } else {
+        m = qwen3_load(gguf);
+    }
     sp_tokenizer *tok = sp_tokenizer_load(g);
     if (!m || !tok) { fprintf(stderr, "[niah] load model/tokenizer FAIL\n"); return 1; }
 
