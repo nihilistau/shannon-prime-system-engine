@@ -29,6 +29,7 @@
 #include "sp_engine/gguf.h"
 #include "sp_engine/model.h"
 #include "sp_engine/sp_model.h"   /* SP_NIAH_SP: production swivel loader */
+#include "sp_engine/ring2_arm.h"  /* SP_RING2_OPTANE_DIR: physical Ring-2 store */
 #include "sp_engine/tokenizer.h"
 
 #include <stdio.h>
@@ -66,6 +67,13 @@ int main(void) {
 
     size_t clen = 0; char *text = read_file(corpus, &clen);
     if (!text) { fprintf(stderr, "[niah] cannot read corpus: %s\n", corpus); return 2; }
+
+    /* Live-Optane Ring-2 (same hook as sp_toks): SP_RING2_OPTANE_DIR registers
+     * the dual-size NO_BUFFERING+IOCP store as THE ARM backend pre-decode. */
+    if (getenv("SP_RING2_OPTANE_DIR")) {
+        if (sp_ring2_optane_register_env())
+            fprintf(stderr, "[niah] WARN: SP_RING2_OPTANE_DIR set but registration failed\n");
+    }
 
     gguf_ctx *g = gguf_open(gguf);
     if (!g) { fprintf(stderr, "[niah] gguf_open FAIL: %s\n", gguf); free(text); return 1; }

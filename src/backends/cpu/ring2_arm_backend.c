@@ -141,14 +141,18 @@ int sp_ring2_optane_register_env(void) {
     const char *dir = getenv("SP_RING2_OPTANE_DIR");
     if (!dir || !dir[0]) return 1;                       /* no-op without the env */
     const char *eb  = getenv("SP_RING2_OPTANE_BYTES");
-    const char *ek  = getenv("SP_RING2_OPTANE_BLOCK");
-    const char *ekk = getenv("SP_RING2_OPTANE_BLOCK_K"); /* fusion: K residue size */
-    const char *ekv = getenv("SP_RING2_OPTANE_BLOCK_V"); /* fusion: V f32 size     */
-    size_t bytes = eb ? (size_t)strtoull(eb, NULL, 10) : ((size_t)1 << 30);
+    const char *ebk = getenv("SP_RING2_OPTANE_BYTES_K"); /* per-stream presize —   */
+    const char *ebv = getenv("SP_RING2_OPTANE_BYTES_V"); /* each inner store opens */
+    const char *ek  = getenv("SP_RING2_OPTANE_BLOCK");   /* TWO files at `bytes`,  */
+    const char *ekk = getenv("SP_RING2_OPTANE_BLOCK_K"); /* so symmetric sizing    */
+    const char *ekv = getenv("SP_RING2_OPTANE_BLOCK_V"); /* costs 4x the K demand  */
+    size_t bytes   = eb  ? (size_t)strtoull(eb, NULL, 10) : ((size_t)1 << 30);
+    size_t bytes_k = ebk ? (size_t)strtoull(ebk, NULL, 10) : bytes;
+    size_t bytes_v = ebv ? (size_t)strtoull(ebv, NULL, 10) : bytes;
     size_t blk   = ek ? (size_t)strtoull(ek, NULL, 10) : 4096u;
     size_t blk_k = ekk ? (size_t)strtoull(ekk, NULL, 10) : blk;
     size_t blk_v = ekv ? (size_t)strtoull(ekv, NULL, 10) : blk;
-    return sp_ring2_optane_register2(dir, bytes, blk_k, bytes, blk_v);
+    return sp_ring2_optane_register2(dir, bytes_k, blk_k, bytes_v, blk_v);
 }
 
 void sp_ring2_optane_unregister(void) {
