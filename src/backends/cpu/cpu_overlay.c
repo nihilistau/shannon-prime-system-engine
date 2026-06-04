@@ -5,6 +5,7 @@
 #include "sp_engine/arena.h"
 #include "sp/frobenius_lift.h"
 #include "sp/ntt_crt.h"   /* sp_ntt_fwd_batch override + ntt_fwd_plan view */
+#include "sp/arm.h"       /* sp_arm_scan_sig override (the 32k-wall seam)  */
 #if defined(SP_ENGINE_AVX512)
 #include "sp_engine/avx512.h"   /* sp_avx512_vnni_matvec + g_avx512_caps (VNNI int8 path) */
 #endif
@@ -649,6 +650,27 @@ static inline __m256i ntb_modsub8(__m256i a, __m256i b, __m256i vq32) {
     __m256i lt = _mm256_cmpgt_epi32(b, a);
     return _mm256_add_epi32(d, _mm256_and_si256(lt, vq32));
 }
+
+/* ── the 32k-wall scan override: sp_arm_scan_sig (arm_scan.c seam) ──────────
+ * Dispatches to the AVX512-VPOPCNTDQ + OMP kernel when the silicon has it
+ * (Tiger Lake does); scalar fallback is the exact reference loop. Lazy caps
+ * init (sp_avx512_init is idempotent). Exactness per the arm.h contract:
+ * identical cand entries either way — gate = T_ARM scan check + NIAH parity. */
+#if defined(SP_ENGINE_AVX512)
+void sp_arm_scan_sig(uint64_t qsig, const uint64_t *sigs, int n, int s0,
+                     sp_arm_sidx *cand) {
+    static int caps_ready = 0;
+    if (!caps_ready) { sp_avx512_init(); caps_ready = 1; }
+    if (g_avx512_caps.has_vpopcntdq) {
+        sp_avx512_scan_sig(qsig, sigs, n, s0, cand);
+        return;
+    }
+    for (int i = 0; i < n; i++) {                  /* scalar fallback (exact) */
+        cand[i].s = -(float)__builtin_popcountll(qsig ^ sigs[i]);
+        cand[i].i = s0 + i;
+    }
+}
+#endif /* SP_ENGINE_AVX512 */
 
 void sp_ntt_fwd_batch(const ntt_ctx *ctx, const int32_t *in, size_t in_stride,
                       uint32_t *out1, size_t out1_stride,

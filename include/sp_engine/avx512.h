@@ -75,6 +75,16 @@ void sp_avx512_ternlog_kste_round(uint32_t *state);
 /* §18.4 TERNLOG: sieve popcount — number of set bits across 8 uint64 lanes. */
 uint64_t sp_avx512_ternlog_popcnt512(const uint64_t *v8);
 
+/* §18.6 SCAN: the 32k-wall popcount candidate scan (VPOPCNTDQ + OMP).
+ * Scores n candidates of a CONTIGUOUS head-major u64 signature slice:
+ * cand[i] = { -(float)popcount(qsig ^ sigs[i]), s0+i } — entries IDENTICAL
+ * to math-core's sp_arm_scan_sig reference (arm.h exactness contract).
+ * Needs g_avx512_caps.has_vpopcntdq; dispatched from cpu_overlay's
+ * sp_arm_scan_sig override. cand is the sp_arm_sidx array from sp/arm.h
+ * (declared void* here to keep this header sp/arm.h-independent). */
+void sp_avx512_scan_sig(uint64_t qsig, const uint64_t *sigs, int n, int s0,
+                        void *cand);
+
 /* §18.5 PERSIST: UMONITOR/UMWAIT sentinel for zero-OS-overhead thread wakeup.
  * The sentinel lives on a VirtualLock'd page (requires SeLockMemoryPrivilege).
  * WAITPKG hardware uses _umonitor+_umwait (C0.2); Zen 4 / no-WAITPKG falls
