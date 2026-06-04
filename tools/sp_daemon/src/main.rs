@@ -141,6 +141,25 @@ async fn main() {
         // blocks travel the QUIC socket instead of the local store. Registered
         // from a plain thread: the client owns its own runtime (block_on would
         // panic inside this tokio context).
+        // Trick #8 server switch: SP_RING2_SERVE=<host:port> turns this daemon
+        // into a Ring-2 peer store — bind the QUIC listener and serve residue
+        // blocks alongside everything else (we are inside the tokio runtime,
+        // so the endpoint binds against the live reactor).
+        if let Ok(serve_addr) = std::env::var("SP_RING2_SERVE") {
+            if let Ok(sock) = serve_addr.parse::<std::net::SocketAddr>() {
+                tokio::spawn(async move {
+                    match sp_daemon::network::ring2_quic::bind_ring2_server(sock) {
+                        Ok(ep) => {
+                            tracing::info!("SP_INFO: Ring-2 peer store SERVING on {sock}");
+                            let _ = sp_daemon::network::ring2_quic::run_ring2_server(ep).await;
+                        }
+                        Err(e) => tracing::warn!("SP_WARN: SP_RING2_SERVE bind failed: {e}"),
+                    }
+                });
+            } else {
+                tracing::warn!("SP_WARN: SP_RING2_SERVE unparsable: {serve_addr}");
+            }
+        }
         if let Ok(peer_addr) = std::env::var("SP_RING2_PEER") {
             if let Ok(sock) = peer_addr.parse::<std::net::SocketAddr>() {
                 let _ = std::thread::spawn(move || {

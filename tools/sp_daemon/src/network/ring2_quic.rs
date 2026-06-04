@@ -182,6 +182,12 @@ impl Ring2QuicClient {
 
 // ── the C-registry trampolines ───────────────────────────────────────────────
 
+/// Wire telemetry: counts of blocks that actually crossed the socket.
+pub static NET_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NET_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NET_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NET_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static CLIENT: OnceLock<Mutex<Option<Ring2QuicClient>>> = OnceLock::new();
 fn client_cell() -> &'static Mutex<Option<Ring2QuicClient>> {
     CLIENT.get_or_init(|| Mutex::new(None))
@@ -194,6 +200,8 @@ unsafe extern "C" fn r2q_write(
     let g = client_cell().lock().unwrap();
     let Some(c) = g.as_ref() else { return 1 };
     let s = std::slice::from_raw_parts(src as *const u8, len);
+    NET_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    NET_BYTES.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
     if c.write_block(which as u8, off, s).is_ok() { 0 } else { 1 }
 }
 
@@ -204,6 +212,8 @@ unsafe extern "C" fn r2q_read(
     let g = client_cell().lock().unwrap();
     let Some(c) = g.as_ref() else { return 1 };
     let d = std::slice::from_raw_parts_mut(dst as *mut u8, len);
+    NET_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    NET_BYTES.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
     if c.read_block(which as u8, off, d).is_ok() { 0 } else { 1 }
 }
 
@@ -223,6 +233,9 @@ unsafe extern "C" fn r2q_read_batch(
              std::slice::from_raw_parts_mut(dsts[i] as *mut u8, len))
         })
         .collect();
+    NET_BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    NET_READS.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    NET_BYTES.fetch_add((n as u64) * (len as u64), std::sync::atomic::Ordering::Relaxed);
     if c.read_batch(reqs).is_ok() { 0 } else { 1 }
 }
 

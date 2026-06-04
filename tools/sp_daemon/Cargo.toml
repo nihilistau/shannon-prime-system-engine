@@ -16,6 +16,14 @@ path = "src/lib.rs"
 name = "sp-console"
 path = "src/bin/sp_console.rs"
 
+# Trick #8 finale — two-process decode-over-peer showpiece: --serve runs the
+# QUIC Ring-2 peer store; --decode drives the CANONICAL math-core two-ring
+# decode (qwen3_generate_kv via the linked L1 libs) with the fusion array on
+# and the peer registered as THE backend; compares vs in-process baseline.
+[[bin]]
+name = "sp_ring2_showpiece"
+path = "src/bin/sp_ring2_showpiece.rs"
+
 [[bin]]
 name = "spec_validate"
 path = "src/bin/spec_validate.rs"
