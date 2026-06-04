@@ -10,6 +10,7 @@
  */
 #include "sp_engine/model.h"
 #include "sp_engine/sp_model.h"
+#include "sp_engine/ring2_arm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,14 @@ int main(void) {
      * arena, gguf==NULL, zero quant inflation. The paired .sp-tokenizer is the same
      * path with the extension swapped. Falls back to the raw-GGUF reference loader
      * (qwen3_load) when SP_TOKS_SP is unset. */
+    /* Live-Optane Ring-2: SP_RING2_OPTANE_DIR=<dir> registers the dual-size
+     * NO_BUFFERING+IOCP store as THE ARM backend before the decode runs — the
+     * canonical decode prefers a registered backend over the stdio reference. */
+    if (getenv("SP_RING2_OPTANE_DIR")) {
+        if (sp_ring2_optane_register_env())
+            fprintf(stderr, "[sp_toks] WARN: SP_RING2_OPTANE_DIR set but registration failed\n");
+    }
+
     sp_model *spm = NULL;
     qwen3_model *m = NULL;
     const char *sp_path = getenv("SP_TOKS_SP");
