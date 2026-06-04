@@ -4,6 +4,7 @@
 #include "sp_engine/kernels.h"
 #include "sp_engine/arena.h"
 #include "sp/frobenius_lift.h"
+#include "sp/ntt_crt.h"   /* sp_ntt_fwd_batch override + ntt_fwd_plan view */
 #if defined(SP_ENGINE_AVX512)
 #include "sp_engine/avx512.h"   /* sp_avx512_vnni_matvec + g_avx512_caps (VNNI int8 path) */
 #endif
@@ -591,5 +592,128 @@ uint32_t sp_pr_resdot(const uint32_t *a, const uint32_t *b, uint32_t n, uint32_t
         acc = (acc + t % q) % q;
     }
     return (uint32_t)acc;
+}
+
+/* ── q-transform amortization: batched forward NTT, lanes = batch items ──────
+ * Overrides math-core's sp_ntt_fwd_batch (ntt_batch.c is its own archive
+ * member — the resdot seam). The decode hands us NH homologous query
+ * transforms (or NKV key encodes) per layer; SoA-transposing them makes the
+ * butterfly tree a pure throughput problem: 8 items ride the 8 u32 lanes of
+ * one register through an IDENTICAL control path — twiddles broadcast, zero
+ * shuffles at every stage (vectorizing a single tree fights stride<8 stages).
+ *
+ * EXACTNESS: all arithmetic is canonical mod-q (Barrett constants from the
+ * read-only plan view, same Q_BITS=30 shifts as the kernel), so every
+ * intermediate equals the reference's bit-for-bit (gate T_PR_BATCH).
+ * Layout per group: x[j*8 + l] = coefficient j of lane l; the bit-reversal
+ * becomes a gather at load time (x[i] = pre[bitrev[i]] — what the kernel's
+ * in-place swap loop computes), and butterfly rows are contiguous 32-byte
+ * loads. Lanes beyond nb are zero (transform of 0 is 0; never stored). */
+static inline uint32_t ntb_bar(uint64_t x, uint32_t q, uint64_t mu) {
+    uint64_t qh = ((x >> 29) * mu) >> 31;
+    uint64_t r = x - qh * (uint64_t)q;
+    if (r >= q) r -= q;
+    if (r >= q) r -= q;
+    return (uint32_t)r;
+}
+/* Barrett for 4 u64 lanes (x < 2^60): qhat=((x>>29)*mu)>>31, r=x-qhat*q.
+ * (x>>29) < 2^31 and mu < 2^32 both fit _mm256_mul_epu32's low-32 operands. */
+static inline __m256i ntb_barrett4(__m256i x, __m256i vq64, __m256i vqm1_64,
+                                   __m256i vmu) {
+    __m256i qh = _mm256_srli_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 29), vmu), 31);
+    __m256i r  = _mm256_sub_epi64(x, _mm256_mul_epu32(qh, vq64));
+    __m256i ge = _mm256_cmpgt_epi64(r, vqm1_64);          /* r >= q (both < 2^62, signed-safe) */
+    r = _mm256_sub_epi64(r, _mm256_and_si256(ge, vq64));
+    ge = _mm256_cmpgt_epi64(r, vqm1_64);
+    r = _mm256_sub_epi64(r, _mm256_and_si256(ge, vq64));
+    return r;
+}
+/* modmul of 8 u32 lanes by a broadcast twiddle: even/odd u64 split (the
+ * resdot idiom), Barrett each half, recombine (results < 2^30 ⇒ high32 = 0). */
+static inline __m256i ntb_modmul8(__m256i a, __m256i w, __m256i vq64,
+                                  __m256i vqm1_64, __m256i vmu) {
+    __m256i re = ntb_barrett4(_mm256_mul_epu32(a, w), vq64, vqm1_64, vmu);
+    __m256i ro = ntb_barrett4(_mm256_mul_epu32(_mm256_srli_epi64(a, 32),
+                                               _mm256_srli_epi64(w, 32)),
+                              vq64, vqm1_64, vmu);
+    return _mm256_or_si256(re, _mm256_slli_epi64(ro, 32));
+}
+/* mod add/sub on 8 u32 lanes; operands < q < 2^30 ⇒ signed 32-bit compares safe. */
+static inline __m256i ntb_modadd8(__m256i a, __m256i b, __m256i vq32, __m256i vqm1_32) {
+    __m256i s  = _mm256_add_epi32(a, b);
+    __m256i ge = _mm256_cmpgt_epi32(s, vqm1_32);
+    return _mm256_sub_epi32(s, _mm256_and_si256(ge, vq32));
+}
+static inline __m256i ntb_modsub8(__m256i a, __m256i b, __m256i vq32) {
+    __m256i d  = _mm256_sub_epi32(a, b);
+    __m256i lt = _mm256_cmpgt_epi32(b, a);
+    return _mm256_add_epi32(d, _mm256_and_si256(lt, vq32));
+}
+
+void sp_ntt_fwd_batch(const ntt_ctx *ctx, const int32_t *in, size_t in_stride,
+                      uint32_t *out1, size_t out1_stride,
+                      uint32_t *out2, size_t out2_stride, int nb) {
+    ntt_fwd_plan pl;
+    if (nb <= 0 || !ntt_fwd_plan_get(ctx, &pl)) return;
+    const uint32_t N = pl.N;
+#if defined(_MSC_VER)
+    static __declspec(thread) uint32_t x_tls[512 * 8];   /* max N = 512 */
+#else
+    static __thread uint32_t x_tls[512 * 8];
+#endif
+    uint32_t *x = x_tls;
+
+    for (int g0 = 0; g0 < nb; g0 += 8) {
+        const int gl = (nb - g0 > 8) ? 8 : (nb - g0);
+        for (int p = 0; p < 2; p++) {
+            const uint32_t q  = pl.p[p].q;
+            const uint64_t mu = pl.p[p].mu;
+            const uint32_t *psi = pl.p[p].psi_pow;
+            const uint32_t *wt  = pl.p[p].w_fwd;
+            uint32_t *out = (p == 0) ? out1 : out2;
+            const size_t ostride = (p == 0) ? out1_stride : out2_stride;
+            const __m256i vq64    = _mm256_set1_epi64x((long long)q);
+            const __m256i vqm1_64 = _mm256_set1_epi64x((long long)q - 1);
+            const __m256i vmu     = _mm256_set1_epi64x((long long)mu);
+            const __m256i vq32    = _mm256_set1_epi32((int)q);
+            const __m256i vqm1_32 = _mm256_set1_epi32((int)q - 1);
+
+            /* pre-weight + signed reduce + bit-reversal gather, SoA transpose */
+            for (uint32_t i = 0; i < N; i++) {
+                const uint32_t j = pl.bitrev[i];
+                const uint32_t pw = psi[j];
+                uint32_t *row = x + (size_t)i * 8;
+                for (int l = 0; l < gl; l++) {
+                    int64_t v = (int64_t)in[(size_t)(g0 + l) * in_stride + j] % (int64_t)q;
+                    if (v < 0) v += (int64_t)q;
+                    row[l] = ntb_bar((uint64_t)v * pw, q, mu);
+                }
+                for (int l = gl; l < 8; l++) row[l] = 0;
+            }
+            /* radix-2 stages: rows are contiguous 8-lane vectors */
+            for (uint32_t len = 2; len <= N; len <<= 1) {
+                const uint32_t half = len >> 1, step = N / len;
+                for (uint32_t i = 0; i < N; i += len) {
+                    uint32_t widx = 0;
+                    for (uint32_t k = 0; k < half; k++) {
+                        uint32_t *ru = x + (size_t)(i + k) * 8;
+                        uint32_t *rv = x + (size_t)(i + k + half) * 8;
+                        const __m256i u = _mm256_loadu_si256((const __m256i *)ru);
+                        const __m256i t = _mm256_loadu_si256((const __m256i *)rv);
+                        const __m256i w = _mm256_set1_epi32((int)wt[widx]);
+                        const __m256i v = ntb_modmul8(t, w, vq64, vqm1_64, vmu);
+                        _mm256_storeu_si256((__m256i *)ru, ntb_modadd8(u, v, vq32, vqm1_32));
+                        _mm256_storeu_si256((__m256i *)rv, ntb_modsub8(u, v, vq32));
+                        widx += step;
+                    }
+                }
+            }
+            /* scatter back, lane -> item */
+            for (int l = 0; l < gl; l++) {
+                uint32_t *dst = out + (size_t)(g0 + l) * ostride;
+                for (uint32_t j = 0; j < N; j++) dst[j] = x[(size_t)j * 8 + l];
+            }
+        }
+    }
 }
 #endif /* SP_ENGINE_AVX2 || SP_ENGINE_AVX512 */
