@@ -94,18 +94,25 @@ static void obe_close(void *h) {       /* called only from _unregister */
     free(b);
 }
 
-int sp_ring2_optane_register2(const char *dir,
-                              size_t bytes_k, size_t blk_k,
-                              size_t bytes_v, size_t blk_v) {
+/* Split-device variant: the K-stream store under dir_k, the V-stream store
+ * under dir_v — two physically independent NVMe controllers, two IOCP queues.
+ * TOPOLOGY NOTE (Beast Canyon): ONE M.2 slot is CPU-attached (the 32 GB
+ * Optane, F:) and the other Optane (E:) hangs off the PCH/DMI — so the heavy
+ * 8 KB K-residue stream belongs on dir_k=F: and the lighter 4 KB V stream on
+ * dir_v=E:. Same-dir callers get this via register2 (dir_v = dir_k). */
+int sp_ring2_optane_register_split(const char *dir_k, const char *dir_v,
+                                   size_t bytes_k, size_t blk_k,
+                                   size_t bytes_v, size_t blk_v) {
     if (g_obe) sp_ring2_optane_unregister();
     optane_be *b = (optane_be *)calloc(1, sizeof(*b));
     if (!b) return 1;
     b->blk[0] = blk_k; b->blk[1] = blk_v;
     const size_t bytes[2] = { bytes_k, bytes_v };
+    const char *dirs[2] = { dir_k, dir_v };
     char pfx[1024];
     for (int w = 0; w < 2; w++) {
-        /* distinct filename prefixes — two independent stores in one dir */
-        snprintf(pfx, sizeof(pfx), "%s%s", dir, w == 0 ? "armk_" : "armv_");
+        /* distinct filename prefixes — independent stores even when same dir */
+        snprintf(pfx, sizeof(pfx), "%s%s", dirs[w], w == 0 ? "armk_" : "armv_");
         b->r[w] = ring2_disk_open(pfx, bytes[w], b->blk[w]);
         if (!b->r[w]) { if (w == 1) { ring2_disk_scratch_free(b->sc[0]); ring2_disk_close(b->r[0]); } free(b); return 1; }
         b->sc[w] = ring2_disk_scratch_new(b->r[w]);
@@ -126,10 +133,16 @@ int sp_ring2_optane_register2(const char *dir,
     be.close         = NULL;             /* borrowed by the decode; WE own teardown */
     sp_arm_ring2_register(&be);
     g_obe = b;
-    fprintf(stderr, "    [ring2-optane] REGISTERED dual-size: dir=%s K(presize=%zu MB blk=%zu B) "
-            "V(presize=%zu MB blk=%zu B) (NO_BUFFERING + IOCP batched reads)\n",
-            dir, bytes_k >> 20, blk_k, bytes_v >> 20, blk_v);
+    fprintf(stderr, "    [ring2-optane] REGISTERED dual-size SPLIT: K(dir=%s presize=%zu MB blk=%zu B) "
+            "V(dir=%s presize=%zu MB blk=%zu B) (NO_BUFFERING + IOCP, independent device queues)\n",
+            dir_k, bytes_k >> 20, blk_k, dir_v, bytes_v >> 20, blk_v);
     return 0;
+}
+
+int sp_ring2_optane_register2(const char *dir,
+                              size_t bytes_k, size_t blk_k,
+                              size_t bytes_v, size_t blk_v) {
+    return sp_ring2_optane_register_split(dir, dir, bytes_k, blk_k, bytes_v, blk_v);
 }
 
 int sp_ring2_optane_register(const char *dir, size_t bytes_per_file, size_t block_bytes) {
@@ -140,6 +153,8 @@ int sp_ring2_optane_register(const char *dir, size_t bytes_per_file, size_t bloc
 int sp_ring2_optane_register_env(void) {
     const char *dir = getenv("SP_RING2_OPTANE_DIR");
     if (!dir || !dir[0]) return 1;                       /* no-op without the env */
+    const char *edv = getenv("SP_RING2_OPTANE_DIR_V");   /* V-stream device split  */
+    const char *dir_v = (edv && edv[0]) ? edv : dir;
     const char *eb  = getenv("SP_RING2_OPTANE_BYTES");
     const char *ebk = getenv("SP_RING2_OPTANE_BYTES_K"); /* per-stream presize —   */
     const char *ebv = getenv("SP_RING2_OPTANE_BYTES_V"); /* each inner store opens */
@@ -152,7 +167,7 @@ int sp_ring2_optane_register_env(void) {
     size_t blk   = ek ? (size_t)strtoull(ek, NULL, 10) : 4096u;
     size_t blk_k = ekk ? (size_t)strtoull(ekk, NULL, 10) : blk;
     size_t blk_v = ekv ? (size_t)strtoull(ekv, NULL, 10) : blk;
-    return sp_ring2_optane_register2(dir, bytes_k, blk_k, bytes_v, blk_v);
+    return sp_ring2_optane_register_split(dir, dir_v, bytes_k, blk_k, bytes_v, blk_v);
 }
 
 void sp_ring2_optane_unregister(void) {

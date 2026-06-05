@@ -30,9 +30,18 @@ int sp_ring2_optane_register2(const char *dir,
                               size_t bytes_k, size_t blk_k,
                               size_t bytes_v, size_t blk_v);
 
+/* Split-device variant: K-stream store under dir_k, V-stream store under
+ * dir_v — two independent NVMe controllers / IOCP queues. Beast Canyon
+ * topology: K (heavy 8 KB residue stream) on the CPU-attached slot (F:),
+ * V (4 KB f32) on the PCH-attached drive (E:). */
+int sp_ring2_optane_register_split(const char *dir_k, const char *dir_v,
+                                   size_t bytes_k, size_t blk_k,
+                                   size_t bytes_v, size_t blk_v);
+
 /* Env-driven variant: SP_RING2_OPTANE_DIR (required to act; absent => no-op 1),
- * SP_RING2_OPTANE_BYTES (default 1 GiB), SP_RING2_OPTANE_BLOCK (default 4096),
- * SP_RING2_OPTANE_BLOCK_K / _V (fusion dual sizes; default = BLOCK). */
+ * SP_RING2_OPTANE_DIR_V (V-stream device; default = DIR),
+ * SP_RING2_OPTANE_BYTES[_K/_V] (per-stream presize; default 1 GiB),
+ * SP_RING2_OPTANE_BLOCK[_K/_V] (fusion dual sizes; default 4096). */
 int sp_ring2_optane_register_env(void);
 
 /* Unregister + close the store (prints the read-latency stats). Safe if not registered. */
