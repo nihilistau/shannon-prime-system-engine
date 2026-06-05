@@ -156,5 +156,6 @@ int main(void) {
 
     free(text); free(hay); free(ndl); free(qst); free(seq);
     sp_tokenizer_free(tok); qwen3_free(m); gguf_close(g);
+    sp_ring2_optane_unregister();   /* prints read-latency + cache hit-rate stats */
     return hit ? 0 : 3;   /* 0 = retrieved, 3 = missed (driver aggregates) */
 }

@@ -33,26 +33,161 @@
 #  include <process.h>   /* _beginthreadex — the device-overlap worker */
 #endif
 
+/* ── the temporal-locality staging cache (v5; SP_RING2_CACHE_MB, 0 = OFF) ────
+ * v4 measured the temporal tax: 9.46 TB pulled to serve ~3 GB of unique
+ * blocks at 32k — adjacent tokens' recall sets DRIFT, so the router without
+ * memory re-fetches the same hot blocks every step. This is a bounded LRU
+ * over Ring-2 blocks, one slab per stream (uniform block size each), keyed
+ * by block offset. CONCURRENCY CONTRACT (pinned before code): every cache
+ * mutation happens on the CALLER thread — probe/hit-copy before dispatch,
+ * insert after join; the V-stream worker thread never touches the cache.
+ * Lock-free by construction, not by cleverness. Writes are write-through +
+ * write-allocate (a freshly spilled position is exactly what recall wants
+ * back). OFF (default) = the proven path, bit-identical. Gate T_CACHE_EXACT:
+ * cached decode == uncached decode, identical sequence. */
+typedef struct {
+    uint8_t  *slab;          /* nslot * blk bytes                       */
+    uint64_t *off;           /* slot -> block offset                    */
+    int      *hash;          /* open-address table: off -> slot (+1)    */
+    int      *lru_prev, *lru_next;                 /* doubly linked LRU */
+    int       nslot, hcap, used, lru_head, lru_tail;
+    unsigned long long hits, misses;
+} blk_cache;
+
 typedef struct {
     ring2_disk    *r[2];     /* [0]=K stream store, [1]=V stream store */
     ring2_scratch *sc[2];    /* serial decode: one scratch per store   */
     size_t         blk[2];   /* per-stream block bytes                 */
+    blk_cache      cache[2]; /* temporal staging cache (nslot==0 = off) */
 } optane_be;
+
+static uint32_t bc_hash64(uint64_t x) {        /* splitmix64 finalizer */
+    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27; x *= 0x94D049BB133111EBULL;
+    return (uint32_t)(x ^ (x >> 31));
+}
+
+static void bc_init(blk_cache *c, size_t bytes, size_t blk) {
+    memset(c, 0, sizeof(*c));
+    c->lru_head = c->lru_tail = -1;
+    int nslot = (int)(bytes / blk);
+    if (nslot < 8) return;                      /* too small: stay off */
+    int hcap = 1; while (hcap < nslot * 2) hcap <<= 1;
+    c->slab     = (uint8_t *)malloc((size_t)nslot * blk);
+    c->off      = (uint64_t *)malloc((size_t)nslot * sizeof(uint64_t));
+    c->hash     = (int *)calloc((size_t)hcap, sizeof(int));
+    c->lru_prev = (int *)malloc((size_t)nslot * sizeof(int));
+    c->lru_next = (int *)malloc((size_t)nslot * sizeof(int));
+    if (!c->slab || !c->off || !c->hash || !c->lru_prev || !c->lru_next) {
+        free(c->slab); free(c->off); free(c->hash); free(c->lru_prev); free(c->lru_next);
+        memset(c, 0, sizeof(*c)); c->lru_head = c->lru_tail = -1;
+        return;
+    }
+    c->nslot = nslot; c->hcap = hcap;
+}
+
+static void bc_free(blk_cache *c) {
+    free(c->slab); free(c->off); free(c->hash); free(c->lru_prev); free(c->lru_next);
+    memset(c, 0, sizeof(*c));
+}
+
+static int bc_find(blk_cache *c, uint64_t off) {   /* slot or -1 */
+    if (!c->nslot) return -1;
+    uint32_t h = bc_hash64(off) & (uint32_t)(c->hcap - 1);
+    while (c->hash[h]) {
+        int s = c->hash[h] - 1;
+        if (c->off[s] == off) return s;
+        h = (h + 1) & (uint32_t)(c->hcap - 1);
+    }
+    return -1;
+}
+
+static void bc_lru_unlink(blk_cache *c, int s) {
+    if (c->lru_prev[s] >= 0) c->lru_next[c->lru_prev[s]] = c->lru_next[s];
+    else c->lru_head = c->lru_next[s];
+    if (c->lru_next[s] >= 0) c->lru_prev[c->lru_next[s]] = c->lru_prev[s];
+    else c->lru_tail = c->lru_prev[s];
+}
+
+static void bc_lru_push_front(blk_cache *c, int s) {
+    c->lru_prev[s] = -1; c->lru_next[s] = c->lru_head;
+    if (c->lru_head >= 0) c->lru_prev[c->lru_head] = s;
+    c->lru_head = s;
+    if (c->lru_tail < 0) c->lru_tail = s;
+}
+
+static void bc_touch(blk_cache *c, int s) { bc_lru_unlink(c, s); bc_lru_push_front(c, s); }
+
+static void bc_hash_remove(blk_cache *c, uint64_t off) {
+    uint32_t h = bc_hash64(off) & (uint32_t)(c->hcap - 1);
+    while (c->hash[h]) {
+        int s = c->hash[h] - 1;
+        if (c->off[s] == off) {
+            /* open-address deletion: clear, then re-insert the probe chain */
+            c->hash[h] = 0;
+            uint32_t j = (h + 1) & (uint32_t)(c->hcap - 1);
+            while (c->hash[j]) {
+                int s2 = c->hash[j] - 1; c->hash[j] = 0;
+                uint32_t h2 = bc_hash64(c->off[s2]) & (uint32_t)(c->hcap - 1);
+                while (c->hash[h2]) h2 = (h2 + 1) & (uint32_t)(c->hcap - 1);
+                c->hash[h2] = s2 + 1;
+                j = (j + 1) & (uint32_t)(c->hcap - 1);
+            }
+            return;
+        }
+        h = (h + 1) & (uint32_t)(c->hcap - 1);
+    }
+}
+
+/* insert/update off -> data (CALLER THREAD ONLY) */
+static void bc_put(blk_cache *c, uint64_t off, const void *data, size_t blk) {
+    if (!c->nslot) return;
+    int s = bc_find(c, off);
+    if (s >= 0) {                                /* update in place */
+        memcpy(c->slab + (size_t)s * blk, data, blk);
+        bc_touch(c, s);
+        return;
+    }
+    if (c->used < c->nslot) s = c->used++;
+    else {                                       /* evict LRU tail */
+        s = c->lru_tail;
+        bc_lru_unlink(c, s);
+        bc_hash_remove(c, c->off[s]);
+    }
+    c->off[s] = off;
+    memcpy(c->slab + (size_t)s * blk, data, blk);
+    uint32_t h = bc_hash64(off) & (uint32_t)(c->hcap - 1);
+    while (c->hash[h]) h = (h + 1) & (uint32_t)(c->hcap - 1);
+    c->hash[h] = s + 1;
+    bc_lru_push_front(c, s);
+}
 
 static optane_be *g_obe = NULL;   /* singleton: registered store pair */
 
 static int obe_write(void *h, int which, uint64_t off, const void *src, size_t len) {
     optane_be *b = (optane_be *)h;
     if (!b || which < 0 || which > 1 || len != b->blk[which]) return 1;
-    return ring2_disk_write(b->r[which], which, (size_t)off, src);
+    if (ring2_disk_write(b->r[which], which, (size_t)off, src)) return 1;
+    /* write-through + write-allocate: the freshly spilled position is exactly
+     * what recall asks for next (caller thread — the decode's write path). */
+    bc_put(&b->cache[which], off, src, b->blk[which]);
+    return 0;
 }
 
 static int obe_read(void *h, int which, uint64_t off, void *dst, size_t len) {
     optane_be *b = (optane_be *)h;
     if (!b || which < 0 || which > 1 || len != b->blk[which]) return 1;
+    blk_cache *c = &b->cache[which];
+    int s = bc_find(c, off);
+    if (s >= 0) {
+        memcpy(dst, c->slab + (size_t)s * b->blk[which], len);
+        bc_touch(c, s); c->hits++;
+        return 0;
+    }
     const void *p = ring2_disk_read(b->r[which], which, (size_t)off, b->sc[which]);
     if (!p) return 1;
     memcpy(dst, p, len);
+    if (c->nslot) { bc_put(c, off, dst, b->blk[which]); c->misses++; }
     return 0;
 }
 
@@ -111,6 +246,16 @@ static int obe_read_batch2(void *h, const int *which, const uint64_t *off,
     for (int i = 0; i < n && rc == 0; i++) {
         int w = which[i];
         if (w < 0 || w > 1 || len_by_stream[w] != b->blk[w]) { rc = 1; break; }
+        /* CACHE PROBE — caller thread only. Hits are served immediately and
+         * never enter the device batch; misses go to the per-stream queue. */
+        blk_cache *c = &b->cache[w];
+        int s = bc_find(c, off[i]);
+        if (s >= 0) {
+            memcpy(dst[i], c->slab + (size_t)s * b->blk[w], b->blk[w]);
+            bc_touch(c, s); c->hits++;
+            continue;
+        }
+        if (c->nslot) c->misses++;
         int slot = (w == 0) ? m[0]++ : (n - 1 - m[1]++);
         reqs[slot].which = w;
         reqs[slot].off   = (size_t)off[i];
@@ -132,6 +277,15 @@ static int obe_read_batch2(void *h, const int *which, const uint64_t *off,
         if (m[1] > 0) rc_v = ring2_disk_read_batch(b->r[1], jv.reqs, jv.m);
 #endif
         rc = rc_k ? rc_k : rc_v;
+        /* INSERT after join — caller thread only (the worker is gone). */
+        if (rc == 0) {
+            for (int i = 0; i < m[0]; i++)
+                bc_put(&b->cache[0], (uint64_t)reqs[i].off, reqs[i].dst, b->blk[0]);
+            for (int i = 0; i < m[1]; i++) {
+                ring2_req *rq = reqs + (n - 1 - i);
+                bc_put(&b->cache[1], (uint64_t)rq->off, rq->dst, b->blk[1]);
+            }
+        }
     }
     free(reqs);
     return rc;
@@ -148,6 +302,15 @@ static void obe_close(void *h) {       /* called only from _unregister */
         ring2_disk_stats(b->r[w], &nr, &rs);
         fprintf(stderr, "    [ring2-optane] %c-stream: %llu reads, %.3f s, %.2f us/read avg\n",
                 w == 0 ? 'K' : 'V', nr, rs, nr ? rs * 1e6 / (double)nr : 0.0);
+        if (b->cache[w].nslot) {
+            unsigned long long tot = b->cache[w].hits + b->cache[w].misses;
+            fprintf(stderr, "    [ring2-cache] %c-stream: %llu hits / %llu misses = %.1f%% hit-rate "
+                    "(%llu device reads avoided)\n",
+                    w == 0 ? 'K' : 'V', b->cache[w].hits, b->cache[w].misses,
+                    tot ? 100.0 * (double)b->cache[w].hits / (double)tot : 0.0,
+                    b->cache[w].hits);
+        }
+        bc_free(&b->cache[w]);
         ring2_disk_scratch_free(b->sc[w]);
         ring2_disk_close(b->r[w]);
     }
@@ -180,6 +343,22 @@ int sp_ring2_optane_register_split(const char *dir_k, const char *dir_v,
             ring2_disk_close(b->r[w]);
             if (w == 1) { ring2_disk_scratch_free(b->sc[0]); ring2_disk_close(b->r[0]); }
             free(b); return 1;
+        }
+    }
+
+    /* temporal-locality staging cache: SP_RING2_CACHE_MB total, split 2:1
+     * K:V (equal slot counts — the same hot positions in both streams).
+     * 0 / unset = OFF = the proven uncached path, bit-identical. */
+    {
+        const char *ec = getenv("SP_RING2_CACHE_MB");
+        size_t cmb = ec ? (size_t)strtoull(ec, NULL, 10) : 0;
+        if (cmb > 0) {
+            bc_init(&b->cache[0], cmb * 1024 * 1024 * 2 / 3, blk_k);
+            bc_init(&b->cache[1], cmb * 1024 * 1024 / 3, blk_v);
+            fprintf(stderr, "    [ring2-cache] temporal staging cache ON: %zu MB "
+                    "(K %d slots x %zu B, V %d slots x %zu B; LRU, write-through, "
+                    "caller-thread-only mutations)\n",
+                    cmb, b->cache[0].nslot, blk_k, b->cache[1].nslot, blk_v);
         }
     }
 
