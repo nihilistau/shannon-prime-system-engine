@@ -27,6 +27,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <process.h>   /* _beginthreadex — the device-overlap worker */
+#endif
 
 typedef struct {
     ring2_disk    *r[2];     /* [0]=K stream store, [1]=V stream store */
@@ -72,6 +77,61 @@ static int obe_read_batch(void *h, const int *which, const uint64_t *off,
             m++;
         }
         if (rc == 0 && m > 0) rc = ring2_disk_read_batch(b->r[w], reqs, m);
+    }
+    free(reqs);
+    return rc;
+}
+
+/* ── the device-overlap fix: mixed-stream batch, two queues CONCURRENT ──────
+ * v3 measured the serialization tax live: two sequential read_batch calls on
+ * split asymmetric devices = 4u/S vs single-device 3u/S (the stoplight on the
+ * dual-lane highway). Here the V-stream sub-batch runs on a worker thread
+ * while the K-stream sub-batch runs on the caller — max(2u/S, 2u/S) = 2u/S.
+ * Each inner ring2_disk store owns its own handles/IOCP, so concurrent batch
+ * calls on the TWO DIFFERENT stores are safe. Byte-exactness untouched:
+ * identical reads, concurrent issue. */
+typedef struct { ring2_disk *r; ring2_req *reqs; int m; int rc; } obe_job;
+
+#ifdef _WIN32
+static unsigned __stdcall obe_job_thread(void *arg) {
+    obe_job *j = (obe_job *)arg;
+    j->rc = ring2_disk_read_batch(j->r, j->reqs, j->m);
+    return 0;
+}
+#endif
+
+static int obe_read_batch2(void *h, const int *which, const uint64_t *off,
+                           void *const *dst, const size_t len_by_stream[2], int n) {
+    optane_be *b = (optane_be *)h;
+    if (!b) return 1;
+    ring2_req *reqs = (ring2_req *)malloc((size_t)n * sizeof(ring2_req));
+    if (!reqs) return 1;
+    int m[2] = { 0, 0 };               /* partition: stream 0 grows from the   */
+    int rc = 0;                        /* front, stream 1 from the back        */
+    for (int i = 0; i < n && rc == 0; i++) {
+        int w = which[i];
+        if (w < 0 || w > 1 || len_by_stream[w] != b->blk[w]) { rc = 1; break; }
+        int slot = (w == 0) ? m[0]++ : (n - 1 - m[1]++);
+        reqs[slot].which = w;
+        reqs[slot].off   = (size_t)off[i];
+        reqs[slot].dst   = dst[i];
+    }
+    if (rc == 0) {
+        obe_job jv = { b->r[1], reqs + (n - m[1]), m[1], 0 };
+        int rc_k = 0, rc_v = 0;
+#ifdef _WIN32
+        HANDLE th = NULL;
+        if (m[1] > 0)
+            th = (HANDLE)_beginthreadex(NULL, 0, obe_job_thread, &jv, 0, NULL);
+        if (m[0] > 0) rc_k = ring2_disk_read_batch(b->r[0], reqs, m[0]);
+        if (th) { WaitForSingleObject(th, INFINITE); CloseHandle(th); rc_v = jv.rc; }
+        else if (m[1] > 0)              /* thread creation failed: serial fallback */
+            rc_v = ring2_disk_read_batch(b->r[1], jv.reqs, jv.m);
+#else
+        if (m[0] > 0) rc_k = ring2_disk_read_batch(b->r[0], reqs, m[0]);
+        if (m[1] > 0) rc_v = ring2_disk_read_batch(b->r[1], jv.reqs, jv.m);
+#endif
+        rc = rc_k ? rc_k : rc_v;
     }
     free(reqs);
     return rc;
@@ -131,6 +191,7 @@ int sp_ring2_optane_register_split(const char *dir_k, const char *dir_v,
     be.alloc_aligned = obe_alloc;
     be.free_aligned  = obe_free;
     be.close         = NULL;             /* borrowed by the decode; WE own teardown */
+    be.read_batch2   = obe_read_batch2;  /* device-overlap mixed-stream batch */
     sp_arm_ring2_register(&be);
     g_obe = b;
     fprintf(stderr, "    [ring2-optane] REGISTERED dual-size SPLIT: K(dir=%s presize=%zu MB blk=%zu B) "

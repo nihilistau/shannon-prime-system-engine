@@ -253,6 +253,8 @@ pub fn register_ring2_quic(addr: SocketAddr) -> Result<()> {
         alloc_aligned: None,   // network store: no direct-I/O alignment needs
         free_aligned: None,
         close: None,           // borrowed: WE own the teardown
+        read_batch2: None,     // overlap n/a: read_batch already flies concurrent
+                               // QUIC streams; the two-call fallback is correct
     };
     unsafe { crate::ffi_l1::sp_arm_ring2_register(&be) };
     tracing::info!("SP_INFO: ARM Ring-2 backend = QUIC peer {addr} (raw residue blocks on the wire)");
