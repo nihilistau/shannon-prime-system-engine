@@ -40,6 +40,14 @@ static void set_graph(int on) {
 #endif
 }
 
+static void set_arena_q8(int on) {
+#if defined(_WIN32)
+    if (on) _putenv_s("SP_ARENA", "q8"); else _putenv_s("SP_ARENA", "");
+#else
+    if (on) setenv("SP_ARENA", "q8", 1); else unsetenv("SP_ARENA");
+#endif
+}
+
 /* Run the GPU decode (knobs as set), return wall-clock seconds via *dt. */
 static int decode_run(qwen3_model *m, const int32_t *prompt, int n_prompt,
                       int n_gen, int32_t *out, double *dt) {
@@ -50,37 +58,36 @@ static int decode_run(qwen3_model *m, const int32_t *prompt, int n_prompt,
     return n;
 }
 
-static void T_QWEN3_DECODE_CUDA(void) {
-    if (sp_cuda_device_count() < 1) { fprintf(stderr, "    no CUDA device — SKIP\n"); return; }
-    const char *gguf = getenv("SP_QWEN3_GGUF"); if (!gguf) gguf = SP_QWEN3_GGUF;
-    qwen3_model *m = qwen3_load(gguf);
-    SP_CHECK(m != NULL, "qwen3_load");
-    if (!m) return;
+/* Gate + measure one precision (model already loaded with the right SP_ARENA).
+ * Runs per-step decode, graph decode, asserts byte-exact equal within precision,
+ * anchors to GPU prefill teacher-forced. Writes tok/s out-params. */
+static void measure_prec(qwen3_model *m, const char *label, const int32_t *prompt,
+                         int n_prompt, int n_gen, double *tps_ref, double *tps_g) {
+    const int P = n_prompt + n_gen, V = (int)m->cfg.n_vocab;
 
-    const int n_prompt = 4, n_gen = 24, P = n_prompt + n_gen;
-    int32_t prompt[4] = { 1, 2, 3, 4 };
-    const int V = (int)m->cfg.n_vocab;
+    /* warmup (untimed): pay the cold CUDA/cuBLAS lazy-load + JIT + heuristic cost
+     * ONCE per precision so the cross-precision per-step comparison isn't confounded
+     * by load order. One graph + one per-step pass, results discarded. */
+    { int32_t w[64]; double wd; set_graph(0); decode_run(m, prompt, n_prompt, n_gen, w, &wd);
+      set_graph(1); decode_run(m, prompt, n_prompt, n_gen, w, &wd); }
 
-    /* (1) per-step decode (graph OFF) — the proven Beta-S0 path. */
     set_graph(0);
     int32_t seq_ref[64]; double dt_ref = 0.0;
     int n_ref = decode_run(m, prompt, n_prompt, n_gen, seq_ref, &dt_ref);
     if (n_ref < 0) fprintf(stderr, "    %s\n", sp_last_error());
     SP_CHECK(n_ref == P, "per-step decode produced full length");
 
-    /* (2) CUDA-graph decode (graph ON, BETA.2) — capture once, replay/token. */
     set_graph(1);
     int32_t seq_g[64]; double dt_g = 0.0;
     int n_g = decode_run(m, prompt, n_prompt, n_gen, seq_g, &dt_g);
     if (n_g < 0) fprintf(stderr, "    %s\n", sp_last_error());
     SP_CHECK(n_g == P, "graph decode produced full length");
 
-    /* (3) byte-exact equality: the graph path must emit the SAME sequence as the
-     * per-step path (position-indirect kernels are numerically identical). */
+    /* byte-exact within precision: graph path must equal per-step path. */
     int eq = (n_ref == n_g), firsteq = -1;
     for (int i = 0; i < P && eq; i++) if (seq_ref[i] != seq_g[i]) { eq = 0; firsteq = i; }
     if (!eq) {
-        fprintf(stderr, "    graph != per-step at idx %d (%d vs %d)\n",
+        fprintf(stderr, "    [%s] graph != per-step at idx %d (%d vs %d)\n", label,
                 firsteq, firsteq>=0?seq_ref[firsteq]:-1, firsteq>=0?seq_g[firsteq]:-1);
         fprintf(stderr, "    per-step:"); for (int i=0;i<P;i++) fprintf(stderr," %d",seq_ref[i]);
         fprintf(stderr, "\n    graph   :"); for (int i=0;i<P;i++) fprintf(stderr," %d",seq_g[i]);
@@ -88,36 +95,59 @@ static void T_QWEN3_DECODE_CUDA(void) {
     }
     SP_CHECK(eq, "CUDA-graph decode == per-step decode (byte-exact)");
 
-    /* (4) GPU teacher-forced PREFILL over the decoded sequence: argmax at pos must
-     * predict seq[pos+1] for every emitted position — anchors decode to recompute.
-     * M_QWEN3_CUDA already proves prefill == CPU; transitively decode == CPU. */
+    /* anchor to GPU prefill teacher-forced (same precision's prefill). */
     float *logits = (float *)malloc((size_t)P * V * sizeof(float));
     SP_CHECK(logits != NULL, "logits buffer");
-    if (!logits) { qwen3_free(m); return; }
-    int rcf = qwen3_forward_cuda(m, seq_g, P, logits);
-    SP_CHECK(rcf == 0, "GPU prefill over decoded sequence");
-
-    int match = 1, firstbad = -1;
-    for (int pos = n_prompt - 1; pos < P - 1 && match; pos++) {
-        const float *row = logits + (size_t)pos * V;
-        int am = 0; float bv = row[0];
-        for (int i = 1; i < V; i++) if (row[i] > bv) { bv = row[i]; am = i; }
-        if (am != seq_g[pos + 1]) { match = 0; firstbad = pos; }
+    if (logits) {
+        int rcf = qwen3_forward_cuda(m, seq_g, P, logits);
+        SP_CHECK(rcf == 0, "GPU prefill over decoded sequence");
+        int match = 1, firstbad = -1;
+        for (int pos = n_prompt - 1; pos < P - 1 && match; pos++) {
+            const float *row = logits + (size_t)pos * V;
+            int am = 0; float bv = row[0];
+            for (int i = 1; i < V; i++) if (row[i] > bv) { bv = row[i]; am = i; }
+            if (am != seq_g[pos + 1]) { match = 0; firstbad = pos; }
+        }
+        if (!match)
+            fprintf(stderr, "    [%s] decode/prefill disagree at pos %d: != %d\n",
+                    label, firstbad, seq_g[firstbad + 1]);
+        SP_CHECK(match, "GPU decode == GPU prefill teacher-forced argmax");
+        free(logits);
     }
-    if (!match)
-        fprintf(stderr, "    decode/prefill disagree at pos %d: != decoded %d\n",
-                firstbad, seq_g[firstbad + 1]);
-    SP_CHECK(match, "GPU decode == GPU prefill teacher-forced argmax");
 
-    double tps_ref = (double)n_gen / dt_ref, tps_g = (double)n_gen / dt_g;
-    fprintf(stderr, "    [decode-cuda] per-step %.2f tok/s | graph %.2f tok/s "
-            "(%.2fx) — %d gen tokens; seq:",
-            tps_ref, tps_g, tps_g / tps_ref, n_gen);
+    *tps_ref = (double)n_gen / dt_ref;
+    *tps_g   = (double)n_gen / dt_g;
+    fprintf(stderr, "    [%s] per-step %.2f | graph %.2f tok/s (%.2fx); seq:",
+            label, *tps_ref, *tps_g, *tps_g / *tps_ref);
     for (int i = 0; i < P; i++) fprintf(stderr, " %d", seq_g[i]);
     fprintf(stderr, "\n");
+}
 
-    free(logits);
-    qwen3_free(m);
+static void T_QWEN3_DECODE_CUDA(void) {
+    if (sp_cuda_device_count() < 1) { fprintf(stderr, "    no CUDA device — SKIP\n"); return; }
+    const char *gguf = getenv("SP_QWEN3_GGUF"); if (!gguf) gguf = SP_QWEN3_GGUF;
+    const int n_prompt = 4, n_gen = 24;
+    int32_t prompt[4] = { 1, 2, 3, 4 };
+    double f32_ref=0, f32_g=0, q8_ref=0, q8_g=0;
+
+    /* ── f32 (f16 GGUF weights, no arena) ── */
+    set_arena_q8(0);
+    qwen3_model *mf = qwen3_load(gguf);
+    SP_CHECK(mf != NULL, "qwen3_load f32");
+    if (mf) { measure_prec(mf, "f32", prompt, n_prompt, n_gen, &f32_ref, &f32_g); qwen3_free(mf); }
+
+    /* ── Q8 arena (per-row Frobenius, the .sp-model ship path) ── */
+    set_arena_q8(1);
+    qwen3_model *mq = qwen3_load(gguf);
+    SP_CHECK(mq != NULL && mq->arena, "qwen3_load Q8 arena");
+    if (mq && mq->arena) { measure_prec(mq, "Q8 ", prompt, n_prompt, n_gen, &q8_ref, &q8_g); qwen3_free(mq); }
+    set_arena_q8(0);
+
+    fprintf(stderr, "\n    ===== BETA.2 decode ladder (RTX 2060, 0.6B, n_gen=%d) =====\n", n_gen);
+    fprintf(stderr, "    f32 per-step %.2f -> f32 graph %.2f (%.2fx)\n", f32_ref, f32_g, f32_g/f32_ref);
+    fprintf(stderr, "    Q8  per-step %.2f -> Q8  graph %.2f (%.2fx)\n", q8_ref, q8_g, q8_g/q8_ref);
+    fprintf(stderr, "    Q8-graph vs f32-graph: %.2fx | top of ladder = %.2f tok/s\n",
+            q8_g/f32_g, q8_g > f32_g ? q8_g : f32_g);
 }
 
 int main(void) {
