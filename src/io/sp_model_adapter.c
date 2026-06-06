@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>   /* offsetof — arch_struct growth-discipline min-copy */
 
 void sp_set_error(const char *msg);
 
@@ -90,12 +91,20 @@ struct qwen3_model *sp_model_to_qwen3(const sp_model *m) {
     q->gguf = NULL; q->released = 1;          /* norms served from owned buffers */
 
     /* arch_struct payload is sp_arch_info (PPT-LAT-SP-MODEL-v0 §3 — frozen contract).
-     * Reconstruct qwen3_config from sp_arch_info + tensor table inspection at load time. */
-    if (h->arch_struct_size < sizeof(sp_arch_info)) {
-        sp_set_error("adapter: arch_struct too small for sp_arch_info"); free(q); return NULL;
+     * Reconstruct qwen3_config from sp_arch_info + tensor table inspection at load time.
+     * GROWTH DISCIPLINE (sp_l1.h §2, reference-sp-arch-info-growth): new fields are
+     * APPENDED in the reserved 256-byte arch_struct tail; the loader copies
+     * min(arch_struct_size, sizeof(sp_arch_info)) so an OLDER .sp-model (smaller
+     * arch_struct_size, e.g. 56 = base+FP16, written before the g4_ + q36_ appends)
+     * leaves the appended fields ZERO = "unspecified" sentinel. Only the base geometry
+     * (through has_qk_norm) MUST be present. A hard `< sizeof` reject was the bug — it
+     * defeated the entire 256-byte reserve and refused valid older artifacts. */
+    if (h->arch_struct_size < offsetof(sp_arch_info, n_ff)) {
+        sp_set_error("adapter: arch_struct too small for base sp_arch_info"); free(q); return NULL;
     }
     sp_arch_info sai; memset(&sai, 0, sizeof sai);
-    memcpy(&sai, h->arch_struct, sizeof(sp_arch_info));
+    size_t sai_copy = h->arch_struct_size < sizeof(sp_arch_info) ? h->arch_struct_size : sizeof(sp_arch_info);
+    memcpy(&sai, h->arch_struct, sai_copy);
     if (sai.vocab_size != h->vocab_size) { sp_set_error("adapter: vocab mismatch arch_struct"); free(q); return NULL; }
 
     qwen3_config *cfg = &q->cfg;
@@ -224,12 +233,13 @@ struct qwen3_model *sp_model_to_qwen25(const sp_model *m) {
     if (h->arch_id != (uint32_t)SP_ARCH_ID_QWEN25) {
         sp_set_error("sp_model_to_qwen25: model is not Qwen2.5"); return NULL;
     }
-    if (h->arch_struct_size < sizeof(sp_arch_info)) {
-        sp_set_error("adapter25: arch_struct too small"); return NULL;
+    if (h->arch_struct_size < offsetof(sp_arch_info, n_ff)) {   /* see growth discipline above */
+        sp_set_error("adapter25: arch_struct too small for base sp_arch_info"); return NULL;
     }
 
     sp_arch_info sai; memset(&sai, 0, sizeof sai);
-    memcpy(&sai, h->arch_struct, sizeof(sp_arch_info));
+    size_t sai_copy = h->arch_struct_size < sizeof(sp_arch_info) ? h->arch_struct_size : sizeof(sp_arch_info);
+    memcpy(&sai, h->arch_struct, sai_copy);
     if (sai.vocab_size != h->vocab_size) {
         sp_set_error("adapter25: vocab mismatch arch_struct"); return NULL;
     }
