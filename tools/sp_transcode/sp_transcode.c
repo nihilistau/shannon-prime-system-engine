@@ -64,6 +64,7 @@ static size_t ggml_row_bytes(uint32_t type, int n) {
     switch (type) {
         case GGML_T_F32:  return (size_t)n * 4;
         case GGML_T_F16:  return (size_t)n * 2;
+        case GGML_T_Q4_0: return (size_t)(n / 32) * 18;   /* QAT-Q4_0 source */
         case GGML_T_Q8_0: return (size_t)(n / 32) * 34;
         case GGML_T_Q4_K: return (size_t)(n / 256) * 144;  /* qwen35moe Q4_K_M source */
         case GGML_T_Q6_K: return (size_t)(n / 256) * 210;
