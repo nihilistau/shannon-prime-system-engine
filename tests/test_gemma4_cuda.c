@@ -87,6 +87,8 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
     const int E = (int)c->n_embd, SW = (int)c->sliding_window, FF = (int)c->n_ff;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int NL = (int)c->n_layers;
+    const int kvfs = (int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : NL;
     const int g_nh = (int)c->n_head, g_nkv = (int)c->n_head_kv, g_hd = (int)c->head_dim;
     const int s_nh = (int)c->g4_nh_swa, s_nkv = (int)c->g4_nkv_swa, s_hd = (int)c->g4_hd_swa;
     const float g_base = c->rope_freq_base, s_base = c->g4_rope_base_swa;
@@ -103,8 +105,11 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
     float *nx  = (float *)malloc((size_t)NT * E * sizeof(float));
     float *nx0 = (float *)malloc((size_t)NT * E * sizeof(float));
     float *q   = (float *)malloc((size_t)NT * QDmax * sizeof(float));
-    float *K   = (float *)malloc((size_t)NT * KVDmax * sizeof(float));
-    float *Vb  = (float *)malloc((size_t)NT * KVDmax * sizeof(float));
+    /* per-OWNER K/V storage (shared-KV mirror of the oracle: owners [0,kvfs)
+     * compute+store; sharers reuse owner kvfs-1 (global) / kvfs-2 (SWA) and skip
+     * their own projection + norms — gemma4.c lines 173-193) */
+    float **Kst = (float **)calloc((size_t)NL, sizeof(float *));
+    float **Vst = (float **)calloc((size_t)NL, sizeof(float *));
     float *ao  = (float *)malloc((size_t)NT * QDmax * sizeof(float));
     float *ap  = (float *)malloc((size_t)NT * E * sizeof(float));
     float *g   = (float *)malloc((size_t)NT * FFmax * sizeof(float));
@@ -112,9 +117,9 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
     float *dn  = (float *)malloc((size_t)NT * E * sizeof(float));
     float *sc  = (float *)malloc((size_t)NT * sizeof(float));
     float *gq  = (float *)malloc((size_t)NT * QDmax * sizeof(float));
-    SP_CHECK(x && nx && nx0 && q && K && Vb && ao && ap && g && up && dn && sc && gq,
+    SP_CHECK(x && nx && nx0 && q && Kst && Vst && ao && ap && g && up && dn && sc && gq,
              "parity buffers");
-    if (!(x && nx && nx0 && q && K && Vb && ao && ap && g && up && dn && sc && gq)) goto fin;
+    if (!(x && nx && nx0 && q && Kst && Vst && ao && ap && g && up && dn && sc && gq)) goto fin;
 
     {
         int cpu_ok = 1, last_qd = 0;
@@ -150,9 +155,13 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
                         sp_rope_neox_freqs(qh, hd, t, rbase, ffac);
                     }
             }
-            if (sp_matmul(m, ly->attn_k, nx, NT, E, kvd, K))  { cpu_ok = 0; break; }
-            if (sp_matmul(m, ly->attn_v, nx, NT, E, kvd, Vb)) { cpu_ok = 0; break; }
-            {
+            float *Kuse, *Vuse;
+            if (L < kvfs) {                       /* OWNER: project + norm + store */
+                float *K  = (float *)malloc((size_t)NT * kvd * sizeof(float));
+                float *Vb = (float *)malloc((size_t)NT * kvd * sizeof(float));
+                if (!K || !Vb) { free(K); free(Vb); cpu_ok = 0; break; }
+                if (sp_matmul(m, ly->attn_k, nx, NT, E, kvd, K))  { free(K); free(Vb); cpu_ok = 0; break; }
+                if (sp_matmul(m, ly->attn_v, nx, NT, E, kvd, Vb)) { free(K); free(Vb); cpu_ok = 0; break; }
                 const float *kn = sp_as_f32(m, ly->attn_k_norm);
                 for (int t = 0; t < NT; t++)
                     for (int h = 0; h < nkv; h++) {
@@ -165,10 +174,15 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
                         float inv = 1.0f / sqrtf((float)(ss / (double)hd) + eps);
                         for (int i = 0; i < hd; i++) vh[i] *= inv;
                     }
+                Kst[L] = K; Vst[L] = Vb; Kuse = K; Vuse = Vb;
+            } else {                              /* SHARER: reuse owner, skip projection */
+                const int src = kvfs - (global ? 1 : 2);
+                Kuse = Kst[src]; Vuse = Vst[src];
+                if (!Kuse || !Vuse) { cpu_ok = 0; break; }
             }
             for (int t = 0; t < NT; t++)
                 for (int h = 0; h < nh; h++)
-                    sp_attn_head(q + (size_t)t * qd + (size_t)h * hd, K, Vb, t, kvd,
+                    sp_attn_head(q + (size_t)t * qd + (size_t)h * hd, Kuse, Vuse, t, kvd,
                                  h / grp, hd, 1.0f, win, sc, ao + (size_t)t * qd + (size_t)h * hd);
             if (sp_matmul(m, ly->attn_output, ao, NT, qd, E, ap)) { cpu_ok = 0; break; }
             for (int t = 0; t < NT; t++) {
@@ -221,8 +235,10 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
         }
     }
 fin:
-    free(x); free(nx); free(nx0); free(q); free(K); free(Vb); free(ao); free(ap);
+    free(x); free(nx); free(nx0); free(q); free(ao); free(ap);
     free(g); free(up); free(dn); free(sc); free(gq);
+    if (Kst) { for (int L = 0; L < NL; L++) free(Kst[L]); free(Kst); }
+    if (Vst) { for (int L = 0; L < NL; L++) free(Vst[L]); free(Vst); }
 }
 
 static void T_GEMMA4_CUDA_WEIGHTS(void) {
@@ -280,6 +296,18 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
          * ao at the floor proves the full-causal (win=-1) mask switch. */
         static const double l4_gates[5] = { 3e-4, 5e-5, 1.5e-4, 2.5e-4, 5e-3 };
         truncated_parity(m, 5, "L4", l4_gates);
+        /* THE SHARER SEAM (ETA.3 remainder): L15 = the FIRST shared-KV layer
+         * (kvfs=15; layers [0,15) own). L15 is SWA (15%5==0) -> reads owner
+         * L13 (kvfs-2)'s STORED K/V from VRAM and skips its own projection.
+         * This is the cross-layer VRAM dependency: wrong owner index = stale
+         * layer; wrong stride = OOB. Both mirror + probe implement the oracle's
+         * owner-store/sharer-reuse. Telemetry first; pin after measurement. */
+        /* Gates pinned at ~3x measured (telemetry 2026-06-06: nx 2.37e-4 /
+         * q 2.67e-5 / ao 1.11e-5 / ap 2.00e-5 / x 2.98e-3 abs). ao AT THE FLOOR
+         * is the seam proof: an off-by-one owner index would read L14's GLOBAL
+         * K/V (kvd 512) through an SWA stride (256) -> garbage, not 1.1e-5. */
+        static const double l15_gates[5] = { 7e-4, 8e-5, 5e-5, 6e-5, 1e-2 };
+        truncated_parity(m, 16, "L15-sharer", l15_gates);
     }
 
     sp_cuda_model_release(m);
