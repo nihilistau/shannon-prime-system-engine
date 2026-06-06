@@ -232,6 +232,31 @@ __global__ void k_attn_ntt(const float *Q, const float *K, const float *V,
  * the prefill kernels at n_tok=1. f32 path; gate = argmax sequence == CPU
  * qwen3_generate_kv (knobs off). */
 
+/* Device argmax over `n` logits -> *out_tok (single block). Keeps the winning
+ * token in VRAM so the decode loop never round-trips logits to the host (the
+ * per-step cudaStreamSynchronize latency killer). out_tok is also appended into
+ * the device sequence buffer so the next step's embed reads it directly. */
+__global__ void k_argmax(const float *logits, int n, int *out_tok) {
+    __shared__ float sval[256];
+    __shared__ int   sidx[256];
+    float bv = -3.4e38f; int bi = 0;
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        if (logits[i] > bv) { bv = logits[i]; bi = i; }
+    sval[threadIdx.x] = bv; sidx[threadIdx.x] = bi;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) {
+            if (sval[threadIdx.x + o] > sval[threadIdx.x] ||
+                (sval[threadIdx.x + o] == sval[threadIdx.x] && sidx[threadIdx.x + o] < sidx[threadIdx.x])) {
+                sval[threadIdx.x] = sval[threadIdx.x + o];
+                sidx[threadIdx.x] = sidx[threadIdx.x + o];
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) *out_tok = sidx[0];
+}
+
 /* NEOX RoPE at ABSOLUTE position p0 (decode: one token, grid=n_heads, t=0). */
 __global__ void k_rope_at(float *base, int n_heads, int d, int rowstride,
                           float rbase, int p0) {
@@ -803,8 +828,8 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     cudaStream_t st = g_w.stream;
 
     float *dKc=NULL,*dVc=NULL,*dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
-          *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL,*hlog=NULL;
-    int *dtok=NULL;
+          *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL;
+    int *dseq=NULL;            /* the whole token sequence, RESIDENT in VRAM */
     int rc=-1, n=n_prompt;
     const size_t kvn=(size_t)NL*P*KVD;
     #define DA(p,cnt) do{ if(cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess){sp_set_error("decode OOM");goto done;} }while(0)
@@ -812,13 +837,13 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     DA(dx,E); DA(dnx,E); DA(dq,QD); DA(dk,KVD); DA(dv,KVD); DA(dao,QD); DA(dap,E);
     DA(dg,FF); DA(dup,FF); DA(ddn,E); DA(dlog,V);
     if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
-    if (cudaMalloc(&dtok,sizeof(int))!=cudaSuccess){sp_set_error("dtok OOM");goto done;}
-    hlog=(float*)malloc((size_t)V*sizeof(float));
-    if(!hlog){sp_set_error("hlog OOM");goto done;}
+    if (cudaMalloc(&dseq,(size_t)P*sizeof(int))!=cudaSuccess){sp_set_error("dseq OOM");goto done;}
+    if (cudaMemcpyAsync(dseq,seq,(size_t)n_prompt*sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("prompt H2D");goto done;}
 
     for (int pos=0; pos<P-1; pos++) {
-        if (cudaMemcpyAsync(dtok,&seq[pos],sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("decode tok H2D");goto done;}
-        { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dtok,1,E,1.0f,dx); }
+        /* embed reads dseq[pos] in place — the previous step's argmax already
+         * wrote it on-device; no host round-trip. */
+        { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dseq+pos,1,E,1.0f,dx); }
         for (int L=0; L<NL; L++) {
             k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
             if (gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr)) goto done;
@@ -847,21 +872,27 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
         if (pos < n_prompt-1) continue;            /* still ingesting the prompt */
         k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
         if (gemm_w(cb,st,&g_w.head,dnx,dlog,1,dscr)) goto done;
-        if (cudaMemcpyAsync(hlog,dlog,(size_t)V*sizeof(float),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("decode logits D2H");goto done;}
-        { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"decode sync");goto done;} }
-        int next=0; float bv=hlog[0];
-        for (int i=1;i<V;i++) if(hlog[i]>bv){bv=hlog[i];next=i;}
-        seq[pos+1]=next; n=pos+2;
-        if (eos_id>=0 && next==eos_id) break;
+        /* DEVICE argmax → write the next token straight into dseq[pos+1]. The
+         * GPU feeds itself: no logits D2H, no per-step stream sync (eos=-1). */
+        k_argmax<<<1,256,0,st>>>(dlog, V, dseq+pos+1);
+        n=pos+2;
+        if (eos_id>=0) {                           /* eos needs the token host-side */
+            int tok=-1;
+            if (cudaMemcpyAsync(&tok,dseq+pos+1,sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("eos D2H");goto done;}
+            { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"eos sync");goto done;} }
+            if (tok==eos_id) break;
+        }
     }
+    /* single sequence download at the end */
+    if (cudaMemcpyAsync(seq,dseq,(size_t)n*sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("seq D2H");goto done;}
+    { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"decode sync");goto done;} }
     { cudaError_t e=cudaGetLastError(); if(e!=cudaSuccess){fail_cuda(e,"decode kernel");goto done;} }
     rc=n;
 done:
     if(dKc)cudaFree(dKc); if(dVc)cudaFree(dVc);
     if(dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
     if(dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
-    if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dtok)cudaFree(dtok);
-    free(hlog);
+    if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dseq)cudaFree(dseq);
     #undef DA
     return rc;
 }
