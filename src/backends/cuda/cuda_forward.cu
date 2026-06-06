@@ -412,6 +412,33 @@ __global__ void k_gemv_q8_dp4a(const signed char *codes, const unsigned long lon
     if (threadIdx.x == 0) y[j] = (float)sm[0] * (row_scale[j] * (1.0f / 127.0f)) * (*sx);
 }
 
+/* TUNED dp4a GEMV: one WARP per output row (32 lanes collaborate), 128-bit int4
+ * loads (16 Q8 codes/thread/iter — maximizes the GDDR6 transaction size), and a
+ * __shfl_down_sync register-speed reduction (no shared memory). 8 warps/block =
+ * 8 rows/block for SM occupancy. `in` must be a multiple of 16 (qwen3 dims are);
+ * codes+row_off[j] and qx are 16-byte aligned (cudaMalloc base + j*in, in%16==0).
+ * Note: int4 here is the 16-BYTE CUDA vector type, NOT 4-bit precision. */
+__global__ void k_gemv_q8_dp4a_v2(const signed char *codes, const unsigned long long *row_off,
+                                  const float *row_scale, int in, const signed char *qx,
+                                  const float *sx, float *y, int out) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int j = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (j >= out) return;
+    const int4 *wrow = (const int4 *)(codes + row_off[j]);   /* in/16 16-byte chunks */
+    const int4 *qxi  = (const int4 *)qx;
+    const int n16 = in >> 4;
+    int acc = 0;
+    for (int c = lane; c < n16; c += 32) {
+        int4 wv = wrow[c], qv = qxi[c];                      /* 128-bit coalesced loads */
+        acc = __dp4a(wv.x, qv.x, acc);
+        acc = __dp4a(wv.y, qv.y, acc);
+        acc = __dp4a(wv.z, qv.z, acc);
+        acc = __dp4a(wv.w, qv.w, acc);
+    }
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+    if (lane == 0) y[j] = (float)acc * (row_scale[j] * (1.0f / 127.0f)) * (*sx);
+}
+
 /* ════════════════════════ device weight cache ════════════════════════ */
 
 /* one weight matrix on device: either plain f32 (f32 != NULL) or packed arena. */
@@ -637,12 +664,23 @@ static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
  * the caller must already have verified the arena precision is 8. */
 static int gemv_w_int8(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
                        signed char *dqx, float *dsx) {
-    if (W->f32 || (W->in & 3) != 0) return 0;            /* not packed, or in not %4 */
-    int npad = (W->in + 3) & ~3;
-    k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
-    k_gemv_q8_dp4a<<<(unsigned)W->out, 256, 0, st>>>(
-        (const signed char *)W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
-    return 1;
+    if (W->f32) return 0;                                 /* not packed */
+    if ((W->in & 15) == 0) {                              /* tuned: warp/row + int4 loads */
+        int npad = (W->in + 15) & ~15;
+        k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
+        unsigned blocks = ((unsigned)W->out + 7u) / 8u;   /* 8 warps (rows) per block */
+        k_gemv_q8_dp4a_v2<<<blocks, 256, 0, st>>>(
+            (const signed char *)W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
+        return 1;
+    }
+    if ((W->in & 3) == 0) {                               /* fallback: naive block/row */
+        int npad = (W->in + 3) & ~3;
+        k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
+        k_gemv_q8_dp4a<<<(unsigned)W->out, 256, 0, st>>>(
+            (const signed char *)W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
+        return 1;
+    }
+    return 0;
 }
 
 /* ════════════════════════ forward ════════════════════════ */
@@ -1025,9 +1063,9 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     DA(dx,E); DA(dnx,E); DA(dq,QD); DA(dk,KVD); DA(dv,KVD); DA(dao,QD); DA(dap,E);
     DA(dg,FF); DA(dup,FF); DA(ddn,E); DA(dlog,V);
     if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
-    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %4 */
+    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %16 */
         int maxin = E; if (QD>maxin) maxin=QD; if (FF>maxin) maxin=FF;
-        if (cudaMalloc(&dqx,(size_t)((maxin+3)&~3))!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
+        if (cudaMalloc(&dqx,(size_t)((maxin+15)&~15))!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
         DA(dsx,1);
     }
     /* MM(W,X,Y): the decode matmul — int8 dp4a GEMV when enabled+packed-Q8, else
