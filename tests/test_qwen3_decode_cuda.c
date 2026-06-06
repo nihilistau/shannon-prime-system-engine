@@ -50,6 +50,14 @@ static void set_arena_q8(int on) {
 #endif
 }
 
+static void set_arena(const char *v) {   /* "q8" / "q4" / "" */
+#if defined(_WIN32)
+    _putenv_s("SP_ARENA", v);
+#else
+    if (v && v[0]) setenv("SP_ARENA", v, 1); else unsetenv("SP_ARENA");
+#endif
+}
+
 static void set_int8(int on) {
 #if defined(_WIN32)
     _putenv_s("SP_CUDA_DECODE_INT8", on ? "1" : "0");
@@ -155,7 +163,7 @@ static void T_QWEN3_DECODE_CUDA(void) {
     const char *gguf = getenv("SP_QWEN3_GGUF"); if (!gguf) gguf = SP_QWEN3_GGUF;
     const int n_prompt = 4, n_gen = 256;   /* long window: stable steady-state tok/s */
     int32_t prompt[4] = { 1, 2, 3, 4 };
-    double f32_ref=0, f32_g=0, q8_ref=0, q8_g=0;
+    double f32_ref=0, f32_g=0, q8_ref=0, q8_g=0, q4_ref=0, q4_g=0;
 
     /* ── f32 (f16 GGUF weights, no arena) ── */
     set_arena_q8(0);
@@ -164,11 +172,19 @@ static void T_QWEN3_DECODE_CUDA(void) {
     if (mf) { measure_prec(mf, "f32", prompt, n_prompt, n_gen, &f32_ref, &f32_g); qwen3_free(mf); }
 
     /* ── Q8 arena via gguf in-memory transcode (SP_ARENA=q8) ── */
-    set_arena_q8(1);
+    set_arena("q8");
     qwen3_model *mq = qwen3_load(gguf);
     SP_CHECK(mq != NULL && mq->arena, "qwen3_load Q8 arena (gguf transcode)");
     if (mq && mq->arena) { measure_prec(mq, "Q8 ", prompt, n_prompt, n_gen, &q8_ref, &q8_g); qwen3_free(mq); }
-    set_arena_q8(0);
+
+    /* ── Q4 arena (SP_ARENA=q4) — BETA.3a-v4 Q4-dp4a decode path. The int8 section
+     * inside measure_prec engages k_gemv_q4_dp4a_v2 (arena_prec==4) and gates its
+     * top-1 vs the Q4-dequant graph: dp4a nibble-unpack must be top-1 lossless. ── */
+    set_arena("q4");
+    qwen3_model *mq4 = qwen3_load(gguf);
+    SP_CHECK(mq4 != NULL && mq4->arena, "qwen3_load Q4 arena");
+    if (mq4 && mq4->arena) { measure_prec(mq4, "Q4 ", prompt, n_prompt, n_gen, &q4_ref, &q4_g); qwen3_free(mq4); }
+    set_arena("");
 
     /* ── Q8 via the REAL .sp-model ship artifact (production sp_model_load path) ──
      * The genuine deliverable loads a .sp-model off disk (OK_Q8 codes mmap'd +
@@ -196,12 +212,14 @@ static void T_QWEN3_DECODE_CUDA(void) {
         fprintf(stderr, "    [SPM] sp_model_load(%s) -> %d, skipping .sp-model measurement\n", spm, (int)st);
     }
 
-    fprintf(stderr, "\n    ===== BETA.2 decode ladder (RTX 2060, 0.6B, n_gen=%d, warm) =====\n", n_gen);
+    fprintf(stderr, "\n    ===== BETA.2/3 decode ladder (RTX 2060, 0.6B, n_gen=%d, warm) =====\n", n_gen);
     fprintf(stderr, "    f32 (f16 gguf)       per-step %.2f -> graph %.2f (%.2fx)\n", f32_ref, f32_g, f32_g/f32_ref);
     fprintf(stderr, "    Q8  (gguf transcode) per-step %.2f -> graph %.2f (%.2fx)\n", q8_ref, q8_g, q8_g/q8_ref);
+    fprintf(stderr, "    Q4  (gguf transcode) per-step %.2f -> graph %.2f (%.2fx)\n", q4_ref, q4_g, q4_g/q4_ref);
     if (have_spm)
         fprintf(stderr, "    Q8  (.sp-model disk) per-step %.2f -> graph %.2f (%.2fx)\n", spm_ref, spm_g, spm_g/spm_ref);
-    fprintf(stderr, "    top of ladder = %.2f tok/s (f32 graph)\n", f32_g);
+    fprintf(stderr, "    NOTE: 0.6B is overhead-bound (~91 tok/s); the Q8/Q4 dp4a bandwidth win\n");
+    fprintf(stderr, "    appears at 12B-scale dims (see bench_gemv_int8.cu: int8 ~3.8x, Q4 ~7x f32).\n");
 }
 
 int main(void) {

@@ -439,11 +439,49 @@ __global__ void k_gemv_q8_dp4a_v2(const signed char *codes, const unsigned long 
     if (lane == 0) y[j] = (float)acc * (row_scale[j] * (1.0f / 127.0f)) * (*sx);
 }
 
+/* BETA.3a-v4: Q4 dp4a GEMV (0.5 B/weight, ~7x f32 at 12B-scale; bench-proven in
+ * tests/bench_gemv_int8.cu, host-ref correctness 1.34e-7). Q4 arena = 2 nibbles/
+ * byte (low=even idx, high=odd, sign-ext (n^8)-8, qmax=7). Read int4 (16 B = 32
+ * packed weights) straight from VRAM, unpack the nibbles to int8 in the ALU (free
+ * under memory-bound), feed dp4a. Activation stays int8 (qmax 127). `in` must be a
+ * multiple of 32; codes+row_off[j] 16-aligned (cudaMalloc base + j*in/2, in%32==0
+ * => in/2 % 16 == 0). */
+__device__ __forceinline__ void sp_unpack8(int w, int &lo4, int &hi4) {
+    int b0=w&0xFF, b1=(w>>8)&0xFF, b2=(w>>16)&0xFF, b3=(w>>24)&0xFF;
+    #define SPX(byte,hi) (((((((hi)?((byte)>>4):(byte)))&0xF)^0x8)-0x8)&0xFF)
+    lo4 = SPX(b0,0) | (SPX(b0,1)<<8) | (SPX(b1,0)<<16) | (SPX(b1,1)<<24);
+    hi4 = SPX(b2,0) | (SPX(b2,1)<<8) | (SPX(b3,0)<<16) | (SPX(b3,1)<<24);
+    #undef SPX
+}
+__global__ void k_gemv_q4_dp4a_v2(const unsigned char *codes, const unsigned long long *row_off,
+                                  const float *row_scale, int in, const signed char *qx,
+                                  const float *sx, float *y, int out) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int j = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (j >= out) return;
+    const int4 *wrow = (const int4 *)(codes + row_off[j]);   /* 16 B = 32 Q4 weights */
+    const int4 *qxi  = (const int4 *)qx;
+    const int n32 = in >> 5;
+    int acc = 0, a, b;
+    for (int c = lane; c < n32; c += 32) {
+        int4 wv = wrow[c];
+        int4 q0 = qxi[2*c], q1 = qxi[2*c + 1];
+        sp_unpack8(wv.x, a, b); acc = __dp4a(a, q0.x, acc); acc = __dp4a(b, q0.y, acc);
+        sp_unpack8(wv.y, a, b); acc = __dp4a(a, q0.z, acc); acc = __dp4a(b, q0.w, acc);
+        sp_unpack8(wv.z, a, b); acc = __dp4a(a, q1.x, acc); acc = __dp4a(b, q1.y, acc);
+        sp_unpack8(wv.w, a, b); acc = __dp4a(a, q1.z, acc); acc = __dp4a(b, q1.w, acc);
+    }
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+    if (lane == 0) y[j] = (float)acc * (row_scale[j] * (1.0f / 7.0f)) * (*sx);
+}
+
 /* ════════════════════════ device weight cache ════════════════════════ */
 
 /* one weight matrix on device: either plain f32 (f32 != NULL) or packed arena. */
 struct DevTensor {
     int in, out;
+    int prec;                    /* host-side per-TENSOR precision: 8 (Q8), 4 (Q4),
+                                  * 0 = f32 or non-uniform rows (forces dequant path) */
     float *f32;                  /* != NULL => plain f32 [out*in] */
     unsigned char     *codes;    /* packed (f32 == NULL): math-core arena layout */
     unsigned long long *row_off; /* [out] */
@@ -509,6 +547,13 @@ static int upload_arr(const T *host, size_t count, T **dev) {
 static int upload_packed(const sp_frob_packed_tensor *pt, DevTensor *d) {
     d->in = pt->cols; d->out = pt->rows; d->f32 = NULL;
     d->codes = NULL; d->row_off = NULL; d->row_scale = NULL; d->row_prec = NULL;
+    /* host-side per-tensor precision: the dp4a GEMV needs uniform rows. row_prec[0]
+     * is the tensor precision; if ANY row differs, prec=0 forces the dequant path
+     * (the on-device k_dequant_arena handles per-row mixed precision; the GEMV does
+     * not). This is the fix for mixed-precision arenas (e.g. Q8 head in a Q4 body). */
+    d->prec = pt->rows > 0 ? (int)pt->row_prec[0] : 0;
+    for (uint32_t r = 1; r < pt->rows; r++)
+        if (pt->row_prec[r] != pt->row_prec[0]) { d->prec = 0; break; }
     /* row_off is size_t on the host (8 bytes on x64) -> unsigned long long on device. */
     if (upload_arr<unsigned char>(pt->codes, pt->codes_bytes, &d->codes)) return 1;
     if (upload_arr<unsigned long long>((const unsigned long long *)pt->row_off,
@@ -658,17 +703,29 @@ static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
     return gemm(h, scratch, dX, dY, n_tok, W->in, W->out);
 }
 
-/* BETA.3a: single-token INT8 GEMV (decode). Quantize x->int8 (dqx/dsx scratch),
- * dp4a against the packed Q8 codes. Returns 1 if it TOOK the int8 path, 0 if it
- * declined (caller falls back to gemm_w). Only for packed Q8 weights with in%4==0;
- * the caller must already have verified the arena precision is 8. */
-static int gemv_w_int8(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
-                       signed char *dqx, float *dsx) {
+/* BETA.3a/v4: single-token packed dp4a GEMV (decode). Quantize x->int8 (dqx/dsx
+ * scratch), dp4a against the packed Q8 (1 B/weight) or Q4 (0.5 B/weight, nibbles
+ * unpacked in-ALU) codes — no f32 scratch materialization. `prec` is the arena
+ * precision (8 or 4) the caller resolved via sp_arena_precision; uniform per arena
+ * for dense qwen3. Returns 1 if it TOOK the packed path, 0 if it declined (caller
+ * falls back to gemm_w dequant). */
+static int gemv_w_packed(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
+                         signed char *dqx, float *dsx) {
     if (W->f32) return 0;                                 /* not packed */
+    const int prec = W->prec;                             /* per-TENSOR precision (uniform rows) */
+    unsigned blocks = ((unsigned)W->out + 7u) / 8u;       /* 8 warps (rows) per block */
+    if (prec == 4) {                                      /* Q4: int4 load = 32 weights */
+        if ((W->in & 31) != 0) return 0;
+        int npad = (W->in + 31) & ~31;
+        k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
+        k_gemv_q4_dp4a_v2<<<blocks, 256, 0, st>>>(
+            W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
+        return 1;
+    }
+    /* prec == 8 (Q8) */
     if ((W->in & 15) == 0) {                              /* tuned: warp/row + int4 loads */
         int npad = (W->in + 15) & ~15;
         k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
-        unsigned blocks = ((unsigned)W->out + 7u) / 8u;   /* 8 warps (rows) per block */
         k_gemv_q8_dp4a_v2<<<blocks, 256, 0, st>>>(
             (const signed char *)W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
         return 1;
@@ -1044,11 +1101,12 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     cublasHandle_t cb = g_w.cublas;
     cudaStream_t st = g_w.stream;
 
-    /* BETA.3a: fused INT8 dp4a GEMV for the decode matmuls, ONLY when the arena is
-     * Q8 (sp_arena_precision==8) and the env is set. Q4 rows are nibble-packed and
-     * would misread as int8, so the precision gate is load-bearing, not cosmetic. */
+    /* BETA.3a/v4: fused packed dp4a GEMV for the decode matmuls when the env is set
+     * and the model carries a packed arena. The arena PRECISION (8 or 4) selects the
+     * kernel (Q8 1 B/weight, or Q4 0.5 B/weight with in-ALU nibble unpack) — passed
+     * to gemv_w_packed so Q4 nibbles are never misread as int8. */
     const char *i8e = getenv("SP_CUDA_DECODE_INT8");
-    const int use_int8 = (i8e && i8e[0]=='1') && m->arena && sp_arena_precision(m->arena) == 8;
+    const int use_int8 = (i8e && i8e[0]=='1') && m->arena;   /* per-TENSOR W->prec selects the kernel */
 
     float *dKc=NULL,*dVc=NULL,*dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
           *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL,*dsx=NULL;
@@ -1063,14 +1121,14 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     DA(dx,E); DA(dnx,E); DA(dq,QD); DA(dk,KVD); DA(dv,KVD); DA(dao,QD); DA(dap,E);
     DA(dg,FF); DA(dup,FF); DA(ddn,E); DA(dlog,V);
     if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
-    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %16 */
+    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %32 (Q4 chunk) */
         int maxin = E; if (QD>maxin) maxin=QD; if (FF>maxin) maxin=FF;
-        if (cudaMalloc(&dqx,(size_t)((maxin+15)&~15))!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
+        if (cudaMalloc(&dqx,(size_t)((maxin+31)&~31))!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
         DA(dsx,1);
     }
-    /* MM(W,X,Y): the decode matmul — int8 dp4a GEMV when enabled+packed-Q8, else
+    /* MM(W,X,Y): the decode matmul — packed dp4a GEMV (Q8 or Q4) when enabled, else
      * the cuBLAS dequant path. Both capture cleanly into the CUDA graph. */
-    #define MM(W,X,Y) do{ if(!(use_int8 && gemv_w_int8(st,(W),(X),(Y),dqx,dsx))){ if(gemm_w(cb,st,(W),(X),(Y),1,dscr)) goto done; } }while(0)
+    #define MM(W,X,Y) do{ if(!(use_int8 && gemv_w_packed(st,(W),(X),(Y),dqx,dsx))){ if(gemm_w(cb,st,(W),(X),(Y),1,dscr)) goto done; } }while(0)
     if (cudaMalloc(&dseq,(size_t)P*sizeof(int))!=cudaSuccess){sp_set_error("dseq OOM");goto done;}
     if (cudaMemcpyAsync(dseq,seq,(size_t)n_prompt*sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("prompt H2D");goto done;}
 
