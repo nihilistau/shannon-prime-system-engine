@@ -56,6 +56,8 @@ int  gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
                        int n_layers, int attn_only, float *out_x);
 int  gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
                          float *logits);
+int  gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
+                        int n_gen, int eos_id);
 void sp_cuda_model_release(const qwen3_model *m);
 
 /* Engine-symbol SHIM (the documented cross-seam alias pattern, cf.
@@ -363,6 +365,46 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
             }
         }
         free(cl); free(gl);
+    }
+
+    /* ════ E_G4_CU_DEC (ETA.5a): THE DECODE GATE — autoregressive generation
+     * over the JAGGED shared-KV cache (per-owner widths, sharers read owners),
+     * per-step AltUp, windowed single-query attention, head + softcap + argmax.
+     * Gate: the CPU ORACLE prefill over the produced sequence must teacher-
+     * forced argmax-predict EVERY generated token (the proven decode pattern). ════ */
+    {
+        enum { NP = 4, NG = 12, PT = NP + NG };
+        int32_t dseq[PT]; const int32_t prompt[NP] = { 2, 10, 100, 1000 };
+        const int V = (int)m->cfg.n_vocab;
+        for (int i = 0; i < NP; i++) dseq[i] = prompt[i];
+        int dn = gemma4_decode_cuda(m, dseq, NP, NG, /*eos=*/-1);
+        if (dn < 0) fprintf(stderr, "    decode: %s\n", sp_last_error());
+        SP_CHECK(dn == PT, "gemma4 CUDA decode produced full length");
+        if (dn == PT) {
+            float *tl = (float *)malloc((size_t)PT * V * sizeof(float));
+            SP_CHECK(tl != NULL, "teacher-forced logits buffer");
+            if (tl) {
+                int orc = gemma4_forward(m, dseq, PT, tl);
+                SP_CHECK(orc == 0, "oracle prefill over decoded sequence");
+                if (orc == 0) {
+                    int ok = 1, firstbad = -1;
+                    for (int pos = NP - 1; pos < PT - 1 && ok; pos++) {
+                        const float *row = tl + (size_t)pos * V;
+                        int am = 0;
+                        for (int i = 1; i < V; i++) if (row[i] > row[am]) am = i;
+                        if (am != dseq[pos + 1]) { ok = 0; firstbad = pos; }
+                    }
+                    fprintf(stderr, "    [g4-cuda-DEC] %d gen tokens; oracle teacher-forced match: %s",
+                            NG, ok ? "ALL" : "FAIL");
+                    if (!ok) fprintf(stderr, " (first bad pos %d)", firstbad);
+                    fprintf(stderr, "; seq:");
+                    for (int i = 0; i < PT; i++) fprintf(stderr, " %d", dseq[i]);
+                    fprintf(stderr, "\n");
+                    SP_CHECK(ok, "DECODE: every generated token == oracle argmax (jagged KV + AltUp per step)");
+                }
+                free(tl);
+            }
+        }
     }
 
     sp_cuda_model_release(m);

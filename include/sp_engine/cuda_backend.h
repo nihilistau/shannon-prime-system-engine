@@ -77,6 +77,15 @@ int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
 int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
                         float *logits);
 
+/* ETA.5a: Gemma4 autoregressive CUDA decode (host-driven, oracle arithmetic).
+ * Jagged per-OWNER KV cache (global 512-wide / SWA 256-wide rows; sharers
+ * allocate nothing), per-step AltUp, windowed single-query attention, tied head
+ * + softcap, greedy argmax. seq[0..n_prompt) in, continuations written into
+ * seq[n_prompt..n_prompt+n_gen). Returns final length or -1. Gate E_G4_CU_DEC:
+ * the oracle prefill must teacher-forced-predict every generated token. */
+int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
+                       int n_gen, int eos_id);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);
