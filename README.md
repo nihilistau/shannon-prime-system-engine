@@ -443,6 +443,40 @@ now runs on the GPU, gated **38/38** against the bit-faithful CPU oracle
   `gemma4_cuda_probe` stages: embed / attn_norm / q / attention / pre-norm /
   residual), which locked L0 (SWA), L4 (the first global layer) and L15 (the
   first shared-KV sharer) before the live run — which then lit green first try.
+
+#### 5.2.1c Stage Eta ETA.5b — the velocity pass + THE 12B SHOOTOUT (2026-06-07)
+
+**SP 34.2 tok/s vs llama.cpp-CUDA 31.29 ± 0.20 (+9.3%)** — Gemma-4-12B,
+RTX 2060, tg256, SM pinned (GeForce `-lmc` unsupported; memory free-ran for
+both engines). The SP artifact is a *reducing* 5.56 GB `.sp-model` (source
+GGUF 6.62 GB). **Anchor: not citable until the wikitext-PPL gate clears the
+Q6_K→Q4 squeeze** (release-blocking for paper 06).
+
+- **E2B ladder (suite 44/44):** oracle lift 10.3 → +graph 10.6 (256/256 EXACT)
+  → +dp4a 62.3 (6.05×) → **graph+dp4a 75.7 tok/s (7.35×)**, 256/256 top-1.
+  Levers: device-side packed **PLE gather** (`k_ple_gather_at`, TRUE-division
+  host-mirror arithmetic — byte-match gated), **packed tied head**
+  (`embd_packed`, 1 B/weight on the largest decode matmul), **jagged-topology
+  CUDA-graph capture** (per-owner cache pointers fixed per layer; position via
+  `*dpos`). Envs: `SP_CUDA_DECODE_GRAPH=1`, `SP_CUDA_DECODE_INT8=1`.
+- **The dense 12B is NOT the E-series:** PL=0 (no AltUp/PLE) with
+  `layer_output_scale` + `rope_freqs` still present (now keyed on tensor
+  PRESENCE); `shared_kv_layers=0`; per-layer `head_count_kv` ARRAY (8 SWA /
+  1 global, period 6); **V-less global layers** — `attn_v` absent, V = the RAW
+  K projection, weightless-normed, never roped (llama.cpp
+  "use_alternative_attention", read reference-first). f32 embd is skipped past
+  a 2 GB budget (12B: ~4 GB) → `k_embed_packed_at` gather + dp4a tied head.
+- **The L11 kill (per-block activation quant):** per-VECTOR int8 activation
+  quant collapsed on the 12B's outlier-heavy activations (L11's TRAINED
+  out_scale is 0.005 — the model flags itself): oracle-rank 205596. The LIFT
+  discriminator (same path, exact arithmetic → 1.5e-4 floors everywhere)
+  proved the structure innocent. Fix: **per-16-block activation scales**
+  aligned exactly to the GEMVs' 128-bit loads (one f32 mul per block, zero
+  extra bus). Verdict: rank 2 at gap 0.31 — a measured top-2 near-tie. The
+  DEC gate prints oracle-rank + logit gap on any flip.
+- **Diagnostic toolkit (env-gated, standing equipment):** `SP_G4_FASTPROBE`,
+  `SP_G4_DEC_PROBE=<pos>`, `SP_G4_DEC_DUMP=<file>`, `SP_G4_LIFT`,
+  `SP_G4_NO_OSCALE` — the five-strike bisection suite that localized the bug.
   Links the CORE inference lane (`sp_session`) + `sp_engine_cuda` in one binary
   (one `as_f32 -> sp_as_f32` alias shim; everything else cross-resolves).
 
