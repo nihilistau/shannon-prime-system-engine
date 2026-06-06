@@ -1316,6 +1316,15 @@ __global__ void k_kv_store(float *Kc, float *Vc, const float *dk, const float *d
                            const int *dpos, size_t layer_off, int KVD);
 __global__ void k_argmax_at(const float *logits, int n, int *dseq, const int *dpos);
 __global__ void k_incr_pos(int *dpos);
+__global__ void k_nll(const float *lg, int n, const int *dtarget, double *nll);  /* ETA.5b PPL */
+
+/* SP_G4_SCORE result handoff (eval lane; single-threaded use). */
+static double g_g4_score_nll = 0.0;
+static long   g_g4_score_cnt = 0;
+extern "C" void gemma4_score_result(double *nll, long *cnt) {
+    if (nll) *nll = g_g4_score_nll;
+    if (cnt) *cnt = g_g4_score_cnt;
+}
 
 /* ═══════════ ETA.5b: device-fed Gemma4 decode kernels ═══════════
  * Token identity and position live in VRAM (dseq[*dpos]); these kernels read
@@ -1527,6 +1536,19 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * already exonerates it — this only aligns the two references. */
     const char *noso = getenv("SP_G4_NO_OSCALE");
     const int skip_oscale = (noso && noso[0] == '1');
+    /* SP_G4_SCORE=<first> (ETA.5b PPL gate): TEACHER-FORCED scoring mode — no
+     * argmax write (dseq keeps the given tokens); at every pos with pos+1 >=
+     * first, run the head and accumulate -log softmax(seq[pos+1]) in f64 on
+     * device. Results via gemma4_score_result(). Call with n_gen=0. Forces the
+     * per-step path. */
+    const char *sce = getenv("SP_G4_SCORE");
+    const int score_first = sce ? atoi(sce) : -1;
+    double *dnll = NULL;
+    if (score_first >= 0) {
+        if (cudaMalloc(&dnll, sizeof(double)) != cudaSuccess) { sp_set_error("g4 dnll OOM"); goto done; }
+        cudaMemsetAsync(dnll, 0, sizeof(double), st);
+        g_g4_score_nll = 0.0; g_g4_score_cnt = 0;
+    }
     dKc = (float **)calloc((size_t)NL, sizeof(float *));
     dVc = (float **)calloc((size_t)NL, sizeof(float *));
     if (!dKc || !dVc) { sp_set_error("g4 decode host OOM"); goto done; }
@@ -1899,7 +1921,21 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             }
         }
 
-        if (gen_here && headless_probe) {
+        if (score_first >= 0) {
+            /* TEACHER-FORCED scoring: head + NLL at scored positions; dseq is
+             * never overwritten (the given tokens are the targets). */
+            if (pos + 1 >= score_first) {
+                k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
+                if (g_w.head.f32 || g_w.head.codes) { MMD(&g_w.head, dnx, dlog); }
+                else if (use_int8 && g_w.embd_packed.codes &&
+                         gemv_w_packed(st, &g_w.embd_packed, dnx, dlog, dqx, dsx)) { /* dp4a head */ }
+                else { if (gemm(cb, g_w.embd, dnx, dlog, 1, E, V)) goto done; }
+                if (softcap > 0.0f)
+                    k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(dlog, (size_t)V, softcap);
+                k_nll<<<1, 256, 0, st>>>(dlog, V, dseq + pos + 1, dnll);
+                g_g4_score_cnt++;
+            }
+        } else if (gen_here && headless_probe) {
             /* diagnostic-only: no head available knobs-off on 12B-class — emit
              * token 0; the per-layer dumps above are the run's product. */
             cudaMemsetAsync(dseq + pos + 1, 0, sizeof(int), st);
@@ -1931,6 +1967,10 @@ download:
         if (pf) { fwrite(probe_xs, sizeof(float), (size_t)NL * E, pf); fclose(pf); }
         fprintf(stderr, "    [g4-dec-probe] dumped %d x-vectors (E=%d) to %s\n", NL, E, pdump);
     }
+    if (dnll) {       /* SP_G4_SCORE: pull the accumulated NLL */
+        cudaStreamSynchronize(st);
+        cudaMemcpy(&g_g4_score_nll, dnll, sizeof(double), cudaMemcpyDeviceToHost);
+    }
     /* single sequence download at the end */
     if (cudaMemcpyAsync(seq, dseq, (size_t)n*sizeof(int), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
         sp_set_error("g4 seq D2H"); goto done; }
@@ -1948,6 +1988,7 @@ done:
     free(hple);
     if (dKc) { for (int L = 0; L < NL; L++) if (dKc[L]) cudaFree(dKc[L]); free(dKc); }
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
+    if (dnll) cudaFree(dnll);
     free(probe_xs);
     #undef MMD
     return rc;
@@ -2367,6 +2408,33 @@ __global__ void k_argmax_at(const float *logits, int n, int *dseq, const int *dp
 
 /* Advance the device position by one (end of each graph replay). */
 __global__ void k_incr_pos(int *dpos) { if (threadIdx.x == 0) (*dpos)++; }
+
+/* ETA.5b PPL gate: -log softmax(logits)[*dtarget] accumulated into *nll (f64,
+ * single block — calls are stream-sequential, no atomics needed). Two-pass
+ * numerically-stable log-softmax over the full vocab, f64 accumulation. */
+__global__ void k_nll(const float *lg, int n, const int *dtarget, double *nll) {
+    __shared__ float  smax[256];
+    __shared__ double ssum[256];
+    float m = -3.4e38f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) if (lg[i] > m) m = lg[i];
+    smax[threadIdx.x] = m; __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o && smax[threadIdx.x + o] > smax[threadIdx.x]) smax[threadIdx.x] = smax[threadIdx.x + o];
+        __syncthreads();
+    }
+    const float mx = smax[0];
+    double s = 0.0;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) s += exp((double)lg[i] - (double)mx);
+    ssum[threadIdx.x] = s; __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) ssum[threadIdx.x] += ssum[threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        double logp = (double)lg[*dtarget] - (double)mx - log(ssum[0]);
+        *nll += -logp;
+    }
+}
 
 /* Autoregressive KV-cache decode on the GPU. seq[0..n_prompt) is the prompt;
  * writes greedy-argmax continuations into seq[n_prompt .. n_prompt+n_gen).

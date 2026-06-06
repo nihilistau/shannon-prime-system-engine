@@ -73,6 +73,7 @@ endif()
 
 # ── Tools (Phase 2-FMT: the sp_transcode GGUF -> .sp-model CLI) ──────────────
 add_subdirectory(tools/sp_transcode)
+add_subdirectory(tools/sp_tok_dump)
 
 if(SP_ENGINE_BUILD_TESTS)
     enable_testing()
