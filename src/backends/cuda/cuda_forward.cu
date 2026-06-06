@@ -355,6 +355,63 @@ __global__ void k_dequant_arena(const unsigned char *codes, const unsigned long 
     out[(size_t)j * cols + i] = (float)code * inv;
 }
 
+/* ═══════════════ BETA.3a: fused INT8 GEMV for decode (dp4a) ═══════════════
+ * The decode path is M=1 (single-token GEMV), so the m8n8k16 tensor-core tile
+ * (ptx_mma.cuh) can't help — a 1-row query fills 1/8 of the MMA_M tile. The
+ * Turing lever for a GEMV is __dp4a (4-wide INT8 dot -> INT32, native sm_75):
+ * read the 1-byte Q8 arena codes STRAIGHT from VRAM (no f32 scratch), quantize
+ * the activation to int8, accumulate in int32, scale back. The current
+ * dequant-then-SGEMM reads the code (1B) then writes (4B) + rereads (4B) an f32
+ * scratch = ~9 B/weight; this reads 1 B/weight. That byte ratio IS the win the
+ * anchored f32==Q8 result showed was being thrown away. */
+
+/* dynamic per-vector int8 quant of the activation: sx = maxabs/127,
+ * qx[i] = round(x[i]/sx) clamped [-127,127]. qx padded to a multiple of 4
+ * (zero tail) so the GEMV can int-load 4 codes per dp4a. One block. */
+__global__ void k_quant_act_int8(const float *x, int n, int npad,
+                                 signed char *qx, float *sx) {
+    __shared__ float sm[256];
+    float m = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) { float a = fabsf(x[i]); if (a > m) m = a; }
+    sm[threadIdx.x] = m; __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o && sm[threadIdx.x + o] > sm[threadIdx.x]) sm[threadIdx.x] = sm[threadIdx.x + o];
+        __syncthreads();
+    }
+    float scale = sm[0] > 0.0f ? sm[0] * (1.0f / 127.0f) : 1.0f;
+    if (threadIdx.x == 0) *sx = scale;
+    float inv = 1.0f / scale;
+    for (int i = threadIdx.x; i < npad; i += blockDim.x) {
+        float v = (i < n) ? x[i] * inv : 0.0f;
+        int q = __float2int_rn(v); if (q > 127) q = 127; if (q < -127) q = -127;
+        qx[i] = (signed char)q;
+    }
+}
+
+/* fused INT8 GEMV: y[j] = (row_scale[j]/127) * sx * Σ_i code[j][i]·qx[i], the inner
+ * INT8·INT8->INT32 dot via __dp4a. One block per output row; `in` must be a
+ * multiple of 4 (qwen3 dims are). Q8 rows only (row_prec==8). codes+row_off[j] is
+ * 4-aligned (cudaMalloc base + j*in, in%4==0), so the int-cast load is a coalesced
+ * 128-byte warp transaction reading 4 weights/thread. */
+__global__ void k_gemv_q8_dp4a(const signed char *codes, const unsigned long long *row_off,
+                               const float *row_scale, int in, const signed char *qx,
+                               const float *sx, float *y, int out) {
+    int j = blockIdx.x;
+    if (j >= out) return;
+    const int *wrow = (const int *)(codes + row_off[j]);   /* in/4 packed-int8 words */
+    const int *qxi  = (const int *)qx;
+    int n4 = in >> 2, acc = 0;
+    for (int k = threadIdx.x; k < n4; k += blockDim.x)
+        acc = __dp4a(wrow[k], qxi[k], acc);
+    __shared__ int sm[256];
+    sm[threadIdx.x] = acc; __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sm[threadIdx.x] += sm[threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[j] = (float)sm[0] * (row_scale[j] * (1.0f / 127.0f)) * (*sx);
+}
+
 /* ════════════════════════ device weight cache ════════════════════════ */
 
 /* one weight matrix on device: either plain f32 (f32 != NULL) or packed arena. */
@@ -572,6 +629,20 @@ static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
     cudaError_t le = cudaGetLastError();
     if (le != cudaSuccess) return fail_cuda(le, "k_dequant_arena launch");
     return gemm(h, scratch, dX, dY, n_tok, W->in, W->out);
+}
+
+/* BETA.3a: single-token INT8 GEMV (decode). Quantize x->int8 (dqx/dsx scratch),
+ * dp4a against the packed Q8 codes. Returns 1 if it TOOK the int8 path, 0 if it
+ * declined (caller falls back to gemm_w). Only for packed Q8 weights with in%4==0;
+ * the caller must already have verified the arena precision is 8. */
+static int gemv_w_int8(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
+                       signed char *dqx, float *dsx) {
+    if (W->f32 || (W->in & 3) != 0) return 0;            /* not packed, or in not %4 */
+    int npad = (W->in + 3) & ~3;
+    k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
+    k_gemv_q8_dp4a<<<(unsigned)W->out, 256, 0, st>>>(
+        (const signed char *)W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
+    return 1;
 }
 
 /* ════════════════════════ forward ════════════════════════ */
@@ -935,8 +1006,15 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     cublasHandle_t cb = g_w.cublas;
     cudaStream_t st = g_w.stream;
 
+    /* BETA.3a: fused INT8 dp4a GEMV for the decode matmuls, ONLY when the arena is
+     * Q8 (sp_arena_precision==8) and the env is set. Q4 rows are nibble-packed and
+     * would misread as int8, so the precision gate is load-bearing, not cosmetic. */
+    const char *i8e = getenv("SP_CUDA_DECODE_INT8");
+    const int use_int8 = (i8e && i8e[0]=='1') && m->arena && sp_arena_precision(m->arena) == 8;
+
     float *dKc=NULL,*dVc=NULL,*dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
-          *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL;
+          *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL,*dsx=NULL;
+    signed char *dqx=NULL;     /* int8 activation-quant scratch (max in-dim, padded) */
     int *dseq=NULL;            /* the whole token sequence, RESIDENT in VRAM */
     int *dpos=NULL;            /* BETA.2: device position scalar for graph replay */
     cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
@@ -947,6 +1025,14 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     DA(dx,E); DA(dnx,E); DA(dq,QD); DA(dk,KVD); DA(dv,KVD); DA(dao,QD); DA(dap,E);
     DA(dg,FF); DA(dup,FF); DA(ddn,E); DA(dlog,V);
     if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
+    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %4 */
+        int maxin = E; if (QD>maxin) maxin=QD; if (FF>maxin) maxin=FF;
+        if (cudaMalloc(&dqx,(size_t)((maxin+3)&~3))!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
+        DA(dsx,1);
+    }
+    /* MM(W,X,Y): the decode matmul — int8 dp4a GEMV when enabled+packed-Q8, else
+     * the cuBLAS dequant path. Both capture cleanly into the CUDA graph. */
+    #define MM(W,X,Y) do{ if(!(use_int8 && gemv_w_int8(st,(W),(X),(Y),dqx,dsx))){ if(gemm_w(cb,st,(W),(X),(Y),1,dscr)) goto done; } }while(0)
     if (cudaMalloc(&dseq,(size_t)P*sizeof(int))!=cudaSuccess){sp_set_error("dseq OOM");goto done;}
     if (cudaMemcpyAsync(dseq,seq,(size_t)n_prompt*sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("prompt H2D");goto done;}
 
@@ -967,9 +1053,9 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
                 { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dseq+pos,1,E,1.0f,dx); }
                 for (int L=0; L<NL; L++) {
                     k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
-                    if (gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr)) goto done;
-                    if (gemm_w(cb,st,&g_w.Wk[L],dnx,dk,1,dscr)) goto done;
-                    if (gemm_w(cb,st,&g_w.Wv[L],dnx,dv,1,dscr)) goto done;
+                    MM(&g_w.Wq[L],dnx,dq);
+                    MM(&g_w.Wk[L],dnx,dk);
+                    MM(&g_w.Wv[L],dnx,dv);
                     k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
                     k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
                     k_rope_at<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, pos);
@@ -979,13 +1065,13 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
                     cudaMemcpyAsync(dVc+koff, dv, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
                     const int ctx=pos+1; int bd=HD>ctx?HD:ctx; if(bd>1024)bd=1024;
                     k_attn_decode<<<NH,bd,(size_t)ctx*sizeof(float),st>>>(dq,dKc,dVc,ctx,KVD,HD,group,ascale,loff,dao);
-                    if (gemm_w(cb,st,&g_w.Wo[L],dao,dap,1,dscr)) goto done;
+                    MM(&g_w.Wo[L],dao,dap);
                     k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
                     k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
-                    if (gemm_w(cb,st,&g_w.Wgate[L],dnx,dg,1,dscr)) goto done;
-                    if (gemm_w(cb,st,&g_w.Wup[L],dnx,dup,1,dscr)) goto done;
+                    MM(&g_w.Wgate[L],dnx,dg);
+                    MM(&g_w.Wup[L],dnx,dup);
                     k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
-                    if (gemm_w(cb,st,&g_w.Wdown[L],dg,ddn,1,dscr)) goto done;
+                    MM(&g_w.Wdown[L],dg,ddn);
                     k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
                 }
             }
@@ -998,9 +1084,9 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
             for (int L=0; L<NL; L++) {
                 const size_t loff=(size_t)L*P*KVD;
                 k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
-                gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr);
-                gemm_w(cb,st,&g_w.Wk[L],dnx,dk,1,dscr);
-                gemm_w(cb,st,&g_w.Wv[L],dnx,dv,1,dscr);
+                MM(&g_w.Wq[L],dnx,dq);
+                MM(&g_w.Wk[L],dnx,dk);
+                MM(&g_w.Wv[L],dnx,dv);
                 k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
                 k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
                 k_rope_dyn<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, dpos);
@@ -1008,17 +1094,17 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
                 k_kv_store<<<(unsigned)((KVD+255)/256),256,0,st>>>(dKc,dVc,dk,dv,dpos,loff,KVD);
                 int bd=HD>256?HD:256; if(bd>1024)bd=1024;
                 k_attn_decode_dyn<<<NH,bd,attn_shm,st>>>(dq,dKc,dVc,dpos,KVD,HD,group,ascale,loff,dao);
-                gemm_w(cb,st,&g_w.Wo[L],dao,dap,1,dscr);
+                MM(&g_w.Wo[L],dao,dap);
                 k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
                 k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
-                gemm_w(cb,st,&g_w.Wgate[L],dnx,dg,1,dscr);
-                gemm_w(cb,st,&g_w.Wup[L],dnx,dup,1,dscr);
+                MM(&g_w.Wgate[L],dnx,dg);
+                MM(&g_w.Wup[L],dnx,dup);
                 k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
-                gemm_w(cb,st,&g_w.Wdown[L],dg,ddn,1,dscr);
+                MM(&g_w.Wdown[L],dg,ddn);
                 k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
             }
             k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
-            gemm_w(cb,st,&g_w.head,dnx,dlog,1,dscr);
+            MM(&g_w.head,dnx,dlog);
             k_argmax_at<<<1,256,0,st>>>(dlog, V, dseq, dpos);   /* writes dseq[*dpos+1] */
             k_incr_pos<<<1,1,0,st>>>(dpos);
             if (cudaStreamEndCapture(st,&cgraph)!=cudaSuccess){sp_set_error("end capture");goto done;}
@@ -1044,9 +1130,9 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
         { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dseq+pos,1,E,1.0f,dx); }
         for (int L=0; L<NL; L++) {
             k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
-            if (gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr)) goto done;
-            if (gemm_w(cb,st,&g_w.Wk[L],dnx,dk,1,dscr)) goto done;
-            if (gemm_w(cb,st,&g_w.Wv[L],dnx,dv,1,dscr)) goto done;
+            MM(&g_w.Wq[L],dnx,dq);
+            MM(&g_w.Wk[L],dnx,dk);
+            MM(&g_w.Wv[L],dnx,dv);
             k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
             k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
             k_rope_at<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, pos);
@@ -1058,18 +1144,18 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
             const int ctx=pos+1;
             int bd=HD>ctx?HD:ctx; if(bd>1024)bd=1024;
             k_attn_decode<<<NH,bd,(size_t)ctx*sizeof(float),st>>>(dq,dKc,dVc,ctx,KVD,HD,group,ascale,loff,dao);
-            if (gemm_w(cb,st,&g_w.Wo[L],dao,dap,1,dscr)) goto done;
+            MM(&g_w.Wo[L],dao,dap);
             k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
             k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
-            if (gemm_w(cb,st,&g_w.Wgate[L],dnx,dg,1,dscr)) goto done;
-            if (gemm_w(cb,st,&g_w.Wup[L],dnx,dup,1,dscr)) goto done;
+            MM(&g_w.Wgate[L],dnx,dg);
+            MM(&g_w.Wup[L],dnx,dup);
             k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
-            if (gemm_w(cb,st,&g_w.Wdown[L],dg,ddn,1,dscr)) goto done;
+            MM(&g_w.Wdown[L],dg,ddn);
             k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
         }
         if (pos < n_prompt-1) continue;            /* still ingesting the prompt */
         k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
-        if (gemm_w(cb,st,&g_w.head,dnx,dlog,1,dscr)) goto done;
+        MM(&g_w.head,dnx,dlog);
         /* DEVICE argmax → write the next token straight into dseq[pos+1]. The
          * GPU feeds itself: no logits D2H, no per-step stream sync (eos=-1). */
         k_argmax<<<1,256,0,st>>>(dlog, V, dseq+pos+1);
@@ -1092,9 +1178,10 @@ done:
     if(dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
     if(dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
     if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dseq)cudaFree(dseq);
-    if(dpos)cudaFree(dpos);
+    if(dpos)cudaFree(dpos); if(dqx)cudaFree(dqx); if(dsx)cudaFree(dsx);
     if(cexec)cudaGraphExecDestroy(cexec); if(cgraph)cudaGraphDestroy(cgraph);
     #undef DA
+    #undef MM
     return rc;
 }
 

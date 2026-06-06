@@ -50,6 +50,14 @@ static void set_arena_q8(int on) {
 #endif
 }
 
+static void set_int8(int on) {
+#if defined(_WIN32)
+    _putenv_s("SP_CUDA_DECODE_INT8", on ? "1" : "0");
+#else
+    if (on) setenv("SP_CUDA_DECODE_INT8", "1", 1); else unsetenv("SP_CUDA_DECODE_INT8");
+#endif
+}
+
 /* Run the GPU decode (knobs as set), return wall-clock seconds via *dt. */
 static int decode_run(qwen3_model *m, const int32_t *prompt, int n_prompt,
                       int n_gen, int32_t *out, double *dt) {
@@ -120,8 +128,24 @@ static void measure_prec(qwen3_model *m, const char *label, const int32_t *promp
 
     *tps_ref = (double)n_gen / dt_ref;
     *tps_g   = (double)n_gen / dt_g;
-    fprintf(stderr, "    [%s] per-step %.2f | graph %.2f tok/s (%.2fx); seq:",
-            label, *tps_ref, *tps_g, *tps_g / *tps_ref);
+
+    /* BETA.3a: INT8 dp4a GEMV (graph on). On f32 (no arena) the engine declines and
+     * this is a no-op == graph. On Q8/.sp-model it engages: read 1-byte codes direct,
+     * no f32 scratch. Gate = top-1 AGREEMENT vs the (non-int8) Q8 graph seq — int8
+     * activation quant is lossy so not byte-exact, but argmax should track tightly. */
+    set_graph(1); set_int8(1);
+    { int32_t w[600]; double wd; decode_run(m, prompt, n_prompt, n_gen, w, &wd); }  /* warm int8 */
+    int32_t seq_i8[600]; double dt_i8 = 0.0;
+    int n_i8 = decode_run(m, prompt, n_prompt, n_gen, seq_i8, &dt_i8);
+    set_int8(0);
+    double tps_i8 = (n_i8 > 0) ? (double)n_gen / dt_i8 : 0.0;
+    int agree = 0; for (int i = n_prompt; i < P; i++) if (seq_i8[i] == seq_g[i]) agree++;
+    double frac = (double)agree / (double)n_gen;
+
+    fprintf(stderr, "    [%s] per-step %.2f | graph %.2f (%.2fx) | int8 %.2f tok/s (%.2fx vs graph); "
+            "int8 top-1 agree %d/%d (%.0f%%); seq:",
+            label, *tps_ref, *tps_g, *tps_g / *tps_ref, tps_i8, tps_i8 / *tps_g,
+            agree, n_gen, frac * 100.0);
     for (int i = 0; i < P; i++) fprintf(stderr, " %d", seq_g[i]);
     fprintf(stderr, "\n");
 }
