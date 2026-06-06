@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>   /* clock(): warm wall-time telemetry in the 5b gate */
 
 #ifndef SP_GEMMA4_SPMODEL_DEF
 #define SP_GEMMA4_SPMODEL_DEF "D:/F/shannon-prime-repos/models/gemma4-e2b.sp-model"
@@ -405,6 +406,57 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
                 free(tl);
             }
         }
+    }
+
+    /* ════ E_G4_CU_DEC_5B (ETA.5b): THE VELOCITY GATES — graph capture + dp4a.
+     * Four decode runs over the same prompt, 256-token window:
+     *   ref   : knobs-off (the oracle-gated lift path above)
+     *   graph : SP_CUDA_DECODE_GRAPH=1  — SAME arithmetic, position via *dpos
+     *           -> gate = EXACT sequence match vs ref
+     *   int8  : SP_CUDA_DECODE_INT8=1   — dp4a packed GEMV (activation int8
+     *           quant is top-1-lossless, NOT byte-exact)
+     *           -> gate currency = TOP-1 sequence agreement vs ref (Beta-style)
+     *   both  : GRAPH=1 + INT8=1        — the velocity configuration
+     *           -> top-1 agreement vs ref
+     * Wall times printed are warm within-run ratios (weights resident; clocks
+     * NOT pinned here — binding tok/s numbers come from the bench methodology;
+     * this is a correctness gate with a velocity telemetry line). ════ */
+    {
+        enum { NP = 4, NG = 256, PT = NP + NG };
+        static int32_t ref[PT], gsq[PT], q8[PT], bth[PT];
+        const int32_t prompt[NP] = { 2, 10, 100, 1000 };
+        clock_t c0; double tref, tgr, ti8, tbo;
+        int dn;
+
+        #define G4DEC(buf, tvar) do { \
+            for (int i = 0; i < NP; i++) (buf)[i] = prompt[i]; \
+            c0 = clock(); dn = gemma4_decode_cuda(m, (buf), NP, NG, -1); \
+            (tvar) = (double)(clock() - c0) / CLOCKS_PER_SEC; \
+            if (dn < 0) fprintf(stderr, "    decode: %s\n", sp_last_error()); \
+            SP_CHECK(dn == PT, "5b decode produced full length"); } while (0)
+
+        G4DEC(ref, tref);                                   /* knobs off (warm) */
+        _putenv("SP_CUDA_DECODE_GRAPH=1");  G4DEC(gsq, tgr);
+        _putenv("SP_CUDA_DECODE_GRAPH=");
+        _putenv("SP_CUDA_DECODE_INT8=1");   G4DEC(q8, ti8);
+        _putenv("SP_CUDA_DECODE_GRAPH=1");  G4DEC(bth, tbo);
+        _putenv("SP_CUDA_DECODE_GRAPH=");   _putenv("SP_CUDA_DECODE_INT8=");
+        #undef G4DEC
+
+        int eq_g = 0, ag_i = 0, ag_b = 0;
+        for (int i = NP; i < PT; i++) {
+            if (gsq[i] == ref[i]) eq_g++;
+            if (q8[i]  == ref[i]) ag_i++;
+            if (bth[i] == ref[i]) ag_b++;
+        }
+        fprintf(stderr, "    [g4-cuda-5B] %d-tok window: graph %d/%d exact | int8 %d/%d top-1 | "
+                "graph+int8 %d/%d top-1\n", NG, eq_g, NG, ag_i, NG, ag_b, NG);
+        fprintf(stderr, "    [g4-cuda-5B] wall (warm, unpinned): ref %.2fs (%.1f tok/s) | graph %.2fs (%.1f) | "
+                "int8 %.2fs (%.1f) | graph+int8 %.2fs (%.1f)\n",
+                tref, NG/tref, tgr, NG/tgr, ti8, NG/ti8, tbo, NG/tbo);
+        SP_CHECK(eq_g == NG, "GRAPH decode: EXACT sequence match vs knobs-off (same arithmetic)");
+        SP_CHECK(ag_i == NG, "INT8 dp4a decode: top-1 agreement vs knobs-off (256-token window)");
+        SP_CHECK(ag_b == NG, "GRAPH+INT8 decode: top-1 agreement vs knobs-off (the velocity config)");
     }
 
     sp_cuda_model_release(m);
