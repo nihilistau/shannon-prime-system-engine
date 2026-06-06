@@ -58,8 +58,159 @@ static emit_tensor *el_push(emit_list *L) {
 }
 static void el_free(emit_list *L) { for (int i = 0; i < L->n; i++) free(L->t[i].bytes); free(L->t); }
 
+/* ── SAFETENSORS DIRECT (gemma4): weight bytes from the official bf16 checkpoint ──
+ * The 2026-06 gemma4 GGUF wave shipped corrupted tensor DATA while metadata,
+ * tokenizer and rope_freqs stayed clean (gold-forward conviction: safetensors
+ * 4.68 PPL vs GGUF 271-364 on identical arithmetic; see lattice
+ * tests/gemma4_gold + CONTRACT-SPEED RESOLUTION 2026-06-07). With --st, every
+ * gemma4-mapped tensor's VALUES come from model.safetensors; the GGUF supplies
+ * structure, KV metadata, tokenizer, and rope_freqs only. Mapped tensors that
+ * fail to resolve are a HARD ERROR — no silent fallback to poisoned bytes. */
+typedef struct {
+    char     name[128];          /* full HF name */
+    int      is_bf16;            /* dtype: BF16 or F32 */
+    uint64_t shape[4]; int n_shape;
+    uint64_t off, len;           /* relative to data base */
+} st_entry;
+typedef struct {
+    FILE *f;
+    uint64_t data_base;
+    st_entry *e; int n;
+} st_ctx;
+
+static st_ctx *st_open(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "[st] cannot open %s\n", path); return NULL; }
+    uint64_t hlen = 0;
+    if (fread(&hlen, 8, 1, f) != 1 || hlen == 0 || hlen > (64u << 20)) { fclose(f); return NULL; }
+    char *h = (char *)malloc((size_t)hlen + 1);
+    if (!h || fread(h, 1, (size_t)hlen, f) != hlen) { free(h); fclose(f); return NULL; }
+    h[hlen] = 0;
+    st_ctx *st = (st_ctx *)calloc(1, sizeof *st);
+    st->f = f; st->data_base = 8 + hlen;
+    int cap = 0;
+    /* linear scan of the header JSON: top-level "name":{...} pairs. HF tensor
+     * names contain no escapes/quotes, so quote-scanning is exact. */
+    const char *p = strchr(h, '{');
+    if (p) p++;
+    while (p && *p) {
+        while (*p && *p != '"') p++;
+        if (!*p) break;
+        const char *k0 = ++p;
+        while (*p && *p != '"') p++;
+        if (!*p) break;
+        size_t klen = (size_t)(p - k0);
+        p++;                                   /* past closing quote */
+        while (*p && *p != '{') p++;
+        if (!*p) break;
+        const char *v0 = p; int depth = 0;
+        do { if (*p == '{') depth++; else if (*p == '}') depth--; p++; } while (*p && depth);
+        if (klen >= 12 && strncmp(k0, "__metadata__", 12) == 0) continue;
+        if (st->n == cap) { cap = cap ? cap * 2 : 1024; st->e = (st_entry *)realloc(st->e, (size_t)cap * sizeof(st_entry)); }
+        st_entry *e = &st->e[st->n];
+        memset(e, 0, sizeof *e);
+        if (klen >= sizeof e->name) klen = sizeof e->name - 1;
+        memcpy(e->name, k0, klen);
+        char vb[512]; size_t vlen = (size_t)(p - v0);
+        if (vlen >= sizeof vb) vlen = sizeof vb - 1;
+        memcpy(vb, v0, vlen); vb[vlen] = 0;
+        e->is_bf16 = strstr(vb, "\"BF16\"") != NULL;
+        if (!e->is_bf16 && !strstr(vb, "\"F32\"")) continue;   /* skip exotic dtypes */
+        const char *sh = strstr(vb, "\"shape\"");
+        if (sh) { sh = strchr(sh, '[');
+            if (sh) { sh++;
+                while (e->n_shape < 4) {
+                    char *end; uint64_t v = strtoull(sh, &end, 10);
+                    if (end == sh) break;
+                    e->shape[e->n_shape++] = v; sh = end;
+                    while (*sh == ',' || *sh == ' ') sh++;
+                    if (*sh == ']') break;
+                } } }
+        const char *of = strstr(vb, "\"data_offsets\"");
+        if (!of) continue;
+        of = strchr(of, '[');
+        if (!of) continue;
+        char *end; uint64_t a = strtoull(of + 1, &end, 10);
+        while (*end == ',' || *end == ' ') end++;
+        uint64_t b = strtoull(end, NULL, 10);
+        e->off = a; e->len = b - a;
+        st->n++;
+    }
+    free(h);
+    fprintf(stderr, "[st] %s: %d tensors mapped\n", path, st->n);
+    return st;
+}
+static void st_close(st_ctx *st) { if (st) { fclose(st->f); free(st->e); free(st); } }
+
+/* gemma4 GGUF-name -> HF-name map. Returns 0 if unmapped (rope_freqs etc.). */
+static int st_map_name(const char *gguf_name, char *out, size_t outsz) {
+    unsigned L;
+    char sub[64];
+    if (strcmp(gguf_name, "token_embd.weight") == 0)
+        return snprintf(out, outsz, "model.language_model.embed_tokens.weight"), 1;
+    if (strcmp(gguf_name, "output_norm.weight") == 0)
+        return snprintf(out, outsz, "model.language_model.norm.weight"), 1;
+    if (sscanf(gguf_name, "blk.%u.%63s", &L, sub) != 2) return 0;
+    static const struct { const char *g, *h; } M[] = {
+        { "attn_norm.weight",            "input_layernorm.weight" },
+        { "attn_q.weight",               "self_attn.q_proj.weight" },
+        { "attn_k.weight",               "self_attn.k_proj.weight" },
+        { "attn_v.weight",               "self_attn.v_proj.weight" },
+        { "attn_output.weight",          "self_attn.o_proj.weight" },
+        { "attn_q_norm.weight",          "self_attn.q_norm.weight" },
+        { "attn_k_norm.weight",          "self_attn.k_norm.weight" },
+        { "post_attention_norm.weight",  "post_attention_layernorm.weight" },
+        { "ffn_norm.weight",             "pre_feedforward_layernorm.weight" },
+        { "ffn_gate.weight",             "mlp.gate_proj.weight" },
+        { "ffn_up.weight",               "mlp.up_proj.weight" },
+        { "ffn_down.weight",             "mlp.down_proj.weight" },
+        { "post_ffw_norm.weight",        "post_feedforward_layernorm.weight" },
+        { "layer_output_scale.weight",   "layer_scalar" },        /* NO .weight suffix */
+    };
+    for (size_t i = 0; i < sizeof M / sizeof M[0]; i++)
+        if (strcmp(sub, M[i].g) == 0)
+            return snprintf(out, outsz, "model.language_model.layers.%u.%s", L, M[i].h), 1;
+    return 0;
+}
+static const st_entry *st_find(const st_ctx *st, const char *gguf_name) {
+    char hf[160];
+    if (!st || !st_map_name(gguf_name, hf, sizeof hf)) return NULL;
+    for (int i = 0; i < st->n; i++)
+        if (strcmp(st->e[i].name, hf) == 0) return &st->e[i];
+    fprintf(stderr, "[st] FATAL: %s maps to %s but it is absent from the safetensors\n", gguf_name, hf);
+    return (const st_entry *)-1;                 /* sentinel: mapped-but-missing */
+}
+/* read elements [j*cols, (j+1)*cols) as f32 (bf16 widened or f32 verbatim) */
+static int st_read_row(const st_ctx *st, const st_entry *e, int j, int cols, float *dst) {
+    size_t esz = e->is_bf16 ? 2 : 4;
+    uint64_t off = st->data_base + e->off + (uint64_t)j * (uint64_t)cols * esz;
+#if defined(_WIN32)
+    if (_fseeki64(st->f, (long long)off, SEEK_SET)) return 1;
+#else
+    if (fseeko(st->f, (off_t)off, SEEK_SET)) return 1;
+#endif
+    if (e->is_bf16) {
+        uint16_t tmp[4096];
+        int done = 0;
+        while (done < cols) {
+            int chunk = cols - done; if (chunk > 4096) chunk = 4096;
+            if (fread(tmp, 2, (size_t)chunk, st->f) != (size_t)chunk) return 1;
+            for (int c = 0; c < chunk; c++) {
+                uint32_t u = (uint32_t)tmp[c] << 16;
+                memcpy(&dst[done + c], &u, 4);
+            }
+            done += chunk;
+        }
+        return 0;
+    }
+    return fread(dst, 4, (size_t)cols, st->f) != (size_t)cols;
+}
+static st_ctx *g_st = NULL;                      /* active Safetensors Direct override */
+static int g_st_hits = 0, g_st_misses = 0;
+
 /* ── GGUF row reader for the Q8 packer (dequant F32/F16/Q8_0 -> f32) ── */
-typedef struct { const uint8_t *base; uint32_t type; size_t rb; int cols; } row_ctx;
+typedef struct { const uint8_t *base; uint32_t type; size_t rb; int cols;
+                 const st_entry *se; } row_ctx;
 static size_t ggml_row_bytes(uint32_t type, int n) {
     switch (type) {
         case GGML_T_F32:  return (size_t)n * 4;
@@ -73,13 +224,45 @@ static size_t ggml_row_bytes(uint32_t type, int n) {
 }
 static int get_row(void *ctx, int j, float *dst) {
     const row_ctx *g = (const row_ctx *)ctx;
+    if (g->se)                                   /* Safetensors Direct */
+        return st_read_row(g_st, g->se, j, g->cols, dst);
     return sp_dequant_row(g->base + (size_t)j * g->rb, g->type, g->cols, dst);
+}
+
+/* Resolve the value source for tensor W under the active override (or NULL).
+ * Mapped-but-missing => hard error (-1 sentinel). Shape sanity: GGUF [cols,rows]
+ * vs HF [rows,cols] (or 1-D / scalar) must agree element-wise. */
+static const st_entry *st_source(const gguf_tensor *W, int *err) {
+    *err = 0;
+    if (!g_st) return NULL;
+    const st_entry *se = st_find(g_st, W->name);
+    if (se == (const st_entry *)-1) { *err = 1; return NULL; }
+    if (!se) { g_st_misses++; return NULL; }     /* unmapped (rope_freqs) -> GGUF */
+    uint64_t g_elems = 1, s_elems = 1;
+    for (uint32_t d = 0; d < W->n_dims; d++) g_elems *= W->dims[d];
+    for (int d = 0; d < se->n_shape; d++) s_elems *= se->shape[d];
+    if (se->n_shape == 0) s_elems = se->len / (se->is_bf16 ? 2 : 4);  /* scalar */
+    if (g_elems != s_elems) {
+        fprintf(stderr, "[st] FATAL: %s element count %llu (gguf) != %llu (st)\n",
+                W->name, (unsigned long long)g_elems, (unsigned long long)s_elems);
+        *err = 1; return NULL;
+    }
+    if (W->n_dims >= 2 && se->n_shape >= 2 && W->dims[0] != se->shape[se->n_shape - 1]) {
+        fprintf(stderr, "[st] FATAL: %s cols %llu (gguf) != %llu (st innermost)\n",
+                W->name, (unsigned long long)W->dims[0],
+                (unsigned long long)se->shape[se->n_shape - 1]);
+        *err = 1; return NULL;
+    }
+    g_st_hits++;
+    return se;
 }
 
 /* Add a matmul weight as OK_Q8 + ".scale" sibling (adjacent in the data region). */
 static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
     if (!base || W->n_dims < 2) { fprintf(stderr, "bad weight %s\n", W->name); return 1; }
+    int serr; const st_entry *se = st_source(W, &serr);
+    if (serr) return 1;
     int cols = (int)W->dims[0], rows = (int)W->dims[1];
     /* Rank-3 MoE expert tensors [cols, rows, n_expert]: pack as (rows*n_expert)
      * contiguous 2D Frobenius rows — the source row (e,r) is at element
@@ -89,8 +272,8 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     int ne2 = (W->n_dims >= 3) ? (int)W->dims[2] : 1;
     int total_rows = rows * ne2;
     size_t rb = ggml_row_bytes(W->type, cols);
-    if (rb == 0) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
-    row_ctx ctx = { base, W->type, rb, cols };
+    if (rb == 0 && !se) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
+    row_ctx ctx = { base, W->type, rb, cols, se };
     sp_frob_packed_tensor pt;
     if (sp_frob_pack_tensor(total_rows, cols, 8, 0.0f, get_row, &ctx, &pt, NULL)) {
         fprintf(stderr, "pack failed %s\n", W->name); return 1;
@@ -126,11 +309,13 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
 static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
     if (!base || W->n_dims < 2) { fprintf(stderr, "bad weight %s\n", W->name); return 1; }
+    int serr; const st_entry *se = st_source(W, &serr);
+    if (serr) return 1;
     int cols = (int)W->dims[0], rows = (int)W->dims[1];
     int ne2 = (W->n_dims >= 3) ? (int)W->dims[2] : 1;
     int total_rows = rows * ne2;
     size_t rb = ggml_row_bytes(W->type, cols);
-    if (rb == 0) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
+    if (rb == 0 && !se) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
     size_t nib_cols = ((size_t)cols + 1u) / 2u;
 
     float  *wrow  = (float *)malloc((size_t)cols * sizeof(float));
@@ -147,7 +332,8 @@ static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     q->bytes = (uint8_t *)malloc(q->size_bytes ? q->size_bytes : 1);
     if (!q->bytes) { free(wrow); free(codes); free(scales); return 1; }
     for (int r = 0; r < total_rows; r++) {
-        if (sp_dequant_row(base + (size_t)r * rb, W->type, cols, wrow)) {
+        if (se ? st_read_row(g_st, se, r, cols, wrow)
+               : sp_dequant_row(base + (size_t)r * rb, W->type, cols, wrow)) {
             free(wrow); free(codes); free(scales); return 1;
         }
         float s = sp_frob_row_scale(wrow, cols);
@@ -172,6 +358,8 @@ static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
 static int add_f32(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
     if (!base) { fprintf(stderr, "no data %s\n", W->name); return 1; }
+    int serr; const st_entry *se = st_source(W, &serr);
+    if (serr) return 1;
     int n = (int)W->n_elements;
     emit_tensor *e = el_push(L);
     snprintf(e->name, sizeof e->name, "%s", W->name);
@@ -180,7 +368,8 @@ static int add_f32(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     e->block_size = 4; e->size_bytes = (uint64_t)n * sizeof(float);
     e->bytes = (uint8_t *)malloc(e->size_bytes ? e->size_bytes : 1);
     if (!e->bytes) return 1;
-    if (sp_dequant_row(base, W->type, n, (float *)e->bytes)) {
+    if (se ? st_read_row(g_st, se, 0, n, (float *)e->bytes)
+           : sp_dequant_row(base, W->type, n, (float *)e->bytes)) {
         fprintf(stderr, "dequant f32 failed %s\n", W->name); return 1;
     }
     return 0;
@@ -515,14 +704,27 @@ static int is_matmul_weight(const char *name) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: %s <in.gguf> <out.sp-model> <out.sp-tokenizer> [--verify]\n", argv[0]);
+        fprintf(stderr, "usage: %s <in.gguf> <out.sp-model> <out.sp-tokenizer> "
+                        "[--verify] [--q4|--q8] [--st <model.safetensors>]\n", argv[0]);
         return 2;
     }
     const char *in = argv[1], *out_model = argv[2], *out_tok = argv[3];
-    int verify = (argc > 4 && strcmp(argv[4], "--verify") == 0);
+    int verify = 0;
+    const char *st_path = NULL;
+    for (int a = 4; a < argc; a++) {
+        if      (strcmp(argv[a], "--verify") == 0) verify = 1;
+        else if (strcmp(argv[a], "--st") == 0 && a + 1 < argc) st_path = argv[++a];
+    }
 
     gguf_ctx *g = gguf_open(in);
     if (!g) { fprintf(stderr, "cannot open GGUF %s\n", in); return 1; }
+
+    if (st_path) {                               /* Safetensors Direct (gemma4) */
+        g_st = st_open(st_path);
+        if (!g_st) { gguf_close(g); return 1; }
+        fprintf(stderr, "[st] SAFETENSORS DIRECT: weight values from %s; "
+                        "GGUF supplies structure/KV/tokenizer/rope_freqs only\n", st_path);
+    }
 
     /* 1. tokenizer -> .sp-tokenizer + its SHA-256 */
     uint8_t tok_sha[32]; uint32_t tok_vocab = 0;
@@ -550,6 +752,7 @@ int main(int argc, char **argv) {
             case GGML_T_Q6_K: use_q4 = 1; break;
             default: use_q4 = 0;
         }
+        if (g_st) use_q4 = 0;                    /* bf16 source: default full-width OK_Q8 */
         for (int a = 4; a < argc; a++) {
             if      (strcmp(argv[a], "--q4") == 0) use_q4 = 1;
             else if (strcmp(argv[a], "--q8") == 0) use_q4 = 0;
@@ -633,6 +836,9 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "[sp_transcode] %s -> %s (%u tensors, %llu bytes) + %s\n",
             in, out_model, h.tensor_count, (unsigned long long)file_size, out_tok);
+    if (g_st)
+        fprintf(stderr, "[st] value sources: %d tensors from safetensors, %d from GGUF (unmapped)\n",
+                g_st_hits, g_st_misses);
 
     /* 8. --verify: sibling adjacency (§9) + reload sanity. */
     if (verify) {
@@ -656,5 +862,6 @@ int main(int argc, char **argv) {
     }
 
     free(tbl); el_free(&L); gguf_close(g);
+    st_close(g_st); g_st = NULL;
     return rc;
 }
