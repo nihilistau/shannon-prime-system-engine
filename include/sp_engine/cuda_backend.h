@@ -70,6 +70,13 @@ int gemma4_cuda_weights_probe(const qwen3_model *m);
 int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
                       int n_layers, int attn_only, float *out_x);
 
+/* ETA.4: the official Gemma4 CUDA prefill — full forward (per-layer geometry +
+ * shared-KV + proportional RoPE + AltUp injection + per-layer out_scale + tied
+ * head + final-logit softcap). logits = [n_tok x n_vocab], all positions.
+ * Gated argmax+KL vs the CPU oracle gemma4_forward (E_G4_CU_FULL). */
+int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                        float *logits);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

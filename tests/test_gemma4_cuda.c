@@ -54,6 +54,8 @@ int  sp_cuda_device_count(void);
 int  gemma4_cuda_weights_probe(const qwen3_model *m);
 int  gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
                        int n_layers, int attn_only, float *out_x);
+int  gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                         float *logits);
 void sp_cuda_model_release(const qwen3_model *m);
 
 /* Engine-symbol SHIM (the documented cross-seam alias pattern, cf.
@@ -308,6 +310,59 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
          * K/V (kvd 512) through an SWA stride (256) -> garbage, not 1.1e-5. */
         static const double l15_gates[5] = { 7e-4, 8e-5, 5e-5, 6e-5, 1e-2 };
         truncated_parity(m, 16, "L15-sharer", l15_gates);
+    }
+
+    /* ════ E_G4_CU_FULL (ETA.4): THE DECISIVE GATE — the live run. The full
+     * 35-layer gemma4_forward_cuda (per-layer geometry + shared-KV + rope_freqs
+     * + AltUp + out_scale + tied head + softcap) vs the CPU oracle
+     * gemma4_forward, per-position ARGMAX + KL(softmax_cpu || softmax_cuda).
+     * The repo's standard cross-backend currency. ════ */
+    {
+        enum { NT = 12 };
+        const int32_t toks[NT] = { 2, 10, 100, 1000, 5000, 9999, 31, 7, 42, 256, 777, 12345 };
+        const int V = (int)m->cfg.n_vocab;
+        float *cl = (float *)malloc((size_t)NT * V * sizeof(float));
+        float *gl = (float *)malloc((size_t)NT * V * sizeof(float));
+        SP_CHECK(cl && gl, "full-forward logits buffers");
+        if (cl && gl) {
+            int orc = gemma4_forward(m, toks, NT, cl);
+            SP_CHECK(orc == 0, "CPU oracle gemma4_forward");
+            int crc = gemma4_forward_cuda(m, toks, NT, gl);
+            if (crc) fprintf(stderr, "    full cuda: %s\n", sp_last_error());
+            SP_CHECK(crc == 0, "gemma4_forward_cuda ran");
+            if (orc == 0 && crc == 0) {
+                int agree = 0; double max_kl = 0.0, max_abs = 0.0;
+                for (int t = 0; t < NT; t++) {
+                    const float *cp = cl + (size_t)t * V, *gp = gl + (size_t)t * V;
+                    /* argmax */
+                    int ac = 0, ag = 0;
+                    for (int i = 1; i < V; i++) {
+                        if (cp[i] > cp[ac]) ac = i;
+                        if (gp[i] > gp[ag]) ag = i;
+                    }
+                    if (ac == ag) agree++;
+                    /* KL(p_cpu || q_cuda), double-precision log-softmax */
+                    double mc = cp[0], mg = gp[0];
+                    for (int i = 1; i < V; i++) { if (cp[i] > mc) mc = cp[i]; if (gp[i] > mg) mg = gp[i]; }
+                    double zc = 0.0, zg = 0.0;
+                    for (int i = 0; i < V; i++) { zc += exp((double)cp[i] - mc); zg += exp((double)gp[i] - mg); }
+                    double lzc = log(zc), lzg = log(zg), kl = 0.0;
+                    for (int i = 0; i < V; i++) {
+                        double lp = (double)cp[i] - mc - lzc;
+                        double lq = (double)gp[i] - mg - lzg;
+                        kl += exp(lp) * (lp - lq);
+                        double d = fabs((double)cp[i] - (double)gp[i]);
+                        if (d > max_abs) max_abs = d;
+                    }
+                    if (kl > max_kl) max_kl = kl;
+                }
+                fprintf(stderr, "    [g4-cuda-FULL] argmax %d/%d  max KL %.3e  max |dlogit| %.3e\n",
+                        agree, NT, max_kl, max_abs);
+                SP_CHECK(agree == NT, "FULL 35-layer: CUDA argmax == CPU oracle argmax (all positions)");
+                SP_CHECK(max_kl < 1e-4, "FULL 35-layer: KL(cpu||cuda) at the cross-backend floor");
+            }
+        }
+        free(cl); free(gl);
     }
 
     sp_cuda_model_release(m);
