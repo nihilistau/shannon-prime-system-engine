@@ -871,15 +871,22 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
         const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
         if (eat) {
             size_t n = (size_t)V * E;
-            float *host = (float *)malloc(n * sizeof(float));
-            if (!host) { sp_set_error("embd host OOM"); free_weights(w); return 1; }
-            for (int r = 0; r < V; r++)
-                if (sp_arena_dequant_row(eat, r, host + (size_t)r * E)) {
-                    free(host); sp_set_error("embd arena dequant"); free_weights(w); return 1;
-                }
-            int rc = upload_arr<float>(host, n, &w->embd);
-            free(host);
-            if (rc) { free_weights(w); return 1; }
+            /* ETA.5b.4: when the dequanted f32 embedding would blow the VRAM
+             * budget (12B: ~4 GB), keep ONLY the packed codes resident — the
+             * decode embeds via k_embed_packed_at and serves the tied head via
+             * dp4a. The f32 copy is uploaded when it fits (parity/forward paths
+             * use it; same dequant arithmetic either way, byte-identical). */
+            if (n * sizeof(float) <= (size_t)2u << 30) {
+                float *host = (float *)malloc(n * sizeof(float));
+                if (!host) { sp_set_error("embd host OOM"); free_weights(w); return 1; }
+                for (int r = 0; r < V; r++)
+                    if (sp_arena_dequant_row(eat, r, host + (size_t)r * E)) {
+                        free(host); sp_set_error("embd arena dequant"); free_weights(w); return 1;
+                    }
+                int rc = upload_arr<float>(host, n, &w->embd);
+                free(host);
+                if (rc) { free_weights(w); return 1; }
+            }
             if (upload_packed(&eat->pt, &w->embd_packed)) { free_weights(w); return 1; }
         } else {
             w->embd = upload_weight(m, m->token_embd, E, V);
@@ -899,7 +906,10 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     ALLOC_DT(Wgate); ALLOC_DT(Wup); ALLOC_DT(Wdown);
     ALLOC_NM(attn_norm); ALLOC_NM(ffn_norm); ALLOC_NM(q_norm); ALLOC_NM(k_norm);
     if (is_gemma) { ALLOC_NM(post_attn); ALLOC_NM(post_ffw); }   /* sandwich norms */
-    if (g4_PL) { ALLOC_DT(Wplig); ALLOC_DT(Wplproj); ALLOC_NM(pl_post_norm); ALLOC_NM(pl_out_scale); }
+    if (g4_PL) { ALLOC_DT(Wplig); ALLOC_DT(Wplproj); ALLOC_NM(pl_post_norm); }
+    /* out_scale is INDEPENDENT of AltUp: the dense gemma-4 (12B) carries
+     * layer_output_scale with PL=0 (the oracle applies it whenever present). */
+    if (is_g4 && m->layers[0].out_scale) { ALLOC_NM(pl_out_scale); }
 
     for (int Li = 0; Li < L; Li++) {
         const qwen3_layer *ly = &m->layers[Li];
@@ -916,7 +926,12 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
         const int owns_kv = !is_g4 || (Li < g4_kvfs);   /* shared-KV: sharers skip K/V */
 
         BUILDW(Wq, attn_q, E, qd_L);
-        if (owns_kv) { BUILDW(Wk, attn_k, E, kvd_L); BUILDW(Wv, attn_v, E, kvd_L); }
+        if (owns_kv) {
+            BUILDW(Wk, attn_k, E, kvd_L);
+            /* V-less layers (dense gemma-4 globals): attn_v ABSENT — the forward
+             * copies the raw K projection (Wv[Li] stays zeroed, detectable). */
+            if (ly->attn_v) BUILDW(Wv, attn_v, E, kvd_L);
+        }
         BUILDW(Wo, attn_output, qd_L, E);
         BUILDW(Wgate, ffn_gate, E, ff_L); BUILDW(Wup, ffn_up, E, ff_L); BUILDW(Wdown, ffn_down, ff_L, E);
         UPV(attn_norm, attn_norm, E);   UPV(ffn_norm, ffn_norm, E);
@@ -927,8 +942,8 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
             BUILDW(Wplig, per_layer_inp_gate, E, g4_PL);
             BUILDW(Wplproj, per_layer_proj, g4_PL, E);
             UPV(pl_post_norm, per_layer_post_norm, E);
-            UPV(pl_out_scale, out_scale, 1);
         }
+        if (w->pl_out_scale && ly->out_scale) UPV(pl_out_scale, out_scale, 1);
     }
 
     /* ETA.1 Gemma4 model-level AltUp tensors. ETA.5b: per_layer_token_embd is
@@ -941,13 +956,17 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
         }
         w->pl_proj_norm = upload_vec(m, m->per_layer_proj_norm, g4_PL);
         if (!w->pl_proj_norm) { free_weights(w); return 1; }
-        w->rope_freqs = upload_vec(m, m->rope_freqs, HD / 2);   /* global-layer freq factors */
-        if (!w->rope_freqs) { free_weights(w); return 1; }
         /* ETA.5b: PLE table packed to VRAM (device per-token row gather). E2B Q8
          * = V*NL*PL ~2.2 GB of codes. Optional: when absent the decode falls back
          * to the ETA.5a host row-gather (and the graph path stays off). */
         const sp_arena_tensor *plt = m->arena ? sp_arena_find(m->arena, "per_layer_token_embd.weight") : NULL;
         if (plt && upload_packed(&plt->pt, &w->pl_tok_embd)) { free_weights(w); return 1; }
+    }
+    /* global-layer proportional freq factors — INDEPENDENT of AltUp (the dense
+     * 12B carries rope_freqs with PL=0). */
+    if (is_g4 && m->rope_freqs) {
+        w->rope_freqs = upload_vec(m, m->rope_freqs, HD / 2);
+        if (!w->rope_freqs) { free_weights(w); return 1; }
     }
     return 0;
 }
@@ -1074,8 +1093,26 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
     if (cudaMemcpyAsync(dtoks, tokens, (size_t)n_tok*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("g4 upload tokens"); goto done;
     }
-    {   dim3 grid(n_tok, (E + 255) / 256);   /* embed + sqrt(E) scale (gemma) */
-        k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dtoks, n_tok, E, embscale, dx); }
+    if (g_w.embd) {
+        dim3 grid(n_tok, (E + 255) / 256);   /* embed + sqrt(E) scale (gemma) */
+        k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dtoks, n_tok, E, embscale, dx);
+    } else {
+        /* ETA.5b.4: f32 embd not resident (VRAM budget — 12B). Host-gather the
+         * n_tok rows (sp_arena_dequant_row, identical arithmetic), scale, upload. */
+        const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+        float *hrows = eat ? (float *)malloc((size_t)n_tok * E * sizeof(float)) : NULL;
+        if (!hrows) { sp_set_error("g4 probe: no f32 embd and no arena gather"); goto done; }
+        for (int t = 0; t < n_tok; t++) {
+            if (sp_arena_dequant_row(eat, tokens[t], hrows + (size_t)t * E)) {
+                free(hrows); sp_set_error("g4 probe: embd row gather"); goto done; }
+            for (int i = 0; i < E; i++) hrows[(size_t)t * E + i] *= embscale;
+        }
+        int up = (cudaMemcpyAsync(dx, hrows, (size_t)n_tok * E * sizeof(float),
+                                  cudaMemcpyHostToDevice, st) != cudaSuccess);
+        cudaStreamSynchronize(st);   /* hrows freed next — make the copy land first */
+        free(hrows);
+        if (up) { sp_set_error("g4 probe: embd rows H2D"); goto done; }
+    }
 
     /* ── ETA.4: AltUp PRECOMPUTE (gemma4.c project_per_layer_inputs) — runs ONCE
      * on the post-embed stream, BEFORE layer 0; dipl persists the whole traversal.
@@ -1135,7 +1172,11 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
         float *Kuse, *Vuse;
         if (L < kvfs) {                                       /* OWNER: project + store */
             if (gemm_w_lift(cb, st, &g_w.Wk[L], dnx, dk, n_tok, dscr)) goto done;
-            if (gemm_w_lift(cb, st, &g_w.Wv[L], dnx, dv, n_tok, dscr)) goto done;
+            if (g_w.Wv[L].f32 || g_w.Wv[L].codes) {
+                if (gemm_w_lift(cb, st, &g_w.Wv[L], dnx, dv, n_tok, dscr)) goto done;
+            } else {  /* V-less layer: V = the RAW K projection (llama.cpp gemma4-iswa) */
+                cudaMemcpyAsync(dv, dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            }
             k_rmsnorm_head<<<n_tok*nkv, 256, 0, st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
             if (ffac) k_rope_freqs<<<n_tok*nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, ffac);
             else      k_rope<<<n_tok*nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase);
@@ -1206,6 +1247,10 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
         if (g_w.head.f32 || g_w.head.codes) {            /* untied head */
             if (gemm_w_lift(cb, st, &g_w.head, dnx, dlog, n_tok, dscr)) goto done;
         } else {                                          /* tied: reuse the f32 embedding */
+            if (!g_w.embd) {   /* 12B-class: f32 embd not resident — FULL mode unavailable */
+                sp_set_error("g4 probe: FULL head needs the f32 embd (VRAM budget keeps only packed codes; use the decode path)");
+                goto done;
+            }
             if (gemm(cb, g_w.embd, dnx, dlog, n_tok, E, V)) goto done;
         }
         if (softcap > 0.0f) {
@@ -1287,6 +1332,30 @@ __global__ void k_ple_gather_at(const unsigned char *codes, const unsigned long 
         inv = row_scale[tok] / 7.0f;
     }
     out[i] = (float)code * inv;
+}
+
+/* embed gather straight from PACKED codes (the token at dseq[*dpos]) + scale:
+ * the f32-embd-free embed path for models whose dequanted embedding would blow
+ * the VRAM budget (12B: V x E f32 ~= 4 GB; the packed codes are ~1 GB). Same
+ * host-mirror arithmetic as k_ple_gather_at (TRUE division — byte-match). */
+__global__ void k_embed_packed_at(const unsigned char *codes, const unsigned long long *row_off,
+                                  const float *row_scale, const unsigned char *row_prec,
+                                  const int *dseq, const int *dpos, int E, float scale, float *x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= E) return;
+    int tok = dseq[*dpos];
+    const unsigned char *rc = codes + row_off[tok];
+    int code; float inv;
+    if (row_prec[tok] == 8) {
+        code = (int)((const signed char *)rc)[i];
+        inv = row_scale[tok] / 127.0f;
+    } else {
+        unsigned char byte = rc[i >> 1];
+        int nib = (i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+        code = (nib ^ 8) - 8;
+        inv = row_scale[tok] / 7.0f;
+    }
+    x[i] = (float)code * inv * scale;
 }
 
 /* proportional-freq NEOX RoPE at the DEVICE position (k_rope_freqs_at + *dpos). */
@@ -1399,6 +1468,13 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     /* ETA.5b: packed dp4a GEMV routing (top-1, not byte-exact — see header). */
     const char *i8e = getenv("SP_CUDA_DECODE_INT8");
     const int use_int8 = (i8e && i8e[0] == '1') && m->arena != NULL;
+    /* 12B-class tied head: the f32 embd isn't resident (VRAM budget) — the
+     * V x E head matmul must take the dp4a route. Surface it, don't crash. */
+    if (!(g_w.head.f32 || g_w.head.codes) && !g_w.embd &&
+        !(use_int8 && g_w.embd_packed.codes)) {
+        sp_set_error("g4 decode: tied head without resident f32 embd requires SP_CUDA_DECODE_INT8=1");
+        return -1;
+    }
 
     int *dseq=NULL;            /* the whole token sequence, RESIDENT in VRAM */
     int *dpos=NULL;            /* device position scalar (shadows the host pos) */
@@ -1458,8 +1534,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             cublasSetStream(cb, st);
             /* ── prompt ingest [0, n_prompt-1): fills the jagged cache, no head ── */
             for (int pos = 0; pos < n_prompt - 1; pos++) {
-                { dim3 grid(1, (E + 255) / 256);
+                if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
                   k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dseq + pos, 1, E, embscale, dx); }
+                else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
+                    g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
+                    g_w.embd_packed.row_prec, dseq, dpos, E, embscale, dx);
                 if (PL) {
                     k_ple_gather_at<<<(unsigned)((NLPL+255)/256), 256, 0, st>>>(
                         g_w.pl_tok_embd.codes, g_w.pl_tok_embd.row_off,
@@ -1487,7 +1566,8 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     float *Kuse, *Vuse;
                     if (L < kvfs) {
                         MMD(&g_w.Wk[L], dnx, dk);
-                        MMD(&g_w.Wv[L], dnx, dv);
+                        if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { MMD(&g_w.Wv[L], dnx, dv); }
+                        else cudaMemcpyAsync(dv, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st); /* V-less: raw K proj */
                         k_rmsnorm_head<<<nkv, 256, 0, st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
                         if (ffac) k_rope_freqs_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, rbase, ffac, pos);
                         else      k_rope_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, pos);
@@ -1529,8 +1609,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             /* ── capture ONE generate step (dpos = n_prompt-1 after ingest) ── */
             if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
                 sp_set_error("g4 begin capture"); goto done; }
-            { dim3 grid(1, (E + 255) / 256);
+            if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
               k_embed_scale_at<<<grid, 256, 0, st>>>(g_w.embd, dseq, dpos, E, embscale, dx); }
+            else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
+                g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
+                g_w.embd_packed.row_prec, dseq, dpos, E, embscale, dx);
             if (PL) {
                 k_ple_gather_at<<<(unsigned)((NLPL+255)/256), 256, 0, st>>>(
                     g_w.pl_tok_embd.codes, g_w.pl_tok_embd.row_off,
@@ -1558,7 +1641,8 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 float *Kuse, *Vuse;
                 if (L < kvfs) {
                     MMD(&g_w.Wk[L], dnx, dk);
-                    MMD(&g_w.Wv[L], dnx, dv);
+                    if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { MMD(&g_w.Wv[L], dnx, dv); }
+                    else cudaMemcpyAsync(dv, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st); /* V-less: raw K proj */
                     k_rmsnorm_head<<<nkv, 256, 0, st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
                     if (ffac) k_rope_freqs_dyn<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, rbase, ffac, dpos);
                     else      k_rope_dyn<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, dpos);
@@ -1623,8 +1707,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     /* ───────── per-step path (the ETA.5a oracle stack, device-fed) ───────── */
     for (int pos = 0; pos < P - 1; pos++) {
         const int gen_here = (pos >= n_prompt - 1);
-        { dim3 grid(1, (E + 255) / 256);
+        if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
           k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dseq + pos, 1, E, embscale, dx); }
+        else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
+            g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
+            g_w.embd_packed.row_prec, dseq, dpos, E, embscale, dx);
 
         /* per-step AltUp precompute (1 x NL*PL): the PLE row for THIS token —
          * gathered ON DEVICE from the packed table (ETA.5b), or host-gathered
@@ -1673,7 +1760,8 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             float *Kuse, *Vuse;
             if (L < kvfs) {
                 MMD(&g_w.Wk[L], dnx, dk);
-                MMD(&g_w.Wv[L], dnx, dv);
+                if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { MMD(&g_w.Wv[L], dnx, dv); }
+                else cudaMemcpyAsync(dv, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st); /* V-less: raw K proj */
                 k_rmsnorm_head<<<nkv, 256, 0, st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
                 if (ffac) k_rope_freqs_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, rbase, ffac, pos);
                 else      k_rope_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, pos);

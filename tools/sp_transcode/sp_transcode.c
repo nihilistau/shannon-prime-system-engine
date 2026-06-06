@@ -408,6 +408,33 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
             if (period == 0) { fprintf(stderr, "fill_arch_struct: gemma4 non-periodic SWA pattern\n"); return 1; }
             ai.g4_swa_period = period;
         }
+        /* Per-layer head_count_kv: the DENSE gemma-4 (12B) emits an ARRAY —
+         * e.g. 8 kv-heads on SWA layers, 1 on globals (the E-series E2B carries
+         * a scalar, handled above). The arch struct expresses this two-class
+         * geometry as n_kv_heads (GLOBAL) + g4_nkv_swa (SWA); derive both from
+         * the array via the SWA period and REQUIRE per-type uniformity. */
+        {
+            const gguf_kv *kv = gguf_find_kv(g, "gemma4.attention.head_count_kv");
+            if (kv && kv->type == GGUF_T_ARRAY && kv->arr_data && kv->arr_len == n_layers &&
+                (kv->arr_type == GGUF_T_UINT32 || kv->arr_type == GGUF_T_INT32)) {
+                const uint32_t *hk = (const uint32_t *)kv->arr_data;   /* i32/u32: same width */
+                uint32_t nkv_g = 0, nkv_s = 0; int two_class = 1;
+                for (uint64_t L = 0; L < n_layers; L++) {
+                    const int global = ((L % ai.g4_swa_period) == ai.g4_swa_period - 1u);
+                    if (global) { if (!nkv_g) nkv_g = hk[L]; else if (nkv_g != hk[L]) two_class = 0; }
+                    else        { if (!nkv_s) nkv_s = hk[L]; else if (nkv_s != hk[L]) two_class = 0; }
+                }
+                if (!two_class || !nkv_g || !nkv_s) {
+                    fprintf(stderr, "fill_arch_struct: gemma4 per-layer head_count_kv is not "
+                                    "two-class uniform (global/SWA)\n");
+                    return 1;
+                }
+                ai.n_kv_heads = nkv_g;
+                ai.g4_nkv_swa = nkv_s;
+                fprintf(stderr, "    [arch] gemma4 per-layer kv-heads: global=%u swa=%u (period %u)\n",
+                        nkv_g, nkv_s, ai.g4_swa_period);
+            }
+        }
         if (ai.n_ff == 0) {   /* feed_forward_length is a per-layer array; n_ff scalar fallback = layer 0 */
             const gguf_tensor *fg0 = gguf_find_tensor(g, "blk.0.ffn_gate.weight");
             if (fg0 && fg0->n_dims >= 2) ai.n_ff = (uint32_t)fg0->dims[1];

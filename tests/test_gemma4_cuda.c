@@ -166,7 +166,11 @@ static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag
                 float *Vb = (float *)malloc((size_t)NT * kvd * sizeof(float));
                 if (!K || !Vb) { free(K); free(Vb); cpu_ok = 0; break; }
                 if (sp_matmul(m, ly->attn_k, nx, NT, E, kvd, K))  { free(K); free(Vb); cpu_ok = 0; break; }
-                if (sp_matmul(m, ly->attn_v, nx, NT, E, kvd, Vb)) { free(K); free(Vb); cpu_ok = 0; break; }
+                if (ly->attn_v) {   /* V-less layers (dense 12B globals): V = raw K projection */
+                    if (sp_matmul(m, ly->attn_v, nx, NT, E, kvd, Vb)) { free(K); free(Vb); cpu_ok = 0; break; }
+                } else {
+                    memcpy(Vb, K, (size_t)NT * kvd * sizeof(float));
+                }
                 const float *kn = sp_as_f32(m, ly->attn_k_norm);
                 for (int t = 0; t < NT; t++)
                     for (int h = 0; h < nkv; h++) {
@@ -290,9 +294,15 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
      * SWA mask drops to full causal. First run = TELEMETRY (NULL gates); pinned
      * after measurement, the L0 discipline. */
     sp_kernels_read_env();
+    /* The pinned ABS gates below were measured + pinned ON E2B (telemetry-then-pin).
+     * Other gemma4 geometries (the dense 12B: 48L, E=3840, V-less globals) run the
+     * SAME probes in TELEMETRY mode (NULL gates) until their own floors are pinned
+     * — different model, different absolute floors; reusing E2B constants would be
+     * gate-currency confusion, not rigor. */
+    const int e2b_pinned = !(((size_t)m->cfg.n_vocab * (size_t)m->cfg.n_embd * sizeof(float)) > ((size_t)2u << 30));
     {
         static const double l0_gates[5] = { 0.0, 5e-5, 1e-4, 2e-4, 5e-3 };
-        truncated_parity(m, 1, "L0", l0_gates);
+        truncated_parity(m, 1, "L0", e2b_pinned ? l0_gates : NULL);
         /* L4 gates pinned at ~3x the measured floors (telemetry run 2026-06-06:
          * nx 1.11e-4 / q 1.15e-5 / ao 5.15e-5 / ap 8.15e-5 / x 1.59e-3 abs).
          * nx is no longer bit-exact at depth — 4 layers of norm-amplified inflow,
@@ -300,7 +310,7 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
          * the rope_freqs proportional handoff + the 4096-wide global projection;
          * ao at the floor proves the full-causal (win=-1) mask switch. */
         static const double l4_gates[5] = { 3e-4, 5e-5, 1.5e-4, 2.5e-4, 5e-3 };
-        truncated_parity(m, 5, "L4", l4_gates);
+        truncated_parity(m, 5, "L4", e2b_pinned ? l4_gates : NULL);
         /* THE SHARER SEAM (ETA.3 remainder): L15 = the FIRST shared-KV layer
          * (kvfs=15; layers [0,15) own). L15 is SWA (15%5==0) -> reads owner
          * L13 (kvfs-2)'s STORED K/V from VRAM and skips its own projection.
@@ -312,15 +322,25 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
          * is the seam proof: an off-by-one owner index would read L14's GLOBAL
          * K/V (kvd 512) through an SWA stride (256) -> garbage, not 1.1e-5. */
         static const double l15_gates[5] = { 7e-4, 8e-5, 5e-5, 6e-5, 1e-2 };
-        truncated_parity(m, 16, "L15-sharer", l15_gates);
+        truncated_parity(m, 16, "L15-sharer", e2b_pinned ? l15_gates : NULL);
     }
+
+    /* ETA.5b.4: 12B-class models keep only PACKED embd codes resident (the f32
+     * dequant would be ~4 GB on a 12 GB card) — the FULL-forward tied-head f32
+     * GEMM is unavailable there, and decode requires the dp4a route. The ORACLE
+     * teacher-forced decode check remains the decisive gate either way. */
+    const int big_embd =
+        ((size_t)m->cfg.n_vocab * (size_t)m->cfg.n_embd * sizeof(float)) > ((size_t)2u << 30);
 
     /* ════ E_G4_CU_FULL (ETA.4): THE DECISIVE GATE — the live run. The full
      * 35-layer gemma4_forward_cuda (per-layer geometry + shared-KV + rope_freqs
      * + AltUp + out_scale + tied head + softcap) vs the CPU oracle
      * gemma4_forward, per-position ARGMAX + KL(softmax_cpu || softmax_cuda).
      * The repo's standard cross-backend currency. ════ */
-    {
+    if (big_embd) {
+        fprintf(stderr, "    [g4-cuda-FULL] SKIP: f32 embd not resident (12B-class VRAM budget); "
+                        "the decode oracle gate below is the live check\n");
+    } else {
         enum { NT = 12 };
         const int32_t toks[NT] = { 2, 10, 100, 1000, 5000, 9999, 31, 7, 42, 256, 777, 12345 };
         const int V = (int)m->cfg.n_vocab;
@@ -378,7 +398,13 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
         int32_t dseq[PT]; const int32_t prompt[NP] = { 2, 10, 100, 1000 };
         const int V = (int)m->cfg.n_vocab;
         for (int i = 0; i < NP; i++) dseq[i] = prompt[i];
+        if (big_embd) {   /* 12B-class: tied head must take the dp4a route (top-1 trust) */
+            _putenv("SP_CUDA_DECODE_INT8=1");
+            fprintf(stderr, "    [g4-cuda-DEC] 12B-class: decode runs dp4a (f32 embd not resident); "
+                            "oracle teacher-force is still the gate\n");
+        }
         int dn = gemma4_decode_cuda(m, dseq, NP, NG, /*eos=*/-1);
+        if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
         if (dn < 0) fprintf(stderr, "    decode: %s\n", sp_last_error());
         SP_CHECK(dn == PT, "gemma4 CUDA decode produced full length");
         if (dn == PT) {
@@ -388,20 +414,58 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
                 int orc = gemma4_forward(m, dseq, PT, tl);
                 SP_CHECK(orc == 0, "oracle prefill over decoded sequence");
                 if (orc == 0) {
-                    int ok = 1, firstbad = -1;
-                    for (int pos = NP - 1; pos < PT - 1 && ok; pos++) {
+                    /* Gate currency depends on the decode arithmetic:
+                     *   exact path (E2B, knobs off)  -> STRICT: every token == oracle argmax.
+                     *   dp4a path (12B-class)        -> top-1-TRUST: a near-tie may flip; a
+                     *     flip is admissible iff the produced token sits within the oracle's
+                     *     TOP-2 at that position (measured, printed — not waved through).
+                     * After the first flip the autoregressive context diverges, so the
+                     * teacher-forced comparison stops there (the oracle graded a different
+                     * prefix from then on). */
+                    int exact = 1, flips = 0, badrank = 0, firstbad = -1;
+                    for (int pos = NP - 1; pos < PT - 1; pos++) {
                         const float *row = tl + (size_t)pos * V;
+                        const int got = dseq[pos + 1];
                         int am = 0;
                         for (int i = 1; i < V; i++) if (row[i] > row[am]) am = i;
-                        if (am != dseq[pos + 1]) { ok = 0; firstbad = pos; }
+                        if (am == got) continue;
+                        exact = 0; if (firstbad < 0) firstbad = pos;
+                        /* rank of the produced token in the oracle row (1 = argmax) */
+                        int rank = 1; for (int i = 0; i < V; i++) if (row[i] > row[got]) rank++;
+                        fprintf(stderr, "    [g4-cuda-DEC] pos %d: produced %d vs oracle argmax %d; "
+                                        "oracle-rank(produced)=%d, logit gap %.4e\n",
+                                pos, got, am, rank, (double)(row[am] - row[got]));
+                        flips++;
+                        if (rank > 2) badrank++;
+                        break;   /* context diverged — later positions aren't comparable */
                     }
-                    fprintf(stderr, "    [g4-cuda-DEC] %d gen tokens; oracle teacher-forced match: %s",
-                            NG, ok ? "ALL" : "FAIL");
-                    if (!ok) fprintf(stderr, " (first bad pos %d)", firstbad);
+                    fprintf(stderr, "    [g4-cuda-DEC] %d gen tokens; oracle teacher-forced: %s",
+                            NG, exact ? "ALL" : (badrank ? "FAIL" : "top-2 flip (dp4a top-1-trust)"));
+                    if (firstbad >= 0) fprintf(stderr, " (first divergence pos %d)", firstbad);
                     fprintf(stderr, "; seq:");
                     for (int i = 0; i < PT; i++) fprintf(stderr, " %d", dseq[i]);
                     fprintf(stderr, "\n");
-                    SP_CHECK(ok, "DECODE: every generated token == oracle argmax (jagged KV + AltUp per step)");
+                    if (big_embd)
+                        SP_CHECK(badrank == 0, "DECODE (dp4a): tokens == oracle argmax, or measured top-2 near-tie");
+                    else
+                        SP_CHECK(exact, "DECODE: every generated token == oracle argmax (jagged KV + AltUp per step)");
+
+                    /* DIAGNOSTIC (provenance bisect): if the decode diverged, rerun
+                     * with the last GOOD token moved INTO the prompt (NG=1). Same
+                     * prefix, same oracle continuation — if the answer changes, the
+                     * bug is in consuming a SELF-GENERATED token (dseq handoff);
+                     * if it repeats, the step computation itself diverges. */
+                    if (!exact && firstbad == NP) {
+                        int32_t d2[NP + 2];
+                        for (int i = 0; i < NP; i++) d2[i] = prompt[i];
+                        d2[NP] = dseq[NP];              /* the good first generation */
+                        int dn2 = gemma4_decode_cuda(m, d2, NP + 1, 1, -1);
+                        const float *row = tl + (size_t)NP * V;
+                        int am = 0; for (int i = 1; i < V; i++) if (row[i] > row[am]) am = i;
+                        fprintf(stderr, "    [g4-cuda-DEC-BISECT] prompt+%d -> produced %d "
+                                        "(oracle argmax %d; autoregressive run produced %d)\n",
+                                dseq[NP], (dn2 == NP + 2) ? d2[NP + 1] : -1, am, dseq[NP + 1]);
+                    }
                 }
                 free(tl);
             }
@@ -435,6 +499,11 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
             if (dn < 0) fprintf(stderr, "    decode: %s\n", sp_last_error()); \
             SP_CHECK(dn == PT, "5b decode produced full length"); } while (0)
 
+        if (big_embd) {   /* 12B-class: every config runs dp4a; 'graph' rows then
+                           * gate graph-vs-per-step EXACTNESS within int8. */
+            _putenv("SP_CUDA_DECODE_INT8=1");
+            fprintf(stderr, "    [g4-cuda-5B] 12B-class: ref = dp4a per-step (f32 embd not resident)\n");
+        }
         G4DEC(ref, tref);                                   /* knobs off (warm) */
         _putenv("SP_CUDA_DECODE_GRAPH=1");  G4DEC(gsq, tgr);
         _putenv("SP_CUDA_DECODE_GRAPH=");
