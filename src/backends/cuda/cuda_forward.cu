@@ -223,6 +223,63 @@ __global__ void k_attn_ntt(const float *Q, const float *K, const float *V,
     }
 }
 
+/* ════════════════ autoregressive KV-cache decode (Beta) ════════════════
+ * The prefill forward above is stateless (recomputes all positions per call).
+ * Decode keeps K/V resident in VRAM across steps and processes ONE new token
+ * per step, attending its single query over the cached [0..pos]. Position-aware
+ * RoPE (the new token sits at absolute `p0`, not batch row 0) + a single-query
+ * attention kernel are the only decode-specific pieces; everything else reuses
+ * the prefill kernels at n_tok=1. f32 path; gate = argmax sequence == CPU
+ * qwen3_generate_kv (knobs off). */
+
+/* NEOX RoPE at ABSOLUTE position p0 (decode: one token, grid=n_heads, t=0). */
+__global__ void k_rope_at(float *base, int n_heads, int d, int rowstride,
+                          float rbase, int p0) {
+    int b = blockIdx.x, t = b / n_heads, h = b % n_heads, i = threadIdx.x, half = d / 2;
+    if (i < half) {
+        float *v = base + (size_t)t * rowstride + (size_t)h * d;
+        float freq = powf(rbase, -2.0f * (float)i / (float)d);
+        float th = (float)(t + p0) * freq, c = cosf(th), s = sinf(th);
+        float a = v[i], bb = v[i + half];
+        v[i] = a * c - bb * s;
+        v[i + half] = a * s + bb * c;
+    }
+}
+
+/* Single-query GQA attention over a cached KV span [0..ctx). One block per query
+ * head; layer_off selects the layer slab in the persistent cache. Shared = ctx
+ * floats (scores). Mirrors k_attn's f32 math exactly (same order). */
+__global__ void k_attn_decode(const float *q, const float *Kc, const float *Vc,
+                              int ctx, int KVD, int HD, int group, float ascale,
+                              size_t layer_off, float *ao) {
+    extern __shared__ float sc[];
+    int h = blockIdx.x, kvh = h / group;
+    const float *qh = q + (size_t)h * HD;
+    for (int s = threadIdx.x; s < ctx; s += blockDim.x) {
+        const float *kh = Kc + layer_off + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[s] = acc * ascale;
+    }
+    __syncthreads();
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float m = sc[0];
+        for (int s = 1; s < ctx; s++) if (sc[s] > m) m = sc[s];
+        float sum = 0.0f;
+        for (int s = 0; s < ctx; s++) { float e = expf(sc[s] - m); sc[s] = e; sum += e; }
+        g_sum = sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < ctx; s++)
+            acc += sc[s] * Vc[layer_off + (size_t)s * KVD + (size_t)kvh * HD + i];
+        ao[(size_t)h * HD + i] = acc * inv;
+    }
+}
+
 __global__ void k_gelu_mul(float *g, const float *up, size_t n) {
     size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -724,6 +781,89 @@ done:
 extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
                                   int n_tok, float *logits) {
     return qwen3_forward_cuda_ex(m, tokens, n_tok, logits, NULL);
+}
+
+/* Autoregressive KV-cache decode on the GPU. seq[0..n_prompt) is the prompt;
+ * writes greedy-argmax continuations into seq[n_prompt .. n_prompt+n_gen).
+ * Returns the final length (n_prompt+produced), or -1 on error. Mirrors the CPU
+ * qwen3_generate_kv (knobs off) so argmax sequences match. */
+extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
+                                 int n_prompt, int n_gen, int eos_id) {
+    if (!m || m->cfg.arch != SP_ARCH_QWEN3) { sp_set_error("qwen3_decode_cuda: not a qwen3 model"); return -1; }
+    if (n_prompt <= 0 || n_gen < 0) { sp_set_error("qwen3_decode_cuda: bad lengths"); return -1; }
+    const qwen3_config *c = &m->cfg;
+    const int E=(int)c->n_embd, FF=(int)c->n_ff, HD=(int)c->head_dim;
+    const int NH=(int)c->n_head, NKV=(int)c->n_head_kv, V=(int)c->n_vocab;
+    const int QD=NH*HD, KVD=NKV*HD, group=NH/NKV, NL=(int)c->n_layers;
+    const float eps=c->rms_eps, base=c->rope_freq_base, ascale=1.0f/sqrtf((float)HD);
+    const int P = n_prompt + n_gen;
+
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return -1; }
+    cublasHandle_t cb = g_w.cublas;
+    cudaStream_t st = g_w.stream;
+
+    float *dKc=NULL,*dVc=NULL,*dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
+          *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL,*hlog=NULL;
+    int *dtok=NULL;
+    int rc=-1, n=n_prompt;
+    const size_t kvn=(size_t)NL*P*KVD;
+    #define DA(p,cnt) do{ if(cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess){sp_set_error("decode OOM");goto done;} }while(0)
+    DA(dKc,kvn); DA(dVc,kvn);
+    DA(dx,E); DA(dnx,E); DA(dq,QD); DA(dk,KVD); DA(dv,KVD); DA(dao,QD); DA(dap,E);
+    DA(dg,FF); DA(dup,FF); DA(ddn,E); DA(dlog,V);
+    if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
+    if (cudaMalloc(&dtok,sizeof(int))!=cudaSuccess){sp_set_error("dtok OOM");goto done;}
+    hlog=(float*)malloc((size_t)V*sizeof(float));
+    if(!hlog){sp_set_error("hlog OOM");goto done;}
+
+    for (int pos=0; pos<P-1; pos++) {
+        if (cudaMemcpyAsync(dtok,&seq[pos],sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("decode tok H2D");goto done;}
+        { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dtok,1,E,1.0f,dx); }
+        for (int L=0; L<NL; L++) {
+            k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+            if (gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr)) goto done;
+            if (gemm_w(cb,st,&g_w.Wk[L],dnx,dk,1,dscr)) goto done;
+            if (gemm_w(cb,st,&g_w.Wv[L],dnx,dv,1,dscr)) goto done;
+            k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
+            k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
+            k_rope_at<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, pos);
+            k_rope_at<<<NKV,HD/2,0,st>>>(dk, NKV, HD, KVD, base, pos);
+            /* write the finalized K/V into the persistent cache at (L,pos) */
+            const size_t loff=(size_t)L*P*KVD, koff=loff+(size_t)pos*KVD;
+            cudaMemcpyAsync(dKc+koff, dk, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            cudaMemcpyAsync(dVc+koff, dv, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            const int ctx=pos+1;
+            int bd=HD>ctx?HD:ctx; if(bd>1024)bd=1024;
+            k_attn_decode<<<NH,bd,(size_t)ctx*sizeof(float),st>>>(dq,dKc,dVc,ctx,KVD,HD,group,ascale,loff,dao);
+            if (gemm_w(cb,st,&g_w.Wo[L],dao,dap,1,dscr)) goto done;
+            k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
+            k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+            if (gemm_w(cb,st,&g_w.Wgate[L],dnx,dg,1,dscr)) goto done;
+            if (gemm_w(cb,st,&g_w.Wup[L],dnx,dup,1,dscr)) goto done;
+            k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
+            if (gemm_w(cb,st,&g_w.Wdown[L],dg,ddn,1,dscr)) goto done;
+            k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
+        }
+        if (pos < n_prompt-1) continue;            /* still ingesting the prompt */
+        k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
+        if (gemm_w(cb,st,&g_w.head,dnx,dlog,1,dscr)) goto done;
+        if (cudaMemcpyAsync(hlog,dlog,(size_t)V*sizeof(float),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("decode logits D2H");goto done;}
+        { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"decode sync");goto done;} }
+        int next=0; float bv=hlog[0];
+        for (int i=1;i<V;i++) if(hlog[i]>bv){bv=hlog[i];next=i;}
+        seq[pos+1]=next; n=pos+2;
+        if (eos_id>=0 && next==eos_id) break;
+    }
+    { cudaError_t e=cudaGetLastError(); if(e!=cudaSuccess){fail_cuda(e,"decode kernel");goto done;} }
+    rc=n;
+done:
+    if(dKc)cudaFree(dKc); if(dVc)cudaFree(dVc);
+    if(dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
+    if(dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
+    if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dtok)cudaFree(dtok);
+    free(hlog);
+    #undef DA
+    return rc;
 }
 
 extern "C" void sp_cuda_model_release(const qwen3_model *m) {

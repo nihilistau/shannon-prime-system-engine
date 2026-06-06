@@ -407,6 +407,19 @@ if(SP_ENGINE_WITH_CUDA)
     add_test(NAME M_QWEN3_CUDA COMMAND test_qwen3_cuda)
     set_tests_properties(M_QWEN3_CUDA PROPERTIES TIMEOUT 600)
 
+    # Beta: autoregressive KV-cache decode on the GPU vs CPU qwen3_generate_kv.
+    add_executable(test_qwen3_decode_cuda test_qwen3_decode_cuda.c)
+    target_link_libraries(test_qwen3_decode_cuda PRIVATE sp_engine)
+    target_compile_definitions(test_qwen3_decode_cuda PRIVATE
+        SP_QWEN3_GGUF="${SP_QWEN3_GGUF}")
+    if(MSVC)
+        target_compile_options(test_qwen3_decode_cuda PRIVATE /W4)
+    else()
+        target_compile_options(test_qwen3_decode_cuda PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME M_QWEN3_DECODE_CUDA COMMAND test_qwen3_decode_cuda)
+    set_tests_properties(M_QWEN3_DECODE_CUDA PROPERTIES TIMEOUT 600)
+
     add_executable(test_ntt_attn_cuda test_ntt_attn_cuda.c)
     target_link_libraries(test_ntt_attn_cuda PRIVATE sp_engine)
     target_compile_definitions(test_ntt_attn_cuda PRIVATE

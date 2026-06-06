@@ -47,6 +47,14 @@ int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tokens
 int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens, int n_tokens,
                           float *logits, sp_kste_tree_t *kv_trees);
 
+/* Autoregressive KV-cache decode on the GPU (Beta). seq[0..n_prompt) is the
+ * prompt; greedy-argmax continuations are written into seq[n_prompt..n_prompt+
+ * n_gen). KV stays resident in VRAM across steps (one token/step, single-query
+ * attention over the cached span). Returns final length (n_prompt+produced) or
+ * -1. argmax sequence matches the CPU qwen3_generate_kv (knobs off). */
+int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
+                      int n_gen, int eos_id);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);
