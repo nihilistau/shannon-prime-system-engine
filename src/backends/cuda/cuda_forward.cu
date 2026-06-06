@@ -1930,6 +1930,38 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 else if (use_int8 && g_w.embd_packed.codes &&
                          gemv_w_packed(st, &g_w.embd_packed, dnx, dlog, dqx, dsx)) { /* dp4a head */ }
                 else { if (gemm(cb, g_w.embd, dnx, dlog, 1, E, V)) goto done; }
+
+                /* SP_G4_SCORE_DBG=<n>: THE LOGIT INTERCEPT (PPL-gate bug hunt).
+                 * D2H the RAW pre-softcap row for the first n scored positions;
+                 * print max/target pre-cap (post-cap is the analytic tanh) and
+                 * the plateau width (#logits within 1% of the cap). */
+                {
+                    static int dbg_left = -2;
+                    if (dbg_left == -2) {
+                        const char *de = getenv("SP_G4_SCORE_DBG");
+                        dbg_left = de ? atoi(de) : 0;
+                    }
+                    if (dbg_left > 0) {
+                        dbg_left--;
+                        cudaStreamSynchronize(st);
+                        float *hl = (float *)malloc((size_t)V * sizeof(float));
+                        if (hl) {
+                            cudaMemcpy(hl, dlog, (size_t)V * sizeof(float), cudaMemcpyDeviceToHost);
+                            const int tgt = seq[pos + 1];
+                            float mx = hl[0]; int mi = 0; long plateau = 0;
+                            for (int i = 1; i < V; i++) if (hl[i] > mx) { mx = hl[i]; mi = i; }
+                            const float thr = (softcap > 0.0f) ? 3.0f * softcap : mx;  /* tanh(3)=0.995 */
+                            for (int i = 0; i < V; i++) if (hl[i] >= thr) plateau++;
+                            fprintf(stderr, "    [g4-score-dbg] pos %d PRE-cap: max %.4f (id %d) target[%d] %.4f "
+                                            "| #pre>=3*cap %ld | POST-cap(analytic): max %.4f target %.4f\n",
+                                    pos, (double)mx, mi, tgt, (double)hl[tgt], plateau,
+                                    softcap > 0 ? (double)(tanhf(mx / softcap) * softcap) : (double)mx,
+                                    softcap > 0 ? (double)(tanhf(hl[tgt] / softcap) * softcap) : (double)hl[tgt]);
+                            free(hl);
+                        }
+                    }
+                }
+
                 if (softcap > 0.0f)
                     k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(dlog, (size_t)V, softcap);
                 k_nll<<<1, 256, 0, st>>>(dlog, V, dseq + pos + 1, dnll);

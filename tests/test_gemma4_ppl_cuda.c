@@ -124,6 +124,50 @@ static void M_GEMMA4_CUDA_PPL(void) {
     _putenv("SP_CUDA_DECODE_INT8=");
     SP_CHECK(rc == 0 && count > 0, "teacher-forced scoring over all chunks");
 
+    /* SP_PPL_ORACLE_DIFF=1 (bug hunt): run the CPU ORACLE (gemma4_forward, the
+     * exact-lift arithmetic, softcap applied internally) over chunk 0 and print
+     * the POST-cap max/target logits at the first scored positions — the
+     * reference half of the logit intercept — plus the host-recomputed chunk
+     * NLL under BOTH loop-bound conventions (ours: targets [first, n_ctx);
+     * M_GEMMA4: targets [first+1, n_ctx)) to reconcile the scorer. CPU 12B is
+     * hours — use on E2B-class models only. */
+    if (getenv("SP_PPL_ORACLE_DIFF") && chunk) {
+        const int V = (int)m->cfg.n_vocab;
+        float *ol = (float *)malloc((size_t)n_ctx * (size_t)V * sizeof(float));
+        if (ol) {
+            chunk[0] = bos;
+            for (int k = 1; k < n_ctx; k++) chunk[k] = toks[k];
+            if (gemma4_forward(m, chunk, n_ctx, ol) == 0) {
+                for (int p = first - 1; p < first + 4 && p < n_ctx - 1; p++) {
+                    const float *lg = ol + (size_t)p * V;
+                    const int tgt = chunk[p + 1];
+                    float mx = lg[0]; int mi = 0;
+                    for (int i = 1; i < V; i++) if (lg[i] > mx) { mx = lg[i]; mi = i; }
+                    fprintf(stderr, "    [g4-oracle-dbg] pos %d POST-cap: max %.4f (id %d) target[%d] %.4f\n",
+                            p, (double)mx, mi, tgt, (double)lg[tgt]);
+                }
+                double nA = 0.0, nB = 0.0; long cA = 0, cB = 0;
+                for (int p = first - 1; p < n_ctx - 1; p++) {
+                    const float *lg = ol + (size_t)p * V;
+                    const int tgt = chunk[p + 1];
+                    double mx = lg[0];
+                    for (int i = 1; i < V; i++) if (lg[i] > mx) mx = lg[i];
+                    double se = 0.0;
+                    for (int i = 0; i < V; i++) se += exp((double)lg[i] - mx);
+                    double nll1 = -((double)lg[tgt] - mx - log(se));
+                    nA += nll1; cA++;                       /* ours: p in [first-1, n_ctx-1) */
+                    if (p >= first) { nB += nll1; cB++; }   /* M_GEMMA4: p in [first, n_ctx-1) */
+                }
+                fprintf(stderr, "    [g4-oracle-dbg] CPU-oracle chunk-0 PPL: ours-bounds %.4f (n=%ld) | "
+                                "M_GEMMA4-bounds %.4f (n=%ld)\n",
+                        exp(nA / (double)cA), cA, exp(nB / (double)cB), cB);
+            } else {
+                fprintf(stderr, "    [g4-oracle-dbg] CPU oracle forward FAILED: %s\n", sp_last_error());
+            }
+            free(ol);
+        }
+    }
+
     if (count > 0) {
         double ppl = exp(nll / (double)count);
         if (oracle > 0.0) {
