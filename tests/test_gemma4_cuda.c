@@ -66,6 +66,165 @@ void sp_cuda_model_release(const qwen3_model *m);
 const float *sp_as_f32(const qwen3_model *m, const gguf_tensor *t);
 const float *as_f32(const qwen3_model *m, const gguf_tensor *t) { return sp_as_f32(m, t); }
 
+/* GELU tanh approximation — verbatim gemma4.c g4_gelu (static in the oracle TU). */
+static float g4_gelu(float v) {
+    const float k = 0.7978845608028654f;
+    return 0.5f * v * (1.0f + tanhf(k * (v + 0.044715f * v * v * v)));
+}
+
+/* ═══ Truncated parity harness (ETA.2/3): CPU mirror of gemma4.c through
+ * n_layers (full layers, attention-only at the LAST), built from the oracle's
+ * OWN core primitives in the oracle's exact order, vs gemma4_cuda_probe at the
+ * same boundary. Drops the 6-stage telemetry at the last layer; abs_gates =
+ * {nx, q, ao, ap, x} or NULL for telemetry-only (first run measures the floor,
+ * then the gates get pinned at ~3x — the L0 discipline). NO AltUp/out_scale on
+ * EITHER side (ETA.4); the boundary is before the injection point. ═══ */
+static void truncated_parity(const qwen3_model *m, int n_layers, const char *tag,
+                             const double *abs_gates) {
+    enum { NT = 12 };
+    const int32_t toks[NT] = { 2, 10, 100, 1000, 5000, 9999, 31, 7, 42, 256, 777, 12345 };
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, SW = (int)c->sliding_window, FF = (int)c->n_ff;
+    const float eps = c->rms_eps, embscale = sqrtf((float)E);
+    const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int g_nh = (int)c->n_head, g_nkv = (int)c->n_head_kv, g_hd = (int)c->head_dim;
+    const int s_nh = (int)c->g4_nh_swa, s_nkv = (int)c->g4_nkv_swa, s_hd = (int)c->g4_hd_swa;
+    const float g_base = c->rope_freq_base, s_base = c->g4_rope_base_swa;
+    const int QDmax = (g_nh*g_hd > s_nh*s_hd) ? g_nh*g_hd : s_nh*s_hd;
+    const int KVDmax = (g_nkv*g_hd > s_nkv*s_hd) ? g_nkv*g_hd : s_nkv*s_hd;
+    int FFmax = FF;
+    for (int L = 0; L < n_layers; L++) {
+        const gguf_tensor *fg = m->layers[L].ffn_gate;
+        int f = (fg && fg->n_dims >= 2 && fg->dims[1] > 0) ? (int)fg->dims[1] : FF;
+        if (f > FFmax) FFmax = f;
+    }
+
+    float *x   = (float *)malloc((size_t)NT * E * sizeof(float));
+    float *nx  = (float *)malloc((size_t)NT * E * sizeof(float));
+    float *nx0 = (float *)malloc((size_t)NT * E * sizeof(float));
+    float *q   = (float *)malloc((size_t)NT * QDmax * sizeof(float));
+    float *K   = (float *)malloc((size_t)NT * KVDmax * sizeof(float));
+    float *Vb  = (float *)malloc((size_t)NT * KVDmax * sizeof(float));
+    float *ao  = (float *)malloc((size_t)NT * QDmax * sizeof(float));
+    float *ap  = (float *)malloc((size_t)NT * E * sizeof(float));
+    float *g   = (float *)malloc((size_t)NT * FFmax * sizeof(float));
+    float *up  = (float *)malloc((size_t)NT * FFmax * sizeof(float));
+    float *dn  = (float *)malloc((size_t)NT * E * sizeof(float));
+    float *sc  = (float *)malloc((size_t)NT * sizeof(float));
+    float *gq  = (float *)malloc((size_t)NT * QDmax * sizeof(float));
+    SP_CHECK(x && nx && nx0 && q && K && Vb && ao && ap && g && up && dn && sc && gq,
+             "parity buffers");
+    if (!(x && nx && nx0 && q && K && Vb && ao && ap && g && up && dn && sc && gq)) goto fin;
+
+    {
+        int cpu_ok = 1, last_qd = 0;
+        for (int t = 0; t < NT && cpu_ok; t++) {
+            if (sp_embed_row(m, toks[t], E, x + (size_t)t * E)) cpu_ok = 0;
+            for (int i = 0; i < E; i++) x[(size_t)t * E + i] *= embscale;
+        }
+        for (int L = 0; L < n_layers && cpu_ok; L++) {
+            const qwen3_layer *ly = &m->layers[L];
+            const int global = ((L % period) == period - 1);
+            const int nh  = global ? g_nh  : s_nh;
+            const int nkv = global ? g_nkv : s_nkv;
+            const int hd  = global ? g_hd  : s_hd;
+            const int grp = nh / nkv, qd = nh * hd, kvd = nkv * hd;
+            const float rbase = global ? g_base : s_base;
+            const float *ffac = global ? sp_as_f32(m, m->rope_freqs) : NULL;
+            const int win = global ? -1 : SW;
+            const gguf_tensor *fg = ly->ffn_gate;
+            const int ffL = (fg && fg->n_dims >= 2 && fg->dims[1] > 0) ? (int)fg->dims[1] : FF;
+            const int last = (L == n_layers - 1);
+            if (last) last_qd = qd;
+
+            for (int t = 0; t < NT; t++)
+                sp_rmsnorm(x + (size_t)t * E, sp_as_f32(m, ly->attn_norm), E, eps, nx + (size_t)t * E);
+            if (last) memcpy(nx0, nx, (size_t)NT * E * sizeof(float));
+            if (sp_matmul(m, ly->attn_q, nx, NT, E, qd, q)) { cpu_ok = 0; break; }
+            {
+                const float *qn = sp_as_f32(m, ly->attn_q_norm);
+                for (int t = 0; t < NT; t++)
+                    for (int h = 0; h < nh; h++) {
+                        float *qh = q + (size_t)t * qd + (size_t)h * hd;
+                        sp_rmsnorm_head(qh, qn, hd, eps);
+                        sp_rope_neox_freqs(qh, hd, t, rbase, ffac);
+                    }
+            }
+            if (sp_matmul(m, ly->attn_k, nx, NT, E, kvd, K))  { cpu_ok = 0; break; }
+            if (sp_matmul(m, ly->attn_v, nx, NT, E, kvd, Vb)) { cpu_ok = 0; break; }
+            {
+                const float *kn = sp_as_f32(m, ly->attn_k_norm);
+                for (int t = 0; t < NT; t++)
+                    for (int h = 0; h < nkv; h++) {
+                        float *kh = K + (size_t)t * kvd + (size_t)h * hd;
+                        sp_rmsnorm_head(kh, kn, hd, eps);
+                        sp_rope_neox_freqs(kh, hd, t, rbase, ffac);
+                        float *vh = Vb + (size_t)t * kvd + (size_t)h * hd;
+                        double ss = 0.0;
+                        for (int i = 0; i < hd; i++) ss += (double)vh[i] * (double)vh[i];
+                        float inv = 1.0f / sqrtf((float)(ss / (double)hd) + eps);
+                        for (int i = 0; i < hd; i++) vh[i] *= inv;
+                    }
+            }
+            for (int t = 0; t < NT; t++)
+                for (int h = 0; h < nh; h++)
+                    sp_attn_head(q + (size_t)t * qd + (size_t)h * hd, K, Vb, t, kvd,
+                                 h / grp, hd, 1.0f, win, sc, ao + (size_t)t * qd + (size_t)h * hd);
+            if (sp_matmul(m, ly->attn_output, ao, NT, qd, E, ap)) { cpu_ok = 0; break; }
+            for (int t = 0; t < NT; t++) {
+                sp_rmsnorm(ap + (size_t)t * E, sp_as_f32(m, ly->post_attn_norm), E, eps, nx + (size_t)t * E);
+                float *xt = x + (size_t)t * E; const float *pt = nx + (size_t)t * E;
+                for (int i = 0; i < E; i++) xt[i] += pt[i];
+            }
+            if (last) break;   /* boundary A: attention residual of the last layer */
+
+            for (int t = 0; t < NT; t++)
+                sp_rmsnorm(x + (size_t)t * E, sp_as_f32(m, ly->ffn_norm), E, eps, nx + (size_t)t * E);
+            if (sp_matmul(m, ly->ffn_gate, nx, NT, E, ffL, g))  { cpu_ok = 0; break; }
+            if (sp_matmul(m, ly->ffn_up,   nx, NT, E, ffL, up)) { cpu_ok = 0; break; }
+            for (size_t i = 0; i < (size_t)NT * ffL; i++) g[i] = g4_gelu(g[i]) * up[i];
+            if (sp_matmul(m, ly->ffn_down, g, NT, ffL, E, dn))  { cpu_ok = 0; break; }
+            for (int t = 0; t < NT; t++) {
+                sp_rmsnorm(dn + (size_t)t * E, sp_as_f32(m, ly->post_ffw_norm), E, eps, nx + (size_t)t * E);
+                float *xt = x + (size_t)t * E; const float *pt = nx + (size_t)t * E;
+                for (int i = 0; i < E; i++) xt[i] += pt[i];
+            }
+        }
+        SP_CHECK(cpu_ok, "CPU truncated mirror computed");
+
+        if (cpu_ok) {
+            struct { int stage; const float *cpu; size_t n; const char *nm; } stg[] = {
+                { 2, nx0, (size_t)NT * E,       "nx (attn_norm)   " },
+                { 3, q,   (size_t)NT * last_qd, "q  (norm+rope)   " },
+                { 4, ao,  (size_t)NT * last_qd, "ao (attention)   " },
+                { 5, ap,  (size_t)NT * E,       "ap (Wo, pre-norm)" },
+                { 1, x,   (size_t)NT * E,       "x  (attn residual)" },
+            };
+            for (int s = 0; s < 5; s++) {
+                int rc2 = gemma4_cuda_probe(m, toks, NT, n_layers, stg[s].stage, gq);
+                if (rc2) { fprintf(stderr, "    [%s] stage %d probe: %s\n", tag, stg[s].stage, sp_last_error()); continue; }
+                double mr = 0.0, ma = 0.0;
+                for (size_t i = 0; i < stg[s].n; i++) {
+                    double d = fabs((double)gq[i] - (double)stg[s].cpu[i]);
+                    double den = fabs((double)stg[s].cpu[i]) > 1e-6 ? fabs((double)stg[s].cpu[i]) : 1e-6;
+                    if (d > ma) ma = d;
+                    if (d / den > mr) mr = d / den;
+                }
+                fprintf(stderr, "    [g4-cuda-%s] stage %s max rel %.3e  max abs %.3e%s\n",
+                        tag, stg[s].nm, mr, ma, abs_gates ? "" : "  (telemetry)");
+                if (abs_gates) {
+                    double gate = abs_gates[s];
+                    SP_CHECK((gate == 0.0 && ma == 0.0) || (gate > 0.0 && ma <= gate),
+                             "stage at the measured f32 floor");
+                }
+            }
+        }
+    }
+fin:
+    free(x); free(nx); free(nx0); free(q); free(K); free(Vb); free(ao); free(ap);
+    free(g); free(up); free(dn); free(sc); free(gq);
+}
+
 static void T_GEMMA4_CUDA_WEIGHTS(void) {
     const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
     const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
@@ -100,177 +259,27 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
     if (rc) fprintf(stderr, "    probe: %s\n", sp_last_error());
     SP_CHECK(rc == 0, "gemma4 CUDA weight set uploads (per-layer geometry + shared-KV + AltUp)");
 
-    /* ════ E_G4_CU_L0 (ETA.2): LAYER-0 TRUNCATED PARITY — the bisection gate ════
-     * CPU mirror computed HERE with the oracle's OWN core primitives (sp_rmsnorm /
-     * sp_matmul / sp_rmsnorm_head / sp_rope_neox_freqs / sp_attn_head), in the
-     * oracle's exact order (gemma4.c lines 144-205), truncated after layer 0's
-     * ATTENTION residual. Layer 0 is SWA (global = L%period==period-1): base
-     * g4_rope_base_swa, no freq factors, sliding window, ascale=1.0, QK-norm
-     * before RoPE, WEIGHTLESS V-norm. The CUDA side runs gemma4_cuda_probe
-     * (n_layers=1, attn_only=1). Locks the math mechanics before AltUp/SWA-global
-     * routing enter. Gate = max rel err at the f32 cuBLAS-vs-CPU floor (1e-4;
-     * observed qwen3/gemma3 floors ~3e-5 — NOT bit-exact, reduction order differs). */
+    /* ════ E_G4_CU_L0 / E_G4_CU_L4 (ETA.2/3): TRUNCATED PARITY via the harness ════
+     * L0 (SWA, n_layers=1): gates PINNED at ~3x the measured floors (bisection
+     * 2026-06-06): nx BIT-EXACT; q 8.6e-6 / ao 3.2e-5 / ap 6.3e-5 abs (f32 GEMM
+     * floor, gemm_w_lift oracle arithmetic); residual 1.59e-3 = the post_attn_norm
+     * 1/rms(ap)~25x amplification of that floor (mechanism on record above).
+     * L4 (the FIRST GLOBAL layer, n_layers=5): the geometry shift — hd 256->512,
+     * qd 2048->4096, nkv geometry change, rope_freqs proportional table engages,
+     * SWA mask drops to full causal. First run = TELEMETRY (NULL gates); pinned
+     * after measurement, the L0 discipline. */
+    sp_kernels_read_env();
     {
-        enum { NT = 12 };
-        const int32_t toks[NT] = { 2, 10, 100, 1000, 5000, 9999, 31, 7, 42, 256, 777, 12345 };
-        const qwen3_config *c = &m->cfg;
-        const int E = (int)c->n_embd, SW = (int)c->sliding_window;
-        const float eps = c->rms_eps, embscale = sqrtf((float)E);
-        const int nh = (int)c->g4_nh_swa, nkv = (int)c->g4_nkv_swa, hd = (int)c->g4_hd_swa;
-        const int grp = nh / nkv, qd = nh * hd, kvd = nkv * hd;
-        const float rbase = c->g4_rope_base_swa, ascale = 1.0f;
-        const int win = SW;
-        const qwen3_layer *ly = &m->layers[0];
-
-        float *x  = (float *)malloc((size_t)NT * E * sizeof(float));
-        float *nx = (float *)malloc((size_t)NT * E * sizeof(float));
-        float *q  = (float *)malloc((size_t)NT * qd * sizeof(float));
-        float *K  = (float *)malloc((size_t)NT * kvd * sizeof(float));
-        float *Vb = (float *)malloc((size_t)NT * kvd * sizeof(float));
-        float *ao = (float *)malloc((size_t)NT * qd * sizeof(float));
-        float *ap = (float *)malloc((size_t)NT * E * sizeof(float));
-        float *sc = (float *)malloc((size_t)NT * sizeof(float));
-        float *gx = (float *)malloc((size_t)NT * E * sizeof(float));
-        float *nx0 = (float *)malloc((size_t)NT * E * sizeof(float));  /* attn_norm snapshot */
-        SP_CHECK(x && nx && q && K && Vb && ao && ap && sc && gx && nx0, "L0 probe buffers");
-        if (x && nx && q && K && Vb && ao && ap && sc && gx && nx0) {
-            sp_kernels_read_env();
-            /* CPU mirror — embed + sqrt(E) scale */
-            int cpu_ok = 1;
-            for (int t = 0; t < NT && cpu_ok; t++) {
-                if (sp_embed_row(m, toks[t], E, x + (size_t)t * E)) cpu_ok = 0;
-                for (int i = 0; i < E; i++) x[(size_t)t * E + i] *= embscale;
-            }
-            /* ── bisect stage 0: EMBED parity (isolates arena dequant + upload from
-             * the attention math; expected ~1e-7, pure dequant+scale both sides) ── */
-            if (cpu_ok) {
-                int erc = gemma4_cuda_probe(m, toks, NT, /*n_layers=*/0, 0, gx);
-                SP_CHECK(erc == 0, "CUDA embed probe ran");
-                if (erc == 0) {
-                    double mr = 0.0;
-                    for (size_t i = 0; i < (size_t)NT * E; i++) {
-                        double d = fabs((double)gx[i] - (double)x[i]);
-                        double den = fabs((double)x[i]) > 1e-6 ? fabs((double)x[i]) : 1e-6;
-                        if (d / den > mr) mr = d / den;
-                    }
-                    fprintf(stderr, "    [g4-cuda-L0] embed parity: max rel %.3e\n", mr);
-                    SP_CHECK(mr < 1e-5, "embed+scale: CUDA == CPU");
-                }
-            }
-            /* layer 0 attention block, oracle order */
-            if (cpu_ok) {
-                for (int t = 0; t < NT; t++)
-                    sp_rmsnorm(x + (size_t)t * E, sp_as_f32(m, ly->attn_norm), E, eps, nx + (size_t)t * E);
-                memcpy(nx0, nx, (size_t)NT * E * sizeof(float));
-                if (sp_matmul(m, ly->attn_q, nx, NT, E, qd, q)) cpu_ok = 0;
-            }
-            if (cpu_ok) {
-                const float *qn = sp_as_f32(m, ly->attn_q_norm);
-                for (int t = 0; t < NT; t++)
-                    for (int h = 0; h < nh; h++) {
-                        float *qh = q + (size_t)t * qd + (size_t)h * hd;
-                        sp_rmsnorm_head(qh, qn, hd, eps);
-                        sp_rope_neox_freqs(qh, hd, t, rbase, NULL);
-                    }
-                if (sp_matmul(m, ly->attn_k, nx, NT, E, kvd, K))  cpu_ok = 0;
-                if (cpu_ok && sp_matmul(m, ly->attn_v, nx, NT, E, kvd, Vb)) cpu_ok = 0;
-            }
-            if (cpu_ok) {
-                const float *kn = sp_as_f32(m, ly->attn_k_norm);
-                for (int t = 0; t < NT; t++)
-                    for (int h = 0; h < nkv; h++) {
-                        float *kh = K + (size_t)t * kvd + (size_t)h * hd;
-                        sp_rmsnorm_head(kh, kn, hd, eps);
-                        sp_rope_neox_freqs(kh, hd, t, rbase, NULL);
-                        /* WEIGHTLESS V-norm (gemma4.c g4_rmsnorm_noweight, inlined —
-                         * it is static in the oracle TU) */
-                        float *vh = Vb + (size_t)t * kvd + (size_t)h * hd;
-                        double ss = 0.0;
-                        for (int i = 0; i < hd; i++) ss += (double)vh[i] * (double)vh[i];
-                        float inv = 1.0f / sqrtf((float)(ss / (double)hd) + eps);
-                        for (int i = 0; i < hd; i++) vh[i] *= inv;
-                    }
-                for (int t = 0; t < NT; t++)
-                    for (int h = 0; h < nh; h++)
-                        sp_attn_head(q + (size_t)t * qd + (size_t)h * hd, K, Vb, t, kvd,
-                                     h / grp, hd, ascale, win, sc, ao + (size_t)t * qd + (size_t)h * hd);
-                if (sp_matmul(m, ly->attn_output, ao, NT, qd, E, ap)) cpu_ok = 0;
-            }
-            if (cpu_ok) {
-                for (int t = 0; t < NT; t++) {
-                    sp_rmsnorm(ap + (size_t)t * E, sp_as_f32(m, ly->post_attn_norm), E, eps, nx + (size_t)t * E);
-                    float *xt = x + (size_t)t * E; const float *pt = nx + (size_t)t * E;
-                    for (int i = 0; i < E; i++) xt[i] += pt[i];
-                }
-            }
-            SP_CHECK(cpu_ok, "CPU layer-0 mirror computed");
-
-            /* ── intra-block bisection stages (informational; pinpoint the seam) ──
-             * stage 2 = post-attn_norm nx [NT*E]; 3 = q post norm+rope [NT*qd];
-             * 4 = ao post-attention [NT*qd]. CPU intermediates are live above. */
-            {
-                float *gq = (float *)malloc((size_t)NT * qd * sizeof(float));
-                if (gq) {
-                    struct { int stage; const float *cpu; size_t n; const char *nm; } stg[] = {
-                        { 2, nx0, (size_t)NT * E,  "nx (attn_norm)   " },
-                        { 3, q,   (size_t)NT * qd, "q  (norm+rope)   " },
-                        { 4, ao,  (size_t)NT * qd, "ao (attention)   " },
-                        { 5, ap,  (size_t)NT * E,  "ap (Wo, pre-norm)" },
-                    };
-                    /* STAGED ABS GATES — the real L0 math lock. Floors measured on the
-                     * E2B (bisection 2026-06-06): nx is BIT-EXACT; q/ao/ap sit at the
-                     * f32 GEMM reduction-order floor (8.6e-6 / 3.2e-5 / 6.3e-5 abs).
-                     * Gates set ~3x above the measured floor. Raw REL error is NOT
-                     * gated at these boundaries: it inflates on near-zero elements. */
-                    const double abs_gate[4] = { 0.0, 5e-5, 1e-4, 2e-4 };
-                    for (int s = 0; s < 4; s++) {
-                        int rc2 = gemma4_cuda_probe(m, toks, NT, 1, stg[s].stage, gq);
-                        if (rc2) { fprintf(stderr, "    stage %d probe: %s\n", stg[s].stage, sp_last_error()); continue; }
-                        double mr = 0.0, ma = 0.0;
-                        for (size_t i = 0; i < stg[s].n; i++) {
-                            double d = fabs((double)gq[i] - (double)stg[s].cpu[i]);
-                            double den = fabs((double)stg[s].cpu[i]) > 1e-6 ? fabs((double)stg[s].cpu[i]) : 1e-6;
-                            if (d > ma) ma = d;
-                            if (d / den > mr) mr = d / den;
-                        }
-                        fprintf(stderr, "    [g4-cuda-L0] stage %s max rel %.3e  max abs %.3e\n",
-                                stg[s].nm, mr, ma);
-                        SP_CHECK(ma <= (abs_gate[s] > 0.0 ? abs_gate[s] : 1e-12) ||
-                                 (s == 0 && ma == 0.0), "L0 stage at the f32 floor");
-                    }
-                    free(gq);
-                }
-            }
-
-            /* CUDA side: same boundary */
-            int crc = gemma4_cuda_probe(m, toks, NT, /*n_layers=*/1, /*attn_only=*/1, gx);
-            if (crc) fprintf(stderr, "    cuda probe: %s\n", sp_last_error());
-            SP_CHECK(crc == 0, "CUDA layer-0 probe ran");
-
-            if (cpu_ok && crc == 0) {
-                double maxrel = 0.0, maxabs = 0.0; size_t bad = (size_t)-1;
-                for (size_t i = 0; i < (size_t)NT * E; i++) {
-                    double d = fabs((double)gx[i] - (double)x[i]);
-                    double denom = fabs((double)x[i]) > 1e-6 ? fabs((double)x[i]) : 1e-6;
-                    if (d > maxabs) maxabs = d;
-                    if (d / denom > maxrel) { maxrel = d / denom; bad = i; }
-                }
-                fprintf(stderr, "    [g4-cuda-L0] attn-residual parity: max rel %.3e  max abs %.3e  (worst idx %zu)\n",
-                        maxrel, maxabs, bad);
-                /* RESIDUAL BOUNDARY GATE — measured amplification, on the record
-                 * (bisection 2026-06-06, NOT a silent revision): every pre-norm stage
-                 * above sits at the f32 floor (<= 6.3e-5 abs), then post_attn_norm
-                 * divides by rms(ap) ~ 0.04, amplifying that floor ~x25 into the
-                 * residual (1.59e-3 abs measured). The pipeline math is at the floor;
-                 * the boundary metric amplifies. Gate = 5e-3 abs (~3x the measured
-                 * amplified floor). The DECISIVE correctness gate for the gemma4 CUDA
-                 * forward is the full-forward argmax+KL vs the CPU oracle (ETA.4
-                 * closure), the repo's standard cross-backend currency — raw
-                 * activation error is amplified through every norm exactly like this. */
-                SP_CHECK(maxabs < 5e-3, "L0 attention block: residual at the norm-amplified f32 floor");
-            }
-        }
-        free(x); free(nx); free(nx0); free(q); free(K); free(Vb); free(ao); free(ap); free(sc); free(gx);
+        static const double l0_gates[5] = { 0.0, 5e-5, 1e-4, 2e-4, 5e-3 };
+        truncated_parity(m, 1, "L0", l0_gates);
+        /* L4 gates pinned at ~3x the measured floors (telemetry run 2026-06-06:
+         * nx 1.11e-4 / q 1.15e-5 / ao 5.15e-5 / ap 8.15e-5 / x 1.59e-3 abs).
+         * nx is no longer bit-exact at depth — 4 layers of norm-amplified inflow,
+         * re-condensed by attn_norm (stable, no explosion). q at the floor PROVES
+         * the rope_freqs proportional handoff + the 4096-wide global projection;
+         * ao at the floor proves the full-causal (win=-1) mask switch. */
+        static const double l4_gates[5] = { 3e-4, 5e-5, 1.5e-4, 2.5e-4, 5e-3 };
+        truncated_parity(m, 5, "L4", l4_gates);
     }
 
     sp_cuda_model_release(m);
