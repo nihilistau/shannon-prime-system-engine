@@ -32,6 +32,24 @@ static double now_s(void) {
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
+static void set_graph(int on) {
+#if defined(_WIN32)
+    _putenv_s("SP_CUDA_DECODE_GRAPH", on ? "1" : "0");
+#else
+    if (on) setenv("SP_CUDA_DECODE_GRAPH", "1", 1); else unsetenv("SP_CUDA_DECODE_GRAPH");
+#endif
+}
+
+/* Run the GPU decode (knobs as set), return wall-clock seconds via *dt. */
+static int decode_run(qwen3_model *m, const int32_t *prompt, int n_prompt,
+                      int n_gen, int32_t *out, double *dt) {
+    for (int i = 0; i < n_prompt; i++) out[i] = prompt[i];
+    double t0 = now_s();
+    int n = qwen3_decode_cuda(m, out, n_prompt, n_gen, /*eos=*/-1);
+    *dt = now_s() - t0;
+    return n;
+}
+
 static void T_QWEN3_DECODE_CUDA(void) {
     if (sp_cuda_device_count() < 1) { fprintf(stderr, "    no CUDA device — SKIP\n"); return; }
     const char *gguf = getenv("SP_QWEN3_GGUF"); if (!gguf) gguf = SP_QWEN3_GGUF;
@@ -43,21 +61,40 @@ static void T_QWEN3_DECODE_CUDA(void) {
     int32_t prompt[4] = { 1, 2, 3, 4 };
     const int V = (int)m->cfg.n_vocab;
 
-    /* GPU autoregressive decode (KV resident in VRAM, single-query attention). */
-    int32_t gpu[64]; for (int i = 0; i < n_prompt; i++) gpu[i] = prompt[i];
-    double t0 = now_s();
-    int ngpu = qwen3_decode_cuda(m, gpu, n_prompt, n_gen, /*eos=*/-1);
-    double dt = now_s() - t0;
-    if (ngpu < 0) fprintf(stderr, "    %s\n", sp_last_error());
-    SP_CHECK(ngpu == P, "GPU decode produced full length");
+    /* (1) per-step decode (graph OFF) — the proven Beta-S0 path. */
+    set_graph(0);
+    int32_t seq_ref[64]; double dt_ref = 0.0;
+    int n_ref = decode_run(m, prompt, n_prompt, n_gen, seq_ref, &dt_ref);
+    if (n_ref < 0) fprintf(stderr, "    %s\n", sp_last_error());
+    SP_CHECK(n_ref == P, "per-step decode produced full length");
 
-    /* GPU teacher-forced PREFILL over the decoded sequence: argmax at position
-     * pos must predict gpu[pos+1] for every emitted position. This verifies the
-     * KV-cache decode agrees with full-attention recompute (both on GPU). */
+    /* (2) CUDA-graph decode (graph ON, BETA.2) — capture once, replay/token. */
+    set_graph(1);
+    int32_t seq_g[64]; double dt_g = 0.0;
+    int n_g = decode_run(m, prompt, n_prompt, n_gen, seq_g, &dt_g);
+    if (n_g < 0) fprintf(stderr, "    %s\n", sp_last_error());
+    SP_CHECK(n_g == P, "graph decode produced full length");
+
+    /* (3) byte-exact equality: the graph path must emit the SAME sequence as the
+     * per-step path (position-indirect kernels are numerically identical). */
+    int eq = (n_ref == n_g), firsteq = -1;
+    for (int i = 0; i < P && eq; i++) if (seq_ref[i] != seq_g[i]) { eq = 0; firsteq = i; }
+    if (!eq) {
+        fprintf(stderr, "    graph != per-step at idx %d (%d vs %d)\n",
+                firsteq, firsteq>=0?seq_ref[firsteq]:-1, firsteq>=0?seq_g[firsteq]:-1);
+        fprintf(stderr, "    per-step:"); for (int i=0;i<P;i++) fprintf(stderr," %d",seq_ref[i]);
+        fprintf(stderr, "\n    graph   :"); for (int i=0;i<P;i++) fprintf(stderr," %d",seq_g[i]);
+        fprintf(stderr, "\n");
+    }
+    SP_CHECK(eq, "CUDA-graph decode == per-step decode (byte-exact)");
+
+    /* (4) GPU teacher-forced PREFILL over the decoded sequence: argmax at pos must
+     * predict seq[pos+1] for every emitted position — anchors decode to recompute.
+     * M_QWEN3_CUDA already proves prefill == CPU; transitively decode == CPU. */
     float *logits = (float *)malloc((size_t)P * V * sizeof(float));
     SP_CHECK(logits != NULL, "logits buffer");
     if (!logits) { qwen3_free(m); return; }
-    int rcf = qwen3_forward_cuda(m, gpu, P, logits);
+    int rcf = qwen3_forward_cuda(m, seq_g, P, logits);
     SP_CHECK(rcf == 0, "GPU prefill over decoded sequence");
 
     int match = 1, firstbad = -1;
@@ -65,21 +102,18 @@ static void T_QWEN3_DECODE_CUDA(void) {
         const float *row = logits + (size_t)pos * V;
         int am = 0; float bv = row[0];
         for (int i = 1; i < V; i++) if (row[i] > bv) { bv = row[i]; am = i; }
-        if (am != gpu[pos + 1]) { match = 0; firstbad = pos; }
+        if (am != seq_g[pos + 1]) { match = 0; firstbad = pos; }
     }
-    if (!match) {
-        fprintf(stderr, "    decode/prefill disagree at pos %d: prefill-argmax != decoded %d\n",
-                firstbad, gpu[firstbad + 1]);
-        fprintf(stderr, "    GPU decoded:");
-        for (int i = 0; i < P; i++) fprintf(stderr, " %d", gpu[i]);
-        fprintf(stderr, "\n");
-    }
-    SP_CHECK(match, "GPU decode (KV cache) == GPU prefill teacher-forced argmax");
+    if (!match)
+        fprintf(stderr, "    decode/prefill disagree at pos %d: != decoded %d\n",
+                firstbad, seq_g[firstbad + 1]);
+    SP_CHECK(match, "GPU decode == GPU prefill teacher-forced argmax");
 
-    fprintf(stderr, "    [decode-cuda] %d gen tokens in %.4fs = %.2f tok/s on the GPU "
-            "(KV resident in VRAM, single-query attention); seq:",
-            n_gen, dt, (double)n_gen / dt);
-    for (int i = 0; i < P; i++) fprintf(stderr, " %d", gpu[i]);
+    double tps_ref = (double)n_gen / dt_ref, tps_g = (double)n_gen / dt_g;
+    fprintf(stderr, "    [decode-cuda] per-step %.2f tok/s | graph %.2f tok/s "
+            "(%.2fx) — %d gen tokens; seq:",
+            tps_ref, tps_g, tps_g / tps_ref, n_gen);
+    for (int i = 0; i < P; i++) fprintf(stderr, " %d", seq_g[i]);
     fprintf(stderr, "\n");
 
     free(logits);

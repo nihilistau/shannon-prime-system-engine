@@ -808,10 +808,118 @@ extern "C" int qwen3_forward_cuda(const qwen3_model *m, const int32_t *tokens,
     return qwen3_forward_cuda_ex(m, tokens, n_tok, logits, NULL);
 }
 
+/* ═══════════ BETA.2: position-indirect decode kernels (CUDA graphs) ═══════════
+ * The per-step decode loop launches ~13 kernels/layer * NL + head/argmax per
+ * token — all tiny, so wall-clock is dominated by launch overhead, not compute.
+ * CUDA graphs collapse that to ONE graph launch/token, but a captured graph
+ * freezes every node's arguments + launch config. The per-step loop changes
+ * those each step (embed reads dseq+pos, KV-store offset = pos*KVD, attn ctx +
+ * shared-mem grow with pos, argmax writes dseq+pos+1).
+ *
+ * Fix: hold `pos` in a device scalar `int *dpos`. These kernels DEREFERENCE it
+ * instead of taking it as a host launch arg, so the graph topology AND all node
+ * params are constant across replays — capture once, replay per token. The math
+ * is byte-identical to the non-dyn kernels above (k_attn_decode_dyn only reads
+ * ctx from *dpos+1; same accumulation order), so the decode==prefill gate holds. */
+
+__global__ void k_embed_at(const float *embd, const int *dseq, const int *dpos,
+                           int E, float *x) {
+    int i = blockIdx.y * blockDim.x + threadIdx.x;
+    if (i < E) { int tok = dseq[*dpos]; x[i] = embd[(size_t)tok * E + i]; }
+}
+
+/* NEOX RoPE at the device position *dpos for a SINGLE token (t=0, grid=n_heads). */
+__global__ void k_rope_dyn(float *base, int n_heads, int d, int rowstride,
+                           float rbase, const int *dpos) {
+    int h = blockIdx.x, i = threadIdx.x, half = d / 2;
+    if (i < half) {
+        float *v = base + (size_t)h * d;          /* t=0 → rowstride term vanishes */
+        float freq = powf(rbase, -2.0f * (float)i / (float)d);
+        float th = (float)(*dpos) * freq, c = cosf(th), s = sinf(th);
+        float a = v[i], bb = v[i + half];
+        v[i] = a * c - bb * s;
+        v[i + half] = a * s + bb * c;
+    }
+    (void)n_heads; (void)rowstride;
+}
+
+/* Store the finalized single-token K/V into the persistent cache at (layer,*dpos). */
+__global__ void k_kv_store(float *Kc, float *Vc, const float *dk, const float *dv,
+                           const int *dpos, size_t layer_off, int KVD) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < KVD) {
+        size_t off = layer_off + (size_t)(*dpos) * KVD + i;
+        Kc[off] = dk[i]; Vc[off] = dv[i];
+    }
+}
+
+/* Single-query GQA over [0..*dpos+1). Identical math to k_attn_decode; ctx comes
+ * from the device scalar. Shared mem is FIXED at capture (P floats) — over-
+ * allocation past ctx is harmless. */
+__global__ void k_attn_decode_dyn(const float *q, const float *Kc, const float *Vc,
+                                  const int *dpos, int KVD, int HD, int group,
+                                  float ascale, size_t layer_off, float *ao) {
+    extern __shared__ float sc[];
+    int ctx = *dpos + 1;
+    int h = blockIdx.x, kvh = h / group;
+    const float *qh = q + (size_t)h * HD;
+    for (int s = threadIdx.x; s < ctx; s += blockDim.x) {
+        const float *kh = Kc + layer_off + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[s] = acc * ascale;
+    }
+    __syncthreads();
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float mx = sc[0];
+        for (int s = 1; s < ctx; s++) if (sc[s] > mx) mx = sc[s];
+        float sum = 0.0f;
+        for (int s = 0; s < ctx; s++) { float e = expf(sc[s] - mx); sc[s] = e; sum += e; }
+        g_sum = sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < ctx; s++)
+            acc += sc[s] * Vc[layer_off + (size_t)s * KVD + (size_t)kvh * HD + i];
+        ao[(size_t)h * HD + i] = acc * inv;
+    }
+}
+
+/* Argmax over logits → write the winner straight into dseq[*dpos+1]. */
+__global__ void k_argmax_at(const float *logits, int n, int *dseq, const int *dpos) {
+    __shared__ float sval[256];
+    __shared__ int   sidx[256];
+    float bv = -3.4e38f; int bi = 0;
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        if (logits[i] > bv) { bv = logits[i]; bi = i; }
+    sval[threadIdx.x] = bv; sidx[threadIdx.x] = bi;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) {
+            if (sval[threadIdx.x + o] > sval[threadIdx.x] ||
+                (sval[threadIdx.x + o] == sval[threadIdx.x] && sidx[threadIdx.x + o] < sidx[threadIdx.x])) {
+                sval[threadIdx.x] = sval[threadIdx.x + o];
+                sidx[threadIdx.x] = sidx[threadIdx.x + o];
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) dseq[*dpos + 1] = sidx[0];
+}
+
+/* Advance the device position by one (end of each graph replay). */
+__global__ void k_incr_pos(int *dpos) { if (threadIdx.x == 0) (*dpos)++; }
+
 /* Autoregressive KV-cache decode on the GPU. seq[0..n_prompt) is the prompt;
  * writes greedy-argmax continuations into seq[n_prompt .. n_prompt+n_gen).
  * Returns the final length (n_prompt+produced), or -1 on error. Mirrors the CPU
- * qwen3_generate_kv (knobs off) so argmax sequences match. */
+ * qwen3_generate_kv (knobs off) so argmax sequences match.
+ *
+ * SP_CUDA_DECODE_GRAPH=1 captures the generate step into a CUDA graph and replays
+ * it per token (BETA.2) — see the graph branch below. */
 extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
                                  int n_prompt, int n_gen, int eos_id) {
     if (!m || m->cfg.arch != SP_ARCH_QWEN3) { sp_set_error("qwen3_decode_cuda: not a qwen3 model"); return -1; }
@@ -830,6 +938,8 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     float *dKc=NULL,*dVc=NULL,*dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
           *dg=NULL,*dup=NULL,*ddn=NULL,*dlog=NULL,*dscr=NULL;
     int *dseq=NULL;            /* the whole token sequence, RESIDENT in VRAM */
+    int *dpos=NULL;            /* BETA.2: device position scalar for graph replay */
+    cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
     int rc=-1, n=n_prompt;
     const size_t kvn=(size_t)NL*P*KVD;
     #define DA(p,cnt) do{ if(cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess){sp_set_error("decode OOM");goto done;} }while(0)
@@ -839,6 +949,94 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
     if (cudaMalloc(&dseq,(size_t)P*sizeof(int))!=cudaSuccess){sp_set_error("dseq OOM");goto done;}
     if (cudaMemcpyAsync(dseq,seq,(size_t)n_prompt*sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("prompt H2D");goto done;}
+
+    /* ───────────── BETA.2: CUDA-graph generate path ─────────────
+     * Prompt ingest stays per-step (one-time, fills the KV cache for [0,n_prompt-1)).
+     * Then the GENERATE step is captured once into a graph and replayed n_gen times,
+     * collapsing ~250 launches/token into one graph launch/token. Position lives in
+     * dpos (device), so the captured node params never change. Requires the fixed
+     * attn shared-mem (P floats) to fit the 48KB/block sm_75 default. */
+    {
+        const char *ge = getenv("SP_CUDA_DECODE_GRAPH");
+        const int use_graph = (ge && ge[0]=='1');
+        const size_t attn_shm = (size_t)P * sizeof(float);
+        if (use_graph && attn_shm <= 48u*1024u && n_gen > 0) {
+            if (cudaMalloc(&dpos,sizeof(int))!=cudaSuccess){sp_set_error("dpos OOM");goto done;}
+            /* ingest the prompt: positions [0,n_prompt-1) fill the cache, no head/argmax */
+            for (int pos=0; pos<n_prompt-1; pos++) {
+                { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dseq+pos,1,E,1.0f,dx); }
+                for (int L=0; L<NL; L++) {
+                    k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+                    if (gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr)) goto done;
+                    if (gemm_w(cb,st,&g_w.Wk[L],dnx,dk,1,dscr)) goto done;
+                    if (gemm_w(cb,st,&g_w.Wv[L],dnx,dv,1,dscr)) goto done;
+                    k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
+                    k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
+                    k_rope_at<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, pos);
+                    k_rope_at<<<NKV,HD/2,0,st>>>(dk, NKV, HD, KVD, base, pos);
+                    const size_t loff=(size_t)L*P*KVD, koff=loff+(size_t)pos*KVD;
+                    cudaMemcpyAsync(dKc+koff, dk, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    cudaMemcpyAsync(dVc+koff, dv, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    const int ctx=pos+1; int bd=HD>ctx?HD:ctx; if(bd>1024)bd=1024;
+                    k_attn_decode<<<NH,bd,(size_t)ctx*sizeof(float),st>>>(dq,dKc,dVc,ctx,KVD,HD,group,ascale,loff,dao);
+                    if (gemm_w(cb,st,&g_w.Wo[L],dao,dap,1,dscr)) goto done;
+                    k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
+                    k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+                    if (gemm_w(cb,st,&g_w.Wgate[L],dnx,dg,1,dscr)) goto done;
+                    if (gemm_w(cb,st,&g_w.Wup[L],dnx,dup,1,dscr)) goto done;
+                    k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
+                    if (gemm_w(cb,st,&g_w.Wdown[L],dg,ddn,1,dscr)) goto done;
+                    k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
+                }
+            }
+            /* seed dpos = n_prompt-1 (the last prompt token generates the first new one) */
+            { int p0=n_prompt-1; if(cudaMemcpyAsync(dpos,&p0,sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("dpos seed");goto done;} }
+            cublasSetStream(cb, st);
+            /* ── capture ONE generate step ── */
+            if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal)!=cudaSuccess){sp_set_error("begin capture");goto done;}
+            { dim3 grid(1,(E+255)/256); k_embed_at<<<grid,256,0,st>>>(g_w.embd,dseq,dpos,E,dx); }
+            for (int L=0; L<NL; L++) {
+                const size_t loff=(size_t)L*P*KVD;
+                k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+                gemm_w(cb,st,&g_w.Wq[L],dnx,dq,1,dscr);
+                gemm_w(cb,st,&g_w.Wk[L],dnx,dk,1,dscr);
+                gemm_w(cb,st,&g_w.Wv[L],dnx,dv,1,dscr);
+                k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
+                k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
+                k_rope_dyn<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, dpos);
+                k_rope_dyn<<<NKV,HD/2,0,st>>>(dk, NKV, HD, KVD, base, dpos);
+                k_kv_store<<<(unsigned)((KVD+255)/256),256,0,st>>>(dKc,dVc,dk,dv,dpos,loff,KVD);
+                int bd=HD>256?HD:256; if(bd>1024)bd=1024;
+                k_attn_decode_dyn<<<NH,bd,attn_shm,st>>>(dq,dKc,dVc,dpos,KVD,HD,group,ascale,loff,dao);
+                gemm_w(cb,st,&g_w.Wo[L],dao,dap,1,dscr);
+                k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
+                k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+                gemm_w(cb,st,&g_w.Wgate[L],dnx,dg,1,dscr);
+                gemm_w(cb,st,&g_w.Wup[L],dnx,dup,1,dscr);
+                k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
+                gemm_w(cb,st,&g_w.Wdown[L],dg,ddn,1,dscr);
+                k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
+            }
+            k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
+            gemm_w(cb,st,&g_w.head,dnx,dlog,1,dscr);
+            k_argmax_at<<<1,256,0,st>>>(dlog, V, dseq, dpos);   /* writes dseq[*dpos+1] */
+            k_incr_pos<<<1,1,0,st>>>(dpos);
+            if (cudaStreamEndCapture(st,&cgraph)!=cudaSuccess){sp_set_error("end capture");goto done;}
+            if (cudaGraphInstantiate(&cexec,cgraph,NULL,NULL,0)!=cudaSuccess){sp_set_error("graph instantiate");goto done;}
+            /* ── replay per token ── */
+            for (int g=0; g<n_gen; g++) {
+                if (cudaGraphLaunch(cexec,st)!=cudaSuccess){sp_set_error("graph launch");goto done;}
+                n = n_prompt + g + 1;
+                if (eos_id>=0) {
+                    int tok=-1;
+                    if (cudaMemcpyAsync(&tok,dseq+n-1,sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("eos D2H");goto done;}
+                    { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"eos sync");goto done;} }
+                    if (tok==eos_id) break;
+                }
+            }
+            goto download;
+        }
+    }
 
     for (int pos=0; pos<P-1; pos++) {
         /* embed reads dseq[pos] in place — the previous step's argmax already
@@ -883,6 +1081,7 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
             if (tok==eos_id) break;
         }
     }
+download:
     /* single sequence download at the end */
     if (cudaMemcpyAsync(seq,dseq,(size_t)n*sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("seq D2H");goto done;}
     { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"decode sync");goto done;} }
@@ -893,6 +1092,8 @@ done:
     if(dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
     if(dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
     if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dseq)cudaFree(dseq);
+    if(dpos)cudaFree(dpos);
+    if(cexec)cudaGraphExecDestroy(cexec); if(cgraph)cudaGraphDestroy(cgraph);
     #undef DA
     return rc;
 }
