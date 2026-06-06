@@ -55,6 +55,13 @@ int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens, int n_tok
 int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
                       int n_gen, int eos_id);
 
+/* ETA.1 (Stage Eta, Gemma4): structural weight-upload probe. Builds the full
+ * Gemma4 CUDA weight set (per-layer global/SWA Q-KV widths, shared-KV owner
+ * skips, elastic per-layer FFN, AltUp tensor set, rope_freqs) for a
+ * core-bridged model (sp_model_load -> sp_model_to_gemma4) and prints the
+ * resolved geometry. 0 on success. The gemma4 forward itself lands in ETA.2+. */
+int gemma4_cuda_weights_probe(const qwen3_model *m);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

@@ -126,6 +126,27 @@ __global__ void k_rmsnorm_head(float *base, const float *w, int n_heads, int d,
     for (int i = threadIdx.x; i < d; i += blockDim.x) v[i] = v[i] * scale * w[i];
 }
 
+/* ETA.1 (Gemma4): WEIGHTLESS per-head RMSNorm — the Gemma4 V-norm (no learned
+ * weight, no RoPE; gemma4.c g4_rmsnorm_noweight). Identical to k_rmsnorm_head
+ * minus the `* w[i]`; f64 sum-of-squares matches the CPU reference precision. */
+__global__ void k_rmsnorm_head_noweight(float *base, int n_heads, int d,
+                                        int rowstride, float eps) {
+    int b = blockIdx.x, t = b / n_heads, h = b % n_heads;
+    float *v = base + (size_t)t * rowstride + (size_t)h * d;
+    __shared__ double sh[256];
+    double s = 0.0;
+    for (int i = threadIdx.x; i < d; i += blockDim.x) { double x = v[i]; s += x * x; }
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    float ms = (float)(sh[0] / (double)d);
+    float scale = 1.0f / sqrtf(ms + eps);
+    for (int i = threadIdx.x; i < d; i += blockDim.x) v[i] = v[i] * scale;
+}
+
 /* NEOX RoPE on each (token,head) vector at position p=t; blockDim=d/2. */
 __global__ void k_rope(float *base, int n_heads, int d, int rowstride, float rbase) {
     int b = blockIdx.x, t = b / n_heads, h = b % n_heads, i = threadIdx.x, half = d / 2;
@@ -499,8 +520,25 @@ struct CudaWeights {
     DevTensor head;     /* untied LM head (qwen3 m->output, f32-or-packed); unused when tied */
     size_t scratch_n;   /* max packed weight elem count (0 if no arena) */
     DevTensor *Wq, *Wk, *Wv, *Wo, *Wgate, *Wup, *Wdown;
-    /* post_attn/post_ffw are gemma3-only (sandwich norms); NULL arrays on qwen3. */
+    /* post_attn/post_ffw are sandwich norms (gemma3 + gemma4); NULL arrays on qwen3. */
     float **attn_norm, **ffn_norm, **q_norm, **k_norm, **post_attn, **post_ffw;
+
+    /* ── ETA.1 Gemma4 (SP_ARCH_GEMMA4) extras; zeroed on other arches. ──
+     * Per-layer AltUp: inp_gate [E->PL] + proj [PL->E] matmuls, post_norm [E],
+     * out_scale [1] scalar. Model-level: per_layer_model_proj [E -> NL*PL]
+     * (the AltUp precompute matmul), per_layer_proj_norm [PL], rope_freqs
+     * [hd_global/2] proportional freq-factor table (global layers only).
+     * per_layer_token_embd stays HOST-side (row-gathered per token via
+     * sp_arena_dequant_row, mirroring the CPU sp_weight_row — uploading it
+     * f32 would be ~GBs). Shared-KV: Wk/Wv are built ONLY for owner layers
+     * [0, kvfs); sharer entries stay zeroed (the forward reuses the owner's
+     * cached K/V and skips its own projection, per gemma4.c). */
+    DevTensor *Wplig, *Wplproj;     /* [L] AltUp per-layer matmuls (NULL arrays if PL=0) */
+    float **pl_post_norm;           /* [L][E]  per_layer_post_norm */
+    float **pl_out_scale;           /* [L][1]  layer_output_scale  */
+    DevTensor pl_model_proj;        /* per_layer_model_proj [E -> NL*PL] */
+    float *pl_proj_norm;            /* [PL] */
+    float *rope_freqs;              /* [hd_global/2] */
 };
 static CudaWeights g_w = {};
 
@@ -576,16 +614,21 @@ static void free_weights(CudaWeights *w) {
     if (w->embd) cudaFree(w->embd);
     if (w->out_norm) cudaFree(w->out_norm);
     free_devtensor(&w->head);   /* untied head (no-op when tied: all ptrs NULL) */
-    DevTensor **dts[] = { &w->Wq,&w->Wk,&w->Wv,&w->Wo,&w->Wgate,&w->Wup,&w->Wdown };
+    DevTensor **dts[] = { &w->Wq,&w->Wk,&w->Wv,&w->Wo,&w->Wgate,&w->Wup,&w->Wdown,
+                          &w->Wplig,&w->Wplproj };
     for (size_t a = 0; a < sizeof(dts)/sizeof(dts[0]); a++) {
         DevTensor *arr = *dts[a];
         if (arr) { for (int L = 0; L < w->L; L++) free_devtensor(&arr[L]); free(arr); }
     }
-    float ***ns[] = { &w->attn_norm,&w->ffn_norm,&w->q_norm,&w->k_norm,&w->post_attn,&w->post_ffw };
+    float ***ns[] = { &w->attn_norm,&w->ffn_norm,&w->q_norm,&w->k_norm,&w->post_attn,&w->post_ffw,
+                      &w->pl_post_norm,&w->pl_out_scale };
     for (size_t a = 0; a < sizeof(ns)/sizeof(ns[0]); a++) {
         float **arr = *ns[a];
         if (arr) { for (int L = 0; L < w->L; L++) if (arr[L]) cudaFree(arr[L]); free(arr); }
     }
+    free_devtensor(&w->pl_model_proj);
+    if (w->pl_proj_norm) cudaFree(w->pl_proj_norm);
+    if (w->rope_freqs) cudaFree(w->rope_freqs);
     if (w->cublas) cublasDestroy(w->cublas);
     if (w->stream) cudaStreamDestroy(w->stream);
     CudaWeights z = {}; *w = z;
@@ -623,7 +666,20 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     const int NH = (int)c->n_head, NKV = (int)c->n_head_kv, V = (int)c->n_vocab;
     const int QD = NH * HD, KVD = NKV * HD, L = (int)c->n_layers;
 
-    const int is_gemma = (c->arch == SP_ARCH_GEMMA3);
+    /* ETA.1 Gemma4: per-layer head GEOMETRY (gemma4.c). GLOBAL layers
+     * (L % period == period-1) use cfg.head_dim/n_head/n_head_kv (512/4/1);
+     * SWA layers use g4_hd_swa/g4_nh_swa/g4_nkv_swa (256/8/2). The Q/K/V
+     * projection WIDTHS therefore differ per layer. Shared-KV: only layers
+     * [0, kvfs) own K/V. PL = AltUp per-layer-input width (0 = no AltUp). */
+    const int is_g4 = (c->arch == SP_ARCH_GEMMA4);
+    const int g4_period = is_g4 ? ((int)c->g4_swa_period ? (int)c->g4_swa_period : 6) : 0;
+    const int g4_kvfs   = is_g4 ? ((int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : L) : L;
+    const int g4_PL     = is_g4 ? (int)c->g4_n_embd_per_layer : 0;
+    const int s_nh = is_g4 ? (int)c->g4_nh_swa  : NH;
+    const int s_nkv = is_g4 ? (int)c->g4_nkv_swa : NKV;
+    const int s_hd = is_g4 ? (int)c->g4_hd_swa  : HD;
+
+    const int is_gemma = (c->arch == SP_ARCH_GEMMA3) || is_g4;   /* sandwich norms */
     const int tied = (m->output == m->token_embd);
 
     CudaWeights z = {}; *w = z;
@@ -668,16 +724,80 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     ALLOC_DT(Wgate); ALLOC_DT(Wup); ALLOC_DT(Wdown);
     ALLOC_NM(attn_norm); ALLOC_NM(ffn_norm); ALLOC_NM(q_norm); ALLOC_NM(k_norm);
     if (is_gemma) { ALLOC_NM(post_attn); ALLOC_NM(post_ffw); }   /* sandwich norms */
+    if (g4_PL) { ALLOC_DT(Wplig); ALLOC_DT(Wplproj); ALLOC_NM(pl_post_norm); ALLOC_NM(pl_out_scale); }
 
     for (int Li = 0; Li < L; Li++) {
         const qwen3_layer *ly = &m->layers[Li];
-        BUILDW(Wq, attn_q, E, QD);   BUILDW(Wk, attn_k, E, KVD);  BUILDW(Wv, attn_v, E, KVD);
-        BUILDW(Wo, attn_output, QD, E);
-        BUILDW(Wgate, ffn_gate, E, FF); BUILDW(Wup, ffn_up, E, FF); BUILDW(Wdown, ffn_down, FF, E);
+        /* per-layer geometry: identical on non-gemma4; global-vs-SWA split on gemma4 */
+        const int g4_global = is_g4 && ((Li % g4_period) == g4_period - 1);
+        const int nh_L  = is_g4 ? (g4_global ? NH  : s_nh)  : NH;
+        const int nkv_L = is_g4 ? (g4_global ? NKV : s_nkv) : NKV;
+        const int hd_L  = is_g4 ? (g4_global ? HD  : s_hd)  : HD;
+        const int qd_L  = nh_L * hd_L, kvd_L = nkv_L * hd_L;
+        /* per-layer ELASTIC FFN width (MatFormer): the layer's ffn_gate out-dim
+         * (synth tensors carry dims from the .sp-model entry); fall back to n_ff. */
+        const int ff_L  = (is_g4 && ly->ffn_gate && ly->ffn_gate->n_dims >= 2 && ly->ffn_gate->dims[1] > 0)
+                          ? (int)ly->ffn_gate->dims[1] : FF;
+        const int owns_kv = !is_g4 || (Li < g4_kvfs);   /* shared-KV: sharers skip K/V */
+
+        BUILDW(Wq, attn_q, E, qd_L);
+        if (owns_kv) { BUILDW(Wk, attn_k, E, kvd_L); BUILDW(Wv, attn_v, E, kvd_L); }
+        BUILDW(Wo, attn_output, qd_L, E);
+        BUILDW(Wgate, ffn_gate, E, ff_L); BUILDW(Wup, ffn_up, E, ff_L); BUILDW(Wdown, ffn_down, ff_L, E);
         UPV(attn_norm, attn_norm, E);   UPV(ffn_norm, ffn_norm, E);
-        UPV(q_norm, attn_q_norm, HD);   UPV(k_norm, attn_k_norm, HD);
+        UPV(q_norm, attn_q_norm, hd_L);
+        if (owns_kv) UPV(k_norm, attn_k_norm, hd_L);     /* sharers never norm K */
         if (is_gemma) { UPV(post_attn, post_attn_norm, E); UPV(post_ffw, post_ffw_norm, E); }
+        if (g4_PL) {
+            BUILDW(Wplig, per_layer_inp_gate, E, g4_PL);
+            BUILDW(Wplproj, per_layer_proj, g4_PL, E);
+            UPV(pl_post_norm, per_layer_post_norm, E);
+            UPV(pl_out_scale, out_scale, 1);
+        }
     }
+
+    /* ETA.1 Gemma4 model-level AltUp tensors. per_layer_token_embd is NOT uploaded
+     * (host row-gather per token via sp_arena_dequant_row, like the CPU
+     * sp_weight_row — see the CudaWeights comment). */
+    if (g4_PL) {
+        if (build_w(m, m->per_layer_model_proj, E, L * g4_PL, &w->pl_model_proj, &w->scratch_n)) {
+            free_weights(w); return 1;
+        }
+        w->pl_proj_norm = upload_vec(m, m->per_layer_proj_norm, g4_PL);
+        if (!w->pl_proj_norm) { free_weights(w); return 1; }
+        w->rope_freqs = upload_vec(m, m->rope_freqs, HD / 2);   /* global-layer freq factors */
+        if (!w->rope_freqs) { free_weights(w); return 1; }
+    }
+    return 0;
+}
+
+/* ETA.1 structural probe: build (upload) the full Gemma4 weight set for a
+ * core-bridged model (sp_model_load -> sp_model_to_gemma4) and report the
+ * per-layer geometry it resolved. Returns 0 on success. The first gate of the
+ * Stage-Eta CUDA port: proves the engine CUDA layer can ingest the gemma4
+ * arena + owned norms across the core/engine link seam, with per-layer Q/KV
+ * widths, shared-KV skips, elastic FFN, and the AltUp tensor set. */
+extern "C" int gemma4_cuda_weights_probe(const qwen3_model *m) {
+    if (!m || m->cfg.arch != SP_ARCH_GEMMA4) { sp_set_error("gemma4 probe: not a gemma4 model"); return 1; }
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
+    const qwen3_config *c = &m->cfg;
+    const int L = (int)c->n_layers;
+    const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int kvfs = (int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : L;
+    int n_global = 0, n_owner = 0, ff_min = 1 << 30, ff_max = 0;
+    for (int Li = 0; Li < L; Li++) {
+        if ((Li % period) == period - 1) n_global++;
+        if (Li < kvfs) n_owner++;
+        int ff = g_w.Wgate[Li].out; if (ff < ff_min) ff_min = ff; if (ff > ff_max) ff_max = ff;
+    }
+    fprintf(stderr, "    [g4-cuda-w] L=%d global=%d swa=%d kv-owners=%d sharers=%d "
+            "ff=[%d..%d] PL=%d qd(g)=%d qd(s)=%d kvd(g)=%d kvd(s)=%d "
+            "plmp=%dx%d prec(Wq0)=%d\n",
+            L, n_global, L - n_global, n_owner, L - n_owner, ff_min, ff_max,
+            (int)c->g4_n_embd_per_layer,
+            (int)c->n_head * (int)c->head_dim, (int)c->g4_nh_swa * (int)c->g4_hd_swa,
+            (int)c->n_head_kv * (int)c->head_dim, (int)c->g4_nkv_swa * (int)c->g4_hd_swa,
+            g_w.pl_model_proj.in, g_w.pl_model_proj.out, g_w.Wq[0].prec);
     return 0;
 }
 
