@@ -62,6 +62,14 @@ int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
  * resolved geometry. 0 on success. The gemma4 forward itself lands in ETA.2+. */
 int gemma4_cuda_weights_probe(const qwen3_model *m);
 
+/* ETA.2: truncatable Gemma4 CUDA prefill probe (the bisection harness).
+ * n_layers=0 -> embed+scale only; attn_only=1 -> stop after layer n_layers-1's
+ * attention residual; else after its FFN residual. Downloads the residual
+ * stream x [n_tok x E] at the boundary. AltUp/out_scale (ETA.4) + head/softcap
+ * are NOT in the probe path yet — boundaries stop before them. */
+int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                      int n_layers, int attn_only, float *out_x);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);
