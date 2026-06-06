@@ -75,6 +75,8 @@ This repo wires the math-core forward onto four accelerator backends plus the `s
 
 ## 2. Current status — honest table
 
+**Update 2026-06-06.** New since the snapshot below: the engine drives the canonical math-core decode at engine speed via the `cpu_overlay.c` dispatch seam (the duplicate decode was deleted); AVX2 `sp_pr_resdot` + `sp_ntt_fwd_batch` (lanes=heads) + AVX512-VPOPCNTDQ `sp_arm_scan_sig` overrides; the dual-size + **split-device** Optane Ring-2 store (`ring2_arm_backend.c`, `SP_RING2_OPTANE_DIR_V`) with `read_batch2` concurrent dual-queue fetch and a bounded LRU temporal staging cache (`SP_RING2_CACHE_MB`); the QUIC Ring-2 peer + two-process showpiece (`sp_ring2_showpiece`). **CUDA backend (RTX 2060 sm_75): gated on real silicon** — prefill `qwen3_forward_cuda` f32+Q8 argmax-exact, and a NEW autoregressive **`qwen3_decode_cuda`** (KV resident in VRAM, device argmax; gate `M_QWEN3_DECODE_CUDA`) generating at 6.93→11.97 tok/s (Q8). Detail in the lattice `papers/PPT-LAT-Roadmap.md` §21 + `SESSION-CLOSED-stage-beta-s0.md`.
+
 Snapshot 2026-06-03. **Built** means the artefact compiles and
 passes its own gates. **Wired** means the daemon routes inference
 through it at runtime.
