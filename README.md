@@ -413,6 +413,43 @@ but a weight-GEMV is *memory*-bound, so the GDDR6 clock must be at full speed
 too (it auto-boosts under sustained load; GeForce `-lmc` is flaky). Trust the
 within-run ratio over the absolute.
 
+#### 5.2.1b Stage Eta Phase 1 — the full Gemma4 architecture on CUDA (2026-06-06)
+
+The complete **Gemma 4 (MatFormer E-series)** forward + autoregressive decode
+now runs on the GPU, gated **38/38** against the bit-faithful CPU oracle
+(`core/forward/gemma4.c`) on the `gemma4-e2b` `.sp-model`:
+
+- **`gemma4_forward_cuda`** — full 35-layer prefill: per-layer GLOBAL/SWA head
+  geometry (projection widths change per layer), shared-KV (15 owners / 20
+  sharers), proportional `rope_freqs` RoPE on global layers, the weightless
+  V-norm, elastic per-layer FFN, the **AltUp** precompute + per-layer injection
+  + scalar `out_scale`, tied head + final-logit softcap.
+  **Gate: argmax 12/12, max KL `2.663e-10` vs the oracle** — distributional
+  identity at machine-noise level across the whole variable-geometry stack.
+- **`gemma4_decode_cuda`** — autoregressive greedy decode over a **jagged
+  shared-KV cache** (per-owner `[P x kvd_L]` buffers: global 512-wide, SWA
+  256-wide, sharers allocate nothing and read their owner), per-step AltUp,
+  windowed single-query attention (`k_attn_decode_win`), absolute-position
+  proportional RoPE (`k_rope_freqs_at`).
+  **Gate: the oracle prefill teacher-forced argmax-predicts EVERY generated
+  token** (E_G4_CU_DEC).
+- **`gemm_w_lift`** — the oracle ARITHMETIC on cuBLAS: raw integer arena codes
+  (exact in f32) into the SGEMM, ONE per-row Frobenius lift after — not
+  per-weight dequantization (which injects an extra rounding per term; measured
+  2.8e-3 divergence before the fix). This is the §4.8 inline-lift discipline
+  enforced on the GPU.
+- **`tests/test_gemma4_cuda.c`** — the gate + the permanent **truncated-parity
+  bisection harness** (CPU mirror of the oracle through N layers vs
+  `gemma4_cuda_probe` stages: embed / attn_norm / q / attention / pre-norm /
+  residual), which locked L0 (SWA), L4 (the first global layer) and L15 (the
+  first shared-KV sharer) before the live run — which then lit green first try.
+  Links the CORE inference lane (`sp_session`) + `sp_engine_cuda` in one binary
+  (one `as_f32 -> sp_as_f32` alias shim; everything else cross-resolves).
+
+Pending (ETA.5b, the velocity pass — gated top-1 like Beta): device-side PLE
+gather (zero-sync steps), CUDA-graph capture of the jagged topology, Q4-dp4a
+routing, then the 12B-Q4_K_M load + tok/s vs llama.cpp.
+
 #### 5.2.2 Bench tool — `tests/bench_gemv_int8.cu`
 
 Standalone nvcc microbench (no engine link) that isolates the weight matmul
