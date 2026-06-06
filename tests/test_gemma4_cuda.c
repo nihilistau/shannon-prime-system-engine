@@ -275,14 +275,88 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
     SP_CHECK(m->cfg.g4_swa_period > 0, "g4_swa_period set");
     SP_CHECK(m->cfg.g4_n_kv_from_start > 0 &&
              m->cfg.g4_n_kv_from_start <= m->cfg.n_layers, "shared-KV kvfs in range");
-    SP_CHECK(m->cfg.g4_n_embd_per_layer > 0, "AltUp PL width set");
-    SP_CHECK(m->per_layer_model_proj && m->per_layer_proj_norm && m->rope_freqs,
-             "model-level AltUp tensors present");
+    /* AltUp/PLE is the E-SERIES MatFormer machinery; the dense 12B runs PL=0
+     * (with layer_output_scale + rope_freqs still present). Assert accordingly. */
+    if (m->cfg.g4_n_embd_per_layer > 0) {
+        SP_CHECK(m->per_layer_model_proj && m->per_layer_proj_norm && m->rope_freqs,
+                 "model-level AltUp tensors present (E-series)");
+    } else {
+        fprintf(stderr, "    dense gemma4 (PL=0): no AltUp/PLE; rope_freqs %s, out_scale[0] %s\n",
+                m->rope_freqs ? "present" : "ABSENT", m->layers[0].out_scale ? "present" : "ABSENT");
+        SP_CHECK(m->rope_freqs != NULL, "dense gemma4: rope_freqs present");
+    }
 
     /* THE GATE: upload the full gemma4 weight set to the device. */
     int rc = gemma4_cuda_weights_probe(m);
     if (rc) fprintf(stderr, "    probe: %s\n", sp_last_error());
     SP_CHECK(rc == 0, "gemma4 CUDA weight set uploads (per-layer geometry + shared-KV + AltUp)");
+
+    /* SP_G4_FASTPROBE=1 (ETA.5b bug-hunt): straight to ONE probed decode step —
+     * prompt {2,10,100,1000,497}, NG=1 — skipping the slow oracle blocks.
+     * Pair with SP_G4_DEC_PROBE=<pos> (read by gemma4_decode_cuda) to intercept
+     * the step. Diagnostic mode only; no gates. */
+    {
+        const char *fpb = getenv("SP_G4_FASTPROBE");
+        if (fpb && fpb[0] == '1') {
+            const int E = (int)m->cfg.n_embd, NL_ = (int)m->cfg.n_layers;
+            int32_t d2[6] = { 2, 10, 100, 1000, 497, 0 };
+            /* out_scale values on the record (position-independent, but known) */
+            fprintf(stderr, "    [fastprobe] out_scale:");
+            for (int L = 0; L < NL_ && L < 48; L++) {
+                const float *os = m->layers[L].out_scale ? sp_as_f32(m, m->layers[L].out_scale) : NULL;
+                fprintf(stderr, " %.3f", os ? os[0] : -1.0f);
+            }
+            fprintf(stderr, "\n");
+            /* SP_G4_LIFT=1: run the probed decode in PURE LIFT arithmetic (same
+             * as the prefill probe) — the int8-vs-lift noise source drops out of
+             * the diff entirely; only a structural decode bug remains visible. */
+            const int lift_mode = (getenv("SP_G4_LIFT") != NULL);
+            if (!lift_mode) _putenv("SP_CUDA_DECODE_INT8=1");
+            int dn2 = gemma4_decode_cuda(m, d2, 5, 1, -1);
+            if (dn2 < 0) fprintf(stderr, "    fastprobe decode: %s\n", sp_last_error());
+            fprintf(stderr, "    [fastprobe] %s dn=%d produced=%d (oracle argmax ref: 11629)\n",
+                    lift_mode ? "LIFT" : "int8", dn2, dn2 == 6 ? d2[5] : -1);
+            if (!lift_mode) _putenv("SP_CUDA_DECODE_INT8=");
+
+            /* layer-bisect: diff the decode dump (pos 4, FFN-residual boundary,
+             * out_scale skipped via SP_G4_NO_OSCALE) against the TRUNCATED
+             * prefill probe (gemm_w_lift arithmetic; skips PL/out_scale by
+             * design; parity-proven vs the CPU mirror) at the same boundary,
+             * row t=4. Expect the int8-vs-lift noise floor everywhere EXCEPT
+             * past the broken stage. */
+            const char *dumpf = getenv("SP_G4_DEC_DUMP");
+            FILE *df = dumpf ? fopen(dumpf, "rb") : NULL;
+            if (df) {
+                float *dump = (float *)malloc((size_t)NL_ * E * sizeof(float));
+                float *px   = (float *)malloc((size_t)5 * E * sizeof(float));
+                if (dump && px && fread(dump, sizeof(float), (size_t)NL_ * E, df) == (size_t)NL_ * E) {
+                    static const int bnd[] = { 1, 5, 8, 10, 11, 12, 24, 48 };
+                    for (size_t b = 0; b < sizeof(bnd)/sizeof(bnd[0]); b++) {
+                        int L = bnd[b]; if (L > NL_) break;
+                        if (gemma4_cuda_probe(m, d2, 5, L, 0, px)) {
+                            fprintf(stderr, "    probe L%d: %s\n", L, sp_last_error()); break;
+                        }
+                        const float *pr = px + (size_t)4 * E;        /* row t=4 */
+                        const float *dc = dump + (size_t)(L - 1) * E; /* after layer L-1 */
+                        double ma = 0.0, ssp = 0.0, ssd = 0.0;
+                        for (int i = 0; i < E; i++) {
+                            double d = fabs((double)dc[i] - (double)pr[i]);
+                            if (d > ma) ma = d;
+                            ssp += (double)pr[i] * pr[i]; ssd += (double)dc[i] * dc[i];
+                        }
+                        fprintf(stderr, "    [fastprobe-diff] boundary L%-2d max|dec-probe| %.3e  "
+                                        "|x|_dec %.4e |x|_probe %.4e\n",
+                                L, ma, sqrt(ssd), sqrt(ssp));
+                    }
+                }
+                free(dump); free(px); fclose(df);
+            }
+            sp_cuda_model_release(m);
+            qwen3_free(m);
+            sp_model_unload(handle);
+            return;
+        }
+    }
 
     /* ════ E_G4_CU_L0 / E_G4_CU_L4 (ETA.2/3): TRUNCATED PARITY via the harness ════
      * L0 (SWA, n_layers=1): gates PINNED at ~3x the measured floors (bisection
@@ -404,7 +478,8 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
                             "oracle teacher-force is still the gate\n");
         }
         int dn = gemma4_decode_cuda(m, dseq, NP, NG, /*eos=*/-1);
-        if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+        /* NOTE: INT8 env intentionally stays set through the BISECT diagnostic
+         * below (the 12B tied head REQUIRES the dp4a route); cleared at the end. */
         if (dn < 0) fprintf(stderr, "    decode: %s\n", sp_last_error());
         SP_CHECK(dn == PT, "gemma4 CUDA decode produced full length");
         if (dn == PT) {
@@ -460,6 +535,7 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
                         for (int i = 0; i < NP; i++) d2[i] = prompt[i];
                         d2[NP] = dseq[NP];              /* the good first generation */
                         int dn2 = gemma4_decode_cuda(m, d2, NP + 1, 1, -1);
+                        if (dn2 < 0) fprintf(stderr, "    bisect decode: %s\n", sp_last_error());
                         const float *row = tl + (size_t)NP * V;
                         int am = 0; for (int i = 1; i < V; i++) if (row[i] > row[am]) am = i;
                         fprintf(stderr, "    [g4-cuda-DEC-BISECT] prompt+%d -> produced %d "
@@ -467,6 +543,7 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
                                 dseq[NP], (dn2 == NP + 2) ? d2[NP + 1] : -1, am, dseq[NP + 1]);
                     }
                 }
+                if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
                 free(tl);
             }
         }

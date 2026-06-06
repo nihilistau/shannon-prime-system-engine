@@ -547,26 +547,39 @@ __global__ void k_scale_rows(float *Y, const float *row_scale, const unsigned ch
  * scratch = ~9 B/weight; this reads 1 B/weight. That byte ratio IS the win the
  * anchored f32==Q8 result showed was being thrown away. */
 
-/* dynamic per-vector int8 quant of the activation: sx = maxabs/127,
- * qx[i] = round(x[i]/sx) clamped [-127,127]. qx padded to a multiple of 4
- * (zero tail) so the GEMV can int-load 4 codes per dp4a. One block. */
+/* dynamic PER-BLOCK int8 quant of the activation: 16-code blocks, one scale
+ * each (sxb[b] = maxabs(block b)/127), qx padded + zero-tailed.
+ *
+ * WHY per-block, not per-vector (ETA.5b.4, measured on gemma-4-12B): a single
+ * per-vector maxabs scale COLLAPSES on outlier-heavy activations — at the
+ * 12B's layer 11 (trained out_scale 0.005: the model itself flags that
+ * layer's magnitudes) one outlier dominated the scale and stripped the
+ * mantissa from the other 3839 dims; logits landed at oracle-rank 205596.
+ * Decode-vs-probe layer bisect in LIFT arithmetic pinned the structure clean
+ * (1.5e-4 floors) — the damage was 100% activation-quant. Per-block scales
+ * are the llama.cpp activation-quant pattern and the GPU twin of the CPU
+ * engine's block-Q8 (WIRE-CPU stage 1b). Blocks of 16 align EXACTLY with the
+ * GEMV's 128-bit int4 loads — one extra f32 mul per 16 codes, no extra bus. */
 __global__ void k_quant_act_int8(const float *x, int n, int npad,
-                                 signed char *qx, float *sx) {
-    __shared__ float sm[256];
-    float m = 0.0f;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) { float a = fabsf(x[i]); if (a > m) m = a; }
-    sm[threadIdx.x] = m; __syncthreads();
-    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
-        if (threadIdx.x < o && sm[threadIdx.x + o] > sm[threadIdx.x]) sm[threadIdx.x] = sm[threadIdx.x + o];
-        __syncthreads();
-    }
-    float scale = sm[0] > 0.0f ? sm[0] * (1.0f / 127.0f) : 1.0f;
-    if (threadIdx.x == 0) *sx = scale;
-    float inv = 1.0f / scale;
-    for (int i = threadIdx.x; i < npad; i += blockDim.x) {
-        float v = (i < n) ? x[i] * inv : 0.0f;
-        int q = __float2int_rn(v); if (q > 127) q = 127; if (q < -127) q = -127;
-        qx[i] = (signed char)q;
+                                 signed char *qx, float *sxb) {
+    const int nblk = npad >> 4;
+    for (int b = threadIdx.x; b < nblk; b += blockDim.x) {
+        const int base = b << 4;
+        float m = 0.0f;
+        for (int i = 0; i < 16; i++) {
+            const int idx = base + i;
+            const float a = (idx < n) ? fabsf(x[idx]) : 0.0f;
+            if (a > m) m = a;
+        }
+        const float scale = m > 0.0f ? m * (1.0f / 127.0f) : 1.0f;
+        sxb[b] = scale;
+        const float inv = 1.0f / scale;
+        for (int i = 0; i < 16; i++) {
+            const int idx = base + i;
+            float v = (idx < n) ? x[idx] * inv : 0.0f;
+            int q = __float2int_rn(v); if (q > 127) q = 127; if (q < -127) q = -127;
+            qx[idx] = (signed char)q;
+        }
     }
 }
 
@@ -577,21 +590,22 @@ __global__ void k_quant_act_int8(const float *x, int n, int npad,
  * 128-byte warp transaction reading 4 weights/thread. */
 __global__ void k_gemv_q8_dp4a(const signed char *codes, const unsigned long long *row_off,
                                const float *row_scale, int in, const signed char *qx,
-                               const float *sx, float *y, int out) {
+                               const float *sxb, float *y, int out) {
     int j = blockIdx.x;
     if (j >= out) return;
     const int *wrow = (const int *)(codes + row_off[j]);   /* in/4 packed-int8 words */
     const int *qxi  = (const int *)qx;
-    int n4 = in >> 2, acc = 0;
+    int n4 = in >> 2;
+    float facc = 0.0f;
     for (int k = threadIdx.x; k < n4; k += blockDim.x)
-        acc = __dp4a(wrow[k], qxi[k], acc);
-    __shared__ int sm[256];
-    sm[threadIdx.x] = acc; __syncthreads();
+        facc += (float)__dp4a(wrow[k], qxi[k], 0) * sxb[k >> 2];   /* 4 ints = one 16-block */
+    __shared__ float sm[256];
+    sm[threadIdx.x] = facc; __syncthreads();
     for (int o = blockDim.x / 2; o > 0; o >>= 1) {
         if (threadIdx.x < o) sm[threadIdx.x] += sm[threadIdx.x + o];
         __syncthreads();
     }
-    if (threadIdx.x == 0) y[j] = (float)sm[0] * (row_scale[j] * (1.0f / 127.0f)) * (*sx);
+    if (threadIdx.x == 0) y[j] = sm[0] * (row_scale[j] * (1.0f / 127.0f));
 }
 
 /* TUNED dp4a GEMV: one WARP per output row (32 lanes collaborate), 128-bit int4
@@ -602,23 +616,25 @@ __global__ void k_gemv_q8_dp4a(const signed char *codes, const unsigned long lon
  * Note: int4 here is the 16-BYTE CUDA vector type, NOT 4-bit precision. */
 __global__ void k_gemv_q8_dp4a_v2(const signed char *codes, const unsigned long long *row_off,
                                   const float *row_scale, int in, const signed char *qx,
-                                  const float *sx, float *y, int out) {
+                                  const float *sxb, float *y, int out) {
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int j = blockIdx.x * (blockDim.x >> 5) + warp;
     if (j >= out) return;
     const int4 *wrow = (const int4 *)(codes + row_off[j]);   /* in/16 16-byte chunks */
     const int4 *qxi  = (const int4 *)qx;
     const int n16 = in >> 4;
-    int acc = 0;
+    float facc = 0.0f;
     for (int c = lane; c < n16; c += 32) {
         int4 wv = wrow[c], qv = qxi[c];                      /* 128-bit coalesced loads */
+        int acc = 0;                                         /* one int4 chunk == one 16-block */
         acc = __dp4a(wv.x, qv.x, acc);
         acc = __dp4a(wv.y, qv.y, acc);
         acc = __dp4a(wv.z, qv.z, acc);
         acc = __dp4a(wv.w, qv.w, acc);
+        facc += (float)acc * sxb[c];
     }
-    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
-    if (lane == 0) y[j] = (float)acc * (row_scale[j] * (1.0f / 127.0f)) * (*sx);
+    for (int o = 16; o > 0; o >>= 1) facc += __shfl_down_sync(0xffffffffu, facc, o);
+    if (lane == 0) y[j] = facc * (row_scale[j] * (1.0f / 127.0f));
 }
 
 /* BETA.3a-v4: Q4 dp4a GEMV (0.5 B/weight, ~7x f32 at 12B-scale; bench-proven in
@@ -637,24 +653,27 @@ __device__ __forceinline__ void sp_unpack8(int w, int &lo4, int &hi4) {
 }
 __global__ void k_gemv_q4_dp4a_v2(const unsigned char *codes, const unsigned long long *row_off,
                                   const float *row_scale, int in, const signed char *qx,
-                                  const float *sx, float *y, int out) {
+                                  const float *sxb, float *y, int out) {
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int j = blockIdx.x * (blockDim.x >> 5) + warp;
     if (j >= out) return;
     const int4 *wrow = (const int4 *)(codes + row_off[j]);   /* 16 B = 32 Q4 weights */
     const int4 *qxi  = (const int4 *)qx;
     const int n32 = in >> 5;
-    int acc = 0, a, b;
+    float facc = 0.0f;
+    int a, b;
     for (int c = lane; c < n32; c += 32) {
         int4 wv = wrow[c];
         int4 q0 = qxi[2*c], q1 = qxi[2*c + 1];
-        sp_unpack8(wv.x, a, b); acc = __dp4a(a, q0.x, acc); acc = __dp4a(b, q0.y, acc);
-        sp_unpack8(wv.y, a, b); acc = __dp4a(a, q0.z, acc); acc = __dp4a(b, q0.w, acc);
-        sp_unpack8(wv.z, a, b); acc = __dp4a(a, q1.x, acc); acc = __dp4a(b, q1.y, acc);
-        sp_unpack8(wv.w, a, b); acc = __dp4a(a, q1.z, acc); acc = __dp4a(b, q1.w, acc);
+        int a0 = 0, a1 = 0;          /* the 32-code chunk splits into TWO 16-blocks */
+        sp_unpack8(wv.x, a, b); a0 = __dp4a(a, q0.x, a0); a0 = __dp4a(b, q0.y, a0);
+        sp_unpack8(wv.y, a, b); a0 = __dp4a(a, q0.z, a0); a0 = __dp4a(b, q0.w, a0);
+        sp_unpack8(wv.z, a, b); a1 = __dp4a(a, q1.x, a1); a1 = __dp4a(b, q1.y, a1);
+        sp_unpack8(wv.w, a, b); a1 = __dp4a(a, q1.z, a1); a1 = __dp4a(b, q1.w, a1);
+        facc += (float)a0 * sxb[2*c] + (float)a1 * sxb[2*c + 1];
     }
-    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
-    if (lane == 0) y[j] = (float)acc * (row_scale[j] * (1.0f / 7.0f)) * (*sx);
+    for (int o = 16; o > 0; o >>= 1) facc += __shfl_down_sync(0xffffffffu, facc, o);
+    if (lane == 0) y[j] = facc * (row_scale[j] * (1.0f / 7.0f));
 }
 
 /* ════════════════════════ device weight cache ════════════════════════ */
@@ -1469,9 +1488,14 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const char *i8e = getenv("SP_CUDA_DECODE_INT8");
     const int use_int8 = (i8e && i8e[0] == '1') && m->arena != NULL;
     /* 12B-class tied head: the f32 embd isn't resident (VRAM budget) — the
-     * V x E head matmul must take the dp4a route. Surface it, don't crash. */
+     * V x E head matmul must take the dp4a route. Surface it, don't crash.
+     * Exception: a PROBED diagnostic run (SP_G4_DEC_PROBE) may proceed headless
+     * (the per-layer x dumps are the product; the produced token is discarded). */
+    const char *pbe_g = getenv("SP_G4_DEC_PROBE");
+    const int headless_probe = (pbe_g != NULL) && !(g_w.head.f32 || g_w.head.codes) &&
+                               !g_w.embd && !(use_int8 && g_w.embd_packed.codes);
     if (!(g_w.head.f32 || g_w.head.codes) && !g_w.embd &&
-        !(use_int8 && g_w.embd_packed.codes)) {
+        !(use_int8 && g_w.embd_packed.codes) && !headless_probe) {
         sp_set_error("g4 decode: tied head without resident f32 embd requires SP_CUDA_DECODE_INT8=1");
         return -1;
     }
@@ -1485,6 +1509,24 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     float *hple=NULL; float **dKc=NULL, **dVc=NULL;
     cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
     int rc=-1, n=n_prompt;
+    /* SP_G4_DEC_PROBE=<pos>: ETA.5b bug-hunt — intercept the step at <pos>:
+     * sync, pull the device token + the post-embed x, diff vs the HOST arena
+     * dequant of the same row (the oracle's own gather arithmetic), print.
+     * SP_G4_DEC_DUMP=<file>: additionally dump x after EVERY layer's FFN
+     * residual (the attn_only=0 probe boundary) at the probed step — the
+     * layer-bisect reference for diffing against gemma4_cuda_probe.
+     * Diagnostic-only; declared up here so no goto crosses an initializer. */
+    const char *pbe = getenv("SP_G4_DEC_PROBE");
+    const int probe_pos = pbe ? atoi(pbe) : -1;
+    const char *pdump = getenv("SP_G4_DEC_DUMP");
+    float *probe_xs = (probe_pos >= 0 && pdump)
+                      ? (float *)malloc((size_t)NL * E * sizeof(float)) : NULL;
+    /* SP_G4_NO_OSCALE=1 (diagnostic): skip per-layer out_scale so the dump is
+     * comparable to the TRUNCATED probe (which skips PL/out_scale by design).
+     * out_scale is position-independent — the correct pos-(probe-1) step
+     * already exonerates it — this only aligns the two references. */
+    const char *noso = getenv("SP_G4_NO_OSCALE");
+    const int skip_oscale = (noso && noso[0] == '1');
     dKc = (float **)calloc((size_t)NL, sizeof(float *));
     dVc = (float **)calloc((size_t)NL, sizeof(float *));
     if (!dKc || !dVc) { sp_set_error("g4 decode host OOM"); goto done; }
@@ -1499,10 +1541,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
               if (!dev_ple) {
                   hple = (float *)malloc((size_t)NLPL*sizeof(float));
                   if (!hple) { sp_set_error("g4 hple OOM"); goto done; } } }
-    if (use_int8) {            /* qx sized to the widest matmul input, padded %32 (Q4 chunk) */
+    if (use_int8) {            /* qx sized to the widest matmul input, padded %32 (Q4 chunk);
+                                * dsx = PER-16-BLOCK activation scales (npad/16 floats) */
         int maxin = E; if (QDmax > maxin) maxin = QDmax; if (FFmax > maxin) maxin = FFmax;
-        if (cudaMalloc(&dqx, (size_t)((maxin+31)&~31)) != cudaSuccess) { sp_set_error("g4 dqx OOM"); goto done; }
-        G4D(dsx,1);
+        const size_t npad = (size_t)((maxin+31)&~31);
+        if (cudaMalloc(&dqx, npad) != cudaSuccess) { sp_set_error("g4 dqx OOM"); goto done; }
+        G4D(dsx, npad >> 4);
     }
     /* the JAGGED cache: owners only, per-layer width */
     for (int L = 0; L < kvfs && L < NL; L++) {
@@ -1713,6 +1757,35 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
             g_w.embd_packed.row_prec, dseq, dpos, E, embscale, dx);
 
+        if (pos == probe_pos) {
+            cudaStreamSynchronize(st);
+            int tok_d = -1, pos_d = -1;
+            cudaMemcpy(&tok_d, dseq + pos, sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&pos_d, dpos, sizeof(int), cudaMemcpyDeviceToHost);
+            float *hx = (float *)malloc((size_t)E * sizeof(float));
+            float *hr = (float *)malloc((size_t)E * sizeof(float));
+            const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+            if (hx && hr && eat) {
+                cudaMemcpy(hx, dx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
+                if (!sp_arena_dequant_row(eat, tok_d, hr)) {
+                    double ma = 0.0; int bi = -1; double sg = 0.0, sr = 0.0;
+                    for (int i = 0; i < E; i++) {
+                        float ref = hr[i] * embscale;
+                        double d = fabs((double)hx[i] - (double)ref);
+                        if (d > ma) { ma = d; bi = i; }
+                        sg += (double)hx[i] * hx[i]; sr += (double)ref * ref;
+                    }
+                    fprintf(stderr, "    [g4-dec-probe] pos %d (*dpos=%d) tok=%d  embed max|diff| %.3e at i=%d "
+                                    "(gpu %.6e vs host %.6e)  |x|_gpu %.4e |x|_ref %.4e\n",
+                            pos, pos_d, tok_d, ma, bi,
+                            bi >= 0 ? (double)hx[bi] : 0.0,
+                            bi >= 0 ? (double)hr[bi] * embscale : 0.0,
+                            sqrt(sg), sqrt(sr));
+                } else fprintf(stderr, "    [g4-dec-probe] pos %d tok=%d: host dequant FAILED\n", pos, tok_d);
+            }
+            free(hx); free(hr);
+        }
+
         /* per-step AltUp precompute (1 x NL*PL): the PLE row for THIS token —
          * gathered ON DEVICE from the packed table (ETA.5b), or host-gathered
          * via sp_arena_dequant_row when the table isn't resident (ETA.5a). */
@@ -1791,6 +1864,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             k_rmsnorm<<<1, 256, 0, st>>>(ddn, g_w.post_ffw[L], E, eps, dnx);
             k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
 
+            /* layer-bisect dump (FFN-residual boundary == probe attn_only=0) */
+            if (probe_xs && pos == probe_pos) {
+                cudaStreamSynchronize(st);
+                cudaMemcpy(probe_xs + (size_t)L * E, dx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
+            }
+
             if (PL) {
                 MMD(&g_w.Wplig[L], dx, dpg);
                 k_altup_gate<<<(unsigned)((PL+255)/256), 256, 0, st>>>(dpg, dipl, L, NL, PL, 1);
@@ -1798,11 +1877,34 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 k_rmsnorm<<<1, 256, 0, st>>>(dpp, g_w.pl_post_norm[L], E, eps, dnx);
                 k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
             }
-            if (g_w.pl_out_scale && g_w.pl_out_scale[L])
+            if (!skip_oscale && g_w.pl_out_scale && g_w.pl_out_scale[L])
                 k_scale_by_dev<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, (size_t)E, g_w.pl_out_scale[L]);
+
+            /* SP_G4_DEC_PROBE layer telemetry: per-layer residual-stream norms at
+             * the probed step AND the step before it (the good/bad pair) — a
+             * catastrophic layer shows as a sudden |x| anomaly in the bad column. */
+            if (probe_pos >= 0 && (pos == probe_pos || pos == probe_pos - 1)) {
+                cudaStreamSynchronize(st);
+                float *hx = (float *)malloc((size_t)E * sizeof(float));
+                if (hx) {
+                    cudaMemcpy(hx, dx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
+                    double ss = 0.0, mx = 0.0;
+                    for (int i = 0; i < E; i++) {
+                        double v = hx[i]; ss += v * v; if (fabs(v) > mx) mx = fabs(v);
+                    }
+                    fprintf(stderr, "    [g4-dec-x] pos %d L%-2d |x| %.6e max|x| %.6e\n",
+                            pos, L, sqrt(ss), mx);
+                    free(hx);
+                }
+            }
         }
 
-        if (gen_here) {
+        if (gen_here && headless_probe) {
+            /* diagnostic-only: no head available knobs-off on 12B-class — emit
+             * token 0; the per-layer dumps above are the run's product. */
+            cudaMemsetAsync(dseq + pos + 1, 0, sizeof(int), st);
+            n = pos + 2;
+        } else if (gen_here) {
             k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
             if (g_w.head.f32 || g_w.head.codes) { MMD(&g_w.head, dnx, dlog); }
             else if (use_int8 && g_w.embd_packed.codes &&
@@ -1824,6 +1926,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         k_incr_pos<<<1, 1, 0, st>>>(dpos);         /* keep dpos == pos+1 */
     }
 download:
+    if (probe_xs) {   /* flush the layer-bisect dump (diagnostic only) */
+        FILE *pf = fopen(pdump, "wb");
+        if (pf) { fwrite(probe_xs, sizeof(float), (size_t)NL * E, pf); fclose(pf); }
+        fprintf(stderr, "    [g4-dec-probe] dumped %d x-vectors (E=%d) to %s\n", NL, E, pdump);
+    }
     /* single sequence download at the end */
     if (cudaMemcpyAsync(seq, dseq, (size_t)n*sizeof(int), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
         sp_set_error("g4 seq D2H"); goto done; }
@@ -1841,6 +1948,7 @@ done:
     free(hple);
     if (dKc) { for (int L = 0; L < NL; L++) if (dKc[L]) cudaFree(dKc[L]); free(dKc); }
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
+    free(probe_xs);
     #undef MMD
     return rc;
 }
@@ -1884,12 +1992,12 @@ static int gemm_w_lift(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
     return 0;
 }
 
-/* BETA.3a/v4: single-token packed dp4a GEMV (decode). Quantize x->int8 (dqx/dsx
- * scratch), dp4a against the packed Q8 (1 B/weight) or Q4 (0.5 B/weight, nibbles
- * unpacked in-ALU) codes — no f32 scratch materialization. `prec` is the arena
- * precision (8 or 4) the caller resolved via sp_arena_precision; uniform per arena
- * for dense qwen3. Returns 1 if it TOOK the packed path, 0 if it declined (caller
- * falls back to gemm_w dequant). */
+/* BETA.3a/v4 + ETA.5b.4: single-token packed dp4a GEMV (decode). Quantize x->int8
+ * PER-16-BLOCK (dqx codes + dsx block scales — the outlier-robust activation
+ * quant; see k_quant_act_int8), dp4a against the packed Q8 (1 B/weight) or Q4
+ * (0.5 B/weight, nibbles unpacked in-ALU) codes — no f32 scratch
+ * materialization. Returns 1 if it TOOK the packed path, 0 if it declined
+ * (caller falls back to the dequant/lift path). */
 static int gemv_w_packed(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
                          signed char *dqx, float *dsx) {
     if (W->f32) return 0;                                 /* not packed */
@@ -2302,10 +2410,12 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     DA(dx,E); DA(dnx,E); DA(dq,QD); DA(dk,KVD); DA(dv,KVD); DA(dao,QD); DA(dap,E);
     DA(dg,FF); DA(dup,FF); DA(ddn,E); DA(dlog,V);
     if (g_w.scratch_n) DA(dscr,g_w.scratch_n);
-    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %32 (Q4 chunk) */
+    if (use_int8) {            /* qx scratch sized to the widest matmul input (FF), padded to %32 (Q4 chunk);
+                                * dsx = PER-16-BLOCK activation scales (npad/16 floats) */
         int maxin = E; if (QD>maxin) maxin=QD; if (FF>maxin) maxin=FF;
-        if (cudaMalloc(&dqx,(size_t)((maxin+31)&~31))!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
-        DA(dsx,1);
+        const size_t npad = (size_t)((maxin+31)&~31);
+        if (cudaMalloc(&dqx,npad)!=cudaSuccess){sp_set_error("dqx OOM");goto done;}
+        DA(dsx, npad >> 4);
     }
     /* MM(W,X,Y): the decode matmul — packed dp4a GEMV (Q8 or Q4) when enabled, else
      * the cuBLAS dequant path. Both capture cleanly into the CUDA graph. */
