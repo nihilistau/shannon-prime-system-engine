@@ -89,6 +89,7 @@ through it at runtime.
 | Math-core reference forward | yes | **yes (default)** | byte-exact on host + aarch64-android; baseline tok/s in §4 below |
 | CPU backend (AVX-512 + cpu_overlay) | yes | **yes (`SP_DAEMON_BACKEND=cpu`)** | sprint WIRE-CPU (2026-06-02): daemon registers `qwen3_forward_cpu` / `gemma3_forward_cpu` via L1 ABI §6 hook; `cpu_forward_count` increments per prefill; bit-exact vs reference (same byte stream); on i9-11900KB host wall-clock matches reference within ±1% (AVX-512 primitives present in lib, hot-path wiring is WIRE-CPU-V2 follow-on) |
 | CUDA backend (PTX MMA + NTT) | yes | no | desktop target; symmetric WIRE-HEX sprint |
+| CUDA GPU decode (Stage Beta) | yes | n/a (test path) | **RTX 2060 sm_75:** `qwen3_decode_cuda` (KV in VRAM) + CUDA graphs + fused dp4a INT8/Q4 GEMV (per-tensor precision). Gated 28/28 top-1-lossless. Isolated bandwidth ladder f32 1× → int8 ~3.8× → **Q4 ~7×**. See §5.2.1 |
 | Vulkan backend | yes | no | desktop target; symmetric WIRE-HEX sprint |
 | Hexagon HVX backend | yes | **partially** | sprint WIRE-HEX: daemon registers `gemma3_forward_hexagon` via L1 ABI §6 hook; `hex_forward_count` increments at first prefill; **`sp_hex_forward` returns non-zero on cDSP after weight upload — cDSP skel on device needs rebuild against current IDL** |
 | Polynomial-ring NTT attention (host) | yes | yes (`SP_ENGINE_NTT_ATTN=1`) | byte-exact vs scalar |
@@ -367,6 +368,66 @@ cmake -B build-cuda -G Ninja \
 The `--use-local-env` flag is mandatory on VS2019 BuildTools (without a
 full VS install nvcc's internal vcvars detection fails). See
 `scripts/build/build-cuda.bat`.
+
+#### 5.2.1 Stage Beta — GPU decode + the INT8/Q4 bandwidth ladder (2026-06-06, RTX 2060, sm_75)
+
+The CUDA forward was prefill-only. **Stage Beta** added autoregressive
+token-**generation** on the GPU and the discrete-quant bandwidth win, all
+gated bit-exact / top-1-lossless on the actual 2060 (12 GB, Turing):
+
+- **GPU autoregressive decode** (`qwen3_decode_cuda`) — KV cache resident in
+  VRAM, single-query GQA attention, device-side argmax that writes the next
+  token straight into a VRAM-resident `dseq[]` (zero per-step host sync at
+  `eos=-1`).
+- **CUDA graphs** (`SP_CUDA_DECODE_GRAPH=1`) — the per-token launch sequence is
+  captured once and replayed, via **position-indirect kernels** (`k_embed_at`,
+  `k_rope_dyn`, `k_kv_store`, `k_attn_decode_dyn`, `k_argmax_at`, `k_incr_pos`)
+  that dereference a device-scalar `int *dpos` so graph topology + node params
+  stay constant across replays. Warm win ≈ **1.06×** (the headline `12.65×`
+  from an early commit was a cold-start measurement artifact — corrected; see
+  `CONTRACT-SPEED`).
+- **Fused dp4a GEMV** (`SP_CUDA_DECODE_INT8=1`) — reads the packed Q8/Q4 arena
+  codes **straight from VRAM** (no f32 scratch), `__dp4a` INT8·INT8→INT32, with
+  dynamic per-vector int8 activation quant. `k_gemv_q8_dp4a_v2` /
+  `k_gemv_q4_dp4a_v2` are warp-per-row + 128-bit `int4` loads +
+  `__shfl_down_sync` reduction. **Per-tensor precision dispatch**
+  (`DevTensor.prec`, resolved from the arena's per-row precision) routes each
+  matmul to the right kernel — this correctly handles **K-quant mixes**
+  (`Q4_K_M` keeps the head/embeddings at Q8 while the body is Q4).
+- **The bandwidth ladder** (isolated GEMV sweep, `tests/bench_gemv_int8.cu`,
+  both clocks pinned): **f32 1× (~290 GB/s, bus-saturated) → int8 dp4a ~3.8×
+  → Q4 dp4a ~7.06×** at 12B-scale dims, hugging the byte ratio (4:1 / 8:1). At
+  0.6B / full clock the decode is **overhead-bound** (~91 tok/s, all precisions
+  converge); the win binds at large-model scale where weight bandwidth is the
+  wall. Q4 correctness vs host reference: max rel err **1.34e-7**.
+
+Gate: `M_QWEN3_DECODE_CUDA` (`tests/test_qwen3_decode_cuda.c`) — f32 / Q8 / Q4 /
+`.sp-model` all **256/256 top-1 lossless** (dp4a == dequant graph), graph ==
+per-step byte-exact, decode == prefill teacher-forced. **28/28 checks.**
+
+**Methodology note (important for any GPU tok/s number):** absolute decode
+tok/s at 0.6B is unreliable without (1) warmup (cold CUDA module load + cuBLAS
+JIT ≈ 13× first-call penalty), (2) a long window (`n_gen ≥ 256`), and (3)
+**both clocks pinned** — `nvidia-smi -lgc <sm>,<sm>` locks only the SM clock,
+but a weight-GEMV is *memory*-bound, so the GDDR6 clock must be at full speed
+too (it auto-boosts under sustained load; GeForce `-lmc` is flaky). Trust the
+within-run ratio over the absolute.
+
+#### 5.2.2 Bench tool — `tests/bench_gemv_int8.cu`
+
+Standalone nvcc microbench (no engine link) that isolates the weight matmul
+from attention / argmax / launch overhead and sweeps the matrix dimension
+`N = 1K..16K`, comparing f32 cuBLAS SGEMV vs int8 and Q4 dp4a GEMV. Prints
+per-GEMV µs, the speedup, and effective GB/s, plus a host-reference correctness
+gate. This is how the bandwidth ladder above was measured.
+
+```bash
+# from tests/, with the CUDA toolkit on PATH:
+nvcc -O3 -arch=sm_75 bench_gemv_int8.cu -lcublas -o bench_gemv_int8
+nvidia-smi -lgc 1500,1500          # pin SM clock (memory auto-boosts under load)
+./bench_gemv_int8                  # sweep + crossover table
+nvidia-smi -rgc                    # reset
+```
 
 Status: **built** + bit-exact-validated. **NOT wired into `sp_daemon`** —
 symmetric WIRE-HEX-style sprint pending.
@@ -881,6 +942,8 @@ rebuilding for the WIRE-HEX BIT-EXACT gate to flip.
 | `SP_ENGINE_NTT_ATTN` | `0`/`1` | Enable polynomial-ring NTT attention overlay (prefill only) |
 | `SP_ENGINE_NTT_ATTN_HEX` | `0`/`1` | (android) Route inner NTT calls through FastRPC methods 17/18 |
 | `SP_ARENA` | `q8` / `q4` | Build the packed-weight arena at load (Q8 or Q4 mixed-precision) |
+| `SP_CUDA_DECODE_GRAPH` | `0`/`1` | (CUDA decode) capture the per-token generate step into a CUDA graph and replay it (position-indirect kernels). Warm win ≈1.06×; cold-start is the real wall. |
+| `SP_CUDA_DECODE_INT8` | `0`/`1` | (CUDA decode) route packed matmuls through the fused dp4a GEMV (Q8 or Q4 per `DevTensor.prec`) — 1 byte/weight straight from VRAM, no f32 scratch. ~3.8× (int8) / ~7× (Q4) over f32 at 12B-scale; a tie at 0.6B (overhead-bound). Top-1 lossless. |
 | `SP_ARENA_RELEASE` | `0`/`1` | Release the GGUF mapping after arena pack (~50% RAM cut) |
 | `SP_ARENA_EMBED` | `0`/`1` | Include the token embedding in the arena pack |
 | `ADSP_LIBRARY_PATH` | path | (android) Where FastRPC looks for `libsp_compute_skel.so` and other skels |
