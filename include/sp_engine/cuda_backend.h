@@ -55,6 +55,37 @@ int qwen3_forward_cuda_ex(const qwen3_model *m, const int32_t *tokens, int n_tok
 int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
                       int n_gen, int eos_id);
 
+/* ETA.1 (Stage Eta, Gemma4): structural weight-upload probe. Builds the full
+ * Gemma4 CUDA weight set (per-layer global/SWA Q-KV widths, shared-KV owner
+ * skips, elastic per-layer FFN, AltUp tensor set, rope_freqs) for a
+ * core-bridged model (sp_model_load -> sp_model_to_gemma4) and prints the
+ * resolved geometry. 0 on success. The gemma4 forward itself lands in ETA.2+. */
+int gemma4_cuda_weights_probe(const qwen3_model *m);
+
+/* ETA.2: truncatable Gemma4 CUDA prefill probe (the bisection harness).
+ * n_layers=0 -> embed+scale only; attn_only=1 -> stop after layer n_layers-1's
+ * attention residual; else after its FFN residual. Downloads the residual
+ * stream x [n_tok x E] at the boundary. AltUp/out_scale (ETA.4) + head/softcap
+ * are NOT in the probe path yet — boundaries stop before them. */
+int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                      int n_layers, int attn_only, float *out_x);
+
+/* ETA.4: the official Gemma4 CUDA prefill — full forward (per-layer geometry +
+ * shared-KV + proportional RoPE + AltUp injection + per-layer out_scale + tied
+ * head + final-logit softcap). logits = [n_tok x n_vocab], all positions.
+ * Gated argmax+KL vs the CPU oracle gemma4_forward (E_G4_CU_FULL). */
+int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                        float *logits);
+
+/* ETA.5a: Gemma4 autoregressive CUDA decode (host-driven, oracle arithmetic).
+ * Jagged per-OWNER KV cache (global 512-wide / SWA 256-wide rows; sharers
+ * allocate nothing), per-step AltUp, windowed single-query attention, tied head
+ * + softcap, greedy argmax. seq[0..n_prompt) in, continuations written into
+ * seq[n_prompt..n_prompt+n_gen). Returns final length or -1. Gate E_G4_CU_DEC:
+ * the oracle prefill must teacher-forced-predict every generated token. */
+int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
+                       int n_gen, int eos_id);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

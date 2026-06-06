@@ -361,6 +361,24 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
     # top-1 argmax sequence (tests/gemma4_sp_model_top1.c). See test header.
     set_tests_properties(M_GEMMA4 PROPERTIES LABELS "SLOW" TIMEOUT 1800
         ENVIRONMENT "SP_PPL_NCTX=84;SP_PPL_ORACLE=90.715809;SP_PPL_GATE=8e-2")
+
+    # ── E_G4_CU_W (ETA.1, Stage Eta): Gemma4 CUDA weight-ingest gate. Links the
+    # CORE lane (sp_session: sp_model_load -> sp_model_to_gemma4, same as
+    # M_GEMMA4) + sp_engine_cuda — the cross-seam link is part of the gate. The
+    # CUDA lib's engine-named references (sp_arena_find/sp_arena_dequant_row/
+    # sp_set_error/...) resolve from the core libs (structs synced byte-for-byte).
+    # Skips cleanly when the model or a CUDA device is absent. ──
+    if(SP_ENGINE_WITH_CUDA)
+        add_executable(test_gemma4_cuda test_gemma4_cuda.c)
+        target_link_libraries(test_gemma4_cuda PRIVATE sp_session sp_engine_cuda)
+        if(MSVC)
+            target_compile_options(test_gemma4_cuda PRIVATE /W4)
+        else()
+            target_compile_options(test_gemma4_cuda PRIVATE -Wall -Wextra)
+        endif()
+        add_test(NAME E_G4_CU_W COMMAND test_gemma4_cuda)
+        set_tests_properties(E_G4_CU_W PROPERTIES LABELS "SLOW" TIMEOUT 900)
+    endif()
 endif()
 
 # ── HX.3a parity gate (on the phone): cDSP Q8 layers-forward vs CPU Q8. Android

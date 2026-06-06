@@ -126,6 +126,155 @@ __global__ void k_rmsnorm_head(float *base, const float *w, int n_heads, int d,
     for (int i = threadIdx.x; i < d; i += blockDim.x) v[i] = v[i] * scale * w[i];
 }
 
+/* ETA.1 (Gemma4): WEIGHTLESS per-head RMSNorm — the Gemma4 V-norm (no learned
+ * weight, no RoPE; gemma4.c g4_rmsnorm_noweight). Identical to k_rmsnorm_head
+ * minus the `* w[i]`; f64 sum-of-squares matches the CPU reference precision. */
+__global__ void k_rmsnorm_head_noweight(float *base, int n_heads, int d,
+                                        int rowstride, float eps) {
+    int b = blockIdx.x, t = b / n_heads, h = b % n_heads;
+    float *v = base + (size_t)t * rowstride + (size_t)h * d;
+    __shared__ double sh[256];
+    double s = 0.0;
+    for (int i = threadIdx.x; i < d; i += blockDim.x) { double x = v[i]; s += x * x; }
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    float ms = (float)(sh[0] / (double)d);
+    float scale = 1.0f / sqrtf(ms + eps);
+    for (int i = threadIdx.x; i < d; i += blockDim.x) v[i] = v[i] * scale;
+}
+
+/* ETA.2 (Gemma4): NEOX RoPE WITH the proportional freq-factor table — mirrors
+ * sp_rope_neox_freqs: freq = base^(-2i/d) / ff[i] (DIVIDE by the factor).
+ * Gemma4 GLOBAL layers only (SWA layers use plain k_rope, base 1e4, ff=NULL). */
+__global__ void k_rope_freqs(float *base, int n_heads, int d, int rowstride,
+                             float rbase, const float *ff) {
+    int b = blockIdx.x, t = b / n_heads, h = b % n_heads, i = threadIdx.x, half = d / 2;
+    if (i < half) {
+        float *v = base + (size_t)t * rowstride + (size_t)h * d;
+        float freq = powf(rbase, -2.0f * (float)i / (float)d) / ff[i];
+        float th = (float)t * freq, c = cosf(th), s = sinf(th);
+        float a = v[i], bb = v[i + half];
+        v[i] = a * c - bb * s;
+        v[i + half] = a * s + bb * c;
+    }
+}
+
+/* ETA.4 (Gemma4 AltUp): the project_per_layer_inputs PRECOMPUTE fusion — runs
+ * ONCE on the post-embed stream, before layer 0; the result persists in VRAM
+ * across the whole traversal. Mirrors gemma4.c lines 121-142 exactly:
+ *   row(t,L)[i] = ( proj(t,L)[i]·(1/√E) · inv · pn[i] + ple(t,L)[i]·√PL ) · (1/√2)
+ * where inv = 1/sqrt( mean( (proj·1/√E)² ) + eps ) over the PL row (f64 sum,
+ * the reference precision; ss accumulates AFTER the proj_scale, as the CPU does).
+ * proj = per_layer_model_proj · x  [n_tok × NL*PL], ple = the host-gathered
+ * per-token rows of per_layer_token_embd [n_tok × NL*PL]. One block per (t,L). */
+__global__ void k_altup_ipl(float *proj, const float *ple, const float *pn,
+                            int PL, float proj_scale, float ple_scale,
+                            float in_scale, float eps) {
+    float *row = proj + (size_t)blockIdx.x * PL;          /* (t,L) row */
+    const float *pl = ple + (size_t)blockIdx.x * PL;
+    __shared__ double sh[256];
+    double s = 0.0;
+    for (int i = threadIdx.x; i < PL; i += blockDim.x) {
+        float v = row[i] * proj_scale;
+        row[i] = v;                                        /* keep the scaled value (CPU order) */
+        s += (double)v * (double)v;
+    }
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    float inv = 1.0f / sqrtf((float)(sh[0] / (double)PL) + eps);
+    for (int i = threadIdx.x; i < PL; i += blockDim.x)
+        row[i] = (row[i] * inv * pn[i] + pl[i] * ple_scale) * in_scale;
+}
+
+/* ETA.4: the per-layer AltUp gate — pg(t)[i] = gelu(pg(t)[i]) · ipl(t,L)[i].
+ * gelu = the tanh approximation (gemma4.c g4_gelu / k_gelu_mul's formula).
+ * ipl rows for fixed L are strided NL*PL apart across tokens. */
+__global__ void k_altup_gate(float *pg, const float *ipl, int L, int NL, int PL, int n_tok) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_tok * PL) return;
+    int t = idx / PL, i = idx - t * PL;
+    float v = pg[idx];
+    const float k = 0.7978845608028654f;
+    float th = tanhf(k * (v + 0.044715f * v * v * v));
+    pg[idx] = 0.5f * v * (1.0f + th) * ipl[((size_t)t * NL + L) * PL + i];
+}
+
+/* ETA.4: scalar buffer scale by a DEVICE 1-float (the per-layer out_scale) —
+ * no host sync, graph/capture-friendly. */
+__global__ void k_scale_by_dev(float *x, size_t n, const float *s) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= s[0];
+}
+
+/* ETA.5 (Gemma4 decode): NEOX RoPE WITH freq factors at ABSOLUTE position p0
+ * (single token, grid = n_heads). The decode twin of k_rope_freqs. */
+__global__ void k_rope_freqs_at(float *base, int n_heads, int d, float rbase,
+                                const float *ff, int p0) {
+    int h = blockIdx.x, i = threadIdx.x, half = d / 2;
+    if (i < half) {
+        float *v = base + (size_t)h * d;
+        float freq = powf(rbase, -2.0f * (float)i / (float)d) / ff[i];
+        float th = (float)p0 * freq, c = cosf(th), s = sinf(th);
+        float a = v[i], bb = v[i + half];
+        v[i] = a * c - bb * s;
+        v[i + half] = a * s + bb * c;
+    }
+}
+
+/* ETA.5 (Gemma4 decode): single-query GQA attention over a cached span with an
+ * optional SLIDING WINDOW — the decode twin of the prefill k_attn's windowing
+ * (s0 = max(0, pos-win+1), matching sp_attn_head). One block per query head;
+ * the cache is the OWNER's jagged buffer [ctx x KVD]. ascale is a parameter
+ * (Gemma4 = 1.0). Shared = ctx floats. */
+__global__ void k_attn_decode_win(const float *q, const float *Kc, const float *Vc,
+                                  int ctx, int KVD, int HD, int group, float ascale,
+                                  int win, float *ao) {
+    extern __shared__ float sc[];
+    int h = blockIdx.x, kvh = h / group;
+    int pos = ctx - 1;
+    int s0 = (win >= 0 && pos - win + 1 > 0) ? pos - win + 1 : 0;
+    const float *qh = q + (size_t)h * HD;
+    for (int s = s0 + threadIdx.x; s < ctx; s += blockDim.x) {
+        const float *kh = Kc + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[s] = acc * ascale;
+    }
+    __syncthreads();
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float mx = sc[s0];
+        for (int s = s0 + 1; s < ctx; s++) if (sc[s] > mx) mx = sc[s];
+        float sum = 0.0f;
+        for (int s = s0; s < ctx; s++) { float e = expf(sc[s] - mx); sc[s] = e; sum += e; }
+        g_sum = sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = s0; s < ctx; s++)
+            acc += sc[s] * Vc[(size_t)s * KVD + (size_t)kvh * HD + i];
+        ao[(size_t)h * HD + i] = acc * inv;
+    }
+}
+
+/* ETA.2 (Gemma4): final-logit softcap, z = tanh(z/cap)*cap (gemma4.c). Applied
+ * to the LM-head logits ONLY — gemma4 has NO attention-score cap (that was
+ * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
+__global__ void k_softcap(float *z, size_t n, float cap) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) z[i] = tanhf(z[i] / cap) * cap;
+}
+
 /* NEOX RoPE on each (token,head) vector at position p=t; blockDim=d/2. */
 __global__ void k_rope(float *base, int n_heads, int d, int rowstride, float rbase) {
     int b = blockIdx.x, t = b / n_heads, h = b % n_heads, i = threadIdx.x, half = d / 2;
@@ -355,6 +504,39 @@ __global__ void k_dequant_arena(const unsigned char *codes, const unsigned long 
     out[(size_t)j * cols + i] = (float)code * inv;
 }
 
+/* ETA.2 (Gemma4 oracle parity): write the RAW integer codes as f32 — NO scale.
+ * The core's matmul_arena (§4.8 inline-lift) accumulates Σ code·x exactly
+ * (codes ≤127 are exact in f32) and applies row_scale/qmax ONCE at the end.
+ * Dequantizing per-weight first (k_dequant_arena) injects one extra f32
+ * rounding per term — measured 2.8e-3 max-rel divergence vs the oracle at
+ * E2B layer 0. This kernel + k_scale_rows reproduce the oracle's arithmetic:
+ * exact codes into the SGEMM, ONE lift after. */
+__global__ void k_codes_f32(const unsigned char *codes, const unsigned long long *row_off,
+                            const unsigned char *row_prec, int rows, int cols, float *out) {
+    int j = blockIdx.x;
+    int i = blockIdx.y * blockDim.x + threadIdx.x;
+    if (j >= rows || i >= cols) return;
+    const unsigned char *rc = codes + row_off[j];
+    int code;
+    if (row_prec[j] == 8) {
+        code = (int)((const signed char *)rc)[i];
+    } else {
+        unsigned char byte = rc[i >> 1];
+        int nib = (i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+        code = (nib ^ 8) - 8;
+    }
+    out[(size_t)j * cols + i] = (float)code;
+}
+
+/* the single post-GEMM lift: Y[t][j] *= row_scale[j]/qmax(row_prec[j]) */
+__global__ void k_scale_rows(float *Y, const float *row_scale, const unsigned char *row_prec,
+                             int n_tok, int out) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= out) return;
+    float inv = row_scale[j] * (row_prec[j] == 8 ? (1.0f / 127.0f) : (1.0f / 7.0f));
+    for (int t = 0; t < n_tok; t++) Y[(size_t)t * out + j] *= inv;
+}
+
 /* ═══════════════ BETA.3a: fused INT8 GEMV for decode (dp4a) ═══════════════
  * The decode path is M=1 (single-token GEMV), so the m8n8k16 tensor-core tile
  * (ptx_mma.cuh) can't help — a 1-row query fills 1/8 of the MMA_M tile. The
@@ -499,8 +681,25 @@ struct CudaWeights {
     DevTensor head;     /* untied LM head (qwen3 m->output, f32-or-packed); unused when tied */
     size_t scratch_n;   /* max packed weight elem count (0 if no arena) */
     DevTensor *Wq, *Wk, *Wv, *Wo, *Wgate, *Wup, *Wdown;
-    /* post_attn/post_ffw are gemma3-only (sandwich norms); NULL arrays on qwen3. */
+    /* post_attn/post_ffw are sandwich norms (gemma3 + gemma4); NULL arrays on qwen3. */
     float **attn_norm, **ffn_norm, **q_norm, **k_norm, **post_attn, **post_ffw;
+
+    /* ── ETA.1 Gemma4 (SP_ARCH_GEMMA4) extras; zeroed on other arches. ──
+     * Per-layer AltUp: inp_gate [E->PL] + proj [PL->E] matmuls, post_norm [E],
+     * out_scale [1] scalar. Model-level: per_layer_model_proj [E -> NL*PL]
+     * (the AltUp precompute matmul), per_layer_proj_norm [PL], rope_freqs
+     * [hd_global/2] proportional freq-factor table (global layers only).
+     * per_layer_token_embd stays HOST-side (row-gathered per token via
+     * sp_arena_dequant_row, mirroring the CPU sp_weight_row — uploading it
+     * f32 would be ~GBs). Shared-KV: Wk/Wv are built ONLY for owner layers
+     * [0, kvfs); sharer entries stay zeroed (the forward reuses the owner's
+     * cached K/V and skips its own projection, per gemma4.c). */
+    DevTensor *Wplig, *Wplproj;     /* [L] AltUp per-layer matmuls (NULL arrays if PL=0) */
+    float **pl_post_norm;           /* [L][E]  per_layer_post_norm */
+    float **pl_out_scale;           /* [L][1]  layer_output_scale  */
+    DevTensor pl_model_proj;        /* per_layer_model_proj [E -> NL*PL] */
+    float *pl_proj_norm;            /* [PL] */
+    float *rope_freqs;              /* [hd_global/2] */
 };
 static CudaWeights g_w = {};
 
@@ -576,16 +775,21 @@ static void free_weights(CudaWeights *w) {
     if (w->embd) cudaFree(w->embd);
     if (w->out_norm) cudaFree(w->out_norm);
     free_devtensor(&w->head);   /* untied head (no-op when tied: all ptrs NULL) */
-    DevTensor **dts[] = { &w->Wq,&w->Wk,&w->Wv,&w->Wo,&w->Wgate,&w->Wup,&w->Wdown };
+    DevTensor **dts[] = { &w->Wq,&w->Wk,&w->Wv,&w->Wo,&w->Wgate,&w->Wup,&w->Wdown,
+                          &w->Wplig,&w->Wplproj };
     for (size_t a = 0; a < sizeof(dts)/sizeof(dts[0]); a++) {
         DevTensor *arr = *dts[a];
         if (arr) { for (int L = 0; L < w->L; L++) free_devtensor(&arr[L]); free(arr); }
     }
-    float ***ns[] = { &w->attn_norm,&w->ffn_norm,&w->q_norm,&w->k_norm,&w->post_attn,&w->post_ffw };
+    float ***ns[] = { &w->attn_norm,&w->ffn_norm,&w->q_norm,&w->k_norm,&w->post_attn,&w->post_ffw,
+                      &w->pl_post_norm,&w->pl_out_scale };
     for (size_t a = 0; a < sizeof(ns)/sizeof(ns[0]); a++) {
         float **arr = *ns[a];
         if (arr) { for (int L = 0; L < w->L; L++) if (arr[L]) cudaFree(arr[L]); free(arr); }
     }
+    free_devtensor(&w->pl_model_proj);
+    if (w->pl_proj_norm) cudaFree(w->pl_proj_norm);
+    if (w->rope_freqs) cudaFree(w->rope_freqs);
     if (w->cublas) cublasDestroy(w->cublas);
     if (w->stream) cudaStreamDestroy(w->stream);
     CudaWeights z = {}; *w = z;
@@ -623,7 +827,20 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     const int NH = (int)c->n_head, NKV = (int)c->n_head_kv, V = (int)c->n_vocab;
     const int QD = NH * HD, KVD = NKV * HD, L = (int)c->n_layers;
 
-    const int is_gemma = (c->arch == SP_ARCH_GEMMA3);
+    /* ETA.1 Gemma4: per-layer head GEOMETRY (gemma4.c). GLOBAL layers
+     * (L % period == period-1) use cfg.head_dim/n_head/n_head_kv (512/4/1);
+     * SWA layers use g4_hd_swa/g4_nh_swa/g4_nkv_swa (256/8/2). The Q/K/V
+     * projection WIDTHS therefore differ per layer. Shared-KV: only layers
+     * [0, kvfs) own K/V. PL = AltUp per-layer-input width (0 = no AltUp). */
+    const int is_g4 = (c->arch == SP_ARCH_GEMMA4);
+    const int g4_period = is_g4 ? ((int)c->g4_swa_period ? (int)c->g4_swa_period : 6) : 0;
+    const int g4_kvfs   = is_g4 ? ((int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : L) : L;
+    const int g4_PL     = is_g4 ? (int)c->g4_n_embd_per_layer : 0;
+    const int s_nh = is_g4 ? (int)c->g4_nh_swa  : NH;
+    const int s_nkv = is_g4 ? (int)c->g4_nkv_swa : NKV;
+    const int s_hd = is_g4 ? (int)c->g4_hd_swa  : HD;
+
+    const int is_gemma = (c->arch == SP_ARCH_GEMMA3) || is_g4;   /* sandwich norms */
     const int tied = (m->output == m->token_embd);
 
     CudaWeights z = {}; *w = z;
@@ -668,17 +885,525 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
     ALLOC_DT(Wgate); ALLOC_DT(Wup); ALLOC_DT(Wdown);
     ALLOC_NM(attn_norm); ALLOC_NM(ffn_norm); ALLOC_NM(q_norm); ALLOC_NM(k_norm);
     if (is_gemma) { ALLOC_NM(post_attn); ALLOC_NM(post_ffw); }   /* sandwich norms */
+    if (g4_PL) { ALLOC_DT(Wplig); ALLOC_DT(Wplproj); ALLOC_NM(pl_post_norm); ALLOC_NM(pl_out_scale); }
 
     for (int Li = 0; Li < L; Li++) {
         const qwen3_layer *ly = &m->layers[Li];
-        BUILDW(Wq, attn_q, E, QD);   BUILDW(Wk, attn_k, E, KVD);  BUILDW(Wv, attn_v, E, KVD);
-        BUILDW(Wo, attn_output, QD, E);
-        BUILDW(Wgate, ffn_gate, E, FF); BUILDW(Wup, ffn_up, E, FF); BUILDW(Wdown, ffn_down, FF, E);
+        /* per-layer geometry: identical on non-gemma4; global-vs-SWA split on gemma4 */
+        const int g4_global = is_g4 && ((Li % g4_period) == g4_period - 1);
+        const int nh_L  = is_g4 ? (g4_global ? NH  : s_nh)  : NH;
+        const int nkv_L = is_g4 ? (g4_global ? NKV : s_nkv) : NKV;
+        const int hd_L  = is_g4 ? (g4_global ? HD  : s_hd)  : HD;
+        const int qd_L  = nh_L * hd_L, kvd_L = nkv_L * hd_L;
+        /* per-layer ELASTIC FFN width (MatFormer): the layer's ffn_gate out-dim
+         * (synth tensors carry dims from the .sp-model entry); fall back to n_ff. */
+        const int ff_L  = (is_g4 && ly->ffn_gate && ly->ffn_gate->n_dims >= 2 && ly->ffn_gate->dims[1] > 0)
+                          ? (int)ly->ffn_gate->dims[1] : FF;
+        const int owns_kv = !is_g4 || (Li < g4_kvfs);   /* shared-KV: sharers skip K/V */
+
+        BUILDW(Wq, attn_q, E, qd_L);
+        if (owns_kv) { BUILDW(Wk, attn_k, E, kvd_L); BUILDW(Wv, attn_v, E, kvd_L); }
+        BUILDW(Wo, attn_output, qd_L, E);
+        BUILDW(Wgate, ffn_gate, E, ff_L); BUILDW(Wup, ffn_up, E, ff_L); BUILDW(Wdown, ffn_down, ff_L, E);
         UPV(attn_norm, attn_norm, E);   UPV(ffn_norm, ffn_norm, E);
-        UPV(q_norm, attn_q_norm, HD);   UPV(k_norm, attn_k_norm, HD);
+        UPV(q_norm, attn_q_norm, hd_L);
+        if (owns_kv) UPV(k_norm, attn_k_norm, hd_L);     /* sharers never norm K */
         if (is_gemma) { UPV(post_attn, post_attn_norm, E); UPV(post_ffw, post_ffw_norm, E); }
+        if (g4_PL) {
+            BUILDW(Wplig, per_layer_inp_gate, E, g4_PL);
+            BUILDW(Wplproj, per_layer_proj, g4_PL, E);
+            UPV(pl_post_norm, per_layer_post_norm, E);
+            UPV(pl_out_scale, out_scale, 1);
+        }
+    }
+
+    /* ETA.1 Gemma4 model-level AltUp tensors. per_layer_token_embd is NOT uploaded
+     * (host row-gather per token via sp_arena_dequant_row, like the CPU
+     * sp_weight_row — see the CudaWeights comment). */
+    if (g4_PL) {
+        if (build_w(m, m->per_layer_model_proj, E, L * g4_PL, &w->pl_model_proj, &w->scratch_n)) {
+            free_weights(w); return 1;
+        }
+        w->pl_proj_norm = upload_vec(m, m->per_layer_proj_norm, g4_PL);
+        if (!w->pl_proj_norm) { free_weights(w); return 1; }
+        w->rope_freqs = upload_vec(m, m->rope_freqs, HD / 2);   /* global-layer freq factors */
+        if (!w->rope_freqs) { free_weights(w); return 1; }
     }
     return 0;
+}
+
+/* ETA.1 structural probe: build (upload) the full Gemma4 weight set for a
+ * core-bridged model (sp_model_load -> sp_model_to_gemma4) and report the
+ * per-layer geometry it resolved. Returns 0 on success. The first gate of the
+ * Stage-Eta CUDA port: proves the engine CUDA layer can ingest the gemma4
+ * arena + owned norms across the core/engine link seam, with per-layer Q/KV
+ * widths, shared-KV skips, elastic FFN, and the AltUp tensor set. */
+extern "C" int gemma4_cuda_weights_probe(const qwen3_model *m) {
+    if (!m || m->cfg.arch != SP_ARCH_GEMMA4) { sp_set_error("gemma4 probe: not a gemma4 model"); return 1; }
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
+    const qwen3_config *c = &m->cfg;
+    const int L = (int)c->n_layers;
+    const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int kvfs = (int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : L;
+    int n_global = 0, n_owner = 0, ff_min = 1 << 30, ff_max = 0;
+    for (int Li = 0; Li < L; Li++) {
+        if ((Li % period) == period - 1) n_global++;
+        if (Li < kvfs) n_owner++;
+        int ff = g_w.Wgate[Li].out; if (ff < ff_min) ff_min = ff; if (ff > ff_max) ff_max = ff;
+    }
+    fprintf(stderr, "    [g4-cuda-w] L=%d global=%d swa=%d kv-owners=%d sharers=%d "
+            "ff=[%d..%d] PL=%d qd(g)=%d qd(s)=%d kvd(g)=%d kvd(s)=%d "
+            "plmp=%dx%d prec(Wq0)=%d\n",
+            L, n_global, L - n_global, n_owner, L - n_owner, ff_min, ff_max,
+            (int)c->g4_n_embd_per_layer,
+            (int)c->n_head * (int)c->head_dim, (int)c->g4_nh_swa * (int)c->g4_hd_swa,
+            (int)c->n_head_kv * (int)c->head_dim, (int)c->g4_nkv_swa * (int)c->g4_hd_swa,
+            g_w.pl_model_proj.in, g_w.pl_model_proj.out, g_w.Wq[0].prec);
+    return 0;
+}
+
+/* ═══════════ ETA.2: Gemma4 CUDA prefill — TRUNCATABLE probe skeleton ═══════════
+ * Mirrors core/forward/gemma4.c (the bit-faithful CPU oracle) onto the CUDA
+ * kernel vocabulary, with the bisection boundaries the Stage-Eta plan demands:
+ *
+ *   n_layers = 0              -> embed + sqrt(E) scale only
+ *   n_layers = N, attn_only=1 -> through layer N-1's ATTENTION residual
+ *   n_layers = N, attn_only=0 -> through layer N-1's FFN residual
+ *
+ * and downloads the residual stream x [n_tok x E] at the boundary. Implemented
+ * here (gated by the layer-0 parity probe E_G4_CU_L0): per-layer GLOBAL/SWA
+ * geometry + per-layer projection widths, attention scale = 1.0 (NO score cap),
+ * QK-norm before RoPE, the WEIGHTLESS V-norm, proportional rope_freqs on global
+ * layers, shared-KV (owners store K/V on device; sharers reuse owner kvfs-1
+ * global / kvfs-2 SWA and skip their own projection), per-layer elastic FFN
+ * (GeGLU) + sandwich norms.
+ *
+ * NOT YET (deliberately, per the gated plan — the FULL-forward gate vs the CPU
+ * oracle only goes green once these land):
+ *   - ETA.4: AltUp precompute + per-layer injection + per-layer out_scale.
+ *   - the final norm + tied head + k_softcap (wired in the full forward entry,
+ *     which follows once AltUp closes; k_softcap is already defined above).
+ * Probe boundaries therefore stop BEFORE the AltUp injection point. */
+static int gemm_w_lift(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
+                       const float *dX, float *dY, int n_tok, float *scratch);  /* defined below */
+static int gemm(cublasHandle_t h, const float *dW, const float *dX, float *dY,
+                int n_tok, int in, int out);                                    /* defined below */
+
+/* attn_only modes: 1 = stop after last layer's attention residual; 2/3/4/5 =
+ * intra-block bisection stages; 0 = stop after last layer's FFN residual;
+ * ETA.4: -1 = FULL FORWARD — all layers + AltUp injection + per-layer out_scale
+ * + final norm + (tied) head + logit softcap; out_x = logits [n_tok x n_vocab]. */
+extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
+                                 int n_tok, int n_layers, int attn_only, float *out_x) {
+    if (!m || m->cfg.arch != SP_ARCH_GEMMA4) { sp_set_error("gemma4_cuda_probe: not gemma4"); return 1; }
+    if (n_tok <= 0 || !tokens || !out_x) { sp_set_error("gemma4_cuda_probe: bad args"); return 1; }
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, NL = (int)c->n_layers, SW = (int)c->sliding_window;
+    const float eps = c->rms_eps, embscale = sqrtf((float)E);
+    const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int kvfs   = (int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : NL;
+    const int g_nh = (int)c->n_head, g_nkv = (int)c->n_head_kv, g_hd = (int)c->head_dim;
+    const int s_nh = (int)c->g4_nh_swa, s_nkv = (int)c->g4_nkv_swa, s_hd = (int)c->g4_hd_swa;
+    const float g_base = c->rope_freq_base, s_base = c->g4_rope_base_swa;
+    const int QDmax = (g_nh*g_hd > s_nh*s_hd) ? g_nh*g_hd : s_nh*s_hd;
+    const int KVDmax = (g_nkv*g_hd > s_nkv*s_hd) ? g_nkv*g_hd : s_nkv*s_hd;
+    const int full = (attn_only == -1);                /* ETA.4 full forward */
+    const int PL = (int)c->g4_n_embd_per_layer;
+    const int V = (int)c->n_vocab;
+    const float softcap = c->g4_logit_softcap;
+    if (full) n_layers = NL;
+    if (n_layers < 0) n_layers = 0;
+    if (n_layers > NL) n_layers = NL;
+
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return 1; }
+    cublasHandle_t cb = g_w.cublas;
+    cudaStream_t st = g_w.stream;
+
+    /* per-layer max FFN width across the truncated range */
+    int FFmax = (int)c->n_ff;
+    for (int L = 0; L < n_layers; L++)
+        if (g_w.Wgate[L].out > FFmax) FFmax = g_w.Wgate[L].out;
+
+    int *dtoks = NULL;
+    float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
+          *dg=NULL,*dup=NULL,*ddn=NULL,*dscr=NULL;
+    float *dipl=NULL,*dple=NULL,*dpg=NULL,*dpp=NULL,*dlog=NULL;   /* ETA.4 AltUp + head */
+    float *hple = NULL;
+    float **Kst=NULL, **Vst=NULL;     /* per-OWNER device K/V (shared-KV reuse) */
+    int rc = 1;
+    Kst = (float **)calloc((size_t)NL, sizeof(float *));
+    Vst = (float **)calloc((size_t)NL, sizeof(float *));
+    if (!Kst || !Vst) { sp_set_error("g4 probe: host OOM"); goto done; }
+    #define G4A(p, cnt) do { if (cudaMalloc(&(p), (size_t)(cnt)*sizeof(float)) != cudaSuccess) { \
+        sp_set_error("g4 probe OOM"); goto done; } } while (0)
+    if (cudaMalloc(&dtoks, (size_t)n_tok*sizeof(int)) != cudaSuccess) { sp_set_error("g4 dtoks OOM"); goto done; }
+    G4A(dx, (size_t)n_tok*E);     G4A(dnx, (size_t)n_tok*E);
+    G4A(dq, (size_t)n_tok*QDmax); G4A(dk, (size_t)n_tok*KVDmax); G4A(dv, (size_t)n_tok*KVDmax);
+    G4A(dao, (size_t)n_tok*QDmax); G4A(dap, (size_t)n_tok*E);
+    G4A(dg, (size_t)n_tok*FFmax); G4A(dup, (size_t)n_tok*FFmax); G4A(ddn, (size_t)n_tok*E);
+    if (g_w.scratch_n) G4A(dscr, g_w.scratch_n);
+    if (full && PL) {                              /* AltUp state: persists ALL layers */
+        G4A(dipl, (size_t)n_tok*NL*PL); G4A(dple, (size_t)n_tok*NL*PL);
+        G4A(dpg, (size_t)n_tok*PL);     G4A(dpp, (size_t)n_tok*E);
+    }
+    if (full) G4A(dlog, (size_t)n_tok*V);
+    #undef G4A
+
+    if (cudaMemcpyAsync(dtoks, tokens, (size_t)n_tok*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+        sp_set_error("g4 upload tokens"); goto done;
+    }
+    {   dim3 grid(n_tok, (E + 255) / 256);   /* embed + sqrt(E) scale (gemma) */
+        k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dtoks, n_tok, E, embscale, dx); }
+
+    /* ── ETA.4: AltUp PRECOMPUTE (gemma4.c project_per_layer_inputs) — runs ONCE
+     * on the post-embed stream, BEFORE layer 0; dipl persists the whole traversal.
+     * PLE rows are host-gathered per token from the arena (the CPU sp_weight_row
+     * mirror), uploaded, then fused with per_layer_model_proj·x on device. ── */
+    if (full && PL) {
+        const sp_arena_tensor *plt = m->arena ? sp_arena_find(m->arena, "per_layer_token_embd.weight") : NULL;
+        if (!plt) { sp_set_error("g4: per_layer_token_embd not in arena"); goto done; }
+        hple = (float *)malloc((size_t)n_tok * NL * PL * sizeof(float));
+        if (!hple) { sp_set_error("g4 hple OOM"); goto done; }
+        for (int t = 0; t < n_tok; t++)
+            if (sp_arena_dequant_row(plt, tokens[t], hple + (size_t)t * NL * PL)) {
+                sp_set_error("g4 ple row dequant"); goto done;
+            }
+        if (cudaMemcpyAsync(dple, hple, (size_t)n_tok*NL*PL*sizeof(float), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+            sp_set_error("g4 ple H2D"); goto done;
+        }
+        /* proj = per_layer_model_proj · x  [n_tok x NL*PL], into dipl (CPU reuses
+         * ipl as the proj scratch — same here), then the fusion in place. */
+        if (gemm_w_lift(cb, st, &g_w.pl_model_proj, dx, dipl, n_tok, dscr)) goto done;
+        k_altup_ipl<<<n_tok*NL, 256, 0, st>>>(dipl, dple, g_w.pl_proj_norm, PL,
+                                              1.0f / sqrtf((float)E), sqrtf((float)PL),
+                                              1.0f / sqrtf(2.0f), eps);
+    }
+
+    for (int L = 0; L < n_layers; L++) {
+        const int global = ((L % period) == period - 1);
+        const int nh  = global ? g_nh  : s_nh;
+        const int nkv = global ? g_nkv : s_nkv;
+        const int hd  = global ? g_hd  : s_hd;
+        const int grp = nh / nkv, qd = nh * hd, kvd = nkv * hd;
+        const float rbase = global ? g_base : s_base;
+        const float *ffac = global ? g_w.rope_freqs : NULL;  /* proportional factors */
+        const int win = global ? -1 : SW;
+        const float ascale = 1.0f;                            /* Gemma4: scaling = 1.0 */
+        const size_t nE = (size_t)n_tok * E;
+
+        /* ── attention ── */
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+        if (attn_only == 2 && L == n_layers - 1) {            /* ── bisect: post-attn_norm nx ── */
+            if (cudaMemcpyAsync(out_x, dnx, (size_t)n_tok*E*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+                sp_set_error("g4 dl nx"); goto done; }
+            { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "g4 sync"); goto done; } }
+            rc = 0; goto done;
+        }
+        if (gemm_w_lift(cb, st, &g_w.Wq[L], dnx, dq, n_tok, dscr)) goto done;
+        k_rmsnorm_head<<<n_tok*nh, 256, 0, st>>>(dq, g_w.q_norm[L], nh, hd, qd, eps);
+        if (ffac) k_rope_freqs<<<n_tok*nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase, ffac);
+        else      k_rope<<<n_tok*nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase);
+        if (attn_only == 3 && L == n_layers - 1) {            /* ── bisect: q post norm+rope [n_tok*qd] ── */
+            if (cudaMemcpyAsync(out_x, dq, (size_t)n_tok*qd*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+                sp_set_error("g4 dl q"); goto done; }
+            { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "g4 sync"); goto done; } }
+            rc = 0; goto done;
+        }
+
+        float *Kuse, *Vuse;
+        if (L < kvfs) {                                       /* OWNER: project + store */
+            if (gemm_w_lift(cb, st, &g_w.Wk[L], dnx, dk, n_tok, dscr)) goto done;
+            if (gemm_w_lift(cb, st, &g_w.Wv[L], dnx, dv, n_tok, dscr)) goto done;
+            k_rmsnorm_head<<<n_tok*nkv, 256, 0, st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
+            if (ffac) k_rope_freqs<<<n_tok*nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, ffac);
+            else      k_rope<<<n_tok*nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase);
+            k_rmsnorm_head_noweight<<<n_tok*nkv, 256, 0, st>>>(dv, nkv, hd, kvd, eps);  /* WEIGHTLESS V-norm */
+            if (cudaMalloc(&Kst[L], (size_t)n_tok*kvd*sizeof(float)) != cudaSuccess ||
+                cudaMalloc(&Vst[L], (size_t)n_tok*kvd*sizeof(float)) != cudaSuccess) {
+                sp_set_error("g4 Kst OOM"); goto done;
+            }
+            cudaMemcpyAsync(Kst[L], dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            cudaMemcpyAsync(Vst[L], dv, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            Kuse = Kst[L]; Vuse = Vst[L];
+        } else {                                              /* SHARER: reuse owner, skip proj */
+            const int src = kvfs - (global ? 1 : 2);          /* type matches by construction */
+            Kuse = Kst[src]; Vuse = Vst[src];
+            if (!Kuse || !Vuse) { sp_set_error("g4 sharer before owner"); goto done; }
+        }
+
+        {   int bd = hd > n_tok ? hd : n_tok; if (bd > 1024) bd = 1024;
+            k_attn<<<n_tok*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
+                dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, win, dao); }
+        if (attn_only == 4 && L == n_layers - 1) {            /* ── bisect: ao post-attention [n_tok*qd] ── */
+            if (cudaMemcpyAsync(out_x, dao, (size_t)n_tok*qd*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+                sp_set_error("g4 dl ao"); goto done; }
+            { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "g4 sync"); goto done; } }
+            rc = 0; goto done;
+        }
+        if (gemm_w_lift(cb, st, &g_w.Wo[L], dao, dap, n_tok, dscr)) goto done;
+        if (attn_only == 5 && L == n_layers - 1) {            /* ── bisect: ap post-Wo PRE-norm [n_tok*E] ── */
+            if (cudaMemcpyAsync(out_x, dap, (size_t)n_tok*E*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+                sp_set_error("g4 dl ap"); goto done; }
+            { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "g4 sync"); goto done; } }
+            rc = 0; goto done;
+        }
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dap, g_w.post_attn[L], E, eps, dnx);
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dnx, nE);
+
+        if (attn_only == 1 && L == n_layers - 1) break;       /* ── probe boundary A ── */
+
+        /* ── FFN (GeGLU, per-layer elastic width) + post_ffw residual ── */
+        const int ffL = g_w.Wgate[L].out;
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+        if (gemm_w_lift(cb, st, &g_w.Wgate[L], dnx, dg, n_tok, dscr)) goto done;
+        if (gemm_w_lift(cb, st, &g_w.Wup[L], dnx, dup, n_tok, dscr)) goto done;
+        {   size_t nFF = (size_t)n_tok * ffL;
+            k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
+        if (gemm_w_lift(cb, st, &g_w.Wdown[L], dg, ddn, n_tok, dscr)) goto done;
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(ddn, g_w.post_ffw[L], E, eps, dnx);
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dnx, nE);
+
+        /* ── ETA.4: AltUp per-layer-input INJECTION (gemma4.c 220-234) — its own
+         * sandwich block AFTER the FFN residual: inp_gate·x -> gelu·ipl(t,L) ->
+         * proj -> per_layer_post_norm -> residual. Then the scalar out_scale. ── */
+        if (full && PL) {
+            if (gemm_w_lift(cb, st, &g_w.Wplig[L], dx, dpg, n_tok, dscr)) goto done;
+            {   int n = n_tok * PL;
+                k_altup_gate<<<(unsigned)((n+255)/256), 256, 0, st>>>(dpg, dipl, L, NL, PL, n_tok); }
+            if (gemm_w_lift(cb, st, &g_w.Wplproj[L], dpg, dpp, n_tok, dscr)) goto done;
+            k_rmsnorm<<<n_tok, 256, 0, st>>>(dpp, g_w.pl_post_norm[L], E, eps, dnx);
+            k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dnx, nE);
+        }
+        if (full && g_w.pl_out_scale && g_w.pl_out_scale[L])
+            k_scale_by_dev<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, nE, g_w.pl_out_scale[L]);
+    }
+
+    /* ── ETA.4: final norm + (tied) head + logit softcap (gemma4.c 243-249) ── */
+    if (full) {
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
+        if (g_w.head.f32 || g_w.head.codes) {            /* untied head */
+            if (gemm_w_lift(cb, st, &g_w.head, dnx, dlog, n_tok, dscr)) goto done;
+        } else {                                          /* tied: reuse the f32 embedding */
+            if (gemm(cb, g_w.embd, dnx, dlog, n_tok, E, V)) goto done;
+        }
+        if (softcap > 0.0f) {
+            size_t nl = (size_t)n_tok * V;
+            k_softcap<<<(unsigned)((nl+255)/256), 256, 0, st>>>(dlog, nl, softcap);
+        }
+        if (cudaMemcpyAsync(out_x, dlog, (size_t)n_tok*V*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+            sp_set_error("g4 download logits"); goto done;
+        }
+    } else if (cudaMemcpyAsync(out_x, dx, (size_t)n_tok*E*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+        sp_set_error("g4 download x"); goto done;
+    }
+    { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "g4 sync"); goto done; } }
+    { cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) { fail_cuda(e, "g4 kernel"); goto done; } }
+    rc = 0;
+done:
+    if (dtoks) cudaFree(dtoks);
+    if (dx) cudaFree(dx); if (dnx) cudaFree(dnx); if (dq) cudaFree(dq);
+    if (dk) cudaFree(dk); if (dv) cudaFree(dv); if (dao) cudaFree(dao); if (dap) cudaFree(dap);
+    if (dg) cudaFree(dg); if (dup) cudaFree(dup); if (ddn) cudaFree(ddn); if (dscr) cudaFree(dscr);
+    if (dipl) cudaFree(dipl); if (dple) cudaFree(dple); if (dpg) cudaFree(dpg);
+    if (dpp) cudaFree(dpp); if (dlog) cudaFree(dlog); free(hple);
+    if (Kst) { for (int L = 0; L < NL; L++) if (Kst[L]) cudaFree(Kst[L]); free(Kst); }
+    if (Vst) { for (int L = 0; L < NL; L++) if (Vst[L]) cudaFree(Vst[L]); free(Vst); }
+    return rc;
+}
+
+/* ETA.4: the official Gemma4 CUDA prefill — the full 35-layer forward (per-layer
+ * geometry + shared-KV + proportional RoPE + AltUp + out_scale + tied head +
+ * logit softcap). logits = [n_tok x n_vocab]. Gated argmax+KL vs the CPU oracle
+ * gemma4_forward (E_G4_CU_FULL). */
+extern "C" int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens,
+                                   int n_tok, float *logits) {
+    return gemma4_cuda_probe(m, tokens, n_tok, m ? (int)m->cfg.n_layers : 0, -1, logits);
+}
+
+__global__ void k_rope_at(float *base, int n_heads, int d, int rowstride,
+                          float rbase, int p0);            /* defined below (BETA.2) */
+__global__ void k_argmax(const float *logits, int n, int *out_tok);
+
+/* ═══════════ ETA.5a: Gemma4 autoregressive CUDA decode (host-driven) ═══════════
+ * The correct-first decode: greedy argmax generation with the FULL Gemma4 stack
+ * per step (per-layer geometry, JAGGED shared-KV cache, proportional RoPE at the
+ * absolute position, windowed single-query SWA attention, AltUp, out_scale, tied
+ * head + softcap), all matmuls on the ORACLE arithmetic (gemm_w_lift).
+ *
+ * JAGGED KV CACHE: per-OWNER device buffers [P x kvd_L] — global owners write
+ * 512-wide rows, SWA owners 256-wide, sharers allocate NOTHING and read their
+ * owner's buffer (kvfs-1 global / kvfs-2 SWA). No uniform grid, no padding.
+ *
+ * HOST-DRIVEN steps (one D2H sync per generated token): the AltUp PLE row for
+ * each position's token is host-gathered from the arena (sp_arena_dequant_row,
+ * the sp_weight_row mirror) — correctness first. The zero-sync device-side PLE
+ * gather + CUDA-graph capture + Q4-dp4a routing are ETA.5b (the speed pass,
+ * gated top-1 like Beta; THIS path is the byte-match oracle gate). */
+extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
+                                  int n_prompt, int n_gen, int eos_id) {
+    if (!m || m->cfg.arch != SP_ARCH_GEMMA4) { sp_set_error("gemma4_decode_cuda: not gemma4"); return -1; }
+    if (n_prompt <= 0 || n_gen < 0 || !seq) { sp_set_error("gemma4_decode_cuda: bad args"); return -1; }
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, NL = (int)c->n_layers, SW = (int)c->sliding_window;
+    const int V = (int)c->n_vocab, P = n_prompt + n_gen;
+    const float eps = c->rms_eps, embscale = sqrtf((float)E);
+    const float softcap = c->g4_logit_softcap;
+    const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int kvfs   = (int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : NL;
+    const int PL = (int)c->g4_n_embd_per_layer;
+    const int g_nh = (int)c->n_head, g_nkv = (int)c->n_head_kv, g_hd = (int)c->head_dim;
+    const int s_nh = (int)c->g4_nh_swa, s_nkv = (int)c->g4_nkv_swa, s_hd = (int)c->g4_hd_swa;
+    const float g_base = c->rope_freq_base, s_base = c->g4_rope_base_swa;
+    const int QDmax = (g_nh*g_hd > s_nh*s_hd) ? g_nh*g_hd : s_nh*s_hd;
+    const int KVDmax = (g_nkv*g_hd > s_nkv*s_hd) ? g_nkv*g_hd : s_nkv*s_hd;
+
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return -1; }
+    cublasHandle_t cb = g_w.cublas;
+    cudaStream_t st = g_w.stream;
+    int FFmax = (int)c->n_ff;
+    for (int L = 0; L < NL; L++) if (g_w.Wgate[L].out > FFmax) FFmax = g_w.Wgate[L].out;
+    const sp_arena_tensor *plt = (PL && m->arena) ? sp_arena_find(m->arena, "per_layer_token_embd.weight") : NULL;
+    if (PL && !plt) { sp_set_error("g4 decode: per_layer_token_embd not in arena"); return -1; }
+
+    int *dtok=NULL, *dnext=NULL;
+    float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
+          *dg=NULL,*dup=NULL,*ddn=NULL,*dscr=NULL,*dlog=NULL,
+          *dipl=NULL,*dple=NULL,*dpg=NULL,*dpp=NULL;
+    float *hple=NULL; float **dKc=NULL, **dVc=NULL;
+    int rc=-1, n=n_prompt;
+    dKc = (float **)calloc((size_t)NL, sizeof(float *));
+    dVc = (float **)calloc((size_t)NL, sizeof(float *));
+    if (!dKc || !dVc) { sp_set_error("g4 decode host OOM"); goto done; }
+    #define G4D(p, cnt) do { if (cudaMalloc(&(p), (size_t)(cnt)*sizeof(float)) != cudaSuccess) { \
+        sp_set_error("g4 decode OOM"); goto done; } } while (0)
+    if (cudaMalloc(&dtok, sizeof(int)) != cudaSuccess ||
+        cudaMalloc(&dnext, sizeof(int)) != cudaSuccess) { sp_set_error("g4 dtok OOM"); goto done; }
+    G4D(dx,E); G4D(dnx,E); G4D(dq,QDmax); G4D(dk,KVDmax); G4D(dv,KVDmax);
+    G4D(dao,QDmax); G4D(dap,E); G4D(dg,FFmax); G4D(dup,FFmax); G4D(ddn,E); G4D(dlog,V);
+    if (g_w.scratch_n) G4D(dscr, g_w.scratch_n);
+    if (PL) { G4D(dipl,(size_t)NL*PL); G4D(dple,(size_t)NL*PL); G4D(dpg,PL); G4D(dpp,E);
+              hple = (float *)malloc((size_t)NL*PL*sizeof(float));
+              if (!hple) { sp_set_error("g4 hple OOM"); goto done; } }
+    /* the JAGGED cache: owners only, per-layer width */
+    for (int L = 0; L < kvfs && L < NL; L++) {
+        const int global = ((L % period) == period - 1);
+        const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+        G4D(dKc[L], (size_t)P * kvd);
+        G4D(dVc[L], (size_t)P * kvd);
+    }
+    #undef G4D
+
+    for (int pos = 0; pos < P - 1; pos++) {
+        const int32_t tok = seq[pos];
+        const int gen_here = (pos >= n_prompt - 1);
+        if (cudaMemcpyAsync(dtok, &tok, sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+            sp_set_error("g4 tok H2D"); goto done; }
+        { dim3 grid(1, (E + 255) / 256);
+          k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dtok, 1, E, embscale, dx); }
+
+        /* per-step AltUp precompute (1 x NL*PL): host-gathered PLE row for THIS token */
+        if (PL) {
+            if (sp_arena_dequant_row(plt, tok, hple)) { sp_set_error("g4 ple row"); goto done; }
+            if (cudaMemcpyAsync(dple, hple, (size_t)NL*PL*sizeof(float), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+                sp_set_error("g4 ple H2D"); goto done; }
+            if (gemm_w_lift(cb, st, &g_w.pl_model_proj, dx, dipl, 1, dscr)) goto done;
+            k_altup_ipl<<<NL, 256, 0, st>>>(dipl, dple, g_w.pl_proj_norm, PL,
+                                            1.0f / sqrtf((float)E), sqrtf((float)PL),
+                                            1.0f / sqrtf(2.0f), eps);
+        }
+
+        for (int L = 0; L < NL; L++) {
+            const int global = ((L % period) == period - 1);
+            const int nh = global ? g_nh : s_nh, nkv = global ? g_nkv : s_nkv;
+            const int hd = global ? g_hd : s_hd;
+            const int grp = nh / nkv, qd = nh * hd, kvd = nkv * hd;
+            const float rbase = global ? g_base : s_base;
+            const float *ffac = global ? g_w.rope_freqs : NULL;
+            const int win = global ? -1 : SW;
+            const int ffL = g_w.Wgate[L].out;
+
+            k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+            if (gemm_w_lift(cb, st, &g_w.Wq[L], dnx, dq, 1, dscr)) goto done;
+            k_rmsnorm_head<<<nh, 256, 0, st>>>(dq, g_w.q_norm[L], nh, hd, qd, eps);
+            if (ffac) k_rope_freqs_at<<<nh, hd/2, 0, st>>>(dq, nh, hd, rbase, ffac, pos);
+            else      k_rope_at<<<nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase, pos);
+
+            float *Kuse, *Vuse;
+            if (L < kvfs) {
+                if (gemm_w_lift(cb, st, &g_w.Wk[L], dnx, dk, 1, dscr)) goto done;
+                if (gemm_w_lift(cb, st, &g_w.Wv[L], dnx, dv, 1, dscr)) goto done;
+                k_rmsnorm_head<<<nkv, 256, 0, st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
+                if (ffac) k_rope_freqs_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, rbase, ffac, pos);
+                else      k_rope_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, pos);
+                k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(dv, nkv, hd, kvd, eps);
+                cudaMemcpyAsync(dKc[L] + (size_t)pos*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(dVc[L] + (size_t)pos*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                Kuse = dKc[L]; Vuse = dVc[L];
+            } else {
+                const int src = kvfs - (global ? 1 : 2);
+                Kuse = dKc[src]; Vuse = dVc[src];
+                if (!Kuse || !Vuse) { sp_set_error("g4 sharer before owner"); goto done; }
+            }
+            {   const int ctx = pos + 1;
+                int bd = hd > ctx ? hd : ctx; if (bd > 1024) bd = 1024;
+                k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
+                    dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao); }
+            if (gemm_w_lift(cb, st, &g_w.Wo[L], dao, dap, 1, dscr)) goto done;
+            k_rmsnorm<<<1, 256, 0, st>>>(dap, g_w.post_attn[L], E, eps, dnx);
+            k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
+
+            k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+            if (gemm_w_lift(cb, st, &g_w.Wgate[L], dnx, dg, 1, dscr)) goto done;
+            if (gemm_w_lift(cb, st, &g_w.Wup[L], dnx, dup, 1, dscr)) goto done;
+            {   size_t nFF = (size_t)ffL;
+                k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
+            if (gemm_w_lift(cb, st, &g_w.Wdown[L], dg, ddn, 1, dscr)) goto done;
+            k_rmsnorm<<<1, 256, 0, st>>>(ddn, g_w.post_ffw[L], E, eps, dnx);
+            k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
+
+            if (PL) {
+                if (gemm_w_lift(cb, st, &g_w.Wplig[L], dx, dpg, 1, dscr)) goto done;
+                k_altup_gate<<<(unsigned)((PL+255)/256), 256, 0, st>>>(dpg, dipl, L, NL, PL, 1);
+                if (gemm_w_lift(cb, st, &g_w.Wplproj[L], dpg, dpp, 1, dscr)) goto done;
+                k_rmsnorm<<<1, 256, 0, st>>>(dpp, g_w.pl_post_norm[L], E, eps, dnx);
+                k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
+            }
+            if (g_w.pl_out_scale && g_w.pl_out_scale[L])
+                k_scale_by_dev<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, (size_t)E, g_w.pl_out_scale[L]);
+        }
+
+        if (!gen_here) continue;               /* still ingesting the prompt */
+        k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.out_norm, E, eps, dnx);
+        if (g_w.head.f32 || g_w.head.codes) {
+            if (gemm_w_lift(cb, st, &g_w.head, dnx, dlog, 1, dscr)) goto done;
+        } else {
+            if (gemm(cb, g_w.embd, dnx, dlog, 1, E, V)) goto done;
+        }
+        if (softcap > 0.0f)
+            k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(dlog, (size_t)V, softcap);
+        k_argmax<<<1, 256, 0, st>>>(dlog, V, dnext);
+        {   int tnext = -1;
+            if (cudaMemcpyAsync(&tnext, dnext, sizeof(int), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+                sp_set_error("g4 next D2H"); goto done; }
+            cudaError_t e = cudaStreamSynchronize(st);
+            if (e != cudaSuccess) { fail_cuda(e, "g4 decode sync"); goto done; }
+            seq[pos + 1] = tnext; n = pos + 2;
+            if (eos_id >= 0 && tnext == eos_id) break;
+        }
+    }
+    { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "g4 final sync"); goto done; } }
+    { cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) { fail_cuda(e, "g4 decode kernel"); goto done; } }
+    rc = n;
+done:
+    if (dtok) cudaFree(dtok); if (dnext) cudaFree(dnext);
+    if (dx) cudaFree(dx); if (dnx) cudaFree(dnx); if (dq) cudaFree(dq); if (dk) cudaFree(dk);
+    if (dv) cudaFree(dv); if (dao) cudaFree(dao); if (dap) cudaFree(dap); if (dg) cudaFree(dg);
+    if (dup) cudaFree(dup); if (ddn) cudaFree(ddn); if (dscr) cudaFree(dscr); if (dlog) cudaFree(dlog);
+    if (dipl) cudaFree(dipl); if (dple) cudaFree(dple); if (dpg) cudaFree(dpg); if (dpp) cudaFree(dpp);
+    free(hple);
+    if (dKc) { for (int L = 0; L < NL; L++) if (dKc[L]) cudaFree(dKc[L]); free(dKc); }
+    if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
+    return rc;
 }
 
 /* row-major GEMM Y[n_tok x out] = X[n_tok x in] * W^T (see file header). */
@@ -701,6 +1426,23 @@ static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
     cudaError_t le = cudaGetLastError();
     if (le != cudaSuccess) return fail_cuda(le, "k_dequant_arena launch");
     return gemm(h, scratch, dX, dY, n_tok, W->in, W->out);
+}
+
+/* ETA.2: oracle-parity matmul — the core matmul_arena arithmetic on cuBLAS.
+ * Packed weights: RAW codes (exact f32) -> SGEMM -> ONE per-row lift on Y.
+ * f32 weights: plain SGEMM (no lift to apply). See k_codes_f32 for why. */
+static int gemm_w_lift(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
+                       const float *dX, float *dY, int n_tok, float *scratch) {
+    if (W->f32) return gemm(h, W->f32, dX, dY, n_tok, W->in, W->out);
+    dim3 grid(W->out, (W->in + 255) / 256);
+    k_codes_f32<<<grid, 256, 0, st>>>(W->codes, W->row_off, W->row_prec, W->out, W->in, scratch);
+    cudaError_t le = cudaGetLastError();
+    if (le != cudaSuccess) return fail_cuda(le, "k_codes_f32 launch");
+    if (gemm(h, scratch, dX, dY, n_tok, W->in, W->out)) return 1;
+    k_scale_rows<<<(unsigned)((W->out + 255) / 256), 256, 0, st>>>(dY, W->row_scale, W->row_prec, n_tok, W->out);
+    le = cudaGetLastError();
+    if (le != cudaSuccess) return fail_cuda(le, "k_scale_rows launch");
+    return 0;
 }
 
 /* BETA.3a/v4: single-token packed dp4a GEMV (decode). Quantize x->int8 (dqx/dsx
