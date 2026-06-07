@@ -47,6 +47,10 @@ typedef enum {
     SP_DT_OK_Q8                = 10,   /* O_K-lifted int8 + per-row Frobenius scale */
     SP_DT_OK_Q4                = 11,
     SP_DT_FROBENIUS_SCALE_FP32 = 12,   /* "<weight>.scale" companion to a Q8/Q4 tensor */
+    SP_DT_OK_Q4B               = 13,   /* block-scaled Q4: int4 codes [-7,7] nibble-packed,
+                                          per-32-block f16 scales in ".bscale" sibling
+                                          (SPEC OK_Q4B, CONTRACT-SPEED 2026-06-07) */
+    SP_DT_BLOCK_SCALE_FP16     = 14,   /* "<weight>.bscale": f16[rows * ceil(cols/32)] */
     SP_DT_SPINOR63             = 20,
     SP_DT_RING_RESIDUE_CRT_30_30 = 30,
     SP_DT_OK_INTEGER           = 31

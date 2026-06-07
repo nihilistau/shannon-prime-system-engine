@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 /* ── a growable in-memory tensor we are about to emit ── */
 typedef struct {
@@ -351,6 +352,74 @@ static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     if (!sc->bytes) { free(wrow); free(codes); free(scales); return 1; }
     memcpy(sc->bytes, scales, (size_t)sc->size_bytes);
     free(wrow); free(codes); free(scales);
+    return 0;
+}
+
+/* Add a matmul weight as OK_Q4B (SPEC OK_Q4B): int4 codes [-7,7] nibble-packed
+ * (low nibble = even col, identical packing to OK_Q4) + PER-32-BLOCK f16 scales
+ * in a ".bscale" sibling [rows * ceil(cols/32)]. Scale discipline: s = maxabs/7
+ * computed f32, ROUNDED THROUGH f16, codes quantized against the STORED scale. */
+static int add_q4b(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
+    const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, W);
+    if (!base || W->n_dims < 2) { fprintf(stderr, "bad weight %s\n", W->name); return 1; }
+    int serr; const st_entry *se = st_source(W, &serr);
+    if (serr) return 1;
+    int cols = (int)W->dims[0], rows = (int)W->dims[1];
+    int ne2 = (W->n_dims >= 3) ? (int)W->dims[2] : 1;
+    int total_rows = rows * ne2;
+    size_t rb = ggml_row_bytes(W->type, cols);
+    if (rb == 0 && !se) { fprintf(stderr, "unsupported src type for %s\n", W->name); return 1; }
+    size_t nib_cols = ((size_t)cols + 1u) / 2u;
+    int nblk = (cols + 31) / 32;
+
+    float  *wrow  = (float *)malloc((size_t)cols * sizeof(float));
+    int8_t *codes = (int8_t *)malloc((size_t)cols);
+    if (!wrow || !codes) { free(wrow); free(codes); return 1; }
+
+    emit_tensor *q = el_push(L);
+    snprintf(q->name, sizeof q->name, "%s", W->name);
+    q->dtype_id = SP_DT_OK_Q4B; q->n_dims = W->n_dims;
+    q->dims[0] = (uint64_t)cols; q->dims[1] = (uint64_t)rows;
+    if (W->n_dims >= 3) q->dims[2] = (uint64_t)ne2;
+    q->block_size = 1; q->size_bytes = (uint64_t)total_rows * nib_cols;
+    q->bytes = (uint8_t *)malloc(q->size_bytes ? q->size_bytes : 1);
+    uint16_t *bs = (uint16_t *)malloc((size_t)total_rows * nblk * sizeof(uint16_t));
+    if (!q->bytes || !bs) { free(wrow); free(codes); free(bs); return 1; }
+
+    for (int r = 0; r < total_rows; r++) {
+        if (se ? st_read_row(g_st, se, r, cols, wrow)
+               : sp_dequant_row(base + (size_t)r * rb, W->type, cols, wrow)) {
+            free(wrow); free(codes); free(bs); return 1;
+        }
+        for (int b = 0; b < nblk; b++) {
+            int c0 = b * 32, c1 = c0 + 32 < cols ? c0 + 32 : cols;
+            float ma = 0.0f;
+            for (int c = c0; c < c1; c++) { float a = fabsf(wrow[c]); if (a > ma) ma = a; }
+            float s = ma / 7.0f;
+            uint16_t sh = sp_f32_to_f16(s);
+            float sf = sp_f16_to_f32(sh);          /* the STORED scale */
+            bs[(size_t)r * nblk + b] = sh;
+            if (sf == 0.0f) { for (int c = c0; c < c1; c++) codes[c] = 0; continue; }
+            for (int c = c0; c < c1; c++) {
+                float v = wrow[c] / sf;
+                int  k = (int)lrintf(v);
+                if (k >  7) k =  7;
+                if (k < -7) k = -7;
+                codes[c] = (int8_t)k;
+            }
+        }
+        sp_frob_q4_pack(codes, cols, q->bytes + (size_t)r * nib_cols);
+    }
+    /* ".bscale" sibling (f16, row-major blocks), adjacent per §9. */
+    emit_tensor *sc = el_push(L);
+    snprintf(sc->name, sizeof sc->name, "%s.bscale", W->name);
+    sc->dtype_id = SP_DT_BLOCK_SCALE_FP16; sc->n_dims = 2;
+    sc->dims[0] = (uint64_t)nblk; sc->dims[1] = (uint64_t)total_rows;
+    sc->block_size = 2; sc->size_bytes = (uint64_t)total_rows * nblk * 2u;
+    sc->bytes = (uint8_t *)malloc(sc->size_bytes ? sc->size_bytes : 1);
+    if (!sc->bytes) { free(wrow); free(codes); free(bs); return 1; }
+    memcpy(sc->bytes, bs, (size_t)sc->size_bytes);
+    free(wrow); free(codes); free(bs);
     return 0;
 }
 
@@ -705,7 +774,7 @@ static int is_matmul_weight(const char *name) {
 int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr, "usage: %s <in.gguf> <out.sp-model> <out.sp-tokenizer> "
-                        "[--verify] [--q4|--q8] [--st <model.safetensors>]\n", argv[0]);
+                        "[--verify] [--q4|--q8|--q4b] [--st <model.safetensors>]\n", argv[0]);
         return 2;
     }
     const char *in = argv[1], *out_model = argv[2], *out_tok = argv[3];
@@ -754,15 +823,27 @@ int main(int argc, char **argv) {
         }
         if (g_st) use_q4 = 0;                    /* bf16 source: default full-width OK_Q8 */
         for (int a = 4; a < argc; a++) {
-            if      (strcmp(argv[a], "--q4") == 0) use_q4 = 1;
-            else if (strcmp(argv[a], "--q8") == 0) use_q4 = 0;
+            if      (strcmp(argv[a], "--q4") == 0)      use_q4 = 1;
+            else if (strcmp(argv[a], "--q8") == 0)      use_q4 = 0;
+            else if (strcmp(argv[a], "--q4b") == 0)     use_q4 = 2;  /* block-scaled, all */
+            else if (strcmp(argv[a], "--q4b-ffn") == 0) use_q4 = 3;  /* RECIPE B1: Q4B on
+                ffn_gate/ffn_up only, OK_Q8 rest — 12B sim'd at PPL 5.13 (+9.6% vs gold
+                4.68), ~8.9 GB, fits the 2060-12GB (lattice CONTRACT-SPEED SPEC OK_Q4B) */
         }
-        fprintf(stderr, "transcode codec: matmul weights -> %s\n", use_q4 ? "OK_Q4 (reducing)" : "OK_Q8");
+        fprintf(stderr, "transcode codec: matmul weights -> %s\n",
+                use_q4 == 3 ? "MIXED: OK_Q4B ffn_gate/up + OK_Q8 rest (recipe B1)" :
+                use_q4 == 2 ? "OK_Q4B (per-32 f16 block scales)" :
+                use_q4      ? "OK_Q4 (reducing)" : "OK_Q8");
     }
     for (uint64_t i = 0; i < gguf_n_tensors(g) && rc == 0; i++) {
         const gguf_tensor *W = gguf_tensor_at(g, i);
-        if (is_matmul_weight(W->name)) rc = use_q4 ? add_q4(&L, g, W) : add_q8(&L, g, W);
-        else                            rc = add_f32(&L, g, W);
+        if (is_matmul_weight(W->name)) {
+            int q4b_this = (use_q4 == 2) ||
+                           (use_q4 == 3 && (strstr(W->name, "ffn_gate.weight") ||
+                                            strstr(W->name, "ffn_up.weight")));
+            rc = q4b_this     ? add_q4b(&L, g, W)
+               : use_q4 == 1  ? add_q4(&L, g, W) : add_q8(&L, g, W);
+        } else rc = add_f32(&L, g, W);
     }
     if (rc) { el_free(&L); gguf_close(g); return 1; }
 
