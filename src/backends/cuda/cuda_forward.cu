@@ -1736,6 +1736,29 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const char *xb_pf_e   = getenv("SP_XBAR_POSFREE");
     const int   xbar_pf   = (xb_pf_e && xb_pf_e[0] == '1');
     const char *xbar_res  = getenv("SP_XBAR_RESID");
+    /* XBAR-P2.a (CONTRACT-XBAR-P2): residual-ENTRY pseudo-token lane.
+     * SP_XBAR_EMB_CAPTURE=<f>  dump post-embed-scale x at steps ROW..ROW+NROWS-1 (XBE1)
+     * SP_XBAR_EMB=<f>          overwrite x at those steps (payload validated E/rows)
+     * KV is then minted NATIVELY by the forward — geometry exact by construction.
+     * NOTE: PLE/AltUp lane still gathers by token id (main-stream-only injection). */
+    const char *xbar_embc = getenv("SP_XBAR_EMB_CAPTURE");
+    const char *xbar_embi = getenv("SP_XBAR_EMB");
+    FILE *xbar_embc_f = NULL;
+    float *xbar_emb_rows = NULL;     /* loaded payload rows (NROWS x E) */
+    if (xbar_embi) {
+        FILE *ef = fopen(xbar_embi, "rb");
+        int32_t eh[8];
+        if (!ef || fread(eh, sizeof(int32_t), 8, ef) != 8 || eh[0] != 0x31454258 /* XBE1 */ ||
+            eh[1] != 1 || eh[2] != xbar_nr || eh[3] != xbar_row || eh[4] != E) {
+            if (ef) fclose(ef);
+            sp_set_error("xbar emb: payload missing or header mismatch (XBE1/nrows/row/E)"); return -1; }
+        xbar_emb_rows = (float *)malloc((size_t)xbar_nr * E * sizeof(float));
+        if (!xbar_emb_rows || fread(xbar_emb_rows, sizeof(float), (size_t)xbar_nr * E, ef)
+                              != (size_t)xbar_nr * E) {
+            fclose(ef); free(xbar_emb_rows);
+            sp_set_error("xbar emb: payload body read"); return -1; }
+        fclose(ef);
+    }
     const char *xbar_rkf  = getenv("SP_XBAR_RANKS");
     const char *xb_tok_e  = getenv("SP_XBAR_TOKENS");
     int xbar_ids[32]; int xbar_nids = 0;
@@ -1747,10 +1770,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             if (*q == ',') q++;
         }
     }
-    const int xbar_on = (xbar_at >= 0 || xbar_res != NULL || xbar_rkf != NULL);
+    const int xbar_on = (xbar_at >= 0 || xbar_res != NULL || xbar_rkf != NULL ||
+                         xbar_embc != NULL || xbar_emb_rows != NULL);
     if (xbar_on) {
         static const char *xbar_envs[] = { "SP_XBAR_AT", "SP_XBAR_ROW", "SP_XBAR_NROWS", "SP_XBAR_CAPTURE",
             "SP_XBAR_SPLICE", "SP_XBAR_MASK", "SP_XBAR_POSFREE", "SP_XBAR_RESID",
+            "SP_XBAR_EMB_CAPTURE", "SP_XBAR_EMB",
             "SP_XBAR_RANKS", "SP_XBAR_TOKENS", "SP_CUDA_DECODE_INT8",
             "SP_CUDA_DECODE_GRAPH", "SP_G4_SCORE", NULL };
         fprintf(stderr, "    [xbar] ── banner (getenv echo) ──\n");
@@ -2012,6 +2037,37 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
             g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
             g_w.embd_packed.row_prec, dseq, dpos, E, embscale, dx);
+
+        /* XBAR-P2.a residual-entry lane: act on x right after the embed kernel,
+         * BEFORE PLE/AltUp and the layer stack — the pseudo-token entry point. */
+        if ((xbar_embc || xbar_emb_rows) && pos >= xbar_row && pos < xbar_row + xbar_nr) {
+            cudaError_t xe = cudaStreamSynchronize(st);
+            if (xe != cudaSuccess) { fail_cuda(xe, "xbar emb sync"); goto done; }
+            if (xbar_embc) {
+                if (!xbar_embc_f) {
+                    xbar_embc_f = fopen(xbar_embc, "wb");
+                    if (!xbar_embc_f) { sp_set_error("xbar emb capture: open"); goto done; }
+                    int32_t eh[8] = { 0x31454258, 1, xbar_nr, xbar_row, E, 0, 0, 0 };
+                    fwrite(eh, sizeof(int32_t), 8, xbar_embc_f);
+                }
+                float *hx = (float *)malloc((size_t)E * sizeof(float));
+                if (!hx) { sp_set_error("xbar emb capture OOM"); goto done; }
+                cudaMemcpy(hx, dx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
+                fwrite(hx, sizeof(float), (size_t)E, xbar_embc_f);
+                free(hx);
+                if (pos == xbar_row + xbar_nr - 1)
+                    fprintf(stderr, "    [xbar] EMB captured steps %d..%d (E=%d) -> %s\n",
+                            xbar_row, pos, E, xbar_embc);
+            }
+            if (xbar_emb_rows) {
+                if (cudaMemcpy(dx, xbar_emb_rows + (size_t)(pos - xbar_row) * E,
+                               (size_t)E * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+                    sp_set_error("xbar emb inject H2D"); goto done; }
+                if (pos == xbar_row + xbar_nr - 1)
+                    fprintf(stderr, "    [xbar] EMB injected steps %d..%d (E=%d)\n",
+                            xbar_row, pos, E);
+            }
+        }
 
         if (pos == probe_pos) {
             cudaStreamSynchronize(st);
@@ -2300,6 +2356,8 @@ done:
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
     if (dnll) cudaFree(dnll);
     free(probe_xs);
+    if (xbar_embc_f) fclose(xbar_embc_f);
+    free(xbar_emb_rows);
     #undef MMD
     return rc;
 }
