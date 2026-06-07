@@ -1502,6 +1502,102 @@ __global__ void k_attn_decode_win_dyn(const float *q, const float *Kc, const flo
     }
 }
 
+/* ═══════════ XBAR-P1: Inception Probe payload I/O ═══════════
+ * CONTRACT-XBAR-P1 (lattice papers): capture/splice the per-owner jagged KV
+ * cache rows at ONE absolute position. Payload = XBP1 file: header + per
+ * owner layer {L, kvd, K[kvd], V[kvd]}. Host-side, called with the stream
+ * SYNCED. Diagnostic lane — per-step path only (the graph path declines). */
+typedef struct {
+    int32_t magic, version, n_layers, row, period, kvfs, rsv0, rsv1;
+} xbar_hdr;
+#define XBAR_MAGIC 0x31504258  /* "XBP1" little-endian */
+
+static int xbar_kvd_of(int L, int period, int g_nkv, int g_hd, int s_nkv, int s_hd) {
+    const int global = ((L % period) == period - 1);
+    return (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+}
+
+static int xbar_capture(const char *path, float **dKc, float **dVc, int kvfs, int period,
+                        int g_nkv, int g_hd, int s_nkv, int s_hd, int row) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { sp_set_error("xbar capture: cannot open payload for write"); return -1; }
+    xbar_hdr h; h.magic = XBAR_MAGIC; h.version = 1; h.n_layers = kvfs; h.row = row;
+    h.period = period; h.kvfs = kvfs; h.rsv0 = 0; h.rsv1 = 0;
+    fwrite(&h, sizeof h, 1, f);
+    int kvd_max = 0;
+    for (int L = 0; L < kvfs; L++) {
+        int k = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
+        if (k > kvd_max) kvd_max = k;
+    }
+    float *tmp = (float *)malloc((size_t)kvd_max * sizeof(float));
+    if (!tmp) { fclose(f); sp_set_error("xbar capture OOM"); return -1; }
+    for (int L = 0; L < kvfs; L++) {
+        const int kvd = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
+        fwrite(&L, sizeof(int32_t), 1, f); fwrite(&kvd, sizeof(int32_t), 1, f);
+        if (cudaMemcpy(tmp, dKc[L] + (size_t)row * kvd, (size_t)kvd * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess ||
+            fwrite(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
+            free(tmp); fclose(f); sp_set_error("xbar capture: K row D2H/write"); return -1; }
+        if (cudaMemcpy(tmp, dVc[L] + (size_t)row * kvd, (size_t)kvd * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess ||
+            fwrite(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
+            free(tmp); fclose(f); sp_set_error("xbar capture: V row D2H/write"); return -1; }
+    }
+    free(tmp); fclose(f);
+    fprintf(stderr, "    [xbar] CAPTURED row %d (%d owner layers) -> %s\n", row, kvfs, path);
+    return 0;
+}
+
+/* mask: 0=all owner layers, 1=GLOBAL only, 2=SWA only. Position discipline:
+ * payload row must equal the target row unless posfree (CONTRACT §1 — RoPE
+ * phase is minted at the absolute position; a mismatched transplant is Arm-B
+ * territory and must be EXPLICIT, never accidental). */
+static int xbar_splice(const char *path, float **dKc, float **dVc, int kvfs, int period,
+                       int g_nkv, int g_hd, int s_nkv, int s_hd, int row,
+                       int mask, int posfree) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { sp_set_error("xbar splice: cannot open payload"); return -1; }
+    xbar_hdr h;
+    if (fread(&h, sizeof h, 1, f) != 1 || h.magic != XBAR_MAGIC || h.version != 1) {
+        fclose(f); sp_set_error("xbar splice: bad payload header"); return -1; }
+    if (h.n_layers != kvfs || h.period != period) {
+        fclose(f); sp_set_error("xbar splice: payload geometry mismatch (kvfs/period)"); return -1; }
+    if (h.row != row && !posfree) {
+        fclose(f); sp_set_error("xbar splice: payload row != target row (set SP_XBAR_POSFREE=1 only for a deliberate phase-mismatch arm)"); return -1; }
+    int kvd_max = 0;
+    for (int L = 0; L < kvfs; L++) {
+        int k = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
+        if (k > kvd_max) kvd_max = k;
+    }
+    float *tmp = (float *)malloc((size_t)kvd_max * sizeof(float));
+    if (!tmp) { fclose(f); sp_set_error("xbar splice OOM"); return -1; }
+    int spliced = 0;
+    for (int L = 0; L < kvfs; L++) {
+        int32_t fL = -1, fkvd = -1;
+        const int kvd = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
+        const int global = ((L % period) == period - 1);
+        const int take = (mask == 0) || (mask == 1 && global) || (mask == 2 && !global);
+        if (fread(&fL, sizeof(int32_t), 1, f) != 1 || fread(&fkvd, sizeof(int32_t), 1, f) != 1 ||
+            fL != L || fkvd != kvd) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: per-layer geometry mismatch"); return -1; }
+        if (fread(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: K row read"); return -1; }
+        if (take && cudaMemcpy(dKc[L] + (size_t)row * kvd, tmp, (size_t)kvd * sizeof(float),
+                               cudaMemcpyHostToDevice) != cudaSuccess) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: K row H2D"); return -1; }
+        if (fread(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: V row read"); return -1; }
+        if (take && cudaMemcpy(dVc[L] + (size_t)row * kvd, tmp, (size_t)kvd * sizeof(float),
+                               cudaMemcpyHostToDevice) != cudaSuccess) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: V row H2D"); return -1; }
+        if (take) spliced++;
+    }
+    free(tmp); fclose(f);
+    fprintf(stderr, "    [xbar] SPLICED row %d (%d/%d owner layers, mask=%s, payload row %d) <- %s\n",
+            row, spliced, kvfs, mask == 1 ? "global" : mask == 2 ? "swa" : "all", h.row, path);
+    return 0;
+}
+
 /* ═══════════ ETA.5a/5b: Gemma4 autoregressive CUDA decode ═══════════
  * ETA.5a (the oracle gate, default knobs-off): greedy argmax generation with the
  * FULL Gemma4 stack per step (per-layer geometry, JAGGED shared-KV cache,
@@ -1607,6 +1703,56 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * per-step path. */
     const char *sce = getenv("SP_G4_SCORE");
     const int score_first = sce ? atoi(sce) : -1;
+    /* ═══ XBAR-P1 knobs (CONTRACT-XBAR-P1-inception-probe.md) — diagnostic lane.
+     * SP_XBAR_AT=<pos>       step at whose START the cache action fires
+     * SP_XBAR_ROW=<row>      cache row acted on (default AT-1)
+     * SP_XBAR_CAPTURE=<f>    dump owner K/V rows at ROW -> XBP1 payload
+     * SP_XBAR_SPLICE=<f>     overwrite owner K/V rows at ROW <- XBP1 payload
+     * SP_XBAR_MASK=all|global|swa   layer-class subset for the splice
+     * SP_XBAR_POSFREE=1      allow payload-row != ROW (deliberate phase-mismatch arm)
+     * SP_XBAR_RESID=<f>      dump residual x (E f32) at the END of step ROW
+     * SP_XBAR_RANKS=<f>      per gen step: append tracked-token logit ranks
+     * SP_XBAR_TOKENS=a,b,..  tracked token ids (<=32) for RANKS
+     * Per-step path only — the graph path declines when AT >= 0. Banner below
+     * echoes every knob via getenv (feedback: banners must echo getenv). */
+    const char *xb_at_e   = getenv("SP_XBAR_AT");
+    const int   xbar_at   = xb_at_e ? atoi(xb_at_e) : -1;
+    const char *xb_row_e  = getenv("SP_XBAR_ROW");
+    const int   xbar_row  = xb_row_e ? atoi(xb_row_e) : (xbar_at > 0 ? xbar_at - 1 : -1);
+    const char *xbar_cap  = getenv("SP_XBAR_CAPTURE");
+    const char *xbar_spl  = getenv("SP_XBAR_SPLICE");
+    const char *xb_mask_e = getenv("SP_XBAR_MASK");
+    const int   xbar_mask = (!xb_mask_e || !strcmp(xb_mask_e, "all")) ? 0
+                          : !strcmp(xb_mask_e, "global") ? 1
+                          : !strcmp(xb_mask_e, "swa") ? 2 : 0;
+    const char *xb_pf_e   = getenv("SP_XBAR_POSFREE");
+    const int   xbar_pf   = (xb_pf_e && xb_pf_e[0] == '1');
+    const char *xbar_res  = getenv("SP_XBAR_RESID");
+    const char *xbar_rkf  = getenv("SP_XBAR_RANKS");
+    const char *xb_tok_e  = getenv("SP_XBAR_TOKENS");
+    int xbar_ids[32]; int xbar_nids = 0;
+    if (xb_tok_e) {
+        const char *q = xb_tok_e;
+        while (*q && xbar_nids < 32) {
+            xbar_ids[xbar_nids++] = atoi(q);
+            while (*q && *q != ',') q++;
+            if (*q == ',') q++;
+        }
+    }
+    const int xbar_on = (xbar_at >= 0 || xbar_res != NULL || xbar_rkf != NULL);
+    if (xbar_on) {
+        static const char *xbar_envs[] = { "SP_XBAR_AT", "SP_XBAR_ROW", "SP_XBAR_CAPTURE",
+            "SP_XBAR_SPLICE", "SP_XBAR_MASK", "SP_XBAR_POSFREE", "SP_XBAR_RESID",
+            "SP_XBAR_RANKS", "SP_XBAR_TOKENS", "SP_CUDA_DECODE_INT8",
+            "SP_CUDA_DECODE_GRAPH", "SP_G4_SCORE", NULL };
+        fprintf(stderr, "    [xbar] ── banner (getenv echo) ──\n");
+        for (int i = 0; xbar_envs[i]; i++) {
+            const char *v = getenv(xbar_envs[i]);
+            fprintf(stderr, "    [xbar]   %s=%s\n", xbar_envs[i], v ? v : "(unset)");
+        }
+        if ((xbar_cap || xbar_spl) && (xbar_at < 0 || xbar_row < 0)) {
+            sp_set_error("xbar: CAPTURE/SPLICE need SP_XBAR_AT (and a valid ROW)"); return -1; }
+    }
     double *dnll = NULL;
     if (score_first >= 0) {
         if (cudaMalloc(&dnll, sizeof(double)) != cudaSuccess) { sp_set_error("g4 dnll OOM"); goto done; }
@@ -1658,7 +1804,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * step) + fixed attn shm (P floats) within the 48KB sm_75 default. */
     {
         const char *ge = getenv("SP_CUDA_DECODE_GRAPH");
-        const int use_graph = (ge && ge[0] == '1');
+        const int use_graph = (ge && ge[0] == '1') && !xbar_on;  /* XBAR = per-step only */
         const size_t attn_shm = (size_t)P * sizeof(float);
         if (use_graph && attn_shm <= 48u*1024u && n_gen > 0 && (!PL || dev_ple)) {
             cublasSetStream(cb, st);
@@ -1837,6 +1983,22 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     /* ───────── per-step path (the ETA.5a oracle stack, device-fed) ───────── */
     for (int pos = 0; pos < P - 1; pos++) {
         const int gen_here = (pos >= n_prompt - 1);
+
+        /* XBAR-P1: at the START of step AT, act on cache row ROW. Order is
+         * CAPTURE then SPLICE (a same-file capture+splice is the G0 identity).
+         * Row ROW was minted during step ROW; every step >= AT attends to the
+         * (possibly foreign) row. Stream synced first — the row's writes are
+         * in-flight on st. */
+        if (pos == xbar_at && (xbar_cap || xbar_spl)) {
+            cudaError_t xe = cudaStreamSynchronize(st);
+            if (xe != cudaSuccess) { fail_cuda(xe, "xbar sync"); goto done; }
+            if (xbar_row >= pos) { sp_set_error("xbar: ROW must be < AT (row not minted yet)"); goto done; }
+            if (xbar_cap && xbar_capture(xbar_cap, dKc, dVc, kvfs, period,
+                                         g_nkv, g_hd, s_nkv, s_hd, xbar_row)) goto done;
+            if (xbar_spl && xbar_splice(xbar_spl, dKc, dVc, kvfs, period,
+                                        g_nkv, g_hd, s_nkv, s_hd, xbar_row,
+                                        xbar_mask, xbar_pf)) goto done;
+        }
         if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
           k_embed_scale<<<grid, 256, 0, st>>>(g_w.embd, dseq + pos, 1, E, embscale, dx); }
         else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
@@ -1985,6 +2147,22 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             }
         }
 
+        /* XBAR-P1 Arm-B ammunition: dump the final-layer residual x (post all
+         * layers + oscale, PRE out_norm) at step ROW — the donor concept
+         * token's residual, E raw f32. */
+        if (xbar_res && pos == xbar_row) {
+            cudaError_t xe = cudaStreamSynchronize(st);
+            if (xe != cudaSuccess) { fail_cuda(xe, "xbar resid sync"); goto done; }
+            float *hx = (float *)malloc((size_t)E * sizeof(float));
+            FILE *rf = hx ? fopen(xbar_res, "wb") : NULL;
+            if (!hx || !rf) { free(hx); if (rf) fclose(rf);
+                sp_set_error("xbar resid: alloc/open"); goto done; }
+            cudaMemcpy(hx, dx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
+            fwrite(hx, sizeof(float), (size_t)E, rf);
+            fclose(rf); free(hx);
+            fprintf(stderr, "    [xbar] RESID dumped (E=%d f32) at step %d -> %s\n", E, pos, xbar_res);
+        }
+
         if (score_first >= 0) {
             /* TEACHER-FORCED scoring: head + NLL at scored positions; dseq is
              * never overwritten (the given tokens are the targets). */
@@ -2044,6 +2222,34 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             else { if (gemm(cb, g_w.embd, dnx, dlog, 1, E, V)) goto done; }
             if (softcap > 0.0f)
                 k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(dlog, (size_t)V, softcap);
+
+            /* XBAR-P1 resonance telemetry: rank + logit of every tracked token
+             * at every generated step (oracle-rank discipline — print the rank,
+             * never just a boolean). Softcap is monotonic, rank is cap-invariant.
+             * Host sync per step — diagnostic lane, N is small. */
+            if (xbar_rkf && xbar_nids > 0) {
+                cudaError_t xe = cudaStreamSynchronize(st);
+                if (xe != cudaSuccess) { fail_cuda(xe, "xbar rank sync"); goto done; }
+                float *hl = (float *)malloc((size_t)V * sizeof(float));
+                FILE *kf = hl ? fopen(xbar_rkf, "ab") : NULL;
+                if (!hl || !kf) { free(hl); if (kf) fclose(kf);
+                    sp_set_error("xbar ranks: alloc/open"); goto done; }
+                cudaMemcpy(hl, dlog, (size_t)V * sizeof(float), cudaMemcpyDeviceToHost);
+                float bmx = hl[0]; int bmi = 0;
+                for (int i = 1; i < V; i++) if (hl[i] > bmx) { bmx = hl[i]; bmi = i; }
+                for (int t = 0; t < xbar_nids; t++) {
+                    const int id = xbar_ids[t];
+                    long rank = 1;
+                    if (id >= 0 && id < V) {
+                        const float lv = hl[id];
+                        for (int i = 0; i < V; i++) if (hl[i] > lv) rank++;
+                        fprintf(kf, "pos=%d gen=%d tok=%d rank=%ld logit=%.6f top1=%d top1_logit=%.6f\n",
+                                pos, pos - (n_prompt - 1), id, rank, (double)lv, bmi, (double)bmx);
+                    }
+                }
+                fclose(kf); free(hl);
+            }
+
             k_argmax<<<1, 256, 0, st>>>(dlog, V, dseq + pos + 1);   /* GPU feeds itself */
             n = pos + 2;
             if (eos_id >= 0) {                     /* eos needs the token host-side */

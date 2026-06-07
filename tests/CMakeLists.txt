@@ -373,6 +373,10 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
         target_link_libraries(test_gemma4_cuda PRIVATE sp_session sp_engine_cuda)
         add_executable(test_gemma4_ppl_cuda test_gemma4_ppl_cuda.c)
         target_link_libraries(test_gemma4_ppl_cuda PRIVATE sp_session sp_engine_cuda)
+        # XBAR-P1 Inception Probe driver (CONTRACT-XBAR-P1, lattice papers).
+        # Env-driven, NOT a ctest: every probe arm = this binary + SP_XBAR_* env.
+        add_executable(test_xbar_p1_cuda test_xbar_p1_cuda.c)
+        target_link_libraries(test_xbar_p1_cuda PRIVATE sp_session sp_engine_cuda)
         if(MSVC)
             target_compile_options(test_gemma4_cuda PRIVATE /W4)
         else()
