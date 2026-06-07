@@ -537,6 +537,24 @@ __global__ void k_scale_rows(float *Y, const float *row_scale, const unsigned ch
     for (int t = 0; t < n_tok; t++) Y[(size_t)t * out + j] *= inv;
 }
 
+/* OK_Q4B prefill dequant: w[j][i] = code * f16(bscale[j][i/32]). EXACT in f32
+ * (4-bit code x f16 scale products are representable), so dequant->SGEMM carries
+ * no extra rounding for Q4B and needs NO post-GEMM lift — both gemm_w and
+ * gemm_w_lift route here when bscale is set. */
+__global__ void k_dequant_arena_q4b(const unsigned char *codes, const unsigned long long *row_off,
+                                    const unsigned short *bscale, int bs_nblk,
+                                    int rows, int cols, float *out) {
+    int j = blockIdx.x;
+    int i = blockIdx.y * blockDim.x + threadIdx.x;
+    if (j >= rows || i >= cols) return;
+    const unsigned char *rc = codes + row_off[j];
+    unsigned char byte = rc[i >> 1];
+    int nib  = (i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+    int code = (nib ^ 8) - 8;
+    float s = __half2float(__ushort_as_half(bscale[(size_t)j * bs_nblk + (i >> 5)]));
+    out[(size_t)j * cols + i] = (float)code * s;
+}
+
 /* ═══════════════ BETA.3a: fused INT8 GEMV for decode (dp4a) ═══════════════
  * The decode path is M=1 (single-token GEMV), so the m8n8k16 tensor-core tile
  * (ptx_mma.cuh) can't help — a 1-row query fills 1/8 of the MMA_M tile. The
@@ -676,6 +694,41 @@ __global__ void k_gemv_q4_dp4a_v2(const unsigned char *codes, const unsigned lon
     if (lane == 0) y[j] = facc * (row_scale[j] * (1.0f / 7.0f));
 }
 
+/* SPEC OK_Q4B (the B1 recipe's kernel): identical code layout + loads + unpack +
+ * dp4a sequence as k_gemv_q4_dp4a_v2 — the ONLY change is the scale application.
+ * One 32-code chunk == one Q4B weight block, so each chunk applies its own f16
+ * block scale wbsc[c] instead of a trailing per-row scale; codes are quantized
+ * against the STORED f16 scale (store-then-derive), so w = code * wbsc exactly.
+ * Two dp4a halves per chunk keep the per-16 activation block scales exact:
+ * facc += wbsc * (sxb[2c]*acc0 + sxb[2c+1]*acc1). Zero extra code-bus traffic;
+ * the bscale stream is 1/16 of code bytes, sequential, __ldg-cached. */
+__global__ void k_gemv_q4b_dp4a_v2(const unsigned char *codes, const unsigned long long *row_off,
+                                   const unsigned short *bscale, int bs_nblk, int in,
+                                   const signed char *qx, const float *sxb, float *y, int out) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int j = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (j >= out) return;
+    const int4 *wrow = (const int4 *)(codes + row_off[j]);   /* 16 B = 32 Q4B weights */
+    const int4 *qxi  = (const int4 *)qx;
+    const unsigned short *bs = bscale + (size_t)j * (size_t)bs_nblk;
+    const int n32 = in >> 5;
+    float facc = 0.0f;
+    int a, b;
+    for (int c = lane; c < n32; c += 32) {
+        int4 wv = wrow[c];
+        int4 q0 = qxi[2*c], q1 = qxi[2*c + 1];
+        int a0 = 0, a1 = 0;
+        sp_unpack8(wv.x, a, b); a0 = __dp4a(a, q0.x, a0); a0 = __dp4a(b, q0.y, a0);
+        sp_unpack8(wv.y, a, b); a0 = __dp4a(a, q0.z, a0); a0 = __dp4a(b, q0.w, a0);
+        sp_unpack8(wv.z, a, b); a1 = __dp4a(a, q1.x, a1); a1 = __dp4a(b, q1.y, a1);
+        sp_unpack8(wv.w, a, b); a1 = __dp4a(a, q1.z, a1); a1 = __dp4a(b, q1.w, a1);
+        float wbsc = __half2float(__ushort_as_half(__ldg(&bs[c])));
+        facc += wbsc * ((float)a0 * sxb[2*c] + (float)a1 * sxb[2*c + 1]);
+    }
+    for (int o = 16; o > 0; o >>= 1) facc += __shfl_down_sync(0xffffffffu, facc, o);
+    if (lane == 0) y[j] = facc;
+}
+
 /* ════════════════════════ device weight cache ════════════════════════ */
 
 /* one weight matrix on device: either plain f32 (f32 != NULL) or packed arena. */
@@ -686,8 +739,11 @@ struct DevTensor {
     float *f32;                  /* != NULL => plain f32 [out*in] */
     unsigned char     *codes;    /* packed (f32 == NULL): math-core arena layout */
     unsigned long long *row_off; /* [out] */
-    float             *row_scale;/* [out] */
+    float             *row_scale;/* [out]; NULL for OK_Q4B (bscale governs) */
     unsigned char     *row_prec; /* [out] */
+    unsigned short    *bscale;   /* OK_Q4B (arena v2): [out * bs_nblk] per-32-block f16
+                                  * scales; NULL = per-row semantics */
+    int                bs_nblk;  /* blocks per row = in/32 (0 when bscale == NULL) */
 };
 
 struct CudaWeights {
@@ -784,8 +840,15 @@ static int upload_packed(const sp_frob_packed_tensor *pt, DevTensor *d) {
     if (upload_arr<unsigned char>(pt->codes, pt->codes_bytes, &d->codes)) return 1;
     if (upload_arr<unsigned long long>((const unsigned long long *)pt->row_off,
                                        (size_t)pt->rows, &d->row_off)) return 1;
-    if (upload_arr<float>(pt->row_scale, (size_t)pt->rows, &d->row_scale)) return 1;
+    if (pt->row_scale &&
+        upload_arr<float>(pt->row_scale, (size_t)pt->rows, &d->row_scale)) return 1;
     if (upload_arr<unsigned char>(pt->row_prec, (size_t)pt->rows, &d->row_prec)) return 1;
+    d->bscale = NULL; d->bs_nblk = 0;
+    if (pt->bscale) {                                /* OK_Q4B: per-32-block f16 scales */
+        d->bs_nblk = pt->bs_nblk;
+        if (upload_arr<unsigned short>(pt->bscale,
+                (size_t)pt->rows * (size_t)pt->bs_nblk, &d->bscale)) return 1;
+    } else if (!pt->row_scale) return 1;             /* neither scale stream: invalid */
     return 0;
 }
 
@@ -795,6 +858,7 @@ static void free_devtensor(DevTensor *d) {
     if (d->row_off) cudaFree(d->row_off);
     if (d->row_scale) cudaFree(d->row_scale);
     if (d->row_prec) cudaFree(d->row_prec);
+    if (d->bscale) cudaFree(d->bscale);
     DevTensor z = {}; *d = z;
 }
 
@@ -2041,6 +2105,13 @@ static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
                   const float *dX, float *dY, int n_tok, float *scratch) {
     if (W->f32) return gemm(h, W->f32, dX, dY, n_tok, W->in, W->out);
     dim3 grid(W->out, (W->in + 255) / 256);   /* rows on grid.x (V can exceed 65535) */
+    if (W->bscale) {                          /* OK_Q4B: exact dequant, no post-lift */
+        k_dequant_arena_q4b<<<grid, 256, 0, st>>>(W->codes, W->row_off, W->bscale,
+                                                  W->bs_nblk, W->out, W->in, scratch);
+        cudaError_t lq = cudaGetLastError();
+        if (lq != cudaSuccess) return fail_cuda(lq, "k_dequant_arena_q4b launch");
+        return gemm(h, scratch, dX, dY, n_tok, W->in, W->out);
+    }
     k_dequant_arena<<<grid, 256, 0, st>>>(W->codes, W->row_off, W->row_scale, W->row_prec,
                                           W->out, W->in, scratch);
     cudaError_t le = cudaGetLastError();
@@ -2054,6 +2125,8 @@ static int gemm_w(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
 static int gemm_w_lift(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
                        const float *dX, float *dY, int n_tok, float *scratch) {
     if (W->f32) return gemm(h, W->f32, dX, dY, n_tok, W->in, W->out);
+    if (W->bscale)                            /* Q4B dequant is already exact — same path */
+        return gemm_w(h, st, W, dX, dY, n_tok, scratch);
     dim3 grid(W->out, (W->in + 255) / 256);
     k_codes_f32<<<grid, 256, 0, st>>>(W->codes, W->row_off, W->row_prec, W->out, W->in, scratch);
     cudaError_t le = cudaGetLastError();
@@ -2080,8 +2153,12 @@ static int gemv_w_packed(cudaStream_t st, const DevTensor *W, const float *dX, f
         if ((W->in & 31) != 0) return 0;
         int npad = (W->in + 31) & ~31;
         k_quant_act_int8<<<1, 256, 0, st>>>(dX, W->in, npad, dqx, dsx);
-        k_gemv_q4_dp4a_v2<<<blocks, 256, 0, st>>>(
-            W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
+        if (W->bscale)                                    /* OK_Q4B (B1 recipe) */
+            k_gemv_q4b_dp4a_v2<<<blocks, 256, 0, st>>>(
+                W->codes, W->row_off, W->bscale, W->bs_nblk, W->in, dqx, dsx, dY, W->out);
+        else
+            k_gemv_q4_dp4a_v2<<<blocks, 256, 0, st>>>(
+                W->codes, W->row_off, W->row_scale, W->in, dqx, dsx, dY, W->out);
         return 1;
     }
     /* prec == 8 (Q8) */
