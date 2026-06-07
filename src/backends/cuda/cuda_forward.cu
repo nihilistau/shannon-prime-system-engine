@@ -1518,33 +1518,35 @@ static int xbar_kvd_of(int L, int period, int g_nkv, int g_hd, int s_nkv, int s_
 }
 
 static int xbar_capture(const char *path, float **dKc, float **dVc, int kvfs, int period,
-                        int g_nkv, int g_hd, int s_nkv, int s_hd, int row) {
+                        int g_nkv, int g_hd, int s_nkv, int s_hd, int row, int n_rows) {
     FILE *f = fopen(path, "wb");
     if (!f) { sp_set_error("xbar capture: cannot open payload for write"); return -1; }
     xbar_hdr h; h.magic = XBAR_MAGIC; h.version = 1; h.n_layers = kvfs; h.row = row;
-    h.period = period; h.kvfs = kvfs; h.rsv0 = 0; h.rsv1 = 0;
+    h.period = period; h.kvfs = kvfs; h.rsv0 = n_rows; h.rsv1 = 0;  /* rsv0 = n_rows (0 => 1, v1 compat) */
     fwrite(&h, sizeof h, 1, f);
     int kvd_max = 0;
     for (int L = 0; L < kvfs; L++) {
         int k = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
         if (k > kvd_max) kvd_max = k;
     }
-    float *tmp = (float *)malloc((size_t)kvd_max * sizeof(float));
+    float *tmp = (float *)malloc((size_t)kvd_max * (size_t)n_rows * sizeof(float));
     if (!tmp) { fclose(f); sp_set_error("xbar capture OOM"); return -1; }
     for (int L = 0; L < kvfs; L++) {
         const int kvd = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
+        const size_t cnt = (size_t)kvd * (size_t)n_rows;   /* rows are CONTIGUOUS in the cache */
         fwrite(&L, sizeof(int32_t), 1, f); fwrite(&kvd, sizeof(int32_t), 1, f);
-        if (cudaMemcpy(tmp, dKc[L] + (size_t)row * kvd, (size_t)kvd * sizeof(float),
+        if (cudaMemcpy(tmp, dKc[L] + (size_t)row * kvd, cnt * sizeof(float),
                        cudaMemcpyDeviceToHost) != cudaSuccess ||
-            fwrite(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
-            free(tmp); fclose(f); sp_set_error("xbar capture: K row D2H/write"); return -1; }
-        if (cudaMemcpy(tmp, dVc[L] + (size_t)row * kvd, (size_t)kvd * sizeof(float),
+            fwrite(tmp, sizeof(float), cnt, f) != cnt) {
+            free(tmp); fclose(f); sp_set_error("xbar capture: K rows D2H/write"); return -1; }
+        if (cudaMemcpy(tmp, dVc[L] + (size_t)row * kvd, cnt * sizeof(float),
                        cudaMemcpyDeviceToHost) != cudaSuccess ||
-            fwrite(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
-            free(tmp); fclose(f); sp_set_error("xbar capture: V row D2H/write"); return -1; }
+            fwrite(tmp, sizeof(float), cnt, f) != cnt) {
+            free(tmp); fclose(f); sp_set_error("xbar capture: V rows D2H/write"); return -1; }
     }
     free(tmp); fclose(f);
-    fprintf(stderr, "    [xbar] CAPTURED row %d (%d owner layers) -> %s\n", row, kvfs, path);
+    fprintf(stderr, "    [xbar] CAPTURED rows %d..%d (%d owner layers) -> %s\n",
+            row, row + n_rows - 1, kvfs, path);
     return 0;
 }
 
@@ -1553,7 +1555,7 @@ static int xbar_capture(const char *path, float **dKc, float **dVc, int kvfs, in
  * phase is minted at the absolute position; a mismatched transplant is Arm-B
  * territory and must be EXPLICIT, never accidental). */
 static int xbar_splice(const char *path, float **dKc, float **dVc, int kvfs, int period,
-                       int g_nkv, int g_hd, int s_nkv, int s_hd, int row,
+                       int g_nkv, int g_hd, int s_nkv, int s_hd, int row, int n_rows,
                        int mask, int posfree) {
     FILE *f = fopen(path, "rb");
     if (!f) { sp_set_error("xbar splice: cannot open payload"); return -1; }
@@ -1562,6 +1564,9 @@ static int xbar_splice(const char *path, float **dKc, float **dVc, int kvfs, int
         fclose(f); sp_set_error("xbar splice: bad payload header"); return -1; }
     if (h.n_layers != kvfs || h.period != period) {
         fclose(f); sp_set_error("xbar splice: payload geometry mismatch (kvfs/period)"); return -1; }
+    const int f_rows = h.rsv0 ? h.rsv0 : 1;       /* v1 compat: rsv0==0 => single row */
+    if (f_rows != n_rows) {
+        fclose(f); sp_set_error("xbar splice: payload n_rows != SP_XBAR_NROWS"); return -1; }
     if (h.row != row && !posfree) {
         fclose(f); sp_set_error("xbar splice: payload row != target row (set SP_XBAR_POSFREE=1 only for a deliberate phase-mismatch arm)"); return -1; }
     int kvd_max = 0;
@@ -1569,32 +1574,33 @@ static int xbar_splice(const char *path, float **dKc, float **dVc, int kvfs, int
         int k = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
         if (k > kvd_max) kvd_max = k;
     }
-    float *tmp = (float *)malloc((size_t)kvd_max * sizeof(float));
+    float *tmp = (float *)malloc((size_t)kvd_max * (size_t)n_rows * sizeof(float));
     if (!tmp) { fclose(f); sp_set_error("xbar splice OOM"); return -1; }
     int spliced = 0;
     for (int L = 0; L < kvfs; L++) {
         int32_t fL = -1, fkvd = -1;
         const int kvd = xbar_kvd_of(L, period, g_nkv, g_hd, s_nkv, s_hd);
+        const size_t cnt = (size_t)kvd * (size_t)n_rows;
         const int global = ((L % period) == period - 1);
         const int take = (mask == 0) || (mask == 1 && global) || (mask == 2 && !global);
         if (fread(&fL, sizeof(int32_t), 1, f) != 1 || fread(&fkvd, sizeof(int32_t), 1, f) != 1 ||
             fL != L || fkvd != kvd) {
             free(tmp); fclose(f); sp_set_error("xbar splice: per-layer geometry mismatch"); return -1; }
-        if (fread(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
-            free(tmp); fclose(f); sp_set_error("xbar splice: K row read"); return -1; }
-        if (take && cudaMemcpy(dKc[L] + (size_t)row * kvd, tmp, (size_t)kvd * sizeof(float),
+        if (fread(tmp, sizeof(float), cnt, f) != cnt) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: K rows read"); return -1; }
+        if (take && cudaMemcpy(dKc[L] + (size_t)row * kvd, tmp, cnt * sizeof(float),
                                cudaMemcpyHostToDevice) != cudaSuccess) {
-            free(tmp); fclose(f); sp_set_error("xbar splice: K row H2D"); return -1; }
-        if (fread(tmp, sizeof(float), (size_t)kvd, f) != (size_t)kvd) {
-            free(tmp); fclose(f); sp_set_error("xbar splice: V row read"); return -1; }
-        if (take && cudaMemcpy(dVc[L] + (size_t)row * kvd, tmp, (size_t)kvd * sizeof(float),
+            free(tmp); fclose(f); sp_set_error("xbar splice: K rows H2D"); return -1; }
+        if (fread(tmp, sizeof(float), cnt, f) != cnt) {
+            free(tmp); fclose(f); sp_set_error("xbar splice: V rows read"); return -1; }
+        if (take && cudaMemcpy(dVc[L] + (size_t)row * kvd, tmp, cnt * sizeof(float),
                                cudaMemcpyHostToDevice) != cudaSuccess) {
-            free(tmp); fclose(f); sp_set_error("xbar splice: V row H2D"); return -1; }
+            free(tmp); fclose(f); sp_set_error("xbar splice: V rows H2D"); return -1; }
         if (take) spliced++;
     }
     free(tmp); fclose(f);
-    fprintf(stderr, "    [xbar] SPLICED row %d (%d/%d owner layers, mask=%s, payload row %d) <- %s\n",
-            row, spliced, kvfs, mask == 1 ? "global" : mask == 2 ? "swa" : "all", h.row, path);
+    fprintf(stderr, "    [xbar] SPLICED rows %d..%d (%d/%d owner layers, mask=%s, payload row %d) <- %s\n",
+            row, row + n_rows - 1, spliced, kvfs, mask == 1 ? "global" : mask == 2 ? "swa" : "all", h.row, path);
     return 0;
 }
 
@@ -1719,6 +1725,8 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const int   xbar_at   = xb_at_e ? atoi(xb_at_e) : -1;
     const char *xb_row_e  = getenv("SP_XBAR_ROW");
     const int   xbar_row  = xb_row_e ? atoi(xb_row_e) : (xbar_at > 0 ? xbar_at - 1 : -1);
+    const char *xb_nr_e   = getenv("SP_XBAR_NROWS");          /* P1.b: contiguous row span */
+    const int   xbar_nr   = (xb_nr_e && atoi(xb_nr_e) > 0) ? atoi(xb_nr_e) : 1;
     const char *xbar_cap  = getenv("SP_XBAR_CAPTURE");
     const char *xbar_spl  = getenv("SP_XBAR_SPLICE");
     const char *xb_mask_e = getenv("SP_XBAR_MASK");
@@ -1741,7 +1749,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     }
     const int xbar_on = (xbar_at >= 0 || xbar_res != NULL || xbar_rkf != NULL);
     if (xbar_on) {
-        static const char *xbar_envs[] = { "SP_XBAR_AT", "SP_XBAR_ROW", "SP_XBAR_CAPTURE",
+        static const char *xbar_envs[] = { "SP_XBAR_AT", "SP_XBAR_ROW", "SP_XBAR_NROWS", "SP_XBAR_CAPTURE",
             "SP_XBAR_SPLICE", "SP_XBAR_MASK", "SP_XBAR_POSFREE", "SP_XBAR_RESID",
             "SP_XBAR_RANKS", "SP_XBAR_TOKENS", "SP_CUDA_DECODE_INT8",
             "SP_CUDA_DECODE_GRAPH", "SP_G4_SCORE", NULL };
@@ -1992,11 +2000,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         if (pos == xbar_at && (xbar_cap || xbar_spl)) {
             cudaError_t xe = cudaStreamSynchronize(st);
             if (xe != cudaSuccess) { fail_cuda(xe, "xbar sync"); goto done; }
-            if (xbar_row >= pos) { sp_set_error("xbar: ROW must be < AT (row not minted yet)"); goto done; }
+            if (xbar_row + xbar_nr - 1 >= pos) { sp_set_error("xbar: ROW+NROWS-1 must be < AT (rows not minted yet)"); goto done; }
             if (xbar_cap && xbar_capture(xbar_cap, dKc, dVc, kvfs, period,
-                                         g_nkv, g_hd, s_nkv, s_hd, xbar_row)) goto done;
+                                         g_nkv, g_hd, s_nkv, s_hd, xbar_row, xbar_nr)) goto done;
             if (xbar_spl && xbar_splice(xbar_spl, dKc, dVc, kvfs, period,
-                                        g_nkv, g_hd, s_nkv, s_hd, xbar_row,
+                                        g_nkv, g_hd, s_nkv, s_hd, xbar_row, xbar_nr,
                                         xbar_mask, xbar_pf)) goto done;
         }
         if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
