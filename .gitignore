@@ -83,3 +83,11 @@ Thumbs.db
 hexagon_*_toolv*/
 android_*_aarch64/
 hexagonsim_*/
+
+# session scratch (root run-scripts + logs/markers)
+/*.ps1
+/*_done.txt
+/*_log.txt
+/*.log
+/_eb.log
+/v?_farf_evidence.txt
