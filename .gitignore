@@ -91,3 +91,5 @@ hexagonsim_*/
 /*.log
 /_eb.log
 /v?_farf_evidence.txt
+
+/p02_out/
