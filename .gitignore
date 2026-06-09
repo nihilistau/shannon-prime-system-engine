@@ -93,3 +93,6 @@ hexagonsim_*/
 /v?_farf_evidence.txt
 
 /p02_out/
+
+# OS-owned bake outputs + retired runners (swept from repo root 2026-06-10)
+/_bake/
