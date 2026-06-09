@@ -291,6 +291,33 @@ if(MSVC)
 else()
     target_compile_options(test_sp_model_roundtrip PRIVATE -Wall -Wextra)
 endif()
+# ── #115: gemma4 tokenizer dispatch gates (SPEC-gemma4-tokenizer-dispatch.md).
+# T_G4_TOK_PARITY: encode(24KB wikitext head) == the llama-dumped==HF-verified
+# fixture, 5432/5432 EXACT (no tolerance), on the GGUF lane AND the
+# sp_transcode'd family-tagged .sp-tokenizer blob lane.
+# T_G4_TOK_ROUNDTRIP: decode(encode(x))==x over the corpus + adversarial set
+# (emoji/CJK/control bytes/invalid UTF-8 -> <0xNN> byte-fallback coverage).
+# Vocab GGUF is out-of-tree (llama.cpp b8861 models/); skips cleanly if absent.
+set(SP_G4VOCAB_GGUF
+    "D:/F/shannon-prime-repos/llama-cpp-b8861-test/models/ggml-vocab-gemma-4.gguf"
+    CACHE FILEPATH "gemma-4 vocab-only GGUF (tokenizer.ggml.model=gemma4, 262144 vocab, 514906 merges)")
+add_executable(test_g4_tokenizer test_g4_tokenizer.c)
+target_link_libraries(test_g4_tokenizer PRIVATE sp_engine)
+add_dependencies(test_g4_tokenizer sp_transcode)
+target_compile_definitions(test_g4_tokenizer PRIVATE
+    SP_G4VOCAB_GGUF="${SP_G4VOCAB_GGUF}"
+    SP_G4TOK_FIXDIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/g4tok"
+    SP_TRANSCODE_BIN="$<TARGET_FILE:sp_transcode>"
+    SP_FMT_OUT_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+if(MSVC)
+    target_compile_options(test_g4_tokenizer PRIVATE /W4)
+else()
+    target_compile_options(test_g4_tokenizer PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME T_G4_TOK_PARITY COMMAND test_g4_tokenizer)
+add_test(NAME T_G4_TOK_ROUNDTRIP COMMAND test_g4_tokenizer)
+set_tests_properties(T_G4_TOK_PARITY T_G4_TOK_ROUNDTRIP PROPERTIES TIMEOUT 600)
+
 add_test(NAME E_FMT_1 COMMAND test_sp_model_roundtrip)
 add_test(NAME E_FMT_2 COMMAND test_sp_model_roundtrip)
 add_test(NAME E_FMT_3 COMMAND test_sp_model_roundtrip)
