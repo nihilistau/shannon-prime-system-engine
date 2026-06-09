@@ -66,10 +66,13 @@ typedef enum {
     SP_ARCH_ID_QWEN36 = 8   /* qwen35moe: Gated DeltaNet + MoE hybrid (Qwen3.6-35B-A3B) */
 } sp_arch_id;
 
-/* §7 tokenizer type_id. */
+/* §7 tokenizer type_id. Doubles as the tokenizer FAMILY tag (#115): legacy
+ * blobs keep their old values/meaning; readers must HARD-ERROR on values they
+ * do not implement (never silently fall back to another family). */
 typedef enum {
     SP_TOK_SENTENCEPIECE = 0, SP_TOK_BPE_LLAMA3 = 1, SP_TOK_BPE_GPT2 = 2,
-    SP_TOK_TIKTOKEN_O200K = 3
+    SP_TOK_TIKTOKEN_O200K = 3,
+    SP_TOK_GEMMA4_BPE = 4   /* gemma4 514k-merge U+2581-piece BPE (issue #115) */
 } sp_tok_type_id;
 
 #pragma pack(push, 1)

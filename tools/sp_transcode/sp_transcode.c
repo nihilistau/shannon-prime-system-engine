@@ -475,9 +475,27 @@ static uint8_t *build_tok_blob(const gguf_ctx *g, uint64_t *blob_size_out,
     if (!tp || !tl || gguf_kv_str_array(g, tk, tp, tl, nv) != nv) {
         fprintf(stderr, "tokens read failed\n"); free(tp); free(tl); return NULL;
     }
+    /* family tag derivation (#115): tokenizer.ggml.model + tokenizer.ggml.pre.
+     * Unknown family = HARD ERROR naming the string — a silently mis-tagged blob
+     * would be the tokenizer twin of the GGUF weight corruption (every id valid,
+     * every id wrong). Mirrors llama-vocab.cpp:1894 (model=="gemma4") + :2005
+     * (pre=="gemma4") + :1930-1931 (unknown model throws). */
     const char *model = gguf_get_str(g, "tokenizer.ggml.model");
+    const char *pre   = gguf_get_str(g, "tokenizer.ggml.pre");
     int spm = (model && strcmp(model, "llama") == 0);
-    *type_id_out = spm ? SP_TOK_SENTENCEPIECE : SP_TOK_BPE_GPT2;
+    if (spm) {
+        *type_id_out = SP_TOK_SENTENCEPIECE;
+    } else if (model && (strcmp(model, "gemma4") == 0 ||
+               (strcmp(model, "gpt2") == 0 && pre && strcmp(pre, "gemma4") == 0))) {
+        *type_id_out = SP_TOK_GEMMA4_BPE;
+    } else if (model && strcmp(model, "gpt2") == 0) {
+        *type_id_out = SP_TOK_BPE_GPT2;
+    } else {
+        fprintf(stderr, "build_tok_blob: unknown tokenizer family '%s' "
+                        "(tokenizer.ggml.model%s%s) — refusing silent GPT2 tag\n",
+                model ? model : "(missing)", pre ? ", pre=" : "", pre ? pre : "");
+        free(tp); free(tl); return NULL;
+    }
 
     const gguf_kv *sk = gguf_find_kv(g, "tokenizer.ggml.scores");
     const float *scores = (spm && sk && sk->type == GGUF_T_ARRAY &&
@@ -772,9 +790,23 @@ static int is_matmul_weight(const char *name) {
 }
 
 int main(int argc, char **argv) {
+    /* --tok-only (#115): extract ONLY the .sp-tokenizer (family-tagged blob)
+     * from a GGUF — no tensor pass, works on vocab-only GGUFs. */
+    if (argc == 4 && strcmp(argv[1], "--tok-only") == 0) {
+        gguf_ctx *gt = gguf_open(argv[2]);
+        if (!gt) { fprintf(stderr, "cannot open GGUF %s\n", argv[2]); return 1; }
+        uint8_t sha[32]; uint32_t vocab = 0;
+        int rc = write_tokenizer(argv[3], gt, &vocab, sha);
+        gguf_close(gt);
+        if (rc) return 1;
+        fprintf(stderr, "tok-only: wrote %s (vocab %u)\n", argv[3], vocab);
+        return 0;
+    }
     if (argc < 4) {
         fprintf(stderr, "usage: %s <in.gguf> <out.sp-model> <out.sp-tokenizer> "
-                        "[--verify] [--q4|--q8|--q4b] [--st <model.safetensors>]\n", argv[0]);
+                        "[--verify] [--q4|--q8|--q4b] [--st <model.safetensors>]\n"
+                        "       %s --tok-only <in.gguf> <out.sp-tokenizer>\n",
+                argv[0], argv[0]);
         return 2;
     }
     const char *in = argv[1], *out_model = argv[2], *out_tok = argv[3];
