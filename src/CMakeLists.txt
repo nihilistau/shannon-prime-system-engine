@@ -18,6 +18,7 @@ add_library(sp_engine STATIC
     # the tokenizer, and the .sp-model -> qwen3 adapter (the §8.7.3 HANDLE work — stays for now).
     forward/ppl.c
     tokenizer/tokenizer.c
+    tokenizer/gemma4_bpe.c   # #115: GEMMA4_BPE lane (514k-merge U+2581-piece BPE)
     io/sp_model_adapter.c
 )
 

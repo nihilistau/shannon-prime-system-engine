@@ -1,7 +1,12 @@
-/* tokenizer.c — GGUF vocab load + byte-level BPE (GPT2 / Qwen2 family).
+/* tokenizer.c — GGUF/.sp-tokenizer vocab load + family dispatch.
  *
- * DECODE (token IDs -> UTF-8): inverse GPT2 byte-level coding.
- * ENCODE (UTF-8 -> token IDs): the Qwen2 pipeline —
+ * Families (tokenizer_internal.h; unknown family = HARD ERROR, never a silent
+ * fallback — SPEC-gemma4-tokenizer-dispatch.md):
+ *   GPT2_BPE   ("gpt2")   — byte-level BPE, Qwen family (this file);
+ *   SPM        ("llama")  — SentencePiece bigram-merge, Gemma3 (this file);
+ *   GEMMA4_BPE ("gemma4") — 514k-merge U+2581-piece BPE (gemma4_bpe.c, #115).
+ *
+ * GPT2 ENCODE (UTF-8 -> token IDs): the Qwen2 pipeline —
  *   1. optional special-token pre-split (CONTROL/USER_DEFINED surfaces, longest
  *      match first), with the gaps tokenized as ordinary text;
  *   2. the Qwen2 pre-tokenizer regex split (hand-coded; classes \p{L}/\p{N}/\s
@@ -11,16 +16,16 @@
  *   5. token->id lookup.
  * Validated to reproduce stock llama.cpp IDs byte-for-byte (see tools/oracle/
  * bpe_proto.py and the TOK_ENCODE test). See sp_engine/tokenizer.h. */
-#include "sp_engine/tokenizer.h"
+#include "tokenizer_internal.h"
+#include "sp_engine/sp_model.h"   /* sp_tok_header + sp_tok_type_id (blob lane) */
 #include "unicode_ranges.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- string hash map (open addressing, linear probe): key = bytes -> int64 -- */
-typedef struct { const char *key; uint32_t klen; int64_t val; uint8_t used; } sp_hent;
-typedef struct { sp_hent *e; size_t mask; } sp_hmap;
+/* ---- string hash map (open addressing, linear probe): key = bytes -> int64 --
+ * (typedefs live in tokenizer_internal.h; shared with gemma4_bpe.c) */
 
 static uint64_t fnv1a(const char *s, uint32_t n) {
     uint64_t h = 1469598103934665603ull;
@@ -52,32 +57,11 @@ static int64_t hmap_get(const sp_hmap *m, const char *k, uint32_t kl, int64_t df
     return dflt;
 }
 
-/* ---- special-token surface (for parse_special pre-split) -------------------- */
-typedef struct { const char *surf; uint32_t len; int32_t id; } sp_special;
+/* (struct sp_tokenizer + sp_special live in tokenizer_internal.h) */
 
-struct sp_tokenizer {
-    uint32_t      n_vocab;
-    const char  **tok;          /* n_vocab pointers into the GGUF mapping (not owned) */
-    uint64_t     *len;          /* n_vocab token byte-lengths                         */
-    int           cp_to_byte[512]; /* GPT2 byte-level inverse: codepoint -> byte      */
-    int           max_cp;
-    /* encode side */
-    uint8_t       bcp[256][2];  /* byte -> UTF-8 of its byte-level codepoint           */
-    uint8_t       bcp_len[256]; /* 1 or 2                                              */
-    sp_hmap       vocab;        /* token-string bytes -> id                            */
-    sp_hmap       merge;        /* "A B" merge-line bytes -> rank                      */
-    sp_special   *spec;         /* special surfaces, sorted longest-first              */
-    uint32_t      n_spec;
-    char         *tok_blob;     /* owned vocab bytes (owning mode); NULL if borrowing  */
-    char         *merge_blob;   /* owned merge bytes (owning mode); NULL if borrowing  */
-    /* SPM (SentencePiece "llama") path — Gemma3 etc. */
-    int           spm;          /* 1 if tokenizer.ggml.model == "llama"                */
-    const float  *scores;       /* n_vocab unigram scores (mapping ptr, or owned blob) */
-    float        *scores_blob;  /* owned scores copy (owning mode); NULL if borrowing  */
-    int32_t       byte_tok[256];/* SPM byte-fallback: byte -> "<0xXX>" token id (-1 NA)*/
-    int           add_bos;      /* tokenizer.ggml.add_bos_token (auto-prepend BOS)     */
-    int32_t       bos_id;       /* tokenizer.ggml.bos_token_id                         */
-};
+int64_t sp_tok_vocab_lookup(const sp_tokenizer *t, const char *bytes, uint32_t len) {
+    return hmap_get(&t->vocab, bytes, len, -1);
+}
 
 /* GPT2 bytes_to_unicode: printable bytes (33..126,161..172,174..255) map to
  * themselves; the remaining 68 map to codepoints 256.. in order. */
@@ -142,9 +126,47 @@ sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own) {
     for (uint32_t i = 0; i < t->n_vocab; i++)
         hmap_put(&t->vocab, t->tok[i], (uint32_t)t->len[i], (int64_t)i);
 
-    /* merge map: "A B" merge-line bytes -> rank (line index) */
+    /* family dispatch — BEFORE the merge tables (gemma4 keys merges by id).
+     * Unknown family = HARD ERROR naming the string; never a silent GPT2
+     * fallback (SPEC-gemma4-tokenizer-dispatch.md / #115). */
+    {
+        const char *model = gguf_get_str(g, "tokenizer.ggml.model");
+        const char *pre   = gguf_get_str(g, "tokenizer.ggml.pre");
+        if (model && strcmp(model, "llama") == 0) {
+            t->family = SP_TOKFAM_SPM;
+        } else if (model && (strcmp(model, "gemma4") == 0 ||
+                   (strcmp(model, "gpt2") == 0 && pre && strcmp(pre, "gemma4") == 0))) {
+            /* llama-vocab.cpp:1894 (model=="gemma4") + :2005 (pre=="gemma4") */
+            t->family = SP_TOKFAM_GEMMA4_BPE;
+        } else if (model && strcmp(model, "gpt2") == 0) {
+            t->family = SP_TOKFAM_GPT2_BPE;
+        } else {
+            fprintf(stderr, "sp_tokenizer: unknown tokenizer family '%s' "
+                            "(tokenizer.ggml.model%s%s) — refusing silent GPT2 fallback\n",
+                    model ? model : "(missing)",
+                    pre ? ", pre=" : "", pre ? pre : "");
+            sp_tokenizer_free(t); return NULL;
+        }
+        t->spm = (t->family == SP_TOKFAM_SPM);
+    }
+
+    /* merge tables. GEMMA4: hashed id-pair -> rank (gemma4_bpe.c). Other
+     * families: "A B" merge-line bytes -> rank (line index), unchanged. */
     const gguf_kv *mkv = gguf_find_kv(g, "tokenizer.ggml.merges");
-    if (mkv && mkv->type == GGUF_T_ARRAY && mkv->arr_type == GGUF_T_STRING && mkv->arr_len > 0) {
+    if (t->family == SP_TOKFAM_GEMMA4_BPE) {
+        if (!mkv || mkv->type != GGUF_T_ARRAY || mkv->arr_type != GGUF_T_STRING ||
+            mkv->arr_len == 0) {
+            fprintf(stderr, "sp_tokenizer(gemma4): tokenizer.ggml.merges missing/empty\n");
+            sp_tokenizer_free(t); return NULL;
+        }
+        uint64_t nm = mkv->arr_len;
+        const char **mp = (const char **)malloc((size_t)nm * sizeof(char *));
+        uint64_t    *ml = (uint64_t *)malloc((size_t)nm * sizeof(uint64_t));
+        int ok = mp && ml && gguf_kv_str_array(g, mkv, mp, ml, nm) == nm &&
+                 sp_g4_build(t, mp, ml, nm) == 0;
+        free((void *)mp); free(ml);   /* id tables built; merge bytes not retained */
+        if (!ok) { sp_tokenizer_free(t); return NULL; }
+    } else if (mkv && mkv->type == GGUF_T_ARRAY && mkv->arr_type == GGUF_T_STRING && mkv->arr_len > 0) {
         uint64_t nm = mkv->arr_len;
         const char **mp = (const char **)malloc((size_t)nm * sizeof(char *));
         uint64_t    *ml = (uint64_t *)malloc((size_t)nm * sizeof(uint64_t));
@@ -193,15 +215,23 @@ sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own) {
         }
     }
 
-    /* SPM ("llama") path: Gemma3 etc. need the unigram scores + byte-fallback
-     * tokens. (BPE models leave spm=0 and never touch these.) */
-    t->bos_id = -1;
-    {
-        const char *model = gguf_get_str(g, "tokenizer.ggml.model");
-        t->spm = (model && strcmp(model, "llama") == 0);
-    }
+    /* special token ids + BOS policy (family set above). */
+    t->bos_id = -1; t->eos_id = -1; t->pad_id = -1; t->unk_id = -1;
     { uint64_t b; if (gguf_get_u64(g, "tokenizer.ggml.bos_token_id", &b)) t->bos_id = (int32_t)b; }
     { uint64_t a; if (gguf_get_u64(g, "tokenizer.ggml.add_bos_token", &a)) t->add_bos = (int)a; }
+    { uint64_t v; if (gguf_get_u64(g, "tokenizer.ggml.eos_token_id", &v))     t->eos_id = (int32_t)v; }
+    { uint64_t v; if (gguf_get_u64(g, "tokenizer.ggml.padding_token_id", &v)) t->pad_id = (int32_t)v; }
+    { uint64_t v; if (gguf_get_u64(g, "tokenizer.ggml.unknown_token_id", &v)) t->unk_id = (int32_t)v; }
+    if (t->family == SP_TOKFAM_GEMMA4_BPE) {
+        t->add_bos = 1;   /* FORCED for gemma4 (llama-vocab.cpp:2338-2344, PR #21500) */
+        if (t->bos_id < 0 || (uint32_t)t->bos_id >= t->n_vocab) {
+            fprintf(stderr, "sp_tokenizer(gemma4): bos_token_id missing/out of range\n");
+            sp_tokenizer_free(t); return NULL;
+        }
+    }
+
+    /* SPM ("llama") path: Gemma3 etc. need the unigram scores + byte-fallback
+     * tokens. (BPE models leave spm=0 and never touch these.) */
     if (t->spm) {
         const gguf_kv *sk = gguf_find_kv(g, "tokenizer.ggml.scores");
         if (!sk || sk->type != GGUF_T_ARRAY || sk->arr_type != GGUF_T_FLOAT32 ||
@@ -226,8 +256,10 @@ sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own) {
 void sp_tokenizer_free(sp_tokenizer *t) {
     if (!t) return;
     hmap_free(&t->vocab); hmap_free(&t->merge);
+    sp_g4_free(t);
     free(t->spec); free((void *)t->tok); free(t->len);
     free(t->tok_blob); free(t->merge_blob); free(t->scores_blob);
+    free(t->file_blob);
     free(t);
 }
 
@@ -242,6 +274,7 @@ static void put(char *buf, size_t cap, size_t *pos, unsigned char b) {
 long sp_tokenizer_decode(const sp_tokenizer *t, const int32_t *ids, int n,
                          char *buf, size_t cap) {
     if (!t || (!ids && n > 0) || (!buf && cap > 0)) return -1;
+    if (t->family == SP_TOKFAM_GEMMA4_BPE) return sp_g4_decode(t, ids, n, buf, cap);
     size_t pos = 0;
     for (int k = 0; k < n; k++) {
         int32_t id = ids[k];
@@ -553,6 +586,8 @@ long sp_tokenizer_encode(const sp_tokenizer *t, const char *text, size_t text_le
     if (!t || (!text && text_len > 0) || (!out && max_out > 0)) return -1;
     if (text_len == 0) return 0;
     const unsigned char *s = (const unsigned char *)text;
+    if (t->family == SP_TOKFAM_GEMMA4_BPE)
+        return sp_g4_encode(t, s, text_len, parse_special, out, max_out);
     if (t->spm) return spm_encode(t, s, text_len, parse_special, out, max_out);
 
     /* scratch sized to the whole input (codepoints <= bytes; enc <= 2*bytes) */
@@ -589,4 +624,160 @@ long sp_tokenizer_encode(const sp_tokenizer *t, const char *text, size_t text_le
 done:
     free(cps); free(enc); free(soff); free(slen); free(key);
     return rc ? -1 : cnt;
+}
+
+/* ===== .sp-tokenizer file loader — the blob lane (#115) ====================== *
+ * Parses the SPTK header + SPTB blob written by sp_transcode build_tok_blob and
+ * dispatches on type_id (the on-disk family tag):
+ *   0 SENTENCEPIECE -> SPM lane;  2 BPE_GPT2 -> GPT2 lane (legacy values keep
+ *   their old meaning);  4 GEMMA4_BPE -> gemma4 lane (#115).
+ * Any other value = HARD ERROR naming it — never a silent fallback.
+ * The blob does NOT serialize token_type, so no special surfaces are available:
+ * parse_special is inert on this lane (n_spec==0), and add_bos comes from the
+ * family (GEMMA4 forced true per llama PR #21500; legacy families 0 — the blob
+ * carries no add_bos flag). SHA-256 pairing with a .sp-model is sp_model_load's
+ * job; this loader checks magics + bounds. */
+
+static int tf_u32(const uint8_t *blob, uint64_t bs, uint64_t *pos, uint32_t *v) {
+    if (*pos + 4 > bs) return 1;
+    memcpy(v, blob + *pos, 4); *pos += 4;
+    return 0;
+}
+
+sp_tokenizer *sp_tokenizer_load_tokfile(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "sp_tokenizer: cannot open %s\n", path); return NULL; }
+    fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (fsz < (long)(SP_TOK_HEADER_SIZE + 16)) {
+        fprintf(stderr, "sp_tokenizer: %s too short for SPTK header\n", path);
+        fclose(f); return NULL;
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)fsz);
+    if (!buf || fread(buf, 1, (size_t)fsz, f) != (size_t)fsz) {
+        fprintf(stderr, "sp_tokenizer: read failed %s\n", path);
+        free(buf); fclose(f); return NULL;
+    }
+    fclose(f);
+
+    sp_tok_header hdr; memcpy(&hdr, buf, sizeof hdr);
+    if (hdr.magic != SP_TOK_MAGIC || hdr.header_size != SP_TOK_HEADER_SIZE ||
+        hdr.blob_offset + hdr.blob_size > (uint64_t)fsz || hdr.blob_size < 16) {
+        fprintf(stderr, "sp_tokenizer: %s bad SPTK header\n", path);
+        free(buf); return NULL;
+    }
+    const uint8_t *blob = buf + hdr.blob_offset;
+    uint64_t bs = hdr.blob_size, pos = 0;
+    uint32_t magic = 0, type_id = 0, nv = 0, nm = 0;
+    if (tf_u32(blob, bs, &pos, &magic) || magic != 0x42545053u /*'SPTB'*/ ||
+        tf_u32(blob, bs, &pos, &type_id) || tf_u32(blob, bs, &pos, &nv) ||
+        tf_u32(blob, bs, &pos, &nm)) {
+        fprintf(stderr, "sp_tokenizer: %s bad SPTB blob header\n", path);
+        free(buf); return NULL;
+    }
+    int family;
+    switch (type_id) {
+        case SP_TOK_SENTENCEPIECE: family = SP_TOKFAM_SPM;        break;
+        case SP_TOK_BPE_GPT2:      family = SP_TOKFAM_GPT2_BPE;   break;
+        case SP_TOK_GEMMA4_BPE:    family = SP_TOKFAM_GEMMA4_BPE; break;
+        default:
+            fprintf(stderr, "sp_tokenizer: %s unknown tokenizer family type_id=%u "
+                            "— refusing silent fallback\n", path, type_id);
+            free(buf); return NULL;
+    }
+    if (nv == 0 || nv != hdr.vocab_size) {
+        fprintf(stderr, "sp_tokenizer: %s blob vocab %u != header vocab %u\n",
+                path, nv, hdr.vocab_size);
+        free(buf); return NULL;
+    }
+
+    sp_tokenizer *t = (sp_tokenizer *)calloc(1, sizeof *t);
+    if (!t) { free(buf); return NULL; }
+    t->file_blob = buf;
+    t->family = family;
+    t->spm = (family == SP_TOKFAM_SPM);
+    t->n_vocab = nv;
+    t->tok = (const char **)malloc((size_t)nv * sizeof(char *));
+    t->len = (uint64_t *)malloc((size_t)nv * sizeof(uint64_t));
+    if (!t->tok || !t->len) { sp_tokenizer_free(t); return NULL; }
+    for (uint32_t i = 0; i < nv; i++) {
+        uint32_t L = 0;
+        if (tf_u32(blob, bs, &pos, &L) || pos + L > bs) {
+            fprintf(stderr, "sp_tokenizer: %s truncated token[%u]\n", path, i);
+            sp_tokenizer_free(t); return NULL;
+        }
+        t->tok[i] = (const char *)(blob + pos);
+        t->len[i] = L;
+        pos += L;
+    }
+    build_byte_maps(t);
+    if (!hmap_init(&t->vocab, (size_t)nv)) { sp_tokenizer_free(t); return NULL; }
+    for (uint32_t i = 0; i < nv; i++)
+        hmap_put(&t->vocab, t->tok[i], (uint32_t)t->len[i], (int64_t)i);
+
+    /* SPM: f32 scores follow the tokens (copy out — blob floats are unaligned) */
+    if (t->spm) {
+        if (pos + (uint64_t)nv * 4 > bs) {
+            fprintf(stderr, "sp_tokenizer: %s truncated scores\n", path);
+            sp_tokenizer_free(t); return NULL;
+        }
+        t->scores_blob = (float *)malloc((size_t)nv * sizeof(float));
+        if (!t->scores_blob) { sp_tokenizer_free(t); return NULL; }
+        memcpy(t->scores_blob, blob + pos, (size_t)nv * sizeof(float));
+        t->scores = t->scores_blob;
+        pos += (uint64_t)nv * 4;
+        for (int b = 0; b < 256; b++) {
+            char nmb[8]; int nl = snprintf(nmb, sizeof nmb, "<0x%02X>", b);
+            t->byte_tok[b] = (int32_t)hmap_get(&t->vocab, nmb, (uint32_t)nl, -1);
+            if (t->byte_tok[b] < 0) {
+                fprintf(stderr, "sp_tokenizer: %s SPM byte token <0x%02X> missing\n", path, b);
+                sp_tokenizer_free(t); return NULL;
+            }
+        }
+    }
+
+    /* merges */
+    if (nm > 0) {
+        const char **mp = (const char **)malloc((size_t)nm * sizeof(char *));
+        uint64_t    *ml = (uint64_t *)malloc((size_t)nm * sizeof(uint64_t));
+        if (!mp || !ml) { free((void *)mp); free(ml); sp_tokenizer_free(t); return NULL; }
+        int ok = 1;
+        for (uint32_t i = 0; i < nm; i++) {
+            uint32_t L = 0;
+            if (tf_u32(blob, bs, &pos, &L) || pos + L > bs) {
+                fprintf(stderr, "sp_tokenizer: %s truncated merge[%u]\n", path, i);
+                ok = 0; break;
+            }
+            mp[i] = (const char *)(blob + pos);
+            ml[i] = L;
+            pos += L;
+        }
+        if (ok) {
+            if (family == SP_TOKFAM_GEMMA4_BPE) {
+                ok = (sp_g4_build(t, mp, ml, nm) == 0);
+            } else if (family == SP_TOKFAM_GPT2_BPE) {
+                ok = hmap_init(&t->merge, (size_t)nm);
+                if (ok) for (uint32_t i = 0; i < nm; i++)
+                    hmap_put(&t->merge, mp[i], (uint32_t)ml[i], (int64_t)i);
+            }   /* SPM: merges unused */
+        }
+        free((void *)mp); free(ml);
+        if (!ok) { sp_tokenizer_free(t); return NULL; }
+    } else if (family == SP_TOKFAM_GEMMA4_BPE) {
+        fprintf(stderr, "sp_tokenizer: %s gemma4 blob has no merges\n", path);
+        sp_tokenizer_free(t); return NULL;
+    }
+
+    /* specials from the header (0xFFFFFFFF = absent) */
+    t->bos_id = (hdr.bos_token == 0xFFFFFFFFu) ? -1 : (int32_t)hdr.bos_token;
+    t->eos_id = (hdr.eos_token == 0xFFFFFFFFu) ? -1 : (int32_t)hdr.eos_token;
+    t->pad_id = (hdr.pad_token == 0xFFFFFFFFu) ? -1 : (int32_t)hdr.pad_token;
+    t->unk_id = (hdr.unk_token == 0xFFFFFFFFu) ? -1 : (int32_t)hdr.unk_token;
+    if (family == SP_TOKFAM_GEMMA4_BPE) {
+        t->add_bos = 1;   /* FORCED (llama-vocab.cpp:2338-2344, PR #21500) */
+        if (t->bos_id < 0 || (uint32_t)t->bos_id >= nv) {
+            fprintf(stderr, "sp_tokenizer: %s gemma4 bos_token missing/out of range\n", path);
+            sp_tokenizer_free(t); return NULL;
+        }
+    }
+    return t;
 }

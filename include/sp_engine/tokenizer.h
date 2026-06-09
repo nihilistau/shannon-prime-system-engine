@@ -31,6 +31,13 @@ sp_tokenizer *sp_tokenizer_load(const gguf_ctx *g);
  * (required before qwen3_release_source unmaps it). own==0 borrows (the default,
  * lower memory). */
 sp_tokenizer *sp_tokenizer_load_ex(const gguf_ctx *g, int own);
+/* Load from a .sp-tokenizer file (SPTK header + SPTB blob, written by
+ * sp_transcode). Dispatches on the blob's family tag (type_id): SENTENCEPIECE,
+ * BPE_GPT2, or GEMMA4_BPE; any other value is a HARD ERROR naming it (no silent
+ * fallback). The returned tokenizer owns all its memory (no GGUF needed). The
+ * blob carries no token_type array, so parse_special is inert on this lane;
+ * add_bos is family-derived (gemma4: forced 1 per llama PR #21500). */
+sp_tokenizer *sp_tokenizer_load_tokfile(const char *path);
 void          sp_tokenizer_free(sp_tokenizer *t);
 
 uint32_t sp_tokenizer_vocab_size(const sp_tokenizer *t);
@@ -46,9 +53,14 @@ long sp_tokenizer_decode(const sp_tokenizer *t, const int32_t *ids, int n,
 /* Encode `text_len` bytes of UTF-8 into token IDs in `out` (capacity `max_out`).
  * Dispatches on the vocab's tokenizer model: "gpt2"/BPE (Qwen family) runs the
  * byte-level BPE pipeline; "llama"/SPM (Gemma family) runs the SentencePiece
- * bigram-merge (spaces -> U+2581, byte fallback). BOS is auto-prepended iff the
- * GGUF sets tokenizer.ggml.add_bos_token=1 (Qwen3=0 -> none; Gemma3=1 -> id 2),
- * matching the oracle's add_special=true. If `parse_special` is nonzero,
+ * bigram-merge (spaces -> U+2581, byte fallback); "gemma4" runs the gemma4
+ * 514k-merge BPE (newline-run pre-split, spaces -> U+2581, UTF-8-char symbols,
+ * hashed pair-rank merges, <0xNN> byte fallback — issue #115). An unknown
+ * tokenizer family fails the LOAD (hard error naming the family), never a
+ * silent fallback. BOS is auto-prepended iff the
+ * GGUF sets tokenizer.ggml.add_bos_token=1 (Qwen3=0 -> none; Gemma3=1 -> id 2;
+ * gemma4 -> FORCED 1 per llama PR #21500), matching the oracle's
+ * add_special=true. If `parse_special` is nonzero,
  * CONTROL/USER_DEFINED token surfaces (e.g. "<|im_start|>", "<start_of_turn>") in
  * the text are matched literally (longest-first) and emitted as their own IDs;
  * the gaps are BPE/SPM-encoded.
