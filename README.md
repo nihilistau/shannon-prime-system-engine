@@ -1,34 +1,80 @@
 # shannon-prime-system-engine
 
-The **engine + daemon** layer of the [shannon-prime-lattice](https://github.com/nihilistau/shannon-prime-lattice)
-project: four backend implementations (CPU AVX-512, CUDA PTX, Vulkan,
-Hexagon HVX) of the [shannon-prime-system](https://github.com/nihilistau/shannon-prime-system)
-math-core forward path, plus `sp_daemon` — a long-lived Rust HTTP/SSE
-server that wraps the frozen L1 C ABI in a chat + dialogue +
-PoUW-ledger + QUIC-mesh surface that every UI binds to.
+The **engine layer** of the [shannon-prime-lattice](https://github.com/nihilistau/shannon-prime-lattice)
+project: **backends + tools + gates on top of the math core**. Four backend
+implementations (CPU AVX2/AVX-512, CUDA, Vulkan, Hexagon HVX) of the
+[shannon-prime-system](https://github.com/nihilistau/shannon-prime-system)
+forward path, the sovereign weight pipeline (`sp_transcode`), the tokenizer
+modules, the Optane Ring-2 stores, and `sp_daemon` — a long-lived Rust
+HTTP/SSE server that wraps the frozen L1 C ABI in a chat + dialogue +
+PoUW-ledger + QUIC-mesh surface.
 
 The math-core lives at `lib/shannon-prime-system/` as a Git submodule.
 That submodule pin is what every engine build links against.
 
-**The headline capability lives here:** the **two-ring long-context memory
+**The citable GPU headline (public ledger 06-R10):** **Gemma-4-12B at
+26.1 tok/s and wikitext PPL 5.12 on an RTX 2060 12GB** — the OK_Q4B
+sovereign artifact, gated 24/24 (CUDA graph EXACT 256/256, dp4a top-1
+256/256; GPU PPL gate 5.1160 against the gold reference 4.6776, with
+sim/CPU/GPU triple-agreement). Both halves stated: **llama.cpp is faster
+at 31.29 tok/s — but on artifacts whose measured PPL is 192–506** (every
+gemma-4 GGUF measurable in June 2026 carries broken weights; see the
+public `GEMMA4-QUANT-FIX.md`). SP engine bandwidth 245 vs 207 GB/s (+18%).
+The earlier 34.2 tok/s number is formally RETIRED (its artifact failed
+the PPL gate). Details in §5.2.1d.
+
+**The standing memory envelope:** the **two-ring long-context memory
 (PPT-ARM)** — a query-directed recall router (±1 Rademacher projection) plus
 a byte-addressable KV offload to NVMe/Optane — is implemented in the CPU
-backend (`src/backends/cpu/cpu_forward.c` + `ring2_disk.c`). Measured at 32k
-context: **910× resident KV-cache shrink** (7.5 GB → 8.3 MB), needle
-retrieved **off a physical drive** at **7.57 µs/read**, **8× KV
-sparsification at +0.69% perplexity**, bit-exact when disabled. The
-**reducing loader** (`tools/sp_transcode`) makes the on-disk model **~50%
-smaller with a bit-faithful forward**. The receipts-first writeup, with
-one-command reproductions, is at
+backend (`src/backends/cpu/cpu_forward.c` + `ring2_disk.c` +
+`ring2_arm_backend.c`). Measured at 32k context: **910× resident KV-cache
+shrink** (7.5 GB → 8.3 MB), needle retrieved **off a physical drive** at
+**7.57 µs/read**, **8× KV sparsification at +0.69% perplexity**, bit-exact
+when disabled. Honest negative, kept on the board: the C2.4 32k NIAH
+finale was a **MISS** — the raw router breaks in the 64× selection-budget
+regime (RAM ladder: 2k HIT, 4k miss-by-one-digit, 8k HIT); Ring 3
+(RFC-XBAR §3.1) is the designed resolution. The **reducing loader**
+(`tools/sp_transcode`) makes the on-disk model **~50% smaller with a
+bit-faithful forward**. The receipts-first writeup, with one-command
+reproductions, is at
 **[Position Is Arithmetic](https://github.com/nihilistau/Position_Is_Arithmetic)**
 (live site: https://nihilistau.github.io/Position_Is_Arithmetic/).
 
-The four backends (CPU / CUDA / Vulkan / Hexagon HVX) are the acceleration
-substrate; Hexagon is one of them, not the focus. Raw throughput is the
-known gap (~1.34× behind a tuned llama.cpp at Q8 on desktop CPU) and is the
-explicit **P1 SPEED / WIRE** work — the value today is the memory envelope.
+On desktop **CPU** raw decode throughput remains the known gap (~1.34×
+behind a tuned llama.cpp at Q8; memory layout, not ALU) — the open
+**P1 SPEED / WIRE** lane.
 
 License: MIT. See `LICENSE`.
+
+---
+
+## 0. Where this repo sits — the four-tier rings + XBAR
+
+XBAR (the **auditable latent crossbar**, lattice `RFC-XBAR`): **Exec** (the
+big generator — the gemma4/qwen3 forwards here) and **Memo** (a small
+curator, math-core `tools/curator/`) share a tiered latent memory; every
+write to canonical memory is receipted, gated, and rewindable.
+
+```
+  Exec (this repo's CUDA/CPU forwards)   Memo (curator, math-core)
+    │ write        ▲ recall from BOTH      │ propose         ▲ read
+    ▼              │                       ▼                 │
+  Ring 1 ────── Ring 2 (verbatim       ◄─ Ring 2′ (shadow staging:
+  (working KV)   episodic Spinor KV,       promote-on-accept w/ receipt,
+                 "hippocampus")            or REWIND)
+                   ▲                          │ promote (gated)
+                   └── Ring 3 (adapter-compressed consolidated,
+                       "neocortex"; G-R3-LOSS bounded)        [DESIGN]
+```
+
+The engine owns: Exec's accelerated forwards (CUDA `gemma4_forward_cuda` /
+`gemma4_decode_cuda`, the CPU overlay), the **`SP_XBAR_*` latent-crossbar
+harness** in `cuda_forward.cu` (P1 KV transplant + P2.a residual injection
+— ledger X-R1), the **Optane / QUIC Ring-2 stores**, the sovereign weight
+pipeline, the tokenizer modules, and the daemon/QUIC tier. The math core
+owns the decode loop, the ARM recall router, and the Ring 2′ curator
+transaction. **Ring 3** + **NIGHTSHIFT** (the offline Ring 2 → Ring 3
+consolidation loop) are **[DESIGN]** — RFC-XBAR §3.1 / §7.
 
 ---
 
@@ -52,7 +98,7 @@ License: MIT. See `LICENSE`.
 
 ## 1. What this repo provides
 
-This repo wires the math-core forward onto four accelerator backends plus the `sp_daemon` server. **Measured here:** the **two-ring memory envelope** (910× resident KV @32k, 7.57 µs/read off Optane) and the **WIRE-CPU integer pipe** (Qwen3-0.6B 0.84 → 39.52 tok/s, 47×, ~1.34× behind llama.cpp Q8_0) — both on the CPU backend — over a forward that is bit-exact on **5 arch families** (Qwen3, Qwen2.5-Coder, Gemma3, Gemma4, Qwen3.6-35B-A3B MoE).
+This repo wires the math-core forward onto four accelerator backends plus the `sp_daemon` server. **Measured here:** the citable **Gemma-4-12B 26.1 tok/s @ wikitext PPL 5.12 on the RTX 2060** (CUDA, OK_Q4B sovereign artifact — ledger 06-R10, §5.2.1d), the **two-ring memory envelope** (910× resident KV @32k, 7.57 µs/read off Optane) and the **WIRE-CPU integer pipe** (Qwen3-0.6B 0.84 → 39.52 tok/s, 47×, ~1.34× behind llama.cpp Q8_0) — the latter two on the CPU backend — over a forward that is bit-exact on **5 arch families** (Qwen3, Qwen2.5-Coder, Gemma3, Gemma4, Qwen3.6-35B-A3B MoE).
 
 | Slot | Path | Status |
 |------|------|--------|
@@ -64,7 +110,8 @@ This repo wires the math-core forward onto four accelerator backends plus the `s
 | **Hexagon HVX backend (host)** | `src/backends/hexagon/sp_hex_host.c` + `sp_hex_rt.c` + `inc/` | built |
 | **Hexagon cDSP skel** | `tools/sp_compute_skel/src_dsp/` (Halide-AOT FFN + HVX NTT + VTCM staging) | built |
 | **`sp_daemon` HTTP/SSE server** | `tools/sp_daemon/src/{main.rs, server.rs, routes.rs, daemon.rs}` | built |
-| **`sp_transcode` GGUF → `.sp-model`** | `tools/sp_transcode/sp_transcode.c` | built |
+| **`sp_transcode` — sovereign weight pipeline** (GGUF lane + `--st` safetensors-direct + OK_Q4B `--q4b`/`--q4b-ffn` + `--tok-only`) | `tools/sp_transcode/sp_transcode.c` | built |
+| **Tokenizer modules** (incl. `GEMMA4_BPE` family dispatch, #115 — 5432/5432 HF parity both lanes) | `src/tokenizer/` (`gemma4_bpe.c`, `tokenizer.c`) | built |
 | **`sp_dsp_smoke` standalone bridge** | `tools/sp_dsp_smoke/` | built |
 | **`sp_npu_spike` Snapdragon NPU spike** | `tools/sp_npu_spike/` | built (K.2-spike) |
 | **`sp_halide_gen` Halide AOT compiler** | `tools/sp_halide_gen/` | built |
@@ -74,6 +121,8 @@ This repo wires the math-core forward onto four accelerator backends plus the `s
 ---
 
 ## 2. Current status — honest table
+
+**Update 2026-06-10 — gemma4 tokenizer dispatch (#115) CLOSED; 12B text-in LIVE.** New tokenizer module `src/tokenizer/gemma4_bpe.c` + family dispatch (`GEMMA4_BPE` family tag written into `.sp-tokenizer` by `sp_transcode`; unknown family = hard error). Gates `T_G4_TOK_PARITY` + `T_G4_TOK_ROUNDTRIP`: **5432/5432 HF-parity exact, both lanes** (GGUF lane + `.sp-tokenizer` blob lane; engine `3253a82`, core `9d3cc72`). Deployment (engine `d8ba947`): the installed 12B blobs were regenerated via `sp_transcode --tok-only` and each paired `.sp-model` header SHA re-paired the way `sp_transcode` pairs at creation; new gate `T_G4_TOK_12B_PAIRED` (proven sensitive — a legacy type_id=2 blob fails it 0/5432); B1 GPU decode smoke 6/6 on the 2060. Also: the E_CPU_9 byte-identity lanes now pin `SP_CPU_SCALAR=1` (the common AVX2 dot kernel reassociates; engine `5cd5870`), and the submodule carries core `64b698c` — the **`sp_arm_*_geom` per-layer-class router API** (`T_ARM_GEOM` 26/26), the G-P3-GEOM substrate for the gemma4 ring port.
 
 **Update 2026-06-08 — the gemma-4 campaign closed; the sovereign quantization pipeline ships here.** `sp_transcode` gained **Safetensors Direct** (`--st <model.safetensors>`: weight VALUES from the official checkpoint; GGUF supplies verified-clean metadata/tokenizer only; mapped-but-missing = hard error) and the **OK_Q4B** codec (`--q4b` / `--q4b-ffn` recipe B1: per-32-block f16 scales, store-then-derive). The CUDA backend gained `k_gemv_q4b_dp4a_v2` (per-block scale inside the dp4a chunk loop) + `k_dequant_arena_q4b` + `DevTensor.bscale` routing; the core arena moved to layout v2 (formal migration). Result, gated 24/24 on the RTX 2060 12GB: **Gemma-4-12B at 26.1 tok/s and wikitext PPL 5.12** (GPU PPL gate 5.1160 vs the hand-written gold reference 4.6776; sim/CPU/GPU triple-agreement at 5.1259/5.1259/5.1160). Context: every gemma-4 GGUF measurable in June 2026 carries broken weights (192–506 by engine-independent measurement) — see the public repo's `GEMMA4-QUANT-FIX.md`. The earlier 34.2 tok/s headline is retired (its artifact failed the PPL gate).
 
@@ -85,7 +134,7 @@ through it at runtime.
 
 | Component | Built | Wired in `sp_daemon` | Notes |
 |-----------|:-----:|:--------------------:|-------|
-| **Two-ring memory (recall router + Optane Ring-2 + fusion)** | yes | yes (`SP_RECALL_*` + `SP_RING2_*`) | 910× resident KV shrink @32k; needle off NVMe @7.57 µs/read; 8×@+0.69% PPL; bit-exact when off; fusion verified N=512 + timed N=8192, 32k (R9) in flight |
+| **Two-ring memory (recall router + Optane Ring-2 + fusion)** | yes | yes (`SP_RECALL_*` + `SP_RING2_*`) | 910× resident KV shrink @32k; needle off NVMe @7.57 µs/read; 8×@+0.69% PPL; bit-exact when off; fusion verified N=512 + timed N=8192. Honest negative: the C2.4 32k NIAH finale = **MISS** (64× selection budget; ladder 2k HIT / 4k −1 digit / 8k HIT) — Ring 3 is the designed fix |
 | **Reducing loader** (`sp_transcode` GGUF → ~50%-smaller `.sp-model`) | yes | yes | bit-faithful forward, 6/6 E_FMT gates (gemma-3 + Qwen3) |
 | Model coverage | yes | yes | Qwen3-0.6B, Qwen2.5-Coder-0.5B, Gemma3-1B, Gemma4, Qwen3.6-35B-A3B MoE (Gated DeltaNet) — byte-exact forward |
 | Math-core reference forward | yes | **yes (default)** | byte-exact on host + aarch64-android; baseline tok/s in §4 below |
@@ -138,6 +187,11 @@ detail: `tools/sp_compute_skel/docs/CLOSURE-WIRE-HEX.md`.
 
 ### 3.1 Build the daemon (host, Windows)
 
+**`docs/BUILD-ENV.md` is the authoritative build doc** (pinned toolchains;
+do not contradict it). Summary: canonical CPU build = **MinGW gcc 15.2**
+in `build/` (Ninja); **MSVC cannot build the CPU tree**; CUDA host =
+VS2019 BuildTools + CUDA 12.4 in `build-cuda/`.
+
 ```cmd
 :: One-time: set up VS 2019 BT + CUDA env (if you want CUDA backend)
 call scripts\env\env-cuda.bat
@@ -156,7 +210,7 @@ Linux equivalents are documented in `docs/BUILD-ENV.md`.
 ### 3.2 Transcode a GGUF model to `.sp-model`
 
 ```cmd
-build-cpu\Release\sp_transcode.exe ^
+build\tools\sp_transcode\sp_transcode.exe ^
     path\to\model.gguf ^
     out\model.sp-model ^
     out\model.sp-tokenizer ^
@@ -336,11 +390,14 @@ cmake -B build-cpu -G Ninja \
       -DSP_ENGINE_BUILD_TESTS=ON
 ```
 
-Or use `scripts\build\build-cpu.bat`. Status: **built**, NOT wired into
-`sp_daemon` (the daemon uses the math-core reference forward by default).
-Wiring is a symmetric WIRE-HEX-style sprint: extend
-`sp_session_register_forward_backend` registration to call
-`gemma3_forward_cpu` instead.
+Or use `scripts\build\build-cpu.bat` (canonical CPU dir = `build/`, MinGW
+gcc — see `docs/BUILD-ENV.md`). Status: **built + wired** (sprint
+WIRE-CPU, 2026-06-02): `SP_DAEMON_BACKEND=cpu` registers
+`qwen3_forward_cpu` / `gemma3_forward_cpu` via the L1 ABI §6 hook. This is
+the backend carrying the two-ring memory envelope and the WIRE-CPU
+integer pipe (§4). Note: the E_CPU_9 byte-identity test lanes pin
+`SP_CPU_SCALAR=1` — the shared AVX2 dot kernel reassociates the reduction
+(engine `5cd5870`).
 
 ### 5.2 CUDA backend — `src/backends/cuda/`
 
@@ -482,9 +539,47 @@ Q6_K→Q4 squeeze** (release-blocking for paper 06).
   Links the CORE inference lane (`sp_session`) + `sp_engine_cuda` in one binary
   (one `as_f32 -> sp_as_f32` alias shim; everything else cross-resolves).
 
-Pending (ETA.5b, the velocity pass — gated top-1 like Beta): device-side PLE
-gather (zero-sync steps), CUDA-graph capture of the jagged topology, Q4-dp4a
-routing, then the 12B-Q4_K_M load + tok/s vs llama.cpp.
+**RESOLUTION (2026-06-08): the PPL gate stayed RED on this artifact — the
+per-row Q4 squeeze of Q6_K source tensors fails wikitext PPL, so the 34.2
+tok/s is formally RETIRED** (the series' own anchor rule caught it). The
+citable successor is §5.2.1d.
+
+#### 5.2.1d THE GEMMA-4 CAMPAIGN — sovereign pipeline + OK_Q4B + SHOOTOUT-2 (2026-06-08, CITABLE — ledger 06-R10)
+
+Full record: lattice `CONTRACT-SPEED` (GOLD INSTRUMENT → RESOLUTION → Q4B
+SPEC → CLOSED GREEN); public ledger rows 06-R8/R9/R10 + `GEMMA4-QUANT-FIX.md`.
+
+- **The gold instrument:** a from-scratch reference forward off the official
+  safetensors measured gemma-4-12B's TRUE wikitext PPL at **4.6776**.
+  llama.cpp's 397–506 was the ARTIFACTS, not the engine — the same
+  arithmetic over GGUF-dequantized tensors reproduces the breakage
+  (post-June-5 rebuilt GGUF still 192.9). **The GGUF weight lane is DEAD
+  for this model** (ledger 06-R8).
+- **Safetensors Direct (the sovereign pipeline):** `sp_transcode --st`
+  takes weight VALUES from the official checkpoint; GGUF supplies
+  verified-clean metadata/tokenizer only; mapped-but-missing = hard
+  error. OK_Q8 artifact: PPL **4.7396 (+1.33%)**.
+- **OK_Q4B (arena layout v2):** per-32-block f16 scales, store-then-derive;
+  recipe **B1** (Q4B gate/up + Q8 rest, chosen from a 6-recipe simulation
+  matrix — gemma4 is PTQ-hostile, all-sym-32 = +45%) → a 9.4 GB artifact
+  at **5.1259 = the simulation to four decimals**. GPU kernel
+  **`k_gemv_q4b_dp4a_v2`** (one weight block per 128-bit chunk) +
+  `k_dequant_arena_q4b` + `DevTensor.bscale` routing landed **5.1160** —
+  sim/CPU/GPU triple-instrument agreement. Core `85aadd3`, engine `bea361e`.
+- **SHOOTOUT-2 (CITABLE, 06-R10): 26.1 tok/s at PPL 5.12 on the 2060-12GB**
+  (24/24 gates; CUDA graph EXACT 256/256; dp4a top-1 256/256). llama.cpp:
+  31.29 tok/s at PPL 192–506 — faster, on quality-failed artifacts; both
+  halves stated. Engine bandwidth 245 vs 207 GB/s (+18%).
+
+**The `SP_XBAR_*` latent-crossbar harness** also lives in
+`cuda_forward.cu`: env knobs `SP_XBAR_CAPTURE` / `SP_XBAR_SPLICE` /
+`SP_XBAR_ROW` / `SP_XBAR_NROWS` / `SP_XBAR_AT` / `SP_XBAR_MASK` /
+`SP_XBAR_TOKENS` / `SP_XBAR_RANKS` / `SP_XBAR_RESID` / `SP_XBAR_POSFREE`
+(P1: direct KV-cache capture/splice — **token-free steering PROVEN**,
+public ledger X-R1: 15/15 lexical incorporation, 15/15 selectivity,
+3.69 orders max rank pull) plus `SP_XBAR_EMB` / `SP_XBAR_EMB_CAPTURE`
+(P2.a residual-entry pseudo-token injection). Gate harness:
+`tests/test_xbar_p1_cuda.c`.
 
 #### 5.2.2 Bench tool — `tests/bench_gemv_int8.cu`
 
@@ -1029,29 +1124,60 @@ bit-identical to a plain inference path (per
 
 ---
 
-## 10. Model conversion (`sp_transcode`)
+## 10. Model conversion (`sp_transcode`) — the sovereign weight pipeline
 
-The `sp_transcode` tool converts a GGUF model to a `.sp-model` +
-`.sp-tokenizer` pair that the daemon can `mmap`-load.
+The `sp_transcode` tool produces the `.sp-model` + `.sp-tokenizer` pair
+that the engine `mmap`-loads. Two weight lanes:
+
+- **GGUF lane:** `sp_transcode <in.gguf> <out.sp-model> <out.sp-tokenizer>` —
+  the original reducing transcode.
+- **Safetensors Direct (`--st <model.safetensors>`):** weight VALUES come
+  from the official checkpoint; the GGUF supplies verified-clean
+  metadata/tokenizer only; a tensor that is mapped but missing in the
+  safetensors is a **hard error**. This is the ONLY trusted gemma-4-12B
+  weight path — every gemma-4 GGUF measurable in June 2026 carries broken
+  weights (engine-independent measurement, PPL 192–506; ledger 06-R8 +
+  the public `GEMMA4-QUANT-FIX.md`).
 
 ### 10.1 Usage
 
 ```bash
-sp_transcode <in.gguf> <out.sp-model> <out.sp-tokenizer> [--verify]
+sp_transcode <in.gguf> <out.sp-model> <out.sp-tokenizer> [--verify] [--q4|--q8|--q4b|--q4b-ffn] [--st <model.safetensors>]
+sp_transcode --tok-only <in.gguf> <out.sp-tokenizer>
 ```
 
-`--verify` runs a per-tensor round-trip dequant check (rms + max
-rel-error) against the GGUF source and rejects the output if a Q8 row
-exceeds the threshold.
+- `--verify` runs a per-tensor round-trip dequant check (rms + max
+  rel-error) against the GGUF source and rejects the output if a Q8 row
+  exceeds the threshold.
+- `--q4b` / `--q4b-ffn` select the **OK_Q4B** codec (per-32-block f16
+  scales, arena layout v2, dtypes 13/14 + `.bscale` sibling); `--q4b-ffn`
+  is recipe **B1** (Q4B gate/up, Q8 rest — the gated 12B recipe).
+- `--tok-only` (#115) extracts ONLY the family-tagged `.sp-tokenizer`
+  blob — the tokenizer-regeneration path used for the 12B text-in
+  deployment.
+
+### 10.1b The `models\` pairing rule (read before touching installed blobs)
+
+A `.sp-model` header is **SHA-256-paired to its `.sp-tokenizer`**
+(`tokenizer_hash` in the header = SHA-256 of the blob; the loader returns
+`SP_ETOKENIZER_HASH` on mismatch). The out-of-tree `models\` directory
+holds installed, hash-paired sets; the `*.pre115` files alongside are the
+byte-exact pre-#115 gold backups. **Never move non-`.pre115` blobs out of
+`models\`** — you would break the pairing of an installed pair. Gate
+`T_G4_TOK_12B_PAIRED` checks the installed 12B pairing end-to-end.
 
 ### 10.2 Supported inputs
 
 GGUF v3 files containing:
-- Architectures: Llama-3, Qwen3, Qwen2.5, Gemma3, DeepSeek V4 (per
-  `sp_arch_id` enum in `include/sp/sp_model.h`)
+- Architectures: Llama-3, Qwen3, Qwen2.5, Gemma3, Gemma4, DeepSeek V4,
+  Qwen3.6-MoE (per `sp_arch_id` enum in `include/sp/sp_model.h`)
 - Per-tensor dtypes: `GGML_T_F32`, `GGML_T_F16`, `GGML_T_Q8_0` (others
   return "unsupported src type" and abort)
-- Tokenizers: SentencePiece, BPE-Llama3, BPE-GPT2, TikToken-O200K
+- Tokenizers: SentencePiece, BPE-Llama3, BPE-GPT2, TikToken-O200K, and
+  **GEMMA4_BPE** (#115) — the family tag (`GPT2_BPE | SPM | GEMMA4_BPE`)
+  is written into the `.sp-tokenizer`; an unknown family is a hard error,
+  and `src/tokenizer/gemma4_bpe.c` dispatches on it (5432/5432 HF parity,
+  both lanes)
 
 ### 10.3 Output format
 
@@ -1260,7 +1386,7 @@ honestly.
 | Issue | Workaround | Resolution |
 |-------|-----------|------------|
 | **WIRE-HEX BIT-EXACT gate blocked by cDSP skel mismatch** | None for the headline tok/s win | Future HX-SKEL-REBUILD sprint owns rebuilding `libsp_hex_skel.so` against current `src/backends/hexagon/inc/sp_hex.idl` and pushing to `/data/local/tmp/sp22u/` |
-| **CPU AVX-512 / CUDA / Vulkan backends not wired to `sp_daemon`** | Use math-core reference path | Three symmetric WIRE-HEX-style sprints; each one is ~1 day of plumbing once the WIRE-HEX template is in hand |
+| **CUDA / Vulkan backends not wired to `sp_daemon`** (CPU IS wired — sprint WIRE-CPU, `SP_DAEMON_BACKEND=cpu`) | Use math-core reference path / CPU backend | Two symmetric WIRE-HEX-style sprints; each one is ~1 day of plumbing once the WIRE-HEX template is in hand |
 | **`sp_decode_step` uses fp32 reference even with `SP_ENGINE_NTT_ATTN=1`** | Decode is the path where this matters most for tok/s; current architecture re-runs full forward on prefill backends | NTT.5e (filed, not shipped) wires decode-path NTT routing |
 | **HD=128 direct path can't use Hexagon backend** | Bluestein at HD=64 covers Qwen3 / Qwen2.5-Coder; Gemma3-1B uses HD=256 (direct N=256 NTT works) | NTT.5d (filed, not shipped) wires a direct backend path at HD=128 |
 | **Hexagon backend re-runs full forward per call** | Decode path stays on math-core reference; bypasses the issue | HEX-DECODE-1 sprint would add per-backend persistent-KV variant |
