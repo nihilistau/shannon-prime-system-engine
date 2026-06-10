@@ -28,6 +28,8 @@
  * Skips cleanly (like M_GEMMA4) when the out-of-tree vocab GGUF is absent. */
 #define _CRT_SECURE_NO_WARNINGS
 #include "sp/sp_test.h"
+#include "sp/sp_model.h"
+#include "sp/sp_status.h"
 #include "sp_engine/gguf.h"
 #include "sp_engine/tokenizer.h"
 
@@ -47,6 +49,15 @@
 #endif
 #ifndef SP_FMT_OUT_DIR
 #define SP_FMT_OUT_DIR "."
+#endif
+/* #115 deployment leg: the INSTALLED 12B artifacts (out-of-tree; skip if absent).
+ * Env SP_G4_12B_SPTOK / SP_G4_12B_SPMODEL override (run the gate against the
+ * -qat / -st / plain pairs the same way). */
+#ifndef SP_G4_12B_SPTOK_DEF
+#define SP_G4_12B_SPTOK_DEF "D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-tokenizer"
+#endif
+#ifndef SP_G4_12B_SPMODEL_DEF
+#define SP_G4_12B_SPMODEL_DEF "D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model"
 #endif
 
 #define MAX_IDS 8192
@@ -257,8 +268,49 @@ static void T_G4_TOK_ROUNDTRIP(void) {
     sp_tokenizer_free(tk);
 }
 
+/* T_G4_TOK_12B_PAIRED (#115 deployment leg, "12B text-in"):
+ *   (1) the INSTALLED 12B .sp-tokenizer must load through the blob lane
+ *       (sp_tokenizer_load_tokfile — a legacy type_id=2 blob would dispatch
+ *       to the GPT2 lane and fail parity; a future unknown tag hard-errors);
+ *   (2) encode(24 KB corpus) == the HF-verified fixture, 5432/5432 EXACT;
+ *   (3) if the paired .sp-model is present, sp_model_load must accept the
+ *       pair — i.e. header.tokenizer_hash == SHA-256(blob file) (§8 13-16).
+ * Skips cleanly when the out-of-tree artifacts are absent. */
+static void T_G4_TOK_12B_PAIRED(void) {
+    if (!g_text) { SP_CHECK(load_fixtures(), "load g4tok fixtures"); }
+    if (!g_text) return;
+    const char *spt = getenv("SP_G4_12B_SPTOK");
+    const char *spm = getenv("SP_G4_12B_SPMODEL");
+    if (!spt) spt = SP_G4_12B_SPTOK_DEF;
+    if (!spm) spm = SP_G4_12B_SPMODEL_DEF;
+    if (!file_exists(spt)) {
+        fprintf(stderr, "    SKIP: installed 12B blob absent: %s\n", spt);
+        return;
+    }
+    fprintf(stderr, "    blob:  %s\n    model: %s\n", spt, spm);
+
+    sp_tokenizer *tk = sp_tokenizer_load_tokfile(spt);
+    SP_CHECK(tk != NULL, "installed 12B blob loads (family-tagged, blob lane)");
+    if (!tk) return;
+    SP_CHECK_EQ_I64(sp_tokenizer_vocab_size(tk), 262144, "12B blob vocab 262144");
+    check_parity(tk, "12b-installed-blob");
+    sp_tokenizer_free(tk);
+
+    if (!file_exists(spm)) {
+        fprintf(stderr, "    NOTE: paired .sp-model absent (%s) — pairing leg skipped\n", spm);
+        return;
+    }
+    sp_model *h = NULL;
+    sp_status st = sp_model_load(spm, spt, &h);
+    if (st != SP_OK) fprintf(stderr, "    sp_model_load: %s\n", sp_last_error());
+    SP_CHECK(st == SP_OK && h != NULL,
+             "sp_model_load accepts the pair (tokenizer_hash == SHA-256(blob))");
+    if (h) sp_model_unload(h);
+}
+
 int main(void) {
     SP_RUN(T_G4_TOK_PARITY);
     SP_RUN(T_G4_TOK_ROUNDTRIP);
+    SP_RUN(T_G4_TOK_12B_PAIRED);
     return SP_DONE();
 }

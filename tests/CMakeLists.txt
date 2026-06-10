@@ -316,7 +316,11 @@ else()
 endif()
 add_test(NAME T_G4_TOK_PARITY COMMAND test_g4_tokenizer)
 add_test(NAME T_G4_TOK_ROUNDTRIP COMMAND test_g4_tokenizer)
-set_tests_properties(T_G4_TOK_PARITY T_G4_TOK_ROUNDTRIP PROPERTIES TIMEOUT 600)
+# #115 deployment leg ("12B text-in"): installed models/gemma4-12b-b1.sp-tokenizer
+# must be GEMMA4_BPE-tagged, hit 5432/5432 parity, and pass sp_model_load's
+# tokenizer_hash pairing against the B1 artifact. Out-of-tree; skips if absent.
+add_test(NAME T_G4_TOK_12B_PAIRED COMMAND test_g4_tokenizer)
+set_tests_properties(T_G4_TOK_PARITY T_G4_TOK_ROUNDTRIP T_G4_TOK_12B_PAIRED PROPERTIES TIMEOUT 600)
 
 add_test(NAME E_FMT_1 COMMAND test_sp_model_roundtrip)
 add_test(NAME E_FMT_2 COMMAND test_sp_model_roundtrip)
