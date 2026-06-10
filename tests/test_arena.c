@@ -11,6 +11,16 @@
  *
  * Two model loads per precision (one with SP_ARENA set, one with SP_ENGINE_FROB)
  * since the arena is built at load time from the env.
+ *
+ * SP_CPU_SCALAR=1 is pinned for BOTH lanes (2026-06-10): since engine 5e443c9
+ * (WIRE-CPU-V2) the arena matmul's dot is AVX2 FMA+hadd while the per-matmul
+ * FROB path stays a serial scalar loop — f32 reassociation breaks bit-equality
+ * between the two DOTS even though the packed codes/scales/promotions remain
+ * byte-identical (verified: scalar run 6/6, identical 14143 q4 promotions).
+ * Pinning the common scalar kernel keeps this gate on the packing/lift contract
+ * it was written for; the SIMD dot itself is parity-gated elsewhere (top-1 /
+ * token-sequence gates, see 5e443c9). NOT a weakening: any drift in codes,
+ * scales, row promotion, or lift arithmetic still fails byte-exact.
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "sp/sp_test.h"
@@ -106,9 +116,12 @@ static void E_CPU_9(void) {
     uint32_t nv = m0->cfg.n_vocab;
     qwen3_free(m0);
 
-    /* (1) Q8 arena == FROB=1 ; (2) Q4 arena == FROB=3, byte-for-byte */
+    /* (1) Q8 arena == FROB=1 ; (2) Q4 arena == FROB=3, byte-for-byte.
+     * Common scalar dot kernel for both lanes (see header; engine 5e443c9). */
+    set_env("SP_CPU_SCALAR", "1");
     check_identical(toks, nt, nv, "q8", "1");
     check_identical(toks, nt, nv, "q4", "3");
+    set_env("SP_CPU_SCALAR", NULL);
 
     free(toks);
 }
