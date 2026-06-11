@@ -13,3 +13,5 @@
 **Git (binding lesson):** `lib/shannon-prime-system` is a submodule of the same repo as the standalone `shannon-prime-system` checkout, so the two can diverge. `git fetch` + check `behind` before building/committing; commit + push every repo touched per milestone.
 
 **Non-negotiables:** receipts-first (no number without a command); bit-exact / top-1-lossless gates per precision; no silent gate revision (surface upstream); **reference-first** when porting (read llama.cpp / the reference with file:line before coding); check code + commits + `git fetch` before trusting memory; verify Gemini's claims; drive by default; bakes are OS-owned + log-tailed, never poll-watched. Full detail in lattice `prompt.md`.
+
+**Environment & credentials (2026-06-11):** compute lanes, shells/traps, storage law (incl. the models\ SHA-pairing rule) → lattice `ENVIRONMENT.md`. Current state/queue → lattice `SESSION-HANDOFF.md`. Secrets → `archive\notes_and_stuff\creds\claude-credentials.txt` (outside all repos; reference paths, never values).
