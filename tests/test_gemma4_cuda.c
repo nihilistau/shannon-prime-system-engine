@@ -549,6 +549,40 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
         }
     }
 
+    /* ════ E_G4_CU_HIST (XBAR P3.1b-2): recall-as-history bit-exact gate ════
+     * episode = prompt[0..H); the rest decodes at absolute [H,..) attending over the
+     * pre-loaded episode. monolithic [episode++rest] vs WRITE-episode + HISTORY-decode
+     * must be token-identical. Env-gated; early-returns to skip the slow 5B velocity run. */
+    {
+        const char *hg = getenv("SP_XBAR_HIST_GATE");
+        if (hg && atoi(hg) > 0) {
+            const int H = atoi(hg);
+            enum { HNP = 4, HNG = 12, HPT = HNP + HNG };
+            const int32_t hp[HNP] = { 2, 10, 100, 1000 };
+            const char *dir = getenv("SP_XBAR_HIST_DIR"); if (!dir) dir = "_p31_ep";
+            char ev[600];
+            int32_t mono[HPT]; for (int i = 0; i < HNP; i++) mono[i] = hp[i];
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=1");
+            snprintf(ev, sizeof(ev), "SP_XBAR_RECALL_WRITE=%s", dir); _putenv(ev);
+            int dnm = gemma4_decode_cuda(m, mono, HNP, HNG, -1);
+            _putenv("SP_XBAR_RECALL_WRITE=");
+            int32_t hist[HPT]; for (int i = 0; i < H; i++) hist[i] = 0; for (int i = H; i < HNP; i++) hist[i] = hp[i];
+            snprintf(ev, sizeof(ev), "SP_XBAR_RECALL_HISTORY=%s", dir); _putenv(ev);
+            snprintf(ev, sizeof(ev), "SP_XBAR_HIST_H=%d", H); _putenv(ev);
+            int dnh = gemma4_decode_cuda(m, hist, HNP, HNG, -1);
+            _putenv("SP_XBAR_RECALL_HISTORY="); _putenv("SP_XBAR_HIST_H=");
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+            int diffs = 0, n = (dnm < dnh ? dnm : dnh); if (n > HPT) n = HPT;
+            for (int i = H; i < n; i++) if (mono[i] != hist[i]) diffs++;
+            fprintf(stderr, "    [g4-cuda-HIST] H=%d  mono dn=%d  hist dn=%d  diffs[%d..%d)=%d\n", H, dnm, dnh, H, HPT, diffs);
+            fprintf(stderr, "        mono:"); for (int i = 0; i < HPT; i++) fprintf(stderr, " %d", mono[i]); fprintf(stderr, "\n");
+            fprintf(stderr, "        hist:"); for (int i = 0; i < HPT; i++) fprintf(stderr, " %d", hist[i]); fprintf(stderr, "\n");
+            SP_CHECK(dnm == HPT && dnh == HPT, "P3.1b-2: both decodes produced full length");
+            SP_CHECK(diffs == 0, "P3.1b-2 recall-as-history: continuation == monolithic (bit-exact)");
+            return SP_DONE();
+        }
+    }
+
     /* ════ E_G4_CU_DEC_5B (ETA.5b): THE VELOCITY GATES — graph capture + dp4a.
      * Four decode runs over the same prompt, 256-token window:
      *   ref   : knobs-off (the oracle-gated lift path above)

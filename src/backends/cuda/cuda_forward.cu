@@ -1689,6 +1689,10 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * formal sp_xbar_block_off link = P3.1b), and attention READS from the store instead
      * of the live cache. Diff vs a legacy run = bit-exact gate on the off[L] addressing. */
     char *d_xbar_K=NULL, *d_xbar_V=NULL; size_t *xbar_off=NULL; size_t xbar_store_bytes=0; sp_xbar_manifest xmf{};
+    /* XBAR P3.1b-2 recall-as-history: pre-load an episode's K/V into the FRONT of the live cache
+     * [0,H) and decode the prompt at absolute [H,..) — pos is already absolute, so NO offset
+     * threading; just skip the forward for the pre-loaded episode positions. */
+    int xbar_hist_on = 0, xbar_hist_H = 0;
     cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
     int rc=-1, n=n_prompt;
     /* SP_G4_DEC_PROBE=<pos>: ETA.5b bug-hunt — intercept the step at <pos>:
@@ -1899,10 +1903,44 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     xbar_wr_e ? "WRITE" : "self-test", (double)xbar_store_bytes / 1048576.0, NL);
         }
     }
+    /* XBAR P3.1b-2: recall-as-history — pre-load an episode's K/V into the live cache front [0,H). */
+    const char *xbar_hist_e = getenv("SP_XBAR_RECALL_HISTORY");
+    if (xbar_hist_e) {
+        char hp[1024]; FILE *hf; sp_xbar_manifest hmf; memset(&hmf, 0, sizeof(hmf));
+        snprintf(hp, sizeof(hp), "%s/ep.mf", xbar_hist_e); hf = fopen(hp, "rb");
+        if (!hf) { sp_set_error("xbar hist: ep.mf open"); goto done; }
+        fseek(hf, 0, SEEK_END); long hl = ftell(hf); fseek(hf, 0, SEEK_SET);
+        uint8_t *hbm = (uint8_t *)malloc((size_t)hl);
+        if (!hbm || fread(hbm, 1, (size_t)hl, hf) != (size_t)hl) { free(hbm); fclose(hf); sp_set_error("xbar hist: ep.mf read"); goto done; }
+        fclose(hf);
+        if (sp_xbar_manifest_deserialize(&hmf, hbm, (size_t)hl)) { free(hbm); sp_set_error("xbar hist: deserialize"); goto done; }
+        free(hbm);
+        { const char *he = getenv("SP_XBAR_HIST_H"); xbar_hist_H = he ? atoi(he) : 0; }  /* episode prefix length to mount */
+        if (xbar_hist_H <= 0 || xbar_hist_H > hmf.P || xbar_hist_H >= P) { sp_xbar_manifest_free(&hmf); sp_set_error("xbar hist: bad H (need 0<H<=store.P and H<cache.P)"); goto done; }
+        size_t hsb = (size_t)hmf.store_bytes;
+        uint8_t *hs = (uint8_t *)malloc(hsb);
+        if (!hs) { sp_xbar_manifest_free(&hmf); sp_set_error("xbar hist host OOM"); goto done; }
+        for (int two = 0; two < 2; two++) {                  /* 0 = K stream, 1 = V stream */
+            snprintf(hp, sizeof(hp), "%s/ep.%c", xbar_hist_e, two ? 'v' : 'k'); hf = fopen(hp, "rb");
+            if (!hf || fread(hs, 1, hsb, hf) != hsb) { free(hs); if (hf) fclose(hf); sp_xbar_manifest_free(&hmf); sp_set_error("xbar hist: ep store read"); goto done; }
+            fclose(hf);
+            for (int L = 0; L < kvfs && L < NL; L++) {        /* owners only; sharers reuse the owner block */
+                const int global = ((L % period) == period - 1);
+                const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+                float *dst = two ? dVc[L] : dKc[L];
+                cudaMemcpy(dst, hs + (size_t)hmf.layers[L].off, (size_t)xbar_hist_H * kvd * 4, cudaMemcpyHostToDevice);
+            }
+        }
+        free(hs); sp_xbar_manifest_free(&hmf);
+        xbar_hist_on = 1;
+        fprintf(stderr, "    [xbar-p3.1b2] recall-as-history: pre-loaded episode H=%d positions into the live-cache front\n", xbar_hist_H);
+    }
     /* prompt into VRAM once; dpos = 0 */
     if (cudaMemcpyAsync(dseq, seq, (size_t)n_prompt*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("g4 prompt H2D"); goto done; }
-    { int z = 0; if (cudaMemcpyAsync(dpos, &z, sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+    { int z = xbar_hist_H;   /* P3.1b-2: seed dpos = H so the device position counter (k_incr_pos skipped
+                              * for the pre-loaded episode positions) stays == absolute pos for the prompt. */
+      if (cudaMemcpyAsync(dpos, &z, sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("g4 dpos seed"); goto done; } }
 
     /* MMD: decode matmul — packed dp4a GEMV when routed, else the ORACLE lift. */
@@ -1915,7 +1953,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * step) + fixed attn shm (P floats) within the 48KB sm_75 default. */
     {
         const char *ge = getenv("SP_CUDA_DECODE_GRAPH");
-        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on;  /* XBAR / P3.1-recall = per-step only */
+        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on && !xbar_hist_on;  /* XBAR / P3.1-recall / P3.1b-2-history = per-step only */
         const size_t attn_shm = (size_t)P * sizeof(float);
         if (use_graph && attn_shm <= 48u*1024u && n_gen > 0 && (!PL || dev_ple)) {
             cublasSetStream(cb, st);
@@ -2093,6 +2131,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
 
     /* ───────── per-step path (the ETA.5a oracle stack, device-fed) ───────── */
     for (int pos = 0; pos < P - 1; pos++) {
+        if (xbar_hist_on && pos < xbar_hist_H) continue;   /* P3.1b-2: episode KV pre-loaded @ [0,H); skip its forward */
         const int gen_here = (pos >= n_prompt - 1);
 
         /* XBAR-P1: at the START of step AT, act on cache row ROW. Order is
