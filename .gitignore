@@ -96,3 +96,10 @@ hexagonsim_*/
 
 # OS-owned bake outputs + retired runners (swept from repo root 2026-06-10)
 /_bake/
+
+# XBAR P3.1/P3.1b local scratch (build/run harness + episode store)
+_build_p31*.bat
+_run_p31*.bat
+build_p31*.log
+run_p31*.log
+_p31_ep/
