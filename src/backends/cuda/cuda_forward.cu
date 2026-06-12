@@ -1682,6 +1682,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
           *dipl=NULL,*dple=NULL,*dpg=NULL,*dpp=NULL,*dsx=NULL;
     signed char *dqx=NULL;     /* int8 activation-quant scratch (max in-dim, padded) */
     float *hple=NULL; float **dKc=NULL, **dVc=NULL;
+    /* XBAR P3.1 (§P3.1 decode-wiring): recall self-test. When SP_XBAR_RECALL_SELFTEST=1,
+     * the per-layer K/V is ALSO mirrored into a separately-laid-out episode store at the
+     * owner-resolved byte offset off[L] (the §3 prefix-sum law, replicated inline here;
+     * formal sp_xbar_block_off link = P3.1b), and attention READS from the store instead
+     * of the live cache. Diff vs a legacy run = bit-exact gate on the off[L] addressing. */
+    char *d_xbar_K=NULL, *d_xbar_V=NULL; size_t *xbar_off=NULL; size_t xbar_store_bytes=0;
     cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
     int rc=-1, n=n_prompt;
     /* SP_G4_DEC_PROBE=<pos>: ETA.5b bug-hunt — intercept the step at <pos>:
@@ -1821,6 +1827,29 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         G4D(dVc[L], (size_t)P * kvd);
     }
     #undef G4D
+    /* XBAR P3.1 (§P3.1): recall episode store + owner-resolved off[L] (the §3 byte law). */
+    const char *xbar_rst_e = getenv("SP_XBAR_RECALL_SELFTEST");
+    const int xbar_recall_on = (xbar_rst_e && xbar_rst_e[0] == '1');
+    if (xbar_recall_on) {
+        xbar_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
+        if (!xbar_off) { sp_set_error("xbar recall off OOM"); goto done; }
+        size_t acc = 0;
+        for (int L = 0; L < NL; L++) {
+            const int global = ((L % period) == period - 1);
+            const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+            if (L < kvfs) { xbar_off[L] = acc; acc += (size_t)P * kvd * 4; }   /* owner: prefix-sum */
+            else {                                                            /* sharer: off[own[L]] */
+                const int src = kvfs - (global ? 1 : 2);
+                if (src < 0 || src >= kvfs) { sp_set_error("xbar recall bad owner"); goto done; }
+                xbar_off[L] = xbar_off[src];
+            }
+        }
+        xbar_store_bytes = acc;
+        if (cudaMalloc((void **)&d_xbar_K, xbar_store_bytes) != cudaSuccess ||
+            cudaMalloc((void **)&d_xbar_V, xbar_store_bytes) != cudaSuccess) { sp_set_error("xbar recall store OOM"); goto done; }
+        fprintf(stderr, "    [xbar-p3.1] recall self-test ON: store %.1f MiB, off[L] owner-resolved over %d layers\n",
+                (double)xbar_store_bytes / 1048576.0, NL);
+    }
     /* prompt into VRAM once; dpos = 0 */
     if (cudaMemcpyAsync(dseq, seq, (size_t)n_prompt*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("g4 prompt H2D"); goto done; }
@@ -1837,7 +1866,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * step) + fixed attn shm (P floats) within the 48KB sm_75 default. */
     {
         const char *ge = getenv("SP_CUDA_DECODE_GRAPH");
-        const int use_graph = (ge && ge[0] == '1') && !xbar_on;  /* XBAR = per-step only */
+        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on;  /* XBAR / P3.1-recall = per-step only */
         const size_t attn_shm = (size_t)P * sizeof(float);
         if (use_graph && attn_shm <= 48u*1024u && n_gen > 0 && (!PL || dev_ple)) {
             cublasSetStream(cb, st);
@@ -2154,10 +2183,17 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 cudaMemcpyAsync(dKc[L] + (size_t)pos*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 cudaMemcpyAsync(dVc[L] + (size_t)pos*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 Kuse = dKc[L]; Vuse = dVc[L];
+                if (xbar_recall_on) {   /* P3.1: mirror this write into the episode store @ off[L], then READ from it */
+                    cudaMemcpyAsync(d_xbar_K + xbar_off[L] + (size_t)pos*kvd*4, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    cudaMemcpyAsync(d_xbar_V + xbar_off[L] + (size_t)pos*kvd*4, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    Kuse = (float *)(d_xbar_K + xbar_off[L]); Vuse = (float *)(d_xbar_V + xbar_off[L]);
+                }
             } else {
                 const int src = kvfs - (global ? 1 : 2);
                 Kuse = dKc[src]; Vuse = dVc[src];
                 if (!Kuse || !Vuse) { sp_set_error("g4 sharer before owner"); goto done; }
+                if (xbar_recall_on)     /* P3.1: sharer reads the owner's mirrored block @ off[L] (= off[own[L]]) */
+                    { Kuse = (float *)(d_xbar_K + xbar_off[L]); Vuse = (float *)(d_xbar_V + xbar_off[L]); }
             }
             {   const int ctx = pos + 1;
                 int bd = hd > ctx ? hd : ctx; if (bd > 1024) bd = 1024;
@@ -2353,6 +2389,7 @@ done:
     if (cexec) cudaGraphExecDestroy(cexec); if (cgraph) cudaGraphDestroy(cgraph);
     free(hple);
     if (dKc) { for (int L = 0; L < NL; L++) if (dKc[L]) cudaFree(dKc[L]); free(dKc); }
+    if (d_xbar_K) cudaFree(d_xbar_K); if (d_xbar_V) cudaFree(d_xbar_V); if (xbar_off) free(xbar_off);  /* P3.1 recall store */
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
     if (dnll) cudaFree(dnll);
     free(probe_xs);
