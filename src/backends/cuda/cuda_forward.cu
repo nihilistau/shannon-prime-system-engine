@@ -30,6 +30,7 @@
 #include "sp_engine/arena.h"     /* sp_arena_find / sp_arena_dequant_row */
 #include "sp_engine/gguf.h"
 #include "sp/frobenius_lift.h"   /* sp_frob_packed_tensor */
+#include "sp/xbar_episode.h"     /* XBAR P3.1b: episode manifest serialize/deserialize */
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -1687,7 +1688,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * owner-resolved byte offset off[L] (the §3 prefix-sum law, replicated inline here;
      * formal sp_xbar_block_off link = P3.1b), and attention READS from the store instead
      * of the live cache. Diff vs a legacy run = bit-exact gate on the off[L] addressing. */
-    char *d_xbar_K=NULL, *d_xbar_V=NULL; size_t *xbar_off=NULL; size_t xbar_store_bytes=0;
+    char *d_xbar_K=NULL, *d_xbar_V=NULL; size_t *xbar_off=NULL; size_t xbar_store_bytes=0; sp_xbar_manifest xmf{};
     cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
     int rc=-1, n=n_prompt;
     /* SP_G4_DEC_PROBE=<pos>: ETA.5b bug-hunt — intercept the step at <pos>:
@@ -1827,28 +1828,76 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         G4D(dVc[L], (size_t)P * kvd);
     }
     #undef G4D
-    /* XBAR P3.1 (§P3.1): recall episode store + owner-resolved off[L] (the §3 byte law). */
+    /* XBAR P3.1 / P3.1b (§P3.1): recall episode store. SELFTEST mirrors the live KV into a
+     * separately-laid-out store at off[L] and reads from it; WRITE additionally serializes the
+     * manifest + dumps the store to disk; LOAD deserializes + mounts a store from disk (read-only).
+     * off[L] = the §3 owner-resolved prefix-sum byte law, populated straight into the formal manifest. */
     const char *xbar_rst_e = getenv("SP_XBAR_RECALL_SELFTEST");
-    const int xbar_recall_on = (xbar_rst_e && xbar_rst_e[0] == '1');
+    const char *xbar_wr_e  = getenv("SP_XBAR_RECALL_WRITE");
+    const char *xbar_ld_e  = getenv("SP_XBAR_RECALL_LOAD");
+    const int xbar_recall_on = (xbar_rst_e && xbar_rst_e[0] == '1') || (xbar_wr_e != NULL) || (xbar_ld_e != NULL);
+    const int xbar_mirror = (xbar_ld_e == NULL);   /* LOAD reads the pre-loaded store; others mirror */
     if (xbar_recall_on) {
-        xbar_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
-        if (!xbar_off) { sp_set_error("xbar recall off OOM"); goto done; }
-        size_t acc = 0;
-        for (int L = 0; L < NL; L++) {
-            const int global = ((L % period) == period - 1);
-            const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
-            if (L < kvfs) { xbar_off[L] = acc; acc += (size_t)P * kvd * 4; }   /* owner: prefix-sum */
-            else {                                                            /* sharer: off[own[L]] */
-                const int src = kvfs - (global ? 1 : 2);
-                if (src < 0 || src >= kvfs) { sp_set_error("xbar recall bad owner"); goto done; }
-                xbar_off[L] = xbar_off[src];
+        char xpath[1024]; FILE *xf;
+        if (xbar_ld_e) {                              /* ── LOAD: deserialize + mount from disk ── */
+            snprintf(xpath, sizeof(xpath), "%s/ep.mf", xbar_ld_e); xf = fopen(xpath, "rb");
+            if (!xf) { sp_set_error("xbar load: ep.mf open"); goto done; }
+            fseek(xf, 0, SEEK_END); long mlen = ftell(xf); fseek(xf, 0, SEEK_SET);
+            uint8_t *mbuf = (uint8_t *)malloc((size_t)mlen);
+            if (!mbuf || fread(mbuf, 1, (size_t)mlen, xf) != (size_t)mlen) { free(mbuf); fclose(xf); sp_set_error("xbar load: ep.mf read"); goto done; }
+            fclose(xf);
+            if (sp_xbar_manifest_deserialize(&xmf, mbuf, (size_t)mlen)) { free(mbuf); sp_set_error("xbar load: deserialize"); goto done; }
+            free(mbuf);
+            xbar_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
+            if (!xbar_off) { sp_set_error("xbar load off OOM"); goto done; }
+            for (int L = 0; L < NL; L++) xbar_off[L] = (size_t)xmf.layers[L].off;
+            xbar_store_bytes = (size_t)xmf.store_bytes;
+            if (cudaMalloc((void **)&d_xbar_K, xbar_store_bytes) != cudaSuccess ||
+                cudaMalloc((void **)&d_xbar_V, xbar_store_bytes) != cudaSuccess) { sp_set_error("xbar load store OOM"); goto done; }
+            uint8_t *hs = (uint8_t *)malloc(xbar_store_bytes);
+            if (!hs) { sp_set_error("xbar load store host OOM"); goto done; }
+            snprintf(xpath, sizeof(xpath), "%s/ep.k", xbar_ld_e); xf = fopen(xpath, "rb");
+            if (!xf || fread(hs, 1, xbar_store_bytes, xf) != xbar_store_bytes) { free(hs); if (xf) fclose(xf); sp_set_error("xbar load: ep.k"); goto done; }
+            fclose(xf); cudaMemcpy(d_xbar_K, hs, xbar_store_bytes, cudaMemcpyHostToDevice);
+            snprintf(xpath, sizeof(xpath), "%s/ep.v", xbar_ld_e); xf = fopen(xpath, "rb");
+            if (!xf || fread(hs, 1, xbar_store_bytes, xf) != xbar_store_bytes) { free(hs); if (xf) fclose(xf); sp_set_error("xbar load: ep.v"); goto done; }
+            fclose(xf); cudaMemcpy(d_xbar_V, hs, xbar_store_bytes, cudaMemcpyHostToDevice); free(hs);
+            fprintf(stderr, "    [xbar-p3.1b] LOADED episode store %.1f MiB from %s (%d layers, read-only)\n",
+                    (double)xbar_store_bytes / 1048576.0, xbar_ld_e, xmf.NL);
+        } else {                                      /* ── SELFTEST / WRITE: build store in-memory ── */
+            xbar_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
+            if (!xbar_off) { sp_set_error("xbar recall off OOM"); goto done; }
+            xmf.version = SP_XBAR_EP_VERSION; xmf.NL = NL; xmf.P = P; xmf.period = period;
+            xmf.kvfs = kvfs; xmf.r = 0; xmf.proj_seed = (uint64_t)SP_ARM_PROJ_SEED;
+            xmf.layers = (sp_xbar_layer *)calloc((size_t)NL, sizeof(sp_xbar_layer));
+            if (!xmf.layers) { sp_set_error("xbar manifest OOM"); goto done; }
+            size_t acc = 0;
+            for (int L = 0; L < NL; L++) {
+                const int global = ((L % period) == period - 1);
+                const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+                sp_xbar_layer *ly = &xmf.layers[L];
+                ly->cls = (uint8_t)(global ? SP_XBAR_CLASS_GLOBAL : SP_XBAR_CLASS_SWA);
+                ly->nh = global ? g_nh : s_nh; ly->nkv = global ? g_nkv : s_nkv;
+                ly->hd = global ? g_hd : s_hd; ly->kvd = kvd;
+                ly->window = global ? -1 : SW; ly->rope_base = global ? g_base : s_base;
+                ly->has_freq_factors = (uint8_t)((global && g_w.rope_freqs) ? 1 : 0);
+                if (L < kvfs) {                       /* owner: prefix-sum */
+                    ly->owns_kv = 1; ly->own = L; ly->off = (uint64_t)acc;
+                    ly->vless = (uint8_t)((global && !(g_w.Wv[L].f32 || g_w.Wv[L].codes)) ? 1 : 0);
+                    xbar_off[L] = acc; acc += (size_t)P * kvd * 4;
+                } else {                              /* sharer: off[own[L]] */
+                    const int src = kvfs - (global ? 1 : 2);
+                    if (src < 0 || src >= kvfs) { sp_set_error("xbar recall bad owner"); goto done; }
+                    ly->owns_kv = 0; ly->own = src; ly->off = xmf.layers[src].off;
+                    xbar_off[L] = (size_t)xmf.layers[src].off;
+                }
             }
+            xmf.store_bytes = (uint64_t)acc; xbar_store_bytes = acc;
+            if (cudaMalloc((void **)&d_xbar_K, xbar_store_bytes) != cudaSuccess ||
+                cudaMalloc((void **)&d_xbar_V, xbar_store_bytes) != cudaSuccess) { sp_set_error("xbar recall store OOM"); goto done; }
+            fprintf(stderr, "    [xbar-p3.1] recall %s: store %.1f MiB, off[L] owner-resolved over %d layers\n",
+                    xbar_wr_e ? "WRITE" : "self-test", (double)xbar_store_bytes / 1048576.0, NL);
         }
-        xbar_store_bytes = acc;
-        if (cudaMalloc((void **)&d_xbar_K, xbar_store_bytes) != cudaSuccess ||
-            cudaMalloc((void **)&d_xbar_V, xbar_store_bytes) != cudaSuccess) { sp_set_error("xbar recall store OOM"); goto done; }
-        fprintf(stderr, "    [xbar-p3.1] recall self-test ON: store %.1f MiB, off[L] owner-resolved over %d layers\n",
-                (double)xbar_store_bytes / 1048576.0, NL);
     }
     /* prompt into VRAM once; dpos = 0 */
     if (cudaMemcpyAsync(dseq, seq, (size_t)n_prompt*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
@@ -2183,9 +2232,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 cudaMemcpyAsync(dKc[L] + (size_t)pos*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 cudaMemcpyAsync(dVc[L] + (size_t)pos*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 Kuse = dKc[L]; Vuse = dVc[L];
-                if (xbar_recall_on) {   /* P3.1: mirror this write into the episode store @ off[L], then READ from it */
-                    cudaMemcpyAsync(d_xbar_K + xbar_off[L] + (size_t)pos*kvd*4, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
-                    cudaMemcpyAsync(d_xbar_V + xbar_off[L] + (size_t)pos*kvd*4, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                if (xbar_recall_on) {   /* P3.1: read attention from the episode store @ off[L] */
+                    if (xbar_mirror) {  /* SELFTEST/WRITE: mirror the live KV into the store first; LOAD reads disk as-is */
+                        cudaMemcpyAsync(d_xbar_K + xbar_off[L] + (size_t)pos*kvd*4, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                        cudaMemcpyAsync(d_xbar_V + xbar_off[L] + (size_t)pos*kvd*4, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    }
                     Kuse = (float *)(d_xbar_K + xbar_off[L]); Vuse = (float *)(d_xbar_V + xbar_off[L]);
                 }
             } else {
@@ -2369,6 +2420,30 @@ download:
         if (pf) { fwrite(probe_xs, sizeof(float), (size_t)NL * E, pf); fclose(pf); }
         fprintf(stderr, "    [g4-dec-probe] dumped %d x-vectors (E=%d) to %s\n", NL, E, pdump);
     }
+    if (xbar_wr_e && d_xbar_K && xmf.layers) {   /* P3.1b: serialize manifest + dump filled store to disk (write-once) */
+        static int xbar_written = 0;
+        if (!xbar_written) {
+            xbar_written = 1; cudaStreamSynchronize(st);
+            char wp[1024]; FILE *wf;
+            size_t msz = sp_xbar_manifest_serial_size(&xmf);
+            uint8_t *mb = (uint8_t *)malloc(msz);
+            if (mb && sp_xbar_manifest_serialize(&xmf, mb, msz) == msz) {
+                snprintf(wp, sizeof(wp), "%s/ep.mf", xbar_wr_e); wf = fopen(wp, "wb");
+                if (wf) { fwrite(mb, 1, msz, wf); fclose(wf); }
+            }
+            free(mb);
+            uint8_t *hs = (uint8_t *)malloc(xbar_store_bytes);
+            if (hs) {
+                cudaMemcpy(hs, d_xbar_K, xbar_store_bytes, cudaMemcpyDeviceToHost);
+                snprintf(wp, sizeof(wp), "%s/ep.k", xbar_wr_e); wf = fopen(wp, "wb"); if (wf) { fwrite(hs, 1, xbar_store_bytes, wf); fclose(wf); }
+                cudaMemcpy(hs, d_xbar_V, xbar_store_bytes, cudaMemcpyDeviceToHost);
+                snprintf(wp, sizeof(wp), "%s/ep.v", xbar_wr_e); wf = fopen(wp, "wb"); if (wf) { fwrite(hs, 1, xbar_store_bytes, wf); fclose(wf); }
+                free(hs);
+            }
+            fprintf(stderr, "    [xbar-p3.1b] WROTE episode (manifest %zu B + K/V store %.1f MiB) -> %s\n",
+                    msz, (double)xbar_store_bytes / 1048576.0, xbar_wr_e);
+        }
+    }
     if (dnll) {       /* SP_G4_SCORE: pull the accumulated NLL */
         cudaStreamSynchronize(st);
         cudaMemcpy(&g_g4_score_nll, dnll, sizeof(double), cudaMemcpyDeviceToHost);
@@ -2389,7 +2464,7 @@ done:
     if (cexec) cudaGraphExecDestroy(cexec); if (cgraph) cudaGraphDestroy(cgraph);
     free(hple);
     if (dKc) { for (int L = 0; L < NL; L++) if (dKc[L]) cudaFree(dKc[L]); free(dKc); }
-    if (d_xbar_K) cudaFree(d_xbar_K); if (d_xbar_V) cudaFree(d_xbar_V); if (xbar_off) free(xbar_off);  /* P3.1 recall store */
+    if (d_xbar_K) cudaFree(d_xbar_K); if (d_xbar_V) cudaFree(d_xbar_V); if (xbar_off) free(xbar_off); sp_xbar_manifest_free(&xmf);  /* P3.1/b recall store */
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
     if (dnll) cudaFree(dnll);
     free(probe_xs);
