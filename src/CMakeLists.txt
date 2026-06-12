@@ -123,6 +123,7 @@ if(SP_ENGINE_WITH_CUDA)
     add_library(sp_engine_cuda STATIC
         backends/cuda/cuda_backend.cu
         backends/cuda/cuda_forward.cu
+        ${CMAKE_SOURCE_DIR}/lib/shannon-prime-system/core/xbar/xbar_episode.c  # XBAR P3.1b: episode manifest serializer
     )
     set_target_properties(sp_engine_cuda PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
