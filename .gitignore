@@ -103,3 +103,6 @@ _run_p31*.bat
 build_p31*.log
 run_p31*.log
 _p31_ep/
+
+build_*.log
+run_*.log
