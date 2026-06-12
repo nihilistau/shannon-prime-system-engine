@@ -615,6 +615,38 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
         }
     }
 
+    /* ════ E_G4_CU_SWA (XBAR P3.2-b-2a): SWA ring-buffer shrink bit-exact gate ════
+     * SWA owners shrink to a W-slot ring (W = SP_XBAR_SWA_W); the ring decode must
+     * be token-identical to the full-cache decode at the SAME window. With W=4 and
+     * P=16 the ring wraps and evicts, exercising the shrink cheaply. Globals are
+     * untouched (they attend all positions — that's P3.2-b-2b's job). */
+    {
+        const char *sg = getenv("SP_XBAR_SWA_GATE");
+        if (sg && atoi(sg) > 0) {
+            enum { SNP = 4, SNG = 12, SPT = SNP + SNG };
+            const int32_t sp_[SNP] = { 2, 10, 100, 1000 };
+            const char *w = getenv("SP_XBAR_SWA_W"); if (!w) w = "4";
+            char ev[600];
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=1");
+            snprintf(ev, sizeof(ev), "SP_XBAR_SWA_W=%s", w); _putenv(ev);   /* window override for BOTH decodes */
+            int32_t ref[SPT]; for (int i = 0; i < SNP; i++) ref[i] = sp_[i];
+            int dnr = gemma4_decode_cuda(m, ref, SNP, SNG, -1);             /* full cache, window w */
+            int32_t rng[SPT]; for (int i = 0; i < SNP; i++) rng[i] = sp_[i];
+            _putenv("SP_XBAR_SWA_RING=1");
+            int dng = gemma4_decode_cuda(m, rng, SNP, SNG, -1);             /* SWA owners = ring of w slots */
+            _putenv("SP_XBAR_SWA_RING="); _putenv("SP_XBAR_SWA_W=");
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+            int diffs = 0, n = (dnr < dng ? dnr : dng); if (n > SPT) n = SPT;
+            for (int i = SNP; i < n; i++) if (ref[i] != rng[i]) diffs++;
+            fprintf(stderr, "    [g4-cuda-SWA] W=%s  full dn=%d  ring dn=%d  diffs[%d..%d)=%d\n", w, dnr, dng, SNP, SPT, diffs);
+            fprintf(stderr, "        full:"); for (int i = 0; i < SPT; i++) fprintf(stderr, " %d", ref[i]); fprintf(stderr, "\n");
+            fprintf(stderr, "        ring:"); for (int i = 0; i < SPT; i++) fprintf(stderr, " %d", rng[i]); fprintf(stderr, "\n");
+            SP_CHECK(dnr == SPT && dng == SPT, "P3.2-b-2a: both decodes produced full length");
+            SP_CHECK(diffs == 0, "P3.2-b-2a SWA ring: ring decode == full-cache windowed decode (bit-exact)");
+            return SP_DONE();
+        }
+    }
+
     /* ════ E_G4_CU_DEC_5B (ETA.5b): THE VELOCITY GATES — graph capture + dp4a.
      * Four decode runs over the same prompt, 256-token window:
      *   ref   : knobs-off (the oracle-gated lift path above)

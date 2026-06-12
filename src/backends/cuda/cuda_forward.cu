@@ -268,6 +268,50 @@ __global__ void k_attn_decode_win(const float *q, const float *Kc, const float *
     }
 }
 
+/* XBAR P3.2-b-2a: windowed decode attention over a RING cache of `Wring` slots.
+ * The cache holds the most-recent positions: absolute position p lives at slot
+ * p % Wring. We iterate the in-window positions [s0, ctx) in POSITION ORDER —
+ * logical index j -> slot (s0+j) % Wring — so the per-thread work and the single-
+ * thread softmax reduction are byte-for-byte identical to k_attn_decode_win over
+ * a full cache (same scores, same max, same exp-sum order, same V-weighted sum).
+ * Bit-exactness is the gate (G-P3-R2.b-2a). Shared = wl floats (the window len). */
+__global__ void k_attn_decode_ring(const float *q, const float *Kc, const float *Vc,
+                                   int ctx, int KVD, int HD, int group, float ascale,
+                                   int win, int Wring, float *ao) {
+    extern __shared__ float sc[];
+    int h = blockIdx.x, kvh = h / group;
+    int pos = ctx - 1;
+    int s0 = (win >= 0 && pos - win + 1 > 0) ? pos - win + 1 : 0;
+    int wl = ctx - s0;                                  /* in-window length, <= Wring */
+    const float *qh = q + (size_t)h * HD;
+    for (int j = threadIdx.x; j < wl; j += blockDim.x) {
+        int slot = (s0 + j) % Wring;                    /* position s0+j -> ring slot */
+        const float *kh = Kc + (size_t)slot * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[j] = acc * ascale;
+    }
+    __syncthreads();
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float mx = sc[0];
+        for (int j = 1; j < wl; j++) if (sc[j] > mx) mx = sc[j];
+        float sum = 0.0f;
+        for (int j = 0; j < wl; j++) { float e = expf(sc[j] - mx); sc[j] = e; sum += e; }
+        g_sum = sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int j = 0; j < wl; j++) {
+            int slot = (s0 + j) % Wring;
+            acc += sc[j] * Vc[(size_t)slot * KVD + (size_t)kvh * HD + i];
+        }
+        ao[(size_t)h * HD + i] = acc * inv;
+    }
+}
+
 /* ETA.2 (Gemma4): final-logit softcap, z = tanh(z/cap)*cap (gemma4.c). Applied
  * to the LM-head logits ONLY — gemma4 has NO attention-score cap (that was
  * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
@@ -1639,6 +1683,22 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const qwen3_config *c = &m->cfg;
     const int E = (int)c->n_embd, NL = (int)c->n_layers, SW = (int)c->sliding_window;
     const int V = (int)c->n_vocab, P = n_prompt + n_gen;
+    /* XBAR P3.2-b-2a SWA ring shrink: SWA owners attend only the sliding window,
+     * so the live cache only needs W slots (ring) — write pos -> slot pos%Wring,
+     * evicting the position that just left the window. Bit-exact to the full cache
+     * because (a) the attended position SET is identical and (b) the ring kernel
+     * iterates in POSITION order (logical j -> slot (s0+j)%Wring), preserving the
+     * fp reduction order. NO disk paging (the window is always live — that's the
+     * whole point of SWA; the two-source-with-staging kernel is the GLOBALS' job,
+     * b-2b). SP_XBAR_SWA_RING=1 enables the ring; SP_XBAR_SWA_W=<w> overrides the
+     * window (applies to BOTH the full-cache baseline and the ring, so the gate can
+     * exercise wrap+eviction cheaply at small P). Both off = current full cache. */
+    const char *swa_w_e = getenv("SP_XBAR_SWA_W");
+    const int   swa_w_ovr = swa_w_e ? atoi(swa_w_e) : 0;        /* 0 = use model SW */
+    const int   ws  = (swa_w_ovr > 0) ? swa_w_ovr : SW;         /* effective SWA window */
+    const int   swa_ring = (getenv("SP_XBAR_SWA_RING") != NULL);
+    const int   Wring = (ws < P) ? ws : P;                      /* ring slots (degenerates to P when no eviction) */
+    const int   swa_active = (swa_ring || swa_w_ovr > 0);       /* either knob forces the per-step path */
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -1847,12 +1907,14 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         if (cudaMalloc(&dqx, npad) != cudaSuccess) { sp_set_error("g4 dqx OOM"); goto done; }
         G4D(dsx, npad >> 4);
     }
-    /* the JAGGED cache: owners only, per-layer width */
+    /* the JAGGED cache: owners only, per-layer width. P3.2-b-2a: SWA owners shrink
+     * to a Wring-slot ring (globals keep the full P — they attend all positions). */
     for (int L = 0; L < kvfs && L < NL; L++) {
         const int global = ((L % period) == period - 1);
         const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
-        G4D(dKc[L], (size_t)P * kvd);
-        G4D(dVc[L], (size_t)P * kvd);
+        const size_t slots = (swa_ring && !global) ? (size_t)Wring : (size_t)P;
+        G4D(dKc[L], slots * kvd);
+        G4D(dVc[L], slots * kvd);
     }
     #undef G4D
     /* XBAR P3.1 / P3.1b (§P3.1): recall episode store. SELFTEST mirrors the live KV into a
@@ -2013,7 +2075,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * step) + fixed attn shm (P floats) within the 48KB sm_75 default. */
     {
         const char *ge = getenv("SP_CUDA_DECODE_GRAPH");
-        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on && !xbar_hist_on && !spill_on;  /* XBAR / P3.1-recall / P3.1b-2-history / P3.2a-spill = per-step only */
+        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on && !xbar_hist_on && !spill_on && !swa_active;  /* XBAR / recall / history / spill / SWA-ring = per-step only */
         const size_t attn_shm = (size_t)P * sizeof(float);
         if (use_graph && attn_shm <= 48u*1024u && n_gen > 0 && (!PL || dev_ple)) {
             cublasSetStream(cb, st);
@@ -2329,7 +2391,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             const int grp = nh / nkv, qd = nh * hd, kvd = nkv * hd;
             const float rbase = global ? g_base : s_base;
             const float *ffac = global ? g_w.rope_freqs : NULL;
-            const int win = global ? -1 : SW;
+            const int win = global ? -1 : ws;   /* P3.2-b-2a: ws = SW, or the SP_XBAR_SWA_W override */
             const int ffL = g_w.Wgate[L].out;
 
             k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
@@ -2347,8 +2409,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 if (ffac) k_rope_freqs_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, rbase, ffac, pos);
                 else      k_rope_at<<<nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, pos);
                 k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(dv, nkv, hd, kvd, eps);
-                cudaMemcpyAsync(dKc[L] + (size_t)pos*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
-                cudaMemcpyAsync(dVc[L] + (size_t)pos*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                /* P3.2-b-2a: SWA owners write into the ring at slot pos%Wring (evicting
+                 * the position that just left the window); globals write at pos. */
+                const size_t wslot = (swa_ring && !global) ? (size_t)(pos % Wring) : (size_t)pos;
+                cudaMemcpyAsync(dKc[L] + wslot*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(dVc[L] + wslot*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 Kuse = dKc[L]; Vuse = dVc[L];
                 if (xbar_recall_on) {   /* P3.1: read attention from the episode store @ off[L] */
                     if (xbar_mirror) {  /* SELFTEST/WRITE: mirror the live KV into the store first; LOAD reads disk as-is */
@@ -2365,9 +2430,16 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     { Kuse = (float *)(d_xbar_K + xbar_off[L]); Vuse = (float *)(d_xbar_V + xbar_off[L]); }
             }
             {   const int ctx = pos + 1;
-                int bd = hd > ctx ? hd : ctx; if (bd > 1024) bd = 1024;
-                k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
-                    dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao); }
+                if (swa_ring && !global && !xbar_recall_on) {   /* P3.2-b-2a: ring read, window-only */
+                    const int wl = (ctx < ws) ? ctx : ws;       /* in-window length present in the ring */
+                    int bd = hd > wl ? hd : wl; if (bd > 1024) bd = 1024;
+                    k_attn_decode_ring<<<nh, bd, (size_t)wl*sizeof(float), st>>>(
+                        dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, Wring, dao);
+                } else {
+                    int bd = hd > ctx ? hd : ctx; if (bd > 1024) bd = 1024;
+                    k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
+                        dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao);
+                } }
             MMD(&g_w.Wo[L], dao, dap);
             k_rmsnorm<<<1, 256, 0, st>>>(dap, g_w.post_attn[L], E, eps, dnx);
             k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
