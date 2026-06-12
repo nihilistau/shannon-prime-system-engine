@@ -1706,6 +1706,16 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * when SP_XBAR_SPILL unset. */
     sp_arm_ring2_backend spill_be; spill_be.handle=NULL; spill_be.close=NULL; spill_be.write_block=NULL; spill_be.read_block=NULL;
     int spill_on=0; size_t *spill_off=NULL; size_t spill_store_bytes=0; float *spill_hK=NULL, *spill_hV=NULL;
+    /* XBAR P3.2-b-1 paged-read (recall the spilled history off Ring-2 during LIVE
+     * generation): SP_XBAR_PAGE=dir implies spill, and additionally — per step,
+     * BEFORE attention — restores `[0,pos)` for every owner from the Ring-2 store
+     * into the live cache, then AFTER the step POISONS `[0,pos]` (zeros it). The
+     * poison makes the gate non-hollow: the live cache provably cannot be the
+     * attention source, so a bit-identical output proves the bytes came off disk
+     * through `off[L]`. Closed loop = write-path (spill) ∘ read-path (off[L] read).
+     * NOTE: this does NOT shrink allocation (global layers attend all positions —
+     * true shrink needs the sparse-recall router, P3.2-b-2). Byte-inert off. */
+    int page_on=0; float *page_hK=NULL, *page_hV=NULL; size_t page_owner_bytes=0;
     cudaGraph_t cgraph=NULL; cudaGraphExec_t cexec=NULL;
     int rc=-1, n=n_prompt;
     /* SP_G4_DEC_PROBE=<pos>: ETA.5b bug-hunt — intercept the step at <pos>:
@@ -1953,26 +1963,36 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * owner block but are never spilled. Per-pos staging = one position across all
      * owners (= store_bytes/P) so the per-step path is one batched D2H + one sync. */
     const char *xbar_spill_e = getenv("SP_XBAR_SPILL");
+    const char *xbar_page_e  = getenv("SP_XBAR_PAGE");   /* P3.2-b-1: page implies spill */
+    const char *xbar_store_dir = xbar_page_e ? xbar_page_e : xbar_spill_e;
     size_t spill_pos_bytes = 0;
-    if (xbar_spill_e) {
+    if (xbar_store_dir) {
         spill_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
         if (!spill_off) { sp_set_error("xbar spill off OOM"); goto done; }
-        size_t acc = 0, pacc = 0;
+        size_t acc = 0, pacc = 0, maxkvd = 0;
         for (int L = 0; L < NL; L++) {
             const int global = ((L % period) == period - 1);
-            const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
-            if (L < kvfs) { spill_off[L] = acc; acc += (size_t)P * kvd * 4; pacc += (size_t)kvd * 4; }
+            const size_t kvd = (size_t)(global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+            if (L < kvfs) { spill_off[L] = acc; acc += (size_t)P * kvd * 4; pacc += kvd * 4; if (kvd > maxkvd) maxkvd = kvd; }
             else          { const int src = kvfs - (global ? 1 : 2);
                             if (src < 0 || src >= kvfs) { sp_set_error("xbar spill bad owner"); goto done; }
                             spill_off[L] = spill_off[src]; }
         }
         spill_store_bytes = acc; spill_pos_bytes = pacc;
-        if (sp_arm_ring2_stdio_open(xbar_spill_e, &spill_be)) { sp_set_error("xbar spill: ring2 stdio open"); goto done; }
+        if (sp_arm_ring2_stdio_open(xbar_store_dir, &spill_be)) { sp_set_error("xbar spill: ring2 stdio open"); goto done; }
         if (cudaHostAlloc((void **)&spill_hK, spill_pos_bytes, cudaHostAllocDefault) != cudaSuccess ||
             cudaHostAlloc((void **)&spill_hV, spill_pos_bytes, cudaHostAllocDefault) != cudaSuccess) { sp_set_error("xbar spill staging OOM"); goto done; }
         spill_on = 1;
-        fprintf(stderr, "    [xbar-p3.2a] shadow spill ON: store %.1f MiB over %d owners -> %s (per-step owner K/V, Ring-2 stdio)\n",
-                (double)spill_store_bytes / 1048576.0, kvfs, xbar_spill_e);
+        if (xbar_page_e) {   /* P3.2-b-1: also alloc the per-owner page-in staging (largest owner region) */
+            page_owner_bytes = (size_t)P * maxkvd * 4;
+            if (cudaHostAlloc((void **)&page_hK, page_owner_bytes, cudaHostAllocDefault) != cudaSuccess ||
+                cudaHostAlloc((void **)&page_hV, page_owner_bytes, cudaHostAllocDefault) != cudaSuccess) { sp_set_error("xbar page staging OOM"); goto done; }
+            page_on = 1;
+        }
+        fprintf(stderr, "    [xbar-p3.2%s] %s ON: store %.1f MiB over %d owners -> %s%s\n",
+                page_on ? "b1" : "a", page_on ? "paged-read (spill+poison+page-in)" : "shadow spill",
+                (double)spill_store_bytes / 1048576.0, kvfs, xbar_store_dir,
+                page_on ? " (per-step recall off disk, live source POISONED)" : " (per-step owner K/V, Ring-2 stdio)");
     }
 
     /* prompt into VRAM once; dpos = 0 */
@@ -2172,6 +2192,25 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     /* ───────── per-step path (the ETA.5a oracle stack, device-fed) ───────── */
     for (int pos = 0; pos < P - 1; pos++) {
         if (xbar_hist_on && pos < xbar_hist_H) continue;   /* P3.1b-2: episode KV pre-loaded @ [0,H); skip its forward */
+        /* ── XBAR P3.2-b-1 PAGE-IN: restore [0,pos) for every owner from the Ring-2
+         * store (those positions were spilled + then POISONED on prior steps), so
+         * this step's attention reads its own history back off disk. read_block →
+         * pinned host → H2D, synced per owner (page_hK/hV reused). [0,pos) of owner L
+         * is contiguous at off[L]. Sharers ride the owner block (transitive). ── */
+        if (page_on && pos > 0) {
+            for (int L = 0; L < kvfs && L < NL; L++) {
+                const int global = ((L % period) == period - 1);
+                const size_t kvd = (size_t)(global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+                const size_t nb = (size_t)pos * kvd * 4;
+                if (spill_be.read_block(spill_be.handle, 0, (uint64_t)spill_off[L], page_hK, nb) ||
+                    spill_be.read_block(spill_be.handle, 1, (uint64_t)spill_off[L], page_hV, nb)) {
+                    sp_set_error("xbar page: read_block"); goto done; }
+                cudaMemcpyAsync(dKc[L], page_hK, nb, cudaMemcpyHostToDevice, st);
+                cudaMemcpyAsync(dVc[L], page_hV, nb, cudaMemcpyHostToDevice, st);
+                cudaError_t e = cudaStreamSynchronize(st);   /* page_hK/hV reused next owner */
+                if (e != cudaSuccess) { fail_cuda(e, "xbar page H2D sync"); goto done; }
+            }
+        }
         const int gen_here = (pos >= n_prompt - 1);
 
         /* XBAR-P1: at the START of step AT, act on cache row ROW. Order is
@@ -2403,6 +2442,20 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             }
         }
 
+        /* ── XBAR P3.2-b-1 POISON: this step's positions [0,pos] are now on disk
+         * (spilled above); zero them in the live cache so the NEXT step is forced
+         * to page them back from Ring-2. Makes the gate non-hollow — a bit-exact
+         * output then proves attention read off disk, not a stale live copy. ── */
+        if (page_on) {
+            for (int L = 0; L < kvfs && L < NL; L++) {
+                const int global = ((L % period) == period - 1);
+                const size_t kvd = (size_t)(global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
+                const size_t nb = (size_t)(pos + 1) * kvd * 4;
+                cudaMemsetAsync(dKc[L], 0, nb, st);
+                cudaMemsetAsync(dVc[L], 0, nb, st);
+            }
+        }
+
         /* XBAR-P1 Arm-B ammunition: dump the final-layer residual x (post all
          * layers + oscale, PRE out_norm) at step ROW — the donor concept
          * token's residual, E raw f32. */
@@ -2608,6 +2661,7 @@ done:
     if (d_xbar_K) cudaFree(d_xbar_K); if (d_xbar_V) cudaFree(d_xbar_V); if (xbar_off) free(xbar_off); sp_xbar_manifest_free(&xmf);  /* P3.1/b recall store */
     if (spill_on && spill_be.close) spill_be.close(spill_be.handle);  /* P3.2-a Ring-2 spill store */
     if (spill_off) free(spill_off); if (spill_hK) cudaFreeHost(spill_hK); if (spill_hV) cudaFreeHost(spill_hV);
+    if (page_hK) cudaFreeHost(page_hK); if (page_hV) cudaFreeHost(page_hV);  /* P3.2-b-1 page-in staging */
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
     if (dnll) cudaFree(dnll);
     free(probe_xs);
@@ -3156,4 +3210,126 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
                     cudaMemcpyAsync(dVc+koff, dv, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
                     const int ctx=pos+1; int bd=HD>ctx?HD:ctx; if(bd>1024)bd=1024;
                     k_attn_decode<<<NH,bd,(size_t)ctx*sizeof(float),st>>>(dq,dKc,dVc,ctx,KVD,HD,group,ascale,loff,dao);
-                    M
+                    MM(&g_w.Wo[L],dao,dap);
+                    k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
+                    k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+                    MM(&g_w.Wgate[L],dnx,dg);
+                    MM(&g_w.Wup[L],dnx,dup);
+                    k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
+                    MM(&g_w.Wdown[L],dg,ddn);
+                    k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
+                }
+            }
+            /* seed dpos = n_prompt-1 (the last prompt token generates the first new one) */
+            { int p0=n_prompt-1; if(cudaMemcpyAsync(dpos,&p0,sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){sp_set_error("dpos seed");goto done;} }
+            cublasSetStream(cb, st);
+            /* ── capture ONE generate step ── */
+            if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal)!=cudaSuccess){sp_set_error("begin capture");goto done;}
+            { dim3 grid(1,(E+255)/256); k_embed_at<<<grid,256,0,st>>>(g_w.embd,dseq,dpos,E,dx); }
+            for (int L=0; L<NL; L++) {
+                const size_t loff=(size_t)L*P*KVD;
+                k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+                MM(&g_w.Wq[L],dnx,dq);
+                MM(&g_w.Wk[L],dnx,dk);
+                MM(&g_w.Wv[L],dnx,dv);
+                k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
+                k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
+                k_rope_dyn<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, dpos);
+                k_rope_dyn<<<NKV,HD/2,0,st>>>(dk, NKV, HD, KVD, base, dpos);
+                k_kv_store<<<(unsigned)((KVD+255)/256),256,0,st>>>(dKc,dVc,dk,dv,dpos,loff,KVD);
+                int bd=HD>256?HD:256; if(bd>1024)bd=1024;
+                k_attn_decode_dyn<<<NH,bd,attn_shm,st>>>(dq,dKc,dVc,dpos,KVD,HD,group,ascale,loff,dao);
+                MM(&g_w.Wo[L],dao,dap);
+                k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
+                k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+                MM(&g_w.Wgate[L],dnx,dg);
+                MM(&g_w.Wup[L],dnx,dup);
+                k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
+                MM(&g_w.Wdown[L],dg,ddn);
+                k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
+            }
+            k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
+            MM(&g_w.head,dnx,dlog);
+            k_argmax_at<<<1,256,0,st>>>(dlog, V, dseq, dpos);   /* writes dseq[*dpos+1] */
+            k_incr_pos<<<1,1,0,st>>>(dpos);
+            if (cudaStreamEndCapture(st,&cgraph)!=cudaSuccess){sp_set_error("end capture");goto done;}
+            if (cudaGraphInstantiate(&cexec,cgraph,NULL,NULL,0)!=cudaSuccess){sp_set_error("graph instantiate");goto done;}
+            /* ── replay per token ── */
+            for (int g=0; g<n_gen; g++) {
+                if (cudaGraphLaunch(cexec,st)!=cudaSuccess){sp_set_error("graph launch");goto done;}
+                n = n_prompt + g + 1;
+                if (eos_id>=0) {
+                    int tok=-1;
+                    if (cudaMemcpyAsync(&tok,dseq+n-1,sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("eos D2H");goto done;}
+                    { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"eos sync");goto done;} }
+                    if (tok==eos_id) break;
+                }
+            }
+            goto download;
+        }
+    }
+
+    for (int pos=0; pos<P-1; pos++) {
+        /* embed reads dseq[pos] in place — the previous step's argmax already
+         * wrote it on-device; no host round-trip. */
+        { dim3 grid(1,(E+255)/256); k_embed_scale<<<grid,256,0,st>>>(g_w.embd,dseq+pos,1,E,1.0f,dx); }
+        for (int L=0; L<NL; L++) {
+            k_rmsnorm<<<1,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+            MM(&g_w.Wq[L],dnx,dq);
+            MM(&g_w.Wk[L],dnx,dk);
+            MM(&g_w.Wv[L],dnx,dv);
+            k_rmsnorm_head<<<NH,HD,0,st>>>(dq, g_w.q_norm[L], NH, HD, QD, eps);
+            k_rmsnorm_head<<<NKV,HD,0,st>>>(dk, g_w.k_norm[L], NKV, HD, KVD, eps);
+            k_rope_at<<<NH,HD/2,0,st>>>(dq, NH, HD, QD, base, pos);
+            k_rope_at<<<NKV,HD/2,0,st>>>(dk, NKV, HD, KVD, base, pos);
+            /* write the finalized K/V into the persistent cache at (L,pos) */
+            const size_t loff=(size_t)L*P*KVD, koff=loff+(size_t)pos*KVD;
+            cudaMemcpyAsync(dKc+koff, dk, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            cudaMemcpyAsync(dVc+koff, dv, (size_t)KVD*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            const int ctx=pos+1;
+            int bd=HD>ctx?HD:ctx; if(bd>1024)bd=1024;
+            k_attn_decode<<<NH,bd,(size_t)ctx*sizeof(float),st>>>(dq,dKc,dVc,ctx,KVD,HD,group,ascale,loff,dao);
+            MM(&g_w.Wo[L],dao,dap);
+            k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,dap,(size_t)E);
+            k_rmsnorm<<<1,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+            MM(&g_w.Wgate[L],dnx,dg);
+            MM(&g_w.Wup[L],dnx,dup);
+            k_silu_mul<<<(unsigned)(((size_t)FF+255)/256),256,0,st>>>(dg,dup,(size_t)FF);
+            MM(&g_w.Wdown[L],dg,ddn);
+            k_add<<<(unsigned)((E+255)/256),256,0,st>>>(dx,ddn,(size_t)E);
+        }
+        if (pos < n_prompt-1) continue;            /* still ingesting the prompt */
+        k_rmsnorm<<<1,256,0,st>>>(dx, g_w.out_norm, E, eps, dnx);
+        MM(&g_w.head,dnx,dlog);
+        /* DEVICE argmax → write the next token straight into dseq[pos+1]. The
+         * GPU feeds itself: no logits D2H, no per-step stream sync (eos=-1). */
+        k_argmax<<<1,256,0,st>>>(dlog, V, dseq+pos+1);
+        n=pos+2;
+        if (eos_id>=0) {                           /* eos needs the token host-side */
+            int tok=-1;
+            if (cudaMemcpyAsync(&tok,dseq+pos+1,sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("eos D2H");goto done;}
+            { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"eos sync");goto done;} }
+            if (tok==eos_id) break;
+        }
+    }
+download:
+    /* single sequence download at the end */
+    if (cudaMemcpyAsync(seq,dseq,(size_t)n*sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("seq D2H");goto done;}
+    { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"decode sync");goto done;} }
+    { cudaError_t e=cudaGetLastError(); if(e!=cudaSuccess){fail_cuda(e,"decode kernel");goto done;} }
+    rc=n;
+done:
+    if(dKc)cudaFree(dKc); if(dVc)cudaFree(dVc);
+    if(dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
+    if(dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
+    if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dseq)cudaFree(dseq);
+    if(dpos)cudaFree(dpos); if(dqx)cudaFree(dqx); if(dsx)cudaFree(dsx);
+    if(cexec)cudaGraphExecDestroy(cexec); if(cgraph)cudaGraphDestroy(cgraph);
+    #undef DA
+    #undef MM
+    return rc;
+}
+
+extern "C" void sp_cuda_model_release(const qwen3_model *m) {
+    if (g_w.key == m) free_weights(&g_w);
+}

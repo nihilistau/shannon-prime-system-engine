@@ -583,6 +583,38 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
         }
     }
 
+    /* ════ E_G4_CU_PAGE (XBAR P3.2-b-1): paged-read bit-exact gate ════
+     * legacy full-cache decode vs SP_XBAR_PAGE decode (per step: spill pos →
+     * poison [0,pos] in the live cache → page [0,pos) back off Ring-2 before
+     * attention). Token-identical proves the attention reads were served off disk
+     * through off[L] — the live cache is provably poisoned, so it can't be the
+     * source. The CLOSED loop = write-path (spill) ∘ read-path (off[L] read). */
+    {
+        const char *pg = getenv("SP_XBAR_PAGE_GATE");
+        if (pg && atoi(pg) > 0) {
+            enum { PNP = 4, PNG = 12, PPT = PNP + PNG };
+            const int32_t pp[PNP] = { 2, 10, 100, 1000 };
+            const char *dir = getenv("SP_XBAR_PAGE_DIR"); if (!dir) dir = "_p32_page";
+            char ev[600];
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=1");
+            int32_t ref[PPT]; for (int i = 0; i < PNP; i++) ref[i] = pp[i];
+            int dnr = gemma4_decode_cuda(m, ref, PNP, PNG, -1);   /* legacy full-cache */
+            int32_t pag[PPT]; for (int i = 0; i < PNP; i++) pag[i] = pp[i];
+            snprintf(ev, sizeof(ev), "SP_XBAR_PAGE=%s", dir); _putenv(ev);
+            int dnp = gemma4_decode_cuda(m, pag, PNP, PNG, -1);   /* paged off Ring-2, source poisoned */
+            _putenv("SP_XBAR_PAGE=");
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+            int diffs = 0, n = (dnr < dnp ? dnr : dnp); if (n > PPT) n = PPT;
+            for (int i = PNP; i < n; i++) if (ref[i] != pag[i]) diffs++;
+            fprintf(stderr, "    [g4-cuda-PAGE] ref dn=%d  paged dn=%d  diffs[%d..%d)=%d\n", dnr, dnp, PNP, PPT, diffs);
+            fprintf(stderr, "        ref :"); for (int i = 0; i < PPT; i++) fprintf(stderr, " %d", ref[i]); fprintf(stderr, "\n");
+            fprintf(stderr, "        page:"); for (int i = 0; i < PPT; i++) fprintf(stderr, " %d", pag[i]); fprintf(stderr, "\n");
+            SP_CHECK(dnr == PPT && dnp == PPT, "P3.2-b-1: both decodes produced full length");
+            SP_CHECK(diffs == 0, "P3.2-b-1 paged-read: paged decode == legacy (bit-exact, live source poisoned)");
+            return SP_DONE();
+        }
+    }
+
     /* ════ E_G4_CU_DEC_5B (ETA.5b): THE VELOCITY GATES — graph capture + dp4a.
      * Four decode runs over the same prompt, 256-token window:
      *   ref   : knobs-off (the oracle-gated lift path above)
