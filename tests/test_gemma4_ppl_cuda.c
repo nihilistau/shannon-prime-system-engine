@@ -38,11 +38,15 @@
 #include <stdlib.h>
 #include <math.h>
 
+/* Default = the OK_Q4B (recipe B1) artifact, the one the PPL gate is calibrated on
+ * (wiki.tiny @ n_ctx=84 -> PPL 4.6665, == the bf16 gold 4.6776). The plain
+ * gemma4-12b.sp-model path is the COARSE per-row QAT variant (PPL ~7.4M — it fails
+ * a teacher-forced score) and must NOT be the PPL default. Override via SP_GEMMA4_SPMODEL. */
 #ifndef SP_GEMMA4_SPMODEL_DEF
-#define SP_GEMMA4_SPMODEL_DEF "D:/F/shannon-prime-repos/models/gemma4-12b.sp-model"
+#define SP_GEMMA4_SPMODEL_DEF "D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model"
 #endif
 #ifndef SP_GEMMA4_SPTOK_DEF
-#define SP_GEMMA4_SPTOK_DEF "D:/F/shannon-prime-repos/models/gemma4-12b.sp-tokenizer"
+#define SP_GEMMA4_SPTOK_DEF "D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-tokenizer"
 #endif
 
 int  sp_cuda_device_count(void);
