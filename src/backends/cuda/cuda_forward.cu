@@ -3271,6 +3271,267 @@ done:
     return rc;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * KAI-1b METAL EVICTION — persistent-KV gemma4 decode + O(1) rewind.
+ *
+ * gemma4_decode_cuda (above) is ONE-SHOT (alloc cache → prefill+gen → free) and
+ * is left BYTE-FOR-BYTE UNTOUCHED (the null floor: every citable gate — 06-R10,
+ * X-R2, NIAH, KAIROS-01 — keeps running it unchanged). This is the resident
+ * twin: a persistent cache the KAIROS heartbeat appends to and shears.
+ *
+ *   gemma4_kv_open   → alloc resident KV (full cache, P=Pmax) + scratch, dpos=0
+ *   gemma4_kv_prefill→ forward n tokens, store K/V at [dpos,dpos+n), dpos+=n
+ *   gemma4_kv_decode → greedy-argmax n_gen steps, append to cache + dseq
+ *   gemma4_kv_rewind → O(1): dpos-=Δ (full cache slot=pos, so writes to [a,..)
+ *                       NEVER touch [0,a) ⇒ rewind is a perfect inverse, T8.1)
+ *   gemma4_kv_pos / gemma4_kv_close
+ *
+ * Per-position forward = the EXACT per-step oracle path (kernels + order copied
+ * from the generate step), using DEVICE dpos so cache writes land at the live
+ * position. Bit-exact to the one-shot split across calls because cache state at
+ * position p depends only on tokens [0,p], not on call chunking.
+ * Scope: FULL cache only (windowed attention via `win` handles SWA correctly);
+ * the SWA-ring/slab variants are a follow-on (they need wrap-aware rewind). ══ */
+struct sp_g4_kv {
+    const qwen3_model *m;
+    int   Pmax, dpos_host, use_int8, dev_ple;
+    int  *dseq, *dpos;
+    float **dKc, **dVc;
+    float *dx,*dnx,*dq,*dk,*dv,*dao,*dap,*dg,*dup,*ddn,*dscr,*dlog,*dipl,*dple,*dpg,*dpp;
+    signed char *dqx; float *dsx; float *hple;
+    /* cached geometry/scales */
+    int   E,NL,V,SW,period,kvfs,PL,NLPL,FFmax,QDmax,KVDmax;
+    int   g_nh,g_nkv,g_hd,s_nh,s_nkv,s_hd;
+    float g_base,s_base,eps,embscale,softcap;
+};
+
+extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
+
+/* one resident-cache forward step at the live dpos. do_head: run out_norm+head+
+ * argmax (writes dseq[dpos+1]) for a decode step; skip for a prefill ingest.
+ * Always: embed dseq[dpos] → PLE/AltUp → 48-layer stack (store K/V at dpos,
+ * windowed attention over [0,dpos]) → optional head → k_incr_pos. */
+static int g4_kv_step(sp_g4_kv *s, int do_head) {
+    const qwen3_model *m = s->m; const qwen3_config *c = &m->cfg;
+    cublasHandle_t cb = g_w.cublas; cudaStream_t st = g_w.stream;
+    const int E=s->E, NL=s->NL, V=s->V, SW=s->SW, period=s->period, kvfs=s->kvfs;
+    const int PL=s->PL, NLPL=s->NLPL;
+    const int g_nh=s->g_nh,g_nkv=s->g_nkv,g_hd=s->g_hd,s_nh=s->s_nh,s_nkv=s->s_nkv,s_hd=s->s_hd;
+    const float eps=s->eps, embscale=s->embscale, softcap=s->softcap;
+    const float g_base=s->g_base, s_base=s->s_base;
+    const int use_int8=s->use_int8;
+    int *dpos=s->dpos, *dseq=s->dseq;
+    float **dKc=s->dKc, **dVc=s->dVc;
+    const size_t attn_shm = (size_t)s->Pmax * sizeof(float);
+    #define KMMD(W,X,Y) do { if (!(use_int8 && gemv_w_packed(st,(W),(X),(Y),s->dqx,s->dsx))) { \
+        if (gemm_w_lift(cb, st, (W), (X), (Y), 1, s->dscr)) return -1; } } while (0)
+    /* embed dseq[dpos] (device position) */
+    if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
+        k_embed_scale_at<<<grid, 256, 0, st>>>(g_w.embd, dseq, dpos, E, embscale, s->dx); }
+    else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
+            g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
+            g_w.embd_packed.row_prec, dseq, dpos, E, embscale, s->dx);
+    if (PL) {
+        k_ple_gather_at<<<(unsigned)((NLPL+255)/256), 256, 0, st>>>(
+            g_w.pl_tok_embd.codes, g_w.pl_tok_embd.row_off, g_w.pl_tok_embd.row_scale,
+            g_w.pl_tok_embd.row_prec, dseq, dpos, NLPL, s->dple);
+        KMMD(&g_w.pl_model_proj, s->dx, s->dipl);
+        k_altup_ipl<<<NL, 256, 0, st>>>(s->dipl, s->dple, g_w.pl_proj_norm, PL,
+                                        1.0f / sqrtf((float)E), sqrtf((float)PL),
+                                        1.0f / sqrtf(2.0f), eps);
+    }
+    for (int L = 0; L < NL; L++) {
+        const int global = ((L % period) == period - 1);
+        const int nh = global ? g_nh : s_nh, nkv = global ? g_nkv : s_nkv;
+        const int hd = global ? g_hd : s_hd;
+        const int grp = nh / nkv, kvd = nkv * hd;
+        const float rbase = global ? g_base : s_base;
+        const float *ffac = global ? g_w.rope_freqs : NULL;
+        const int win = global ? -1 : SW;
+        const int ffL = g_w.Wgate[L].out;
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.attn_norm[L], E, eps, s->dnx);
+        KMMD(&g_w.Wq[L], s->dnx, s->dq);
+        k_rmsnorm_head<<<nh, 256, 0, st>>>(s->dq, g_w.q_norm[L], nh, hd, nh*hd, eps);
+        if (ffac) k_rope_freqs_dyn<<<nh, hd/2, 0, st>>>(s->dq, nh, hd, rbase, ffac, dpos);
+        else      k_rope_dyn<<<nh, hd/2, 0, st>>>(s->dq, nh, hd, nh*hd, rbase, dpos);
+        float *Kuse, *Vuse;
+        if (L < kvfs) {
+            KMMD(&g_w.Wk[L], s->dnx, s->dk);
+            if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { KMMD(&g_w.Wv[L], s->dnx, s->dv); }
+            else cudaMemcpyAsync(s->dv, s->dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            k_rmsnorm_head<<<nkv, 256, 0, st>>>(s->dk, g_w.k_norm[L], nkv, hd, kvd, eps);
+            if (ffac) k_rope_freqs_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, rbase, ffac, dpos);
+            else      k_rope_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, kvd, rbase, dpos);
+            k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(s->dv, nkv, hd, kvd, eps);
+            k_kv_store<<<(unsigned)((kvd+255)/256), 256, 0, st>>>(dKc[L], dVc[L], s->dk, s->dv, dpos, 0, kvd);
+            Kuse = dKc[L]; Vuse = dVc[L];
+        } else {
+            const int src = kvfs - (global ? 1 : 2);
+            Kuse = dKc[src]; Vuse = dVc[src];
+            if (!Kuse || !Vuse) { sp_set_error("g4_kv: sharer before owner"); return -1; }
+        }
+        {   int bd = hd > 256 ? hd : 256; if (bd > 1024) bd = 1024;
+            k_attn_decode_win_dyn<<<nh, bd, attn_shm, st>>>(
+                s->dq, Kuse, Vuse, dpos, kvd, hd, grp, 1.0f, win, s->dao); }
+        KMMD(&g_w.Wo[L], s->dao, s->dap);
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dap, g_w.post_attn[L], E, eps, s->dnx);
+        k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.ffn_norm[L], E, eps, s->dnx);
+        KMMD(&g_w.Wgate[L], s->dnx, s->dg);
+        KMMD(&g_w.Wup[L], s->dnx, s->dup);
+        k_gelu_mul<<<(unsigned)(((size_t)ffL+255)/256), 256, 0, st>>>(s->dg, s->dup, (size_t)ffL);
+        KMMD(&g_w.Wdown[L], s->dg, s->ddn);
+        k_rmsnorm<<<1, 256, 0, st>>>(s->ddn, g_w.post_ffw[L], E, eps, s->dnx);
+        k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        if (PL) {
+            KMMD(&g_w.Wplig[L], s->dx, s->dpg);
+            k_altup_gate<<<(unsigned)((PL+255)/256), 256, 0, st>>>(s->dpg, s->dipl, L, NL, PL, 1);
+            KMMD(&g_w.Wplproj[L], s->dpg, s->dpp);
+            k_rmsnorm<<<1, 256, 0, st>>>(s->dpp, g_w.pl_post_norm[L], E, eps, s->dnx);
+            k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        }
+        if (g_w.pl_out_scale && g_w.pl_out_scale[L])
+            k_scale_by_dev<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, (size_t)E, g_w.pl_out_scale[L]);
+    }
+    if (do_head) {
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.out_norm, E, eps, s->dnx);
+        if (g_w.head.f32 || g_w.head.codes) { KMMD(&g_w.head, s->dnx, s->dlog); }
+        else if (use_int8 && g_w.embd_packed.codes &&
+                 gemv_w_packed(st, &g_w.embd_packed, s->dnx, s->dlog, s->dqx, s->dsx)) { }
+        else { if (gemm(cb, g_w.embd, s->dnx, s->dlog, 1, E, V)) return -1; }
+        if (softcap > 0.0f)
+            k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(s->dlog, (size_t)V, softcap);
+        k_argmax_at<<<1, 256, 0, st>>>(s->dlog, V, dseq, dpos);   /* writes dseq[*dpos+1] */
+    }
+    k_incr_pos<<<1, 1, 0, st>>>(dpos);
+    (void)c;
+    #undef KMMD
+    return 0;
+}
+
+extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
+    if (!m || m->cfg.arch != SP_ARCH_GEMMA4 || Pmax <= 0) { sp_set_error("gemma4_kv_open: bad args"); return NULL; }
+    if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return NULL; }
+    const qwen3_config *c = &m->cfg;
+    sp_g4_kv *s = (sp_g4_kv *)calloc(1, sizeof(sp_g4_kv));
+    if (!s) { sp_set_error("gemma4_kv_open: host OOM"); return NULL; }
+    s->m = m; s->Pmax = Pmax; s->dpos_host = 0;
+    s->E=(int)c->n_embd; s->NL=(int)c->n_layers; s->V=(int)c->n_vocab; s->SW=(int)c->sliding_window;
+    s->period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
+    s->kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:s->NL;
+    s->PL=(int)c->g4_n_embd_per_layer; s->NLPL=s->NL*s->PL;
+    s->g_nh=(int)c->n_head; s->g_nkv=(int)c->n_head_kv; s->g_hd=(int)c->head_dim;
+    s->s_nh=(int)c->g4_nh_swa; s->s_nkv=(int)c->g4_nkv_swa; s->s_hd=(int)c->g4_hd_swa;
+    s->g_base=c->rope_freq_base; s->s_base=c->g4_rope_base_swa;
+    s->eps=c->rms_eps; s->embscale=sqrtf((float)s->E); s->softcap=c->g4_logit_softcap;
+    s->QDmax=(s->g_nh*s->g_hd>s->s_nh*s->s_hd)?s->g_nh*s->g_hd:s->s_nh*s->s_hd;
+    s->KVDmax=(s->g_nkv*s->g_hd>s->s_nkv*s->s_hd)?s->g_nkv*s->g_hd:s->s_nkv*s->s_hd;
+    s->FFmax=(int)c->n_ff; for (int L=0; L<s->NL; L++) if (g_w.Wgate[L].out>s->FFmax) s->FFmax=g_w.Wgate[L].out;
+    const char *i8e = getenv("SP_CUDA_DECODE_INT8");
+    s->use_int8 = (i8e && i8e[0]=='1') && m->arena!=NULL;
+    s->dev_ple = (s->PL && g_w.pl_tok_embd.codes!=NULL);
+    if (!(g_w.head.f32 || g_w.head.codes) && !g_w.embd && !(s->use_int8 && g_w.embd_packed.codes)) {
+        sp_set_error("gemma4_kv_open: tied head needs SP_CUDA_DECODE_INT8=1"); free(s); return NULL; }
+    int ok = 1;
+    #define KA(p,cnt) do { if (cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess) ok=0; } while(0)
+    if (cudaMalloc(&s->dseq,(size_t)Pmax*sizeof(int))!=cudaSuccess) ok=0;
+    if (cudaMalloc(&s->dpos,sizeof(int))!=cudaSuccess) ok=0;
+    cudaMemset(s->dpos, 0, sizeof(int));
+    KA(s->dx,s->E);KA(s->dnx,s->E);KA(s->dq,s->QDmax);KA(s->dk,s->KVDmax);KA(s->dv,s->KVDmax);
+    KA(s->dao,s->QDmax);KA(s->dap,s->E);KA(s->dg,s->FFmax);KA(s->dup,s->FFmax);KA(s->ddn,s->E);KA(s->dlog,s->V);
+    if (g_w.scratch_n) KA(s->dscr,g_w.scratch_n);
+    if (s->PL){ KA(s->dipl,s->NLPL);KA(s->dple,s->NLPL);KA(s->dpg,s->PL);KA(s->dpp,s->E); }
+    if (s->use_int8){ int mx=s->E; if(s->QDmax>mx)mx=s->QDmax; if(s->FFmax>mx)mx=s->FFmax;
+        size_t npad=(size_t)((mx+31)&~31);
+        if (cudaMalloc(&s->dqx,npad)!=cudaSuccess) ok=0; KA(s->dsx,npad>>4); }
+    /* the JAGGED cache — owners only, per-layer width; FULL P=Pmax (no ring, KAI-1b base). */
+    s->dKc=(float**)calloc((size_t)s->NL,sizeof(float*));
+    s->dVc=(float**)calloc((size_t)s->NL,sizeof(float*));
+    if (!s->dKc||!s->dVc) ok=0;
+    for (int L=0; ok && L<s->kvfs && L<s->NL; L++){
+        const int global=((L%s->period)==s->period-1);
+        const int kvd=(global?s->g_nkv:s->s_nkv)*(global?s->g_hd:s->s_hd);
+        KA(s->dKc[L],(size_t)Pmax*kvd); KA(s->dVc[L],(size_t)Pmax*kvd);
+    }
+    #undef KA
+    if (!ok) { sp_set_error("gemma4_kv_open: device OOM"); gemma4_kv_close(s); return NULL; }
+    return s;
+}
+
+extern "C" int gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n) {
+    if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_prefill: bad args"); return -1; }
+    if (s->dpos_host + n > s->Pmax) { sp_set_error("gemma4_kv_prefill: exceeds Pmax"); return -1; }
+    cudaStream_t st = g_w.stream;
+    if (cudaMemcpyAsync(s->dseq + s->dpos_host, toks, (size_t)n*sizeof(int),
+                        cudaMemcpyHostToDevice, st) != cudaSuccess) { sp_set_error("g4_kv prefill H2D"); return -1; }
+    for (int i = 0; i < n; i++) {                 /* every position: forward + store K/V; last runs the head */
+        if (g4_kv_step(s, /*do_head=*/(i == n - 1))) return -1;
+        s->dpos_host++;
+    }
+    cudaError_t e = cudaStreamSynchronize(st);
+    if (e != cudaSuccess) return fail_cuda(e, "g4_kv prefill sync");
+    return 0;
+}
+
+extern "C" int gemma4_kv_decode(sp_g4_kv *s, int n_gen, int32_t *out) {
+    if (!s || n_gen < 0) { sp_set_error("gemma4_kv_decode: bad args"); return -1; }
+    if (s->dpos_host + n_gen >= s->Pmax) { sp_set_error("gemma4_kv_decode: exceeds Pmax"); return -1; }
+    cudaStream_t st = g_w.stream;
+    for (int g = 0; g < n_gen; g++) {             /* process the just-predicted token, predict next */
+        if (g4_kv_step(s, /*do_head=*/1)) return -1;
+        s->dpos_host++;
+        if (out && cudaMemcpyAsync(&out[g], s->dseq + s->dpos_host, sizeof(int),
+                                   cudaMemcpyDeviceToHost, st) != cudaSuccess) { sp_set_error("g4_kv decode D2H"); return -1; }
+    }
+    cudaError_t e = cudaStreamSynchronize(st);
+    if (e != cudaSuccess) return fail_cuda(e, "g4_kv decode sync");
+    return 0;
+}
+
+/* O(1) cold-evict: shear the logical decode position back by delta. Full cache
+ * slot==pos ⇒ the sheared slots [dpos-delta, dpos) are never read (attention
+ * bounds at dpos) and are overwritten on the next prefill ⇒ rewind is a perfect
+ * inverse (the G-1b-REWIND-NULL invariant; T8.1 analog on the GPU). */
+extern "C" int gemma4_kv_rewind(sp_g4_kv *s, int delta) {
+    if (!s || delta < 0 || delta > s->dpos_host) { sp_set_error("gemma4_kv_rewind: bad delta"); return -1; }
+    s->dpos_host -= delta;
+    if (cudaMemcpy(s->dpos, &s->dpos_host, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("g4_kv rewind dpos H2D"); return -1; }
+    return 0;
+}
+
+extern "C" int gemma4_kv_pos(const sp_g4_kv *s) { return s ? s->dpos_host : -1; }
+
+/* D2H the live K/V cache for all owner layers into host buffers (the gate's
+ * byte-comparator). Caller passes pre-sized host arrays [NL][Pmax*kvd]; only
+ * owner layers (L<kvfs) are filled. Returns total bytes copied. */
+extern "C" long gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV) {
+    if (!s || !hK || !hV) return -1;
+    cudaStreamSynchronize(g_w.stream);
+    long bytes = 0;
+    for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+        const int global = ((L % s->period) == s->period - 1);
+        const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
+        size_t nb = (size_t)s->Pmax * kvd * sizeof(float);
+        if (hK[L] && cudaMemcpy(hK[L], s->dKc[L], nb, cudaMemcpyDeviceToHost) != cudaSuccess) return -1;
+        if (hV[L] && cudaMemcpy(hV[L], s->dVc[L], nb, cudaMemcpyDeviceToHost) != cudaSuccess) return -1;
+        bytes += 2 * (long)nb;
+    }
+    return bytes;
+}
+
+extern "C" void gemma4_kv_close(sp_g4_kv *s) {
+    if (!s) return;
+    if (s->dseq) cudaFree(s->dseq); if (s->dpos) cudaFree(s->dpos);
+    float *ptrs[] = {s->dx,s->dnx,s->dq,s->dk,s->dv,s->dao,s->dap,s->dg,s->dup,s->ddn,s->dscr,
+                     s->dlog,s->dipl,s->dple,s->dpg,s->dpp,s->dsx};
+    for (size_t i = 0; i < sizeof(ptrs)/sizeof(ptrs[0]); i++) if (ptrs[i]) cudaFree(ptrs[i]);
+    if (s->dqx) cudaFree(s->dqx);
+    if (s->dKc) { for (int L=0;L<s->NL;L++) if (s->dKc[L]) cudaFree(s->dKc[L]); free(s->dKc); }
+    if (s->dVc) { for (int L=0;L<s->NL;L++) if (s->dVc[L]) cudaFree(s->dVc[L]); free(s->dVc); }
+    free(s);
+}
+
 /* row-major GEMM Y[n_tok x out] = X[n_tok x in] * W^T (see file header). */
 static int gemm(cublasHandle_t h, const float *dW, const float *dX, float *dY,
                 int n_tok, int in, int out) {

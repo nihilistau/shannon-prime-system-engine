@@ -60,6 +60,15 @@ int  gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
                          float *logits);
 int  gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
                         int n_gen, int eos_id);
+/* KAI-1b persistent-KV ABI (cuda_forward.cu) — resident decode + O(1) rewind. */
+typedef struct sp_g4_kv sp_g4_kv;
+sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
+int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
+int   gemma4_kv_decode(sp_g4_kv *s, int n_gen, int32_t *out);
+int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
+int   gemma4_kv_pos(const sp_g4_kv *s);
+long  gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV);
+void  gemma4_kv_close(sp_g4_kv *s);
 void xbar_arm_shadow_result(long *mism, long *sel);   /* P3.2-b-2b Phase-1 oracle parity handoff */
 void sp_cuda_model_release(const qwen3_model *m);
 
@@ -288,6 +297,56 @@ static int run_kairos(void) {
     sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
     /* gate: zero false-actions AND zero missed-events = the cognitive crucible passed */
     return (false_act==0 && missed==0 && malformed==0) ? 0 : 3;
+}
+
+/* ═══ SP_G4_KV_REWIND=1 (KAI-1b G-1b-REWIND-NULL): the bit-exact rewind gate. ═══
+ * Prefill a system prefix (anchor), snapshot the cache; run an IDLE TICK (prefill
+ * frame + decode); rewind to the anchor; snapshot again. The [0,anchor) region MUST
+ * be byte-identical — rewind is a perfect inverse (the T8.1 analog on the GPU).
+ * EQUIV-lite: re-running the same idle tick after rewind reproduces the SAME
+ * generated tokens — the rewound cache is a perfect re-entry point ("never knew it
+ * waited"). Token ids are arbitrary-valid (semantics irrelevant to KV byte-identity). */
+static int run_kv_rewind(void) {
+    const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
+    const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle = NULL;
+    if (sp_model_load(spm, stk, &handle) != SP_OK || !handle) { fprintf(stderr, "[g4-kvrw] load FAIL\n"); return 2; }
+    qwen3_model *m = sp_model_to_gemma4(handle);
+    if (!m) { fprintf(stderr, "[g4-kvrw] to_gemma4 FAIL: %s\n", sp_last_error()); return 2; }
+    const qwen3_config *c = &m->cfg;
+    const int NL=(int)c->n_layers, period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
+    const int kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:NL;
+    const int g_nkv=(int)c->n_head_kv,g_hd=(int)c->head_dim,s_nkv=(int)c->g4_nkv_swa,s_hd=(int)c->g4_hd_swa;
+    const int Pmax=256, sys_n=24, frm_n=12, ngen=8;
+    sp_g4_kv *s=gemma4_kv_open(m,Pmax);
+    if(!s){ fprintf(stderr,"[g4-kvrw] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+    int32_t sys[24]; for(int i=0;i<sys_n;i++) sys[i]=100+i;
+    int32_t frm[12]; for(int i=0;i<frm_n;i++) frm[i]=500+i;
+    if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-kvrw] sys prefill FAIL: %s\n",sp_last_error()); return 2; }
+    int anchor=gemma4_kv_pos(s);
+    float **hK0=(float**)calloc(NL,sizeof(float*)),**hV0=(float**)calloc(NL,sizeof(float*));
+    float **hK1=(float**)calloc(NL,sizeof(float*)),**hV1=(float**)calloc(NL,sizeof(float*));
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        size_t nb=(size_t)Pmax*kvd*sizeof(float); hK0[L]=(float*)malloc(nb);hV0[L]=(float*)malloc(nb);hK1[L]=(float*)malloc(nb);hV1[L]=(float*)malloc(nb); }
+    gemma4_kv_snapshot(s,hK0,hV0);
+    int32_t gen1[8];
+    if(gemma4_kv_prefill(s,frm,frm_n)||gemma4_kv_decode(s,ngen,gen1)){ fprintf(stderr,"[g4-kvrw] tick1 FAIL: %s\n",sp_last_error()); return 2; }
+    int after=gemma4_kv_pos(s);
+    if(gemma4_kv_rewind(s,after-anchor)){ fprintf(stderr,"[g4-kvrw] rewind FAIL\n"); return 2; }
+    gemma4_kv_snapshot(s,hK1,hV1);
+    long diffs=0; size_t cmp_bytes=0;
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        size_t nb=(size_t)anchor*kvd*sizeof(float); cmp_bytes+=2*nb;
+        if(memcmp(hK0[L],hK1[L],nb)) diffs++; if(memcmp(hV0[L],hV1[L],nb)) diffs++; }
+    int32_t gen2[8]; int genmatch=1;
+    if(gemma4_kv_prefill(s,frm,frm_n)||gemma4_kv_decode(s,ngen,gen2)){ fprintf(stderr,"[g4-kvrw] tick2 FAIL\n"); return 2; }
+    for(int i=0;i<ngen;i++) if(gen1[i]!=gen2[i]) genmatch=0;
+    gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+    fprintf(stderr,"[g4-kvrw] anchor=%d after_tick=%d cmp=%zuB owners=%d\n",anchor,after,cmp_bytes,(kvfs<NL?kvfs:NL));
+    fprintf(stderr,"[g4-kvrw] REWIND-NULL: %s (layer-diffs=%ld) | EQUIV gen-reproduce: %s [%d %d %d %d ...]\n",
+        diffs==0?"GREEN":"RED",diffs, genmatch?"GREEN":"RED", gen1[0],gen1[1],gen1[2],gen1[3]);
+    gemma4_kv_close(s); sp_model_unload(handle);
+    return (diffs==0 && genmatch)?0:3;
 }
 
 /* GELU tanh approximation — verbatim gemma4.c g4_gelu (static in the oracle TU). */
@@ -1007,6 +1066,7 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
 int main(void) {
     if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
+    if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
     return SP_DONE();
 }
