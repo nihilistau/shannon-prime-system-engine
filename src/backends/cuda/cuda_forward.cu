@@ -1916,6 +1916,17 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const char *arm_lshr_path = getenv("SP_ARM_LSH_R");
     const int   arm_lshr = (arm_lshr_path != NULL) && arm_lsh;
     float      *arm_dR = NULL, *arm_pk = NULL, *arm_Rq = NULL; int arm_r_dim = 0;
+    /* §3q C-b.2 COMPACT GLOBAL SLAB: SP_ARM_SLAB caps the 8 global dKc/dVc at B+sink+margin
+     * slots (not P). The full global history lives in a host-RAM store (arm_ramK/V); the slab
+     * is an ephemeral per-step scratchpad — each step the recalled union {sinks∪pos∪top-B} is
+     * paged from RAM into compact slots [0,m) and the gather reads compact-slot indices.
+     * Requires the sidecar (arm_lshr) for selection; forces host top-B (union built on host). */
+    const int   arm_slab = (getenv("SP_ARM_SLAB") != NULL) && arm_lshr;
+    int         arm_Bslab = 0;                       /* compact slab depth = B + sink + margin */
+    float     **arm_ramK = NULL, **arm_ramV = NULL;  /* host RAM store, per global layer [P*kvd] */
+    float      *arm_stageK = NULL, *arm_stageV = NULL; /* host staging for the batched union page-in */
+    int        *arm_slotmap = NULL, *arm_ri_host2 = NULL; /* abs→compact-slot map + remapped per-head ri */
+    long        arm_umax = 0, arm_uclip = 0;          /* C-b.2 telemetry: max per-step union size + clip events */
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2126,10 +2137,16 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     }
     /* the JAGGED cache: owners only, per-layer width. P3.2-b-2a: SWA owners shrink
      * to a Wring-slot ring (globals keep the full P — they attend all positions). */
+    if (arm_slab) {   /* compact depth: SP_ARM_BSLAB or default full-P (safe: validates mechanics + measures the
+                       * per-step UNION size before committing a shrink, since ∪_heads(top-B) can exceed B). */
+        arm_Bslab = getenv("SP_ARM_BSLAB") ? atoi(getenv("SP_ARM_BSLAB")) : P;
+        if (arm_Bslab < 1 || arm_Bslab > P) arm_Bslab = P;
+    }
     for (int L = 0; L < kvfs && L < NL; L++) {
         const int global = ((L % period) == period - 1);
         const int kvd = (global ? g_nkv : s_nkv) * (global ? g_hd : s_hd);
-        const size_t slots = (swa_ring && !global) ? (size_t)Wring : (size_t)P;
+        const size_t slots = (arm_slab && global) ? (size_t)arm_Bslab        /* §3q C-b.2: compact slab */
+                           : (swa_ring && !global) ? (size_t)Wring : (size_t)P;
         G4D(dKc[L], slots * kvd);
         G4D(dVc[L], slots * kvd);
     }
@@ -2352,6 +2369,25 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 cudaMalloc((void **)&arm_Rq, (size_t)g_nh * arm_r_dim * sizeof(float)) != cudaSuccess) { free(Rh); sp_set_error("xbar LSH_R dev OOM"); goto done; }
             cudaMemcpy(arm_dR, Rh, rn * sizeof(float), cudaMemcpyHostToDevice); free(Rh);
             fprintf(stderr, "    [xbar-lsh-r] C-b.1 projected-key sidecar ON: r=%d, select scores RᵀK (resident r-dim, not full K)\n", arm_r_dim);
+        }
+        if (arm_slab) {   /* §3q C-b.2: host-RAM store for the full global K/V + union staging/remap scratch */
+            const size_t kvd_g = (size_t)g_nkv * g_hd;
+            arm_ramK = (float **)calloc((size_t)NL, sizeof(float *));
+            arm_ramV = (float **)calloc((size_t)NL, sizeof(float *));
+            if (!arm_ramK || !arm_ramV) { sp_set_error("xbar slab ramptr OOM"); goto done; }
+            for (int L = 0; L < NL; L++) if ((L % period) == period - 1) {
+                arm_ramK[L] = (float *)malloc((size_t)P * kvd_g * sizeof(float));
+                arm_ramV[L] = (float *)malloc((size_t)P * kvd_g * sizeof(float));
+                if (!arm_ramK[L] || !arm_ramV[L]) { sp_set_error("xbar slab RAM store OOM"); goto done; }
+            }
+            arm_stageK   = (float *)malloc((size_t)arm_Bslab * kvd_g * sizeof(float));
+            arm_stageV   = (float *)malloc((size_t)arm_Bslab * kvd_g * sizeof(float));
+            arm_slotmap  = (int *)malloc((size_t)P * sizeof(int));
+            arm_ri_host2 = (int *)malloc((size_t)g_nh * arm_Bslab * sizeof(int));
+            if (!arm_seen)  arm_seen  = (unsigned char *)malloc((size_t)P);
+            if (!arm_union) arm_union = (int *)malloc((size_t)P * sizeof(int));
+            if (!arm_stageK || !arm_stageV || !arm_slotmap || !arm_ri_host2 || !arm_seen || !arm_union) { sp_set_error("xbar slab scratch OOM"); goto done; }
+            fprintf(stderr, "    [xbar-slab] C-b.2 COMPACT GLOBAL SLAB: globals capped at %d slots (was P=%d); full K/V in host RAM, union paged per step\n", arm_Bslab, P);
         }
         fprintf(stderr, "    [xbar-p3.2b2b] %s router ON: B=%d W=%d sink=%d r=%d, GLOBALS ONLY%s\n",
                 arm_gather ? "GATHER (Phase 2, LOSSY)" : "SHADOW (Phase 0/1, bit-exact)",
@@ -2726,8 +2762,13 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 /* P3.2-b-2a: SWA owners write into the ring at slot pos%Wring (evicting
                  * the position that just left the window); globals write at pos. */
                 const size_t wslot = (swa_ring && !global) ? (size_t)(pos % Wring) : (size_t)pos;
-                cudaMemcpyAsync(dKc[L] + wslot*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
-                cudaMemcpyAsync(dVc[L] + wslot*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                if (arm_slab && global) {   /* §3q C-b.2: global K/V lives in the host-RAM store, not the compact slab */
+                    cudaMemcpyAsync(arm_ramK[L] + (size_t)pos*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost, st);
+                    cudaMemcpyAsync(arm_ramV[L] + (size_t)pos*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost, st);
+                } else {
+                    cudaMemcpyAsync(dKc[L] + wslot*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    cudaMemcpyAsync(dVc[L] + wslot*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                }
                 if (arm_lshr && global)   /* §3q C-b.1: mint the r-dim projected key RᵀK[pos] into the sidecar */
                     k_proj_RT<<<1, arm_r_dim, 0, st>>>(dk, arm_dR, 1, hd, arm_r_dim, arm_pk + ((size_t)L*P + pos)*arm_r_dim);
                 Kuse = dKc[L]; Vuse = dVc[L];
@@ -2761,7 +2802,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                             }
                             k_qk_scores<<<nh, 256, 0, st>>>(qsel, dKc[L], pos + 1, P, kvd, hd, grp, arm_dscores);
                         }
-                        if (arm_devsel) {   /* §3q C-a: top-B on DEVICE, on-stream — no D2H/host-heap/sync */
+                        if (arm_devsel && !arm_slab) {   /* §3q C-a: top-B on DEVICE (C-b.2 slab needs host indices for the union) */
                             k_topb_dev<<<nh, 32, (size_t)arm_B*(sizeof(float)+sizeof(int)), st>>>(
                                 arm_dscores, pos + 1, P, arm_B, arm_ri_dev, arm_m_dev);
                         } else {
@@ -2773,7 +2814,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                         sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
                                             arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
                     }
-                    if (!arm_devsel) for (int h = 0; h < nh; h++) {   /* host top-B path (devsel did it on-device) */
+                    if (!arm_devsel || arm_slab) for (int h = 0; h < nh; h++) {   /* host top-B path (devsel did it on-device; slab needs host indices) */
                         int m = arm_gpusel
                             ? sp_oracle_top_b(arm_scores_h + (size_t)h*P, pos + 1, arm_B, arm_hs, arm_hi, arm_ri)
                             : sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
@@ -2826,14 +2867,42 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                             cudaMemcpy(dVc[L] + (size_t)s*kvd, arm_phV, (size_t)kvd*4, cudaMemcpyHostToDevice);
                         }
                     }
-                    if (!arm_devsel) {   /* host-select uploads indices; devsel filled arm_ri_dev/arm_m_dev on-device */
-                        cudaMemcpyAsync(arm_ri_dev, arm_ri_host, (size_t)nh*P*sizeof(int), cudaMemcpyHostToDevice, st);
-                        cudaMemcpyAsync(arm_m_dev,  arm_m_host,  (size_t)nh*sizeof(int),   cudaMemcpyHostToDevice, st);
+                    if (arm_slab) {   /* §3q C-b.2: build union {sinks∪pos∪top-B}, batch-page from RAM into compact
+                                       * slots [0,m), remap per-head ri abs→compact-slot, gather over the compact slab. */
+                        int mu = 0; memset(arm_seen, 0, (size_t)P);
+                        #define ARM_ADD(u) do { int _u=(u); if (_u>=0 && _u<=pos && !arm_seen[_u]) { \
+                            if (mu < arm_Bslab) { arm_seen[_u]=1; arm_slotmap[_u]=mu; arm_union[mu++]=_u; } else { arm_uclip++; } } } while(0)
+                        for (int s = 0; s < arm_sink; s++) ARM_ADD(s);
+                        ARM_ADD(pos);
+                        for (int hh = 0; hh < nh; hh++) for (int j = 0; j < arm_m_host[hh]; j++) ARM_ADD(arm_ri_host[(size_t)hh*P + j]);
+                        #undef ARM_ADD
+                        if (mu > arm_umax) arm_umax = mu;
+                        for (int s = 0; s < mu; s++) {   /* stage the union K/V contiguously, then one H2D each */
+                            int u = arm_union[s];
+                            memcpy(arm_stageK + (size_t)s*kvd, arm_ramK[L] + (size_t)u*kvd, (size_t)kvd*sizeof(float));
+                            memcpy(arm_stageV + (size_t)s*kvd, arm_ramV[L] + (size_t)u*kvd, (size_t)kvd*sizeof(float));
+                        }
+                        cudaMemcpyAsync(dKc[L], arm_stageK, (size_t)mu*kvd*sizeof(float), cudaMemcpyHostToDevice, st);
+                        cudaMemcpyAsync(dVc[L], arm_stageV, (size_t)mu*kvd*sizeof(float), cudaMemcpyHostToDevice, st);
+                        for (int hh = 0; hh < nh; hh++) for (int j = 0; j < arm_m_host[hh]; j++) {
+                            int u = arm_ri_host[(size_t)hh*P + j];
+                            arm_ri_host2[(size_t)hh*arm_Bslab + j] = (u >= 0 && u <= pos && arm_seen[u]) ? arm_slotmap[u] : 0;  /* clipped→sink slot 0 */
+                        }
+                        cudaMemcpyAsync(arm_ri_dev, arm_ri_host2, (size_t)nh*arm_Bslab*sizeof(int), cudaMemcpyHostToDevice, st);
+                        cudaMemcpyAsync(arm_m_dev,  arm_m_host,    (size_t)nh*sizeof(int),          cudaMemcpyHostToDevice, st);
+                        int mm = arm_B; int bd = hd > mm ? hd : mm; if (bd > 1024) bd = 1024;
+                        k_attn_decode_gather<<<nh, bd, (size_t)mm*sizeof(float), st>>>(
+                            dq, dKc[L], dVc[L], arm_ri_dev, arm_m_dev, arm_Bslab, kvd, hd, grp, 1.0f, dao);
+                    } else {
+                        if (!arm_devsel) {   /* host-select uploads indices; devsel filled arm_ri_dev/arm_m_dev on-device */
+                            cudaMemcpyAsync(arm_ri_dev, arm_ri_host, (size_t)nh*P*sizeof(int), cudaMemcpyHostToDevice, st);
+                            cudaMemcpyAsync(arm_m_dev,  arm_m_host,  (size_t)nh*sizeof(int),   cudaMemcpyHostToDevice, st);
+                        }
+                        int mm = arm_devsel ? arm_B : (arm_max_m > 0 ? arm_max_m : 1);
+                        int bd = hd > mm ? hd : mm; if (bd > 1024) bd = 1024;
+                        k_attn_decode_gather<<<nh, bd, (size_t)mm*sizeof(float), st>>>(
+                            dq, Kuse, Vuse, arm_ri_dev, arm_m_dev, P, kvd, hd, grp, 1.0f, dao);
                     }
-                    int mm = arm_devsel ? arm_B : (arm_max_m > 0 ? arm_max_m : 1);
-                    int bd = hd > mm ? hd : mm; if (bd > 1024) bd = 1024;
-                    k_attn_decode_gather<<<nh, bd, (size_t)mm*sizeof(float), st>>>(
-                        dq, Kuse, Vuse, arm_ri_dev, arm_m_dev, P, kvd, hd, grp, 1.0f, dao);
                 } else if (swa_ring && !global && !xbar_recall_on) {   /* P3.2-b-2a: ring read, window-only */
                     const int wl = (ctx < ws) ? ctx : ws;       /* in-window length present in the ring */
                     int bd = hd > wl ? hd : wl; if (bd > 1024) bd = 1024;
@@ -3165,6 +3234,14 @@ done:
     if (arm_hs) free(arm_hs); if (arm_hi) free(arm_hi);
     if (arm_dM) cudaFree(arm_dM); if (arm_dqp) cudaFree(arm_dqp);  /* §3q Learned-LSH */
     if (arm_dR) cudaFree(arm_dR); if (arm_pk) cudaFree(arm_pk); if (arm_Rq) cudaFree(arm_Rq);  /* §3q C-b.1 sidecar */
+    if (arm_slab) {   /* §3q C-b.2: report the measured union size, free the host RAM store + scratch */
+        fprintf(stderr, "    [xbar-slab] C-b.2 union telemetry: max per-step union = %ld (slab depth %d, B=%d); clip events = %ld\n",
+                arm_umax, arm_Bslab, arm_B, arm_uclip);
+        if (arm_ramK) { for (int L = 0; L < NL; L++) if (arm_ramK[L]) free(arm_ramK[L]); free(arm_ramK); }
+        if (arm_ramV) { for (int L = 0; L < NL; L++) if (arm_ramV[L]) free(arm_ramV[L]); free(arm_ramV); }
+        if (arm_stageK) free(arm_stageK); if (arm_stageV) free(arm_stageV);
+        if (arm_slotmap) free(arm_slotmap); if (arm_ri_host2) free(arm_ri_host2);
+    }
     if (arm_ri_host) free(arm_ri_host); if (arm_m_host) free(arm_m_host);  /* P3.2-b-2b gather buffers */
     if (arm_ri_dev) cudaFree(arm_ri_dev); if (arm_m_dev) cudaFree(arm_m_dev);
     if (arm_page && arm_be.close) arm_be.close(arm_be.handle);  /* P3.2-b-2b G1 Ring-2 store */

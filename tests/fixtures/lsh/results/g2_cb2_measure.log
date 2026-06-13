@@ -1,0 +1,28 @@
+[env-common] paths pinned: SP_REPO_ROOT=D:\F\shannon-prime-repos
+[env-common] toolchain pins: CPU=MinGW-gcc-15.2 (build/), CUDA-host=VS2019 BT + CUDA 13.2, Tier3-MSVC-parity=VS18 (D:), Vulkan >= 1.3.250, Hexagon SDK C:\Qualcomm\Hexagon_SDK\5.5.6.0
+===== [21:59:55.11] C-b.2 slab mechanics+union (Bslab=, default P) 8x =====
+    [xbar-lsh] Learned-LSH M=R·Rᵀ loaded (D:\F\shannon-prime-repos\_xbar\p2b\lsh_M_r32.bin); select = top-B by (Mq)·K
+    [xbar-lsh-r] C-b.1 projected-key sidecar ON: r=32, select scores RᵀK (resident r-dim, not full K)
+    [xbar-slab] C-b.2 COMPACT GLOBAL SLAB: globals capped at 2048 slots (was P=2048); full K/V in host RAM, union paged per step
+    [xbar-p3.2b2b] GATHER (Phase 2, LOSSY) router ON: B=256 W=0 sink=0 r=32, GLOBALS ONLY — recall set wired into attention, output diverges (gate = G2 PPL<2%)
+    [xbar-p3.2b2b] G-P3-GEOM.a oracle parity: global projk fresh-vs-incremental mismatches=318720; selections=262016 avg|recall|=240.1 => MISMATCH
+    [xbar-slab] C-b.2 union telemetry: max per-step union = 1500 (slab depth 2048, B=256); clip events = 0
+    [g4-ppl] chunk 1: ppl 5.4086 (n=1024)
+    [xbar-lsh] Learned-LSH M=R·Rᵀ loaded (D:\F\shannon-prime-repos\_xbar\p2b\lsh_M_r32.bin); select = top-B by (Mq)·K
+    [xbar-lsh-r] C-b.1 projected-key sidecar ON: r=32, select scores RᵀK (resident r-dim, not full K)
+    [xbar-slab] C-b.2 COMPACT GLOBAL SLAB: globals capped at 2048 slots (was P=2048); full K/V in host RAM, union paged per step
+    [xbar-p3.2b2b] GATHER (Phase 2, LOSSY) router ON: B=256 W=0 sink=0 r=32, GLOBALS ONLY — recall set wired into attention, output diverges (gate = G2 PPL<2%)
+    [xbar-p3.2b2b] G-P3-GEOM.a oracle parity: global projk fresh-vs-incremental mismatches=316480; selections=262016 avg|recall|=240.1 => MISMATCH
+    [xbar-slab] C-b.2 union telemetry: max per-step union = 1511 (slab depth 2048, B=256); clip events = 0
+    [g4-ppl] chunk 2: ppl 4.4782 (n=1024)
+    [xbar-lsh] Learned-LSH M=R·Rᵀ loaded (D:\F\shannon-prime-repos\_xbar\p2b\lsh_M_r32.bin); select = top-B by (Mq)·K
+    [xbar-lsh-r] C-b.1 projected-key sidecar ON: r=32, select scores RᵀK (resident r-dim, not full K)
+    [xbar-slab] C-b.2 COMPACT GLOBAL SLAB: globals capped at 2048 slots (was P=2048); full K/V in host RAM, union paged per step
+    [xbar-p3.2b2b] GATHER (Phase 2, LOSSY) router ON: B=256 W=0 sink=0 r=32, GLOBALS ONLY — recall set wired into attention, output diverges (gate = G2 PPL<2%)
+    [xbar-p3.2b2b] G-P3-GEOM.a oracle parity: global projk fresh-vs-incremental mismatches=312160; selections=262016 avg|recall|=240.1 => MISMATCH
+    [xbar-slab] C-b.2 union telemetry: max per-step union = 1442 (slab depth 2048, B=256); clip events = 0
+    [g4-ppl] chunk 3: ppl 5.6974 (n=1024)
+    [g4-ppl] SP PPL=5.1676 (report-only; set SP_PPL_ORACLE to gate) n_scored=3072 n_ctx=2048 chunks=3
+[M_GEMMA4_CUDA_PPL] PASS
+---- checks=5 fails=0 ----
+===== [22:05:48.37] CB2_EXIT=0 =====
