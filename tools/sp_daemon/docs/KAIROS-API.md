@@ -262,3 +262,22 @@ The honest scope boundary, so nobody mistakes Alpha for the finished kernel:
 
 The XBAR campaign (`SP_REPLAY`, the episode store, the O(1) KV crossbar) is the
 **memory floor** KAIROS schedules over. KAIROS is the time/agency axis above it.
+
+## 9. KAI-1b — metal eviction (the cold-evict dropped to the crossbar, 2026-06-14)
+
+§7 noted the daemon-resident tick and curator pruning as not-yet-wired. **KAI-1b closes the
+*physical* eviction primitive** on the engine CUDA path (the production forward for the 12B):
+the host-layer prefix-grow hack (don't append tokens on NO_OP, re-prefill each tick) is replaced
+by an O(1) **memory-coordinate shear**. New persistent-KV ABI in `engine/src/backends/cuda/
+cuda_forward.cu` (`gemma4_decode_cuda` left byte-untouched = null floor):
+
+`gemma4_kv_open / prefill / decode / rewind(Δ) / pos / snapshot / close`
+
+KAIROS tick (metal): `anchor=kv_pos`; `kv_prefill(frame)`; `kv_decode`; **NO_OP ⇒
+`kv_rewind(kv_pos-anchor)`** (frame+gen sheared, cache resident, zero re-prefill); **ACTION ⇒
+keep**. Gates (gemma4-12b-b1, RTX 2060): **G-1b-REWIND-NULL** — rewound KV byte-identical to
+never-visited (48 owner layers, 16.5 MB, diffs=0) + EQUIV gen-reproduce. **O(actions)→O(1)
+telemetry** — metal idle-tick latency flat (slope 0.0073 s/action) vs prefix-grow linear (0.924,
+127× shallower); 16.7× faster @ 16 retained actions. Lattice CONTRACT-KAIROS-K0-K1 §5; receipts
+`engine/results/kai1b_*.log`. Follow-on: wire the Rust daemon's KAIROS loop to this ABI (the
+daemon currently runs the qwen3 path; the 12B metal loop lives in the engine harness for now).
