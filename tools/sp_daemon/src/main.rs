@@ -31,6 +31,14 @@ mod tokenizer;
 // through the existing crate::session::SpSession wrapper.
 mod dialogue_runner;
 
+// KAI-1 Alpha — the inference-driven `decide_via_model` heartbeat decider
+// (binary-crate half of KAIROS; the lib half is sp_daemon::kairos). Behind the
+// off-by-default `kairos` feature: when unset this module does not exist and the
+// daemon binary is byte-identical. Dispatched by the SP_KAIROS_ALPHA env gate at
+// the top of main() — never touches the daemon startup path.
+#[cfg(feature = "kairos")]
+mod kairos_runner;
+
 // Sprint WIRE-CPU — host CPU AVX-512 full-forward backend dispatcher for
 // sp_l1.h:§6. Symmetric to the lib-crate's hex_forward_dispatch (android).
 // Activates when SP_DAEMON_BACKEND=cpu is set AND the daemon was built
@@ -133,6 +141,47 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() {
+    // KAI-1 Alpha (G-KAIROS-1 telemetry) — env-gated, runs the inference-driven
+    // heartbeat over a scripted §2b tape and exits BEFORE any clap parsing or
+    // daemon startup. Feature-gated so default builds don't compile this at all
+    // (null floor). Usage:
+    //   SP_KAIROS_ALPHA=1 SP_KAIROS_MODEL=... SP_KAIROS_TOK=... \
+    //   SP_KAIROS_TAPE=tools/sp_daemon/tests/fixtures/kairos/tape_smoke.txt \
+    //   [SP_KAIROS_REPORT=results/kairos_alpha.json] sp-daemon
+    #[cfg(feature = "kairos")]
+    if std::env::var("SP_KAIROS_ALPHA").as_deref() == Ok("1") {
+        let model = std::env::var("SP_KAIROS_MODEL").unwrap_or_default();
+        let tok = std::env::var("SP_KAIROS_TOK").unwrap_or_default();
+        let tape = std::env::var("SP_KAIROS_TAPE").unwrap_or_default();
+        if model.is_empty() || tok.is_empty() || tape.is_empty() {
+            eprintln!("SP_KAIROS_ALPHA=1 requires SP_KAIROS_MODEL, SP_KAIROS_TOK, SP_KAIROS_TAPE");
+            std::process::exit(2);
+        }
+        match kairos_runner::run_kairos_alpha(&model, &tok, &tape) {
+            Ok((log, counters)) => {
+                let json = kairos_runner::report_json(&log, &counters);
+                println!("{json}");
+                if let Ok(path) = std::env::var("SP_KAIROS_REPORT") {
+                    if let Err(e) = std::fs::write(&path, &json) {
+                        eprintln!("[kairos-alpha] report write {path} failed: {e}");
+                    } else {
+                        eprintln!("[kairos-alpha] report written: {path}");
+                    }
+                }
+                eprintln!(
+                    "[kairos-alpha] DONE ticks={} noop_ok={} action_ok={} false_action={} missed={} malformed={}",
+                    counters.ticks, counters.noop_correct, counters.action_correct,
+                    counters.false_actions, counters.missed_events, counters.malformed
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("[kairos-alpha] FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cli = Cli::parse();
 
     if cli.daemon_inner {
