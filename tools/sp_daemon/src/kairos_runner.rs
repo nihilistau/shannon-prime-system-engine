@@ -134,10 +134,17 @@ fn frame_prompt_raw(ev: &TapeEvent) -> String {
 /// `<|im_end|>` are registered special tokens (tokenizer.rs:163-170), so they
 /// encode to their single IDs; `<|im_end|>` is an EOS id, so decode self-stops.
 fn frame_prompt_chatml(ev: &TapeEvent) -> String {
-    format!(
-        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-        event_body(ev)
-    )
+    // No-think suppression (SP_KAIROS_NOTHINK=1): pre-fill a CLOSED thinking
+    // block immediately after the assistant header, hijacking the token
+    // trajectory past qwen3's deliberation phase so it must emit the final
+    // action directly. `<think>`/`</think>` are registered special tokens.
+    let nothink = std::env::var("SP_KAIROS_NOTHINK").as_deref() == Ok("1");
+    let assistant_prime = if nothink {
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    } else {
+        "<|im_start|>assistant\n"
+    };
+    format!("<|im_start|>user\n{}<|im_end|>\n{}", event_body(ev), assistant_prime)
 }
 
 /// Decode the decision for one tick on a persistent session. Returns the raw
