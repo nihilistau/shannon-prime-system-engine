@@ -406,6 +406,39 @@ __global__ void k_apply_M(const float *q, const float *M, int nh, int HD, float 
     }
 }
 
+/* §3q C-a device-side top-B: one block per head, thread 0 runs the same size-B
+ * min-heap as sp_oracle_top_b over scores[h*Pstr,..ctx) — keeps the select on the
+ * decode stream, no D2H/host-heap/H2D, no sync stall. ri[h*Pstr+j], m_out[h].
+ * shared = B*(float+int). Identical algorithm+input ⇒ identical top-B set to host. */
+__global__ void k_topb_dev(const float *scores, int ctx, int Pstr, int B, int *ri, int *m_out) {
+    if (threadIdx.x != 0) return;
+    int h = blockIdx.x;
+    const float *sc = scores + (size_t)h * Pstr;
+    extern __shared__ char smem[];
+    float *hs = (float *)smem; int *hi = (int *)(hs + B);
+    int mm = (B < ctx) ? B : ctx, n = 0;
+    for (int p = 0; p < ctx; p++) {
+        float v = sc[p];
+        if (n < mm) {
+            int i = n++; hs[i] = v; hi[i] = p;
+            while (i > 0) { int par = (i-1)/2; if (hs[par] <= hs[i]) break;
+                float t = hs[par]; hs[par] = hs[i]; hs[i] = t;
+                int ti = hi[par]; hi[par] = hi[i]; hi[i] = ti; i = par; }
+        } else if (v > hs[0]) {
+            hs[0] = v; hi[0] = p; int i = 0;
+            for (;;) { int l = 2*i+1, r = 2*i+2, s = i;
+                if (l < n && hs[l] < hs[s]) s = l;
+                if (r < n && hs[r] < hs[s]) s = r;
+                if (s == i) break;
+                float t = hs[s]; hs[s] = hs[i]; hs[i] = t;
+                int ti = hi[s]; hi[s] = hi[i]; hi[i] = ti; i = s; }
+        }
+    }
+    int *rih = ri + (size_t)h * Pstr;
+    for (int j = 0; j < n; j++) rih[j] = hi[j];
+    m_out[h] = n;
+}
+
 /* ETA.2 (Gemma4): final-logit softcap, z = tanh(z/cap)*cap (gemma4.c). Applied
  * to the LM-head logits ONLY — gemma4 has NO attention-score cap (that was
  * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
@@ -1859,6 +1892,10 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const int   arm_lsh = (arm_lsh_path != NULL) && arm_gather;
     const int   arm_gpusel = arm_oracle || arm_lsh;   /* both score on GPU + top-B on host */
     float      *arm_dM = NULL, *arm_dqp = NULL;
+    /* §3q C-a: SP_ARM_DEVSEL moves the top-B min-heap onto the GPU (k_topb_dev) — no
+     * per-step score-D2H / host-heap / index-H2D / sync stall. GPU-score modes only
+     * (oracle/LSH), and not the G1 page lane (that needs host indices for the union). */
+    const int   arm_devsel = (getenv("SP_ARM_DEVSEL") != NULL) && arm_gpusel && !arm_page;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2661,31 +2698,38 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                  * projk sidecar incrementally, run the frozen sp_arm_select_geom per query head.
                  * LOG ONLY — Kuse stays the full cache, so attention is byte-identical. ── */
                 if (shadow_on && global) {
-                    cudaError_t se = cudaStreamSynchronize(st);
-                    if (se != cudaSuccess) { fail_cuda(se, "xbar shadow sync"); goto done; }
-                    cudaMemcpy(arm_kh, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost);
-                    cudaMemcpy(arm_qh, dq, (size_t)qd*sizeof(float),  cudaMemcpyDeviceToHost);
-                    if (arm_dump_f) {   /* §3q Phase A corpus: post-RoPE K (kvd) + q (qd), this (L,pos) */
-                        int32_t rh[6] = { 0x504B5251 /*QRKP rec*/, L, pos, nkv, nh, hd };
-                        fwrite(rh, sizeof(int32_t), 6, arm_dump_f);
-                        fwrite(arm_kh, sizeof(float), (size_t)kvd, arm_dump_f);
-                        fwrite(arm_qh, sizeof(float), (size_t)qd,  arm_dump_f);
+                    if (!arm_devsel || arm_dump_f) {   /* host needs K/q only for geom-select, host-select, or the dump */
+                        cudaError_t se = cudaStreamSynchronize(st);
+                        if (se != cudaSuccess) { fail_cuda(se, "xbar shadow sync"); goto done; }
+                        cudaMemcpy(arm_kh, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost);
+                        cudaMemcpy(arm_qh, dq, (size_t)qd*sizeof(float),  cudaMemcpyDeviceToHost);
+                        if (arm_dump_f) {   /* §3q Phase A corpus: post-RoPE K (kvd) + q (qd), this (L,pos) */
+                            int32_t rh[6] = { 0x504B5251 /*QRKP rec*/, L, pos, nkv, nh, hd };
+                            fwrite(rh, sizeof(int32_t), 6, arm_dump_f);
+                            fwrite(arm_kh, sizeof(float), (size_t)kvd, arm_dump_f);
+                            fwrite(arm_qh, sizeof(float), (size_t)qd,  arm_dump_f);
+                        }
                     }
-                    if (arm_gpusel) {   /* §3q oracle/LSH: GPU scores, top-B on host */
+                    if (arm_gpusel) {   /* §3q oracle/LSH: GPU scores */
                         const float *qsel = dq;
                         if (arm_lsh) {  /* transform q' = M·q per head, then score on q' */
                             k_apply_M<<<nh, 256, 0, st>>>(dq, arm_dM, nh, hd, arm_dqp);
                             qsel = arm_dqp;
                         }
                         k_qk_scores<<<nh, 256, 0, st>>>(qsel, dKc[L], pos + 1, P, kvd, hd, grp, arm_dscores);
-                        cudaError_t oe = cudaStreamSynchronize(st);
-                        if (oe != cudaSuccess) { fail_cuda(oe, "xbar gpusel scores sync"); goto done; }
-                        cudaMemcpy(arm_scores_h, arm_dscores, (size_t)nh * P * sizeof(float), cudaMemcpyDeviceToHost);
+                        if (arm_devsel) {   /* §3q C-a: top-B on DEVICE, on-stream — no D2H/host-heap/sync */
+                            k_topb_dev<<<nh, 32, (size_t)arm_B*(sizeof(float)+sizeof(int)), st>>>(
+                                arm_dscores, pos + 1, P, arm_B, arm_ri_dev, arm_m_dev);
+                        } else {
+                            cudaError_t oe = cudaStreamSynchronize(st);
+                            if (oe != cudaSuccess) { fail_cuda(oe, "xbar gpusel scores sync"); goto done; }
+                            cudaMemcpy(arm_scores_h, arm_dscores, (size_t)nh * P * sizeof(float), cudaMemcpyDeviceToHost);
+                        }
                     } else {
                         sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
                                             arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
                     }
-                    for (int h = 0; h < nh; h++) {
+                    if (!arm_devsel) for (int h = 0; h < nh; h++) {   /* host top-B path (devsel did it on-device) */
                         int m = arm_gpusel
                             ? sp_oracle_top_b(arm_scores_h + (size_t)h*P, pos + 1, arm_B, arm_hs, arm_hi, arm_ri)
                             : sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
@@ -2738,9 +2782,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                             cudaMemcpy(dVc[L] + (size_t)s*kvd, arm_phV, (size_t)kvd*4, cudaMemcpyHostToDevice);
                         }
                     }
-                    cudaMemcpyAsync(arm_ri_dev, arm_ri_host, (size_t)nh*P*sizeof(int), cudaMemcpyHostToDevice, st);
-                    cudaMemcpyAsync(arm_m_dev,  arm_m_host,  (size_t)nh*sizeof(int),   cudaMemcpyHostToDevice, st);
-                    int mm = arm_max_m > 0 ? arm_max_m : 1;
+                    if (!arm_devsel) {   /* host-select uploads indices; devsel filled arm_ri_dev/arm_m_dev on-device */
+                        cudaMemcpyAsync(arm_ri_dev, arm_ri_host, (size_t)nh*P*sizeof(int), cudaMemcpyHostToDevice, st);
+                        cudaMemcpyAsync(arm_m_dev,  arm_m_host,  (size_t)nh*sizeof(int),   cudaMemcpyHostToDevice, st);
+                    }
+                    int mm = arm_devsel ? arm_B : (arm_max_m > 0 ? arm_max_m : 1);
                     int bd = hd > mm ? hd : mm; if (bd > 1024) bd = 1024;
                     k_attn_decode_gather<<<nh, bd, (size_t)mm*sizeof(float), st>>>(
                         dq, Kuse, Vuse, arm_ri_dev, arm_m_dev, P, kvd, hd, grp, 1.0f, dao);
