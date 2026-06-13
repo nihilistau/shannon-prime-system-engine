@@ -89,3 +89,15 @@ pub mod memo_routing;
 // (file I/O + SpinorReceipt::as_bytes round-trip, no L1 ABI needed); the
 // android smoke binary sp_memo_m4_ledger_smoke drives it on the S22U.
 pub mod pouw_ledger;
+
+// KAI-1 — the KAIROS heartbeat-null control plane (implements the ratified
+// papers/CONTRACT-KAIROS-K0-K1.md §2.5/§2a/§2b handoff ABI). Behind the
+// off-by-default `kairos` feature: null-floor = byte-identical binary when
+// unset, exactly like the wire_* backends. Pure host-safe Rust — the §2.5
+// type system (coordinates, never prose), the §2b deterministic event-tape
+// reader, the per-tick receipt log, and the tokio heartbeat loop that mirrors
+// mining.rs's yield-to-inference idiom. The model-decode decision seam
+// (`decide_via_model`) is named inside; the stub decider proves the loop's
+// nervous system only.
+#[cfg(feature = "kairos")]
+pub mod kairos;

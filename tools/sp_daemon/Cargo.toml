@@ -153,9 +153,19 @@ bindgen = "0.70"
 #   when SP_DAEMON_BACKEND=vulkan is set at daemon startup. Symmetric to
 #   wire_hex_backend (Hexagon V69 cDSP, android-only) but Vulkan is host
 #   GPU compute — Windows / Linux / macOS where vulkan-1.{dll,so} resolves.
+#
+# `kairos` (KAI-1, host-side): compiles the `kairos` control-plane module
+#   (papers/CONTRACT-KAIROS-K0-K1.md §2.5/§2a/§2b — the heartbeat-null
+#   scheduler over the resident daemon). Off by default — the daemon binary
+#   stays byte-identical to pre-KAI-1 when unset (the null-floor invariant,
+#   kernel edition). Pure host-safe Rust (no extra link deps); the §2b event
+#   tape + tokio heartbeat loop. With the feature built, the loop still only
+#   runs when SP_KERNEL=1 is set at startup. Test via
+#   `cargo test --features kairos kairos::`.
 [features]
 default = []
 wire_hex_backend = []
 wire_cpu_backend = []
 wire_cuda_backend = []
 wire_vulkan_backend = []
+kairos = []
