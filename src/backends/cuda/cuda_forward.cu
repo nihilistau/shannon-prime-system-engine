@@ -354,6 +354,45 @@ __global__ void k_attn_decode_gather(const float *q, const float *Kc, const floa
     }
 }
 
+/* §3q oracle: exact q.K scores per head over [0,ctx) — same dot/indexing as
+ * k_attn_decode_gather (kvh = h/group, scale 1.0). scores[h*Pstr + p]. The host
+ * then picks the exact top-B (the selection ceiling). One block per query head. */
+__global__ void k_qk_scores(const float *q, const float *Kc, int ctx, int Pstr,
+                            int KVD, int HD, int group, float *scores) {
+    int h = blockIdx.x, kvh = h / group;
+    const float *qh = q + (size_t)h * HD;
+    for (int p = threadIdx.x; p < ctx; p += blockDim.x) {
+        const float *kh = Kc + (size_t)p * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        scores[(size_t)h * Pstr + p] = acc;
+    }
+}
+
+/* exact top-B indices of sc[0,ctx) via a size-B min-heap (O(ctx log B), no std). */
+static int sp_oracle_top_b(const float *sc, int ctx, int B, float *hs, int *hi, int *out) {
+    int m = (B < ctx) ? B : ctx, n = 0;
+    for (int p = 0; p < ctx; p++) {
+        float v = sc[p];
+        if (n < m) {
+            int i = n++; hs[i] = v; hi[i] = p;
+            while (i > 0) { int par = (i - 1) / 2; if (hs[par] <= hs[i]) break;
+                float t = hs[par]; hs[par] = hs[i]; hs[i] = t;
+                int ti = hi[par]; hi[par] = hi[i]; hi[i] = ti; i = par; }
+        } else if (v > hs[0]) {
+            hs[0] = v; hi[0] = p; int i = 0;
+            for (;;) { int l = 2*i+1, r = 2*i+2, sm = i;
+                if (l < n && hs[l] < hs[sm]) sm = l;
+                if (r < n && hs[r] < hs[sm]) sm = r;
+                if (sm == i) break;
+                float t = hs[sm]; hs[sm] = hs[i]; hs[i] = t;
+                int ti = hi[sm]; hi[sm] = hi[i]; hi[i] = ti; i = sm; }
+        }
+    }
+    for (int j = 0; j < n; j++) out[j] = hi[j];
+    return n;
+}
+
 /* ETA.2 (Gemma4): final-logit softcap, z = tanh(z/cap)*cap (gemma4.c). Applied
  * to the LM-head logits ONLY — gemma4 has NO attention-score cap (that was
  * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
@@ -1794,6 +1833,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * D2H of arm_kh/arm_qh, writes one self-contained file per decode call. Implies shadow_on. */
     const char *arm_dump_dir = getenv("SP_ARM_DUMP");
     FILE       *arm_dump_f = NULL;
+    /* §3q oracle ceiling: SP_ARM_ORACLE selects the EXACT top-B by q.K (the best any
+     * selector can do) instead of the ±1 projection — measures whether even perfect
+     * selection holds < 2.0% PPL at 8×, i.e. is 8× learnable or information-bounded.
+     * Scores on the GPU (q.K GEMV, microseconds), top-B on the host (min-heap). Implies gather. */
+    const int   arm_oracle = (getenv("SP_ARM_ORACLE") != NULL) && arm_gather;
+    float      *arm_dscores = NULL, *arm_scores_h = NULL, *arm_hs = NULL; int *arm_hi = NULL;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2195,6 +2240,14 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             arm_union= (int *)malloc((size_t)P * sizeof(int));
             if (!arm_phK || !arm_phV || !arm_seen || !arm_union) { sp_set_error("xbar arm_page scratch OOM"); goto done; }
         }
+        if (arm_oracle) {   /* §3q ceiling: GPU q.K scores [g_nh x P] + host min-heap scratch */
+            if (cudaMalloc((void **)&arm_dscores, (size_t)g_nh * P * sizeof(float)) != cudaSuccess) { sp_set_error("xbar oracle dscores OOM"); goto done; }
+            arm_scores_h = (float *)malloc((size_t)g_nh * P * sizeof(float));
+            arm_hs = (float *)malloc((size_t)(arm_B > 0 ? arm_B : 1) * sizeof(float));
+            arm_hi = (int   *)malloc((size_t)(arm_B > 0 ? arm_B : 1) * sizeof(int));
+            if (!arm_scores_h || !arm_hs || !arm_hi) { sp_set_error("xbar oracle host OOM"); goto done; }
+            fprintf(stderr, "    [xbar-oracle] EXACT top-B by q.K selection (the selection ceiling)\n");
+        }
         fprintf(stderr, "    [xbar-p3.2b2b] %s router ON: B=%d W=%d sink=%d r=%d, GLOBALS ONLY%s\n",
                 arm_gather ? "GATHER (Phase 2, LOSSY)" : "SHADOW (Phase 0/1, bit-exact)",
                 arm_B, arm_W, arm_sink, arm_r,
@@ -2586,11 +2639,20 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                         fwrite(arm_kh, sizeof(float), (size_t)kvd, arm_dump_f);
                         fwrite(arm_qh, sizeof(float), (size_t)qd,  arm_dump_f);
                     }
-                    sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
-                                        arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
+                    if (arm_oracle) {   /* §3q ceiling: exact q.K scores on GPU, top-B on host */
+                        k_qk_scores<<<nh, 256, 0, st>>>(dq, dKc[L], pos + 1, P, kvd, hd, grp, arm_dscores);
+                        cudaError_t oe = cudaStreamSynchronize(st);
+                        if (oe != cudaSuccess) { fail_cuda(oe, "xbar oracle scores sync"); goto done; }
+                        cudaMemcpy(arm_scores_h, arm_dscores, (size_t)nh * P * sizeof(float), cudaMemcpyDeviceToHost);
+                    } else {
+                        sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
+                                            arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
+                    }
                     for (int h = 0; h < nh; h++) {
-                        int m = sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
-                                                   arm_projk, P, 0, arm_B, arm_W, arm_sink, pos, arm_cand, arm_ri);
+                        int m = arm_oracle
+                            ? sp_oracle_top_b(arm_scores_h + (size_t)h*P, pos + 1, arm_B, arm_hs, arm_hi, arm_ri)
+                            : sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
+                                                 arm_projk, P, 0, arm_B, arm_W, arm_sink, pos, arm_cand, arm_ri);
                         arm_sel++; arm_msum += m;
                         if (arm_gather) {   /* stash this head's recall set for the gather kernel */
                             arm_m_host[h] = m;
@@ -2972,6 +3034,8 @@ done:
     if (armR) free(armR); if (armG) free(armG); if (arm_projk) free(arm_projk);  /* P3.2-b-2b shadow router */
     if (arm_cand) free(arm_cand); if (arm_ri) free(arm_ri); if (arm_kh) free(arm_kh); if (arm_qh) free(arm_qh);
     if (arm_dump_f) fclose(arm_dump_f);  /* §3q Phase A K/q dump */
+    if (arm_dscores) cudaFree(arm_dscores); if (arm_scores_h) free(arm_scores_h);  /* §3q oracle ceiling */
+    if (arm_hs) free(arm_hs); if (arm_hi) free(arm_hi);
     if (arm_ri_host) free(arm_ri_host); if (arm_m_host) free(arm_m_host);  /* P3.2-b-2b gather buffers */
     if (arm_ri_dev) cudaFree(arm_ri_dev); if (arm_m_dev) cudaFree(arm_m_dev);
     if (arm_page && arm_be.close) arm_be.close(arm_be.handle);  /* P3.2-b-2b G1 Ring-2 store */
