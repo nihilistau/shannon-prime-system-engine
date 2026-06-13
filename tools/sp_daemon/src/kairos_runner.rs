@@ -215,6 +215,17 @@ pub fn run_kairos_alpha(
     let chatml = std::env::var("SP_KAIROS_CHATML").as_deref() == Ok("1");
     eprintln!("[kairos-alpha] prompt mode = {}", if chatml { "CHATML (templated)" } else { "RAW (un-templated)" });
 
+    // SP_KAIROS_PRUNE=1 = the C1-lite cold-evict idle-hygiene step: if a tick
+    // decides NO_OP, rewind the SpSession KV back to the pre-tick position
+    // (sp_session_rewind, O(1), byte-identical per Corollary T8.1) — the event
+    // and the model's NO_OP output are discarded from the cache. The next idle
+    // tick then re-enters a context byte-identical to the FIRST clean
+    // evaluation: the model never knows it has been waiting, so the unpruned
+    // corruption attractor (deterministic "NO_克思主义" drift) cannot form, and
+    // persistent-session size stays flat (O(Δ) holds across 10k idle ticks).
+    let prune = std::env::var("SP_KAIROS_PRUNE").as_deref() == Ok("1");
+    eprintln!("[kairos-alpha] idle-prune (cold-evict on NO_OP) = {}", if prune { "ON" } else { "OFF" });
+
     // Prefill the system contract ONCE (the persistent session law). In CHATML
     // mode it is wrapped as the `system` turn so every later `user` turn is
     // evaluated against it.
@@ -239,11 +250,28 @@ pub fn run_kairos_alpha(
 
     for ev in &tape.events {
         let t0 = Instant::now();
+        // Position BEFORE this tick touches the cache — the cold-evict anchor.
+        let pre_pos = session.position().unwrap_or(0);
         let frame = if chatml { frame_prompt_chatml(ev) } else { frame_prompt_raw(ev) };
         let frame_tokens = tok.encode(&frame)?;
         let raw = decode_decision(&mut session, &tok, &mut logits, &frame_tokens)?;
         let decided = parse_decision(&raw);
         counters.observe(ev.expect, decided);
+
+        // C1-lite cold-evict: a NO_OP tick is discarded from the KV — rewind the
+        // SpSession back to pre_pos so the next idle tick re-enters the clean
+        // first-evaluation context (defeats the corruption attractor; keeps
+        // state flat = O(Δ)). ACTION / Malformed ticks are KEPT (a real event
+        // being handled, or a signal worth seeing).
+        let mut pruned = false;
+        if prune && matches!(decided, DecisionParse::Noop) {
+            let cur = session.position().unwrap_or(pre_pos);
+            if cur > pre_pos {
+                session.rewind(cur - pre_pos)?;
+                pruned = true;
+            }
+        }
+
         let rec = AlphaTick {
             tick_idx: ev.tick_idx,
             expect: ev.expect,
@@ -253,8 +281,9 @@ pub fn run_kairos_alpha(
             session_pos: session.position().unwrap_or(0),
         };
         eprintln!(
-            "[kairos-alpha] tick {:>3} expect={:?} decided={:?} pos={} {}ms raw={:?}",
-            rec.tick_idx, rec.expect, rec.decided, rec.session_pos, rec.latency_ms,
+            "[kairos-alpha] tick {:>3} expect={:?} decided={:?} pos={}{} {}ms raw={:?}",
+            rec.tick_idx, rec.expect, rec.decided, rec.session_pos,
+            if pruned { " (pruned->flat)" } else { "" }, rec.latency_ms,
             if rec.raw.len() > 48 { &rec.raw[..48] } else { &rec.raw }
         );
         log.push(rec);
