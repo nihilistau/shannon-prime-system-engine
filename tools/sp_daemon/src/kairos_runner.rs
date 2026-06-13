@@ -115,13 +115,28 @@ impl AlphaCounters {
     }
 }
 
-/// Build the per-tick frame instruction (structured, compact — NOT prose
-/// summary of history). The kernel sees only the new event delta.
-fn frame_prompt(ev: &TapeEvent) -> String {
+/// The compact structured event body (NOT a prose summary of history). The
+/// kernel sees only the new event delta — this is the O(Δ) payload.
+fn event_body(ev: &TapeEvent) -> String {
     let payload = if ev.payload.is_empty() { "-" } else { ev.payload.as_str() };
+    format!("EVENT kind={} salience={:.2} payload=\"{}\"", ev.kind, ev.salience, payload)
+}
+
+/// RAW per-tick frame (no template) — the unaligned baseline.
+fn frame_prompt_raw(ev: &TapeEvent) -> String {
+    format!("\n{}\nDECISION: ", event_body(ev))
+}
+
+/// CHATML per-tick frame — wrap the event as a `user` turn and prime the
+/// `assistant` turn, on a persistent KV that already holds the system turn.
+/// This forces the instruct model to evaluate the prompt as an INSTRUCTION
+/// (its fine-tuned boundary), not a narrative continuation. `<|im_start|>` /
+/// `<|im_end|>` are registered special tokens (tokenizer.rs:163-170), so they
+/// encode to their single IDs; `<|im_end|>` is an EOS id, so decode self-stops.
+fn frame_prompt_chatml(ev: &TapeEvent) -> String {
     format!(
-        "\nEVENT kind={} salience={:.2} payload=\"{}\"\nDECISION: ",
-        ev.kind, ev.salience, payload
+        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+        event_body(ev)
     )
 }
 
@@ -187,14 +202,28 @@ pub fn run_kairos_alpha(
     let mut session = SpSession::create(&model, cancel)?;
     let mut logits = vec![0.0f32; vocab];
 
-    // Prefill the system contract ONCE (the persistent session law).
-    let sys_tokens = tok.encode(SYSTEM_CONTRACT)?;
+    // SP_KAIROS_CHATML=1 wraps the system contract + each event in the qwen3
+    // ChatML instruction boundary (the fine-tuned <|im_start|>…<|im_end|>
+    // frame). Default OFF = the raw un-templated baseline.
+    let chatml = std::env::var("SP_KAIROS_CHATML").as_deref() == Ok("1");
+    eprintln!("[kairos-alpha] prompt mode = {}", if chatml { "CHATML (templated)" } else { "RAW (un-templated)" });
+
+    // Prefill the system contract ONCE (the persistent session law). In CHATML
+    // mode it is wrapped as the `system` turn so every later `user` turn is
+    // evaluated against it.
+    let sys_text = if chatml {
+        format!("<|im_start|>system\n{}<|im_end|>\n", SYSTEM_CONTRACT.trim())
+    } else {
+        SYSTEM_CONTRACT.to_string()
+    };
+    let sys_tokens = tok.encode(&sys_text)?;
     if !sys_tokens.is_empty() {
         session.prefill_chunk(&sys_tokens, &mut logits)?;
     }
     eprintln!(
-        "[kairos-alpha] system contract prefilled ({} tokens); pos={}",
+        "[kairos-alpha] system contract prefilled ({} tokens, {} mode); pos={}",
         sys_tokens.len(),
+        if chatml { "chatml" } else { "raw" },
         session.position().unwrap_or(0)
     );
 
@@ -203,7 +232,7 @@ pub fn run_kairos_alpha(
 
     for ev in &tape.events {
         let t0 = Instant::now();
-        let frame = frame_prompt(ev);
+        let frame = if chatml { frame_prompt_chatml(ev) } else { frame_prompt_raw(ev) };
         let frame_tokens = tok.encode(&frame)?;
         let raw = decode_decision(&mut session, &tok, &mut logits, &frame_tokens)?;
         let decided = parse_decision(&raw);
