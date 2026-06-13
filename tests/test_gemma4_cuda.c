@@ -689,6 +689,42 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
         }
     }
 
+    /* ════ E_G4_CU_ARMPAGE (XBAR P3.2-b-2b G1): recall set served OFF RING-2 ════
+     * Two gather decodes with the SAME recall sets: (A) reads the recalled positions
+     * from the LIVE global cache; (B) per step spills the global K/V to Ring-2, NaN-
+     * POISONS the live global cache, and pages back ONLY the recalled union off disk —
+     * then gathers. If B == A token-identical, every recalled byte was served byte-exact
+     * off Ring-2 (a poisoned slot that wasn't paged would NaN-corrupt the output). This
+     * is the served-off-disk proof — the needle survives the poison. */
+    {
+        const char *pg = getenv("SP_ARM_PAGE_GATE");
+        if (pg && atoi(pg) > 0) {
+            enum { GNP = 4, GNG = 12, GPT = GNP + GNG };
+            const int32_t gp[GNP] = { 2, 10, 100, 1000 };
+            char ev[300];
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=1");
+            _putenv("SP_ARM_SHADOW=1"); _putenv("SP_ARM_GATHER=1");
+            _putenv("SP_ARM_B=8"); _putenv("SP_ARM_W=2"); _putenv("SP_ARM_SINK=1"); _putenv("SP_ARM_R=32");
+            int32_t live[GPT]; for (int i = 0; i < GNP; i++) live[i] = gp[i];
+            int dnl = gemma4_decode_cuda(m, live, GNP, GNG, -1);          /* gather from LIVE cache */
+            const char *dir = getenv("SP_ARM_PAGE_DIR"); if (!dir) dir = "_p32_armpage";
+            snprintf(ev, sizeof(ev), "SP_ARM_PAGE=%s", dir); _putenv(ev);
+            int32_t disk[GPT]; for (int i = 0; i < GNP; i++) disk[i] = gp[i];
+            int dnd = gemma4_decode_cuda(m, disk, GNP, GNG, -1);          /* gather from DISK (poison + page) */
+            _putenv("SP_ARM_PAGE=");
+            _putenv("SP_ARM_SHADOW="); _putenv("SP_ARM_GATHER="); _putenv("SP_ARM_B="); _putenv("SP_ARM_W="); _putenv("SP_ARM_SINK="); _putenv("SP_ARM_R=");
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+            int diffs = 0, n = (dnl < dnd ? dnl : dnd); if (n > GPT) n = GPT;
+            for (int i = GNP; i < n; i++) if (live[i] != disk[i]) diffs++;
+            fprintf(stderr, "    [g4-cuda-ARMPAGE] live dn=%d  disk dn=%d  diffs[%d..%d)=%d\n", dnl, dnd, GNP, GPT, diffs);
+            fprintf(stderr, "        live:"); for (int i = 0; i < GPT; i++) fprintf(stderr, " %d", live[i]); fprintf(stderr, "\n");
+            fprintf(stderr, "        disk:"); for (int i = 0; i < GPT; i++) fprintf(stderr, " %d", disk[i]); fprintf(stderr, "\n");
+            SP_CHECK(dnl == GPT && dnd == GPT, "P3.2-b-2b G1: both gather decodes full length");
+            SP_CHECK(diffs == 0, "P3.2-b-2b G1: gather-from-disk == gather-from-live (recalled set served byte-exact off Ring-2, NaN-poison rigor)");
+            return SP_DONE();
+        }
+    }
+
     /* ════ E_G4_CU_DEC_5B (ETA.5b): THE VELOCITY GATES — graph capture + dp4a.
      * Four decode runs over the same prompt, 256-token window:
      *   ref   : knobs-off (the oracle-gated lift path above)

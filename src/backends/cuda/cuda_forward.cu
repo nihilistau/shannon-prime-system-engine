@@ -312,6 +312,48 @@ __global__ void k_attn_decode_ring(const float *q, const float *Kc, const float 
     }
 }
 
+/* XBAR P3.2-b-2b Phase 2: gated GLOBAL attention over a sparse RECALL SET.
+ * Block h attends only the mh[h] positions listed in ri[h*ristr + j] (host-selected
+ * per query head by sp_arm_select_geom, H2D'd) — reading Kc/Vc at those absolute
+ * positions of the live cache. Same softmax structure as k_attn_decode_win; the key
+ * SET is the recall set, not [0,ctx). LOSSY by design (drops keys) — the bounded gate
+ * G-P3-R2.b-2b (PPL deflection < 2.0%) replaces diffs=0 here. shared = max_m floats. */
+__global__ void k_attn_decode_gather(const float *q, const float *Kc, const float *Vc,
+                                     const int *ri, const int *mh, int ristr,
+                                     int KVD, int HD, int group, float ascale, float *ao) {
+    extern __shared__ float sc[];
+    int h = blockIdx.x, kvh = h / group;
+    int m = mh[h];
+    const int *rih = ri + (size_t)h * ristr;
+    const float *qh = q + (size_t)h * HD;
+    for (int j = threadIdx.x; j < m; j += blockDim.x) {
+        int s = rih[j];
+        const float *kh = Kc + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[j] = acc * ascale;
+    }
+    __syncthreads();
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float mx = sc[0];
+        for (int j = 1; j < m; j++) if (sc[j] > mx) mx = sc[j];
+        float sum = 0.0f;
+        for (int j = 0; j < m; j++) { float e = expf(sc[j] - mx); sc[j] = e; sum += e; }
+        g_sum = sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int j = 0; j < m; j++) {
+            int s = rih[j];
+            acc += sc[j] * Vc[(size_t)s * KVD + (size_t)kvh * HD + i];
+        }
+        ao[(size_t)h * HD + i] = acc * inv;
+    }
+}
+
 /* ETA.2 (Gemma4): final-logit softcap, z = tanh(z/cap)*cap (gemma4.c). Applied
  * to the LM-head logits ONLY — gemma4 has NO attention-score cap (that was
  * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
@@ -1729,6 +1771,23 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     signed char    *armR = NULL; sp_arm_geom *armG = NULL; float *arm_projk = NULL;
     sp_arm_sidx    *arm_cand = NULL; int *arm_ri = NULL; float *arm_kh = NULL, *arm_qh = NULL;
     size_t          arm_projk_n = 0; long arm_sel = 0, arm_msum = 0;
+    /* P3.2-b-2b Phase 2: SP_ARM_GATHER wires the recall set INTO attention (lossy) —
+     * globals attend only the per-head selected set via k_attn_decode_gather. Implies
+     * shadow_on (the select must run). diffs=0 dies here; the gate is G2 PPL < 2.0%. */
+    const int   arm_gather = (getenv("SP_ARM_GATHER") != NULL) && shadow_on;
+    int        *arm_ri_host = NULL, *arm_m_host = NULL, *arm_ri_dev = NULL, *arm_m_dev = NULL;
+    /* P3.2-b-2b G1: SP_ARM_PAGE=dir serves the recalled GLOBAL set off Ring-2 instead
+     * of the live cache. Per step: spill pos's global K/V → Ring-2, NaN-POISON the live
+     * global cache [0,pos] (0xFF bytes = NaN float), then page back ONLY the recalled
+     * union from disk into their slots; the gather then reads the live cache (recalled
+     * slots = disk bytes, the rest = NaN, never read). Bit-exact vs gather-from-live
+     * proves every recalled byte came off disk (a poisoned slot that wasn't paged would
+     * NaN-corrupt the output). Globals-only, own contiguous store. Implies arm_gather. */
+    const char *arm_page_dir = getenv("SP_ARM_PAGE");
+    const int   arm_page = (arm_page_dir != NULL) && arm_gather;
+    sp_arm_ring2_backend arm_be; arm_be.handle=NULL; arm_be.close=NULL; arm_be.write_block=NULL; arm_be.read_block=NULL;
+    size_t     *arm_off = NULL; float *arm_phK = NULL, *arm_phV = NULL;
+    unsigned char *arm_seen = NULL; int *arm_union = NULL;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2108,8 +2167,32 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         arm_kh    = (float *)malloc((size_t)arm_hd_max * sizeof(float));
         arm_qh    = (float *)malloc((size_t)g_nh * g_hd * sizeof(float));
         if (!arm_projk || !arm_cand || !arm_ri || !arm_kh || !arm_qh) { sp_set_error("xbar shadow scratch OOM"); goto done; }
-        fprintf(stderr, "    [xbar-p3.2b2b] SHADOW router ON: B=%d W=%d sink=%d r=%d, GLOBALS ONLY, attention UNCHANGED (Phase 0/1, live decode stays bit-exact)\n",
-                arm_B, arm_W, arm_sink, arm_r);
+        if (arm_gather) {   /* per-head recall-set buffers (host fill -> H2D -> gather kernel) */
+            arm_ri_host = (int *)malloc((size_t)g_nh * P * sizeof(int));
+            arm_m_host  = (int *)malloc((size_t)g_nh * sizeof(int));
+            if (!arm_ri_host || !arm_m_host) { sp_set_error("xbar gather host OOM"); goto done; }
+            if (cudaMalloc((void **)&arm_ri_dev, (size_t)g_nh * P * sizeof(int)) != cudaSuccess ||
+                cudaMalloc((void **)&arm_m_dev,  (size_t)g_nh * sizeof(int))     != cudaSuccess) { sp_set_error("xbar gather dev OOM"); goto done; }
+        }
+        if (arm_page) {   /* G1: open the globals-only Ring-2 store + the contiguous off[L] */
+            arm_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
+            if (!arm_off) { sp_set_error("xbar arm_off OOM"); goto done; }
+            size_t gacc = 0;
+            for (int L = 0; L < NL; L++) {
+                if ((L % period) == period - 1) { arm_off[L] = gacc; gacc += (size_t)P * g_nkv * g_hd * 4; }
+                else arm_off[L] = 0;   /* SWA layers unused on the ARM page lane */
+            }
+            if (sp_arm_ring2_stdio_open(arm_page_dir, &arm_be)) { sp_set_error("xbar arm_page: ring2 open"); goto done; }
+            arm_phK  = (float *)malloc((size_t)g_nkv * g_hd * sizeof(float));
+            arm_phV  = (float *)malloc((size_t)g_nkv * g_hd * sizeof(float));
+            arm_seen = (unsigned char *)malloc((size_t)P);
+            arm_union= (int *)malloc((size_t)P * sizeof(int));
+            if (!arm_phK || !arm_phV || !arm_seen || !arm_union) { sp_set_error("xbar arm_page scratch OOM"); goto done; }
+        }
+        fprintf(stderr, "    [xbar-p3.2b2b] %s router ON: B=%d W=%d sink=%d r=%d, GLOBALS ONLY%s\n",
+                arm_gather ? "GATHER (Phase 2, LOSSY)" : "SHADOW (Phase 0/1, bit-exact)",
+                arm_B, arm_W, arm_sink, arm_r,
+                arm_gather ? " — recall set wired into attention, output diverges (gate = G2 PPL<2%)" : " — attention UNCHANGED");
     }
 
     /* prompt into VRAM once; dpos = 0 */
@@ -2448,6 +2531,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             const float *ffac = global ? g_w.rope_freqs : NULL;
             const int win = global ? -1 : ws;   /* P3.2-b-2a: ws = SW, or the SP_XBAR_SWA_W override */
             const int ffL = g_w.Wgate[L].out;
+            int arm_max_m = 0;                   /* P3.2-b-2b: widest per-head recall set this global step (gather shared-mem size) */
 
             k_rmsnorm<<<1, 256, 0, st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
             MMD(&g_w.Wq[L], dnx, dq);
@@ -2485,6 +2569,11 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                         int m = sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
                                                    arm_projk, P, 0, arm_B, arm_W, arm_sink, pos, arm_cand, arm_ri);
                         arm_sel++; arm_msum += m;
+                        if (arm_gather) {   /* stash this head's recall set for the gather kernel */
+                            arm_m_host[h] = m;
+                            memcpy(arm_ri_host + (size_t)h * P, arm_ri, (size_t)m * sizeof(int));
+                            if (m > arm_max_m) arm_max_m = m;
+                        }
                     }
                 }
                 if (xbar_recall_on) {   /* P3.1: read attention from the episode store @ off[L] */
@@ -2502,7 +2591,38 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     { Kuse = (float *)(d_xbar_K + xbar_off[L]); Vuse = (float *)(d_xbar_V + xbar_off[L]); }
             }
             {   const int ctx = pos + 1;
-                if (swa_ring && !global && !xbar_recall_on) {   /* P3.2-b-2a: ring read, window-only */
+                if (arm_gather && global && !xbar_recall_on) {  /* P3.2-b-2b Phase 2: global SPARSE recall (LOSSY) */
+                    if (arm_page) {   /* G1: serve the recalled set off Ring-2 (NaN-poison rigor) */
+                        cudaError_t pe = cudaStreamSynchronize(st);
+                        if (pe != cudaSuccess) { fail_cuda(pe, "xbar arm_page sync"); goto done; }
+                        cudaMemcpy(arm_phK, dKc[L] + (size_t)pos*kvd, (size_t)kvd*4, cudaMemcpyDeviceToHost);  /* spill pos */
+                        cudaMemcpy(arm_phV, dVc[L] + (size_t)pos*kvd, (size_t)kvd*4, cudaMemcpyDeviceToHost);
+                        arm_be.write_block(arm_be.handle, 0, (uint64_t)arm_off[L] + (uint64_t)pos*kvd*4, arm_phK, (size_t)kvd*4);
+                        arm_be.write_block(arm_be.handle, 1, (uint64_t)arm_off[L] + (uint64_t)pos*kvd*4, arm_phV, (size_t)kvd*4);
+                        cudaMemset(dKc[L], 0xFF, (size_t)(pos+1)*kvd*4);  /* NaN-poison live globals [0,pos] (0xFF=NaN) */
+                        cudaMemset(dVc[L], 0xFF, (size_t)(pos+1)*kvd*4);
+                        memset(arm_seen, 0, (size_t)P);                  /* page back ONLY the recalled union off disk */
+                        int nun = 0;
+                        for (int hh = 0; hh < nh; hh++) for (int j = 0; j < arm_m_host[hh]; j++) {
+                            int s = arm_ri_host[(size_t)hh*P + j];
+                            if (s >= 0 && s <= pos && !arm_seen[s]) { arm_seen[s] = 1; arm_union[nun++] = s; }
+                        }
+                        for (int u = 0; u < nun; u++) {
+                            int s = arm_union[u];
+                            if (arm_be.read_block(arm_be.handle, 0, (uint64_t)arm_off[L] + (uint64_t)s*kvd*4, arm_phK, (size_t)kvd*4) ||
+                                arm_be.read_block(arm_be.handle, 1, (uint64_t)arm_off[L] + (uint64_t)s*kvd*4, arm_phV, (size_t)kvd*4)) {
+                                sp_set_error("xbar arm_page: read_block"); goto done; }
+                            cudaMemcpy(dKc[L] + (size_t)s*kvd, arm_phK, (size_t)kvd*4, cudaMemcpyHostToDevice);
+                            cudaMemcpy(dVc[L] + (size_t)s*kvd, arm_phV, (size_t)kvd*4, cudaMemcpyHostToDevice);
+                        }
+                    }
+                    cudaMemcpyAsync(arm_ri_dev, arm_ri_host, (size_t)nh*P*sizeof(int), cudaMemcpyHostToDevice, st);
+                    cudaMemcpyAsync(arm_m_dev,  arm_m_host,  (size_t)nh*sizeof(int),   cudaMemcpyHostToDevice, st);
+                    int mm = arm_max_m > 0 ? arm_max_m : 1;
+                    int bd = hd > mm ? hd : mm; if (bd > 1024) bd = 1024;
+                    k_attn_decode_gather<<<nh, bd, (size_t)mm*sizeof(float), st>>>(
+                        dq, Kuse, Vuse, arm_ri_dev, arm_m_dev, P, kvd, hd, grp, 1.0f, dao);
+                } else if (swa_ring && !global && !xbar_recall_on) {   /* P3.2-b-2a: ring read, window-only */
                     const int wl = (ctx < ws) ? ctx : ws;       /* in-window length present in the ring */
                     int bd = hd > wl ? hd : wl; if (bd > 1024) bd = 1024;
                     k_attn_decode_ring<<<nh, bd, (size_t)wl*sizeof(float), st>>>(
@@ -2828,6 +2948,11 @@ done:
     if (page_hK) cudaFreeHost(page_hK); if (page_hV) cudaFreeHost(page_hV);  /* P3.2-b-1 page-in staging */
     if (armR) free(armR); if (armG) free(armG); if (arm_projk) free(arm_projk);  /* P3.2-b-2b shadow router */
     if (arm_cand) free(arm_cand); if (arm_ri) free(arm_ri); if (arm_kh) free(arm_kh); if (arm_qh) free(arm_qh);
+    if (arm_ri_host) free(arm_ri_host); if (arm_m_host) free(arm_m_host);  /* P3.2-b-2b gather buffers */
+    if (arm_ri_dev) cudaFree(arm_ri_dev); if (arm_m_dev) cudaFree(arm_m_dev);
+    if (arm_page && arm_be.close) arm_be.close(arm_be.handle);  /* P3.2-b-2b G1 Ring-2 store */
+    if (arm_off) free(arm_off); if (arm_phK) free(arm_phK); if (arm_phV) free(arm_phV);
+    if (arm_seen) free(arm_seen); if (arm_union) free(arm_union);
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
     if (dnll) cudaFree(dnll);
     free(probe_xs);
