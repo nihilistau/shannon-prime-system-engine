@@ -1852,6 +1852,9 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const int   swa_ring = (getenv("SP_XBAR_SWA_RING") != NULL);
     const int   Wring = (ws < P) ? ws : P;                      /* ring slots (degenerates to P when no eviction) */
     const int   swa_active = (swa_ring || swa_w_ovr > 0);       /* either knob forces the per-step path */
+    if (swa_ring || swa_w_ovr > 0)
+        fprintf(stderr, "    [xbar-swa] ring=%d ws=%d Wring=%d P=%d swa_active=%d (SWA owners alloc %s slots)\n",
+                swa_ring, ws, Wring, (int)P, swa_active, swa_ring ? "Wring" : "P");
     /* XBAR P3.2-b-2b Phase 0/1: SHADOW global recall router (the policy-domain entry).
      * SP_ARM_SHADOW=1 enables it; per global step we D2H the post-RoPE K + q, mint the
      * geom projk sidecar host-side, and run the FROZEN ±1 projection router
@@ -2913,6 +2916,10 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
                         dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao);
                 } }
+            { static int _attn_diag = 0; cudaError_t _ae = cudaPeekAtLastError();   /* XBAR diag: name the failing attention launch (print-once) */
+              if (_ae != cudaSuccess && !_attn_diag) { _attn_diag = 1;
+                fprintf(stderr, "    [attn-fail] L=%d global=%d pos=%d hd=%d kvd=%d swa_ring=%d arm_slab=%d shadow=%d shared_win=%zuB: %s\n",
+                        L, global, pos, hd, kvd, swa_ring, arm_slab, shadow_on, (size_t)(pos+1)*sizeof(float), cudaGetErrorString(_ae)); } }
             MMD(&g_w.Wo[L], dao, dap);
             k_rmsnorm<<<1, 256, 0, st>>>(dap, g_w.post_attn[L], E, eps, dnx);
             k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
@@ -3026,6 +3033,8 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 else if (use_int8 && g_w.embd_packed.codes &&
                          gemv_w_packed(st, &g_w.embd_packed, dnx, dlog, dqx, dsx)) { /* dp4a head */ }
                 else { if (gemm(cb, g_w.embd, dnx, dlog, 1, E, V)) goto done; }
+                { static int _hd=0; cudaError_t _e=cudaPeekAtLastError(); if(_e!=cudaSuccess&&!_hd){_hd=1;
+                    fprintf(stderr,"    [score-fail] phase=HEAD pos=%d V=%d E=%d: %s\n", pos, V, E, cudaGetErrorString(_e)); } }
 
                 /* SP_G4_SCORE_DBG=<n>: THE LOGIT INTERCEPT (PPL-gate bug hunt).
                  * D2H the RAW pre-softcap row for the first n scored positions;
@@ -3061,6 +3070,9 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 if (softcap > 0.0f)
                     k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(dlog, (size_t)V, softcap);
                 k_nll<<<1, 256, 0, st>>>(dlog, V, dseq + pos + 1, dnll);
+                { static int _sc=0; cudaError_t _e=cudaPeekAtLastError(); if(_e!=cudaSuccess&&!_sc){_sc=1;
+                    fprintf(stderr,"    [score-fail] phase=SOFTCAP/NLL pos=%d V=%d softcap=%.3f score_first=%d: %s\n",
+                            pos, V, (double)softcap, score_first, cudaGetErrorString(_e)); } }
                 g_g4_score_cnt++;
             }
         } else if (gen_here && headless_probe) {
@@ -3118,10 +3130,13 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         k_incr_pos<<<1, 1, 0, st>>>(dpos);         /* keep dpos == pos+1 */
     }
 download:
-    if (shadow_on && armR) {   /* ── P3.2-b-2b Phase 1 gate: G-P3-GEOM.a oracle parity ──
+    if (shadow_on && armR && !arm_slab) {   /* ── P3.2-b-2b Phase 1 gate: G-P3-GEOM.a oracle parity ──
         * The K fed to the router must BE the K attention reads. Re-project the FINAL global
         * K cache fresh and compare to the incrementally-minted projk: mismatch ⇒ a wrong-K
-        * capture or a sidecar-indexing fault (the bug class Phase 1 isolates from router logic). */
+        * capture or a sidecar-indexing fault (the bug class Phase 1 isolates from router logic).
+        * SKIPPED under arm_slab (C-b.2): the compact slab holds only arm_Bslab<P slots, so the
+        * p2∈[0,P) re-projection would read past dKc[L] (cudaErrorInvalidValue). The parity was
+        * validated in Phase 1 without the slab; the slab cannot host the full-P re-projection. */
         cudaStreamSynchronize(st);
         long mism = 0; float oproj[SP_ARM_R_MAX];
         for (int L = 0; L < kvfs && L < NL; L++) {
