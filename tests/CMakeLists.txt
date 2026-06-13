@@ -400,7 +400,7 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
     # sp_set_error/...) resolve from the core libs (structs synced byte-for-byte).
     # Skips cleanly when the model or a CUDA device is absent. ──
     if(SP_ENGINE_WITH_CUDA)
-        add_executable(test_gemma4_cuda test_gemma4_cuda.c)
+        add_executable(test_gemma4_cuda test_gemma4_cuda.c ${CMAKE_SOURCE_DIR}/src/tokenizer/tokenizer.c ${CMAKE_SOURCE_DIR}/src/tokenizer/gemma4_bpe.c)  # KAI-1 Path B: SP_G4_KAIROS needs sp_tokenizer_* (TUs only, NOT sp_engine = avoids dup forward/struct)
         target_link_libraries(test_gemma4_cuda PRIVATE sp_session sp_engine_cuda)
         add_executable(test_gemma4_ppl_cuda test_gemma4_ppl_cuda.c)
         target_link_libraries(test_gemma4_ppl_cuda PRIVATE sp_session sp_engine_cuda)

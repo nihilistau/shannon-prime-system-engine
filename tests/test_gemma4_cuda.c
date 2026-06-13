@@ -174,6 +174,12 @@ static int run_niah(void) {
 #define KAIROS_GEN     16
 typedef struct { int expect_action; float sal; char kind[48]; char payload[96]; } ktick_t;
 
+/* local wall-clock (this TU uses clock() elsewhere; now_s lives in the tokenizer test). */
+static double kairos_now_s(void) {
+    struct timespec t; timespec_get(&t, TIME_UTC);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
 static int run_kairos(void) {
     const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
     const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
@@ -254,9 +260,9 @@ static int run_kairos(void) {
         if (prefix_n + (int)fn + KAIROS_GEN + 8 > cap) { fprintf(stderr, "[g4-kairos] seq cap hit\n"); break; }
         for (int k=0;k<fn;k++) seq[prefix_n+k] = tmp[k];
         int n_prompt = prefix_n + (int)fn;
-        double t0 = now_s();
+        double t0 = kairos_now_s();
         int n = gemma4_decode_cuda(m, seq, n_prompt, KAIROS_GEN, -1);
-        double dt = now_s() - t0;
+        double dt = kairos_now_s() - t0;
         if (n < n_prompt) { fprintf(stderr, "[g4-kairos] tick %d decode FAIL (n=%d) %s\n", i, n, sp_last_error()); continue; }
         long bl = sp_tokenizer_decode(tk, seq + n_prompt, n - n_prompt, dbuf, sizeof dbuf - 1);
         if (bl < 0) bl = 0; dbuf[bl] = 0;
