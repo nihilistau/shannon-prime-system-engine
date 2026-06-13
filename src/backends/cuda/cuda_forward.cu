@@ -1788,6 +1788,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     sp_arm_ring2_backend arm_be; arm_be.handle=NULL; arm_be.close=NULL; arm_be.write_block=NULL; arm_be.read_block=NULL;
     size_t     *arm_off = NULL; float *arm_phK = NULL, *arm_phV = NULL;
     unsigned char *arm_seen = NULL; int *arm_union = NULL;
+    /* §3q Phase A: SP_ARM_DUMP=dir dumps the post-RoPE per-position (K,q) on the GLOBAL owners —
+     * the training corpus for the per-position addresser (the b-2b shortlister the 8× failure needs;
+     * Fork-6 is a span-level addresser, wrong modality). Pure offline capture: reuses the shadow_on
+     * D2H of arm_kh/arm_qh, writes one self-contained file per decode call. Implies shadow_on. */
+    const char *arm_dump_dir = getenv("SP_ARM_DUMP");
+    FILE       *arm_dump_f = NULL;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2193,6 +2199,17 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 arm_gather ? "GATHER (Phase 2, LOSSY)" : "SHADOW (Phase 0/1, bit-exact)",
                 arm_B, arm_W, arm_sink, arm_r,
                 arm_gather ? " — recall set wired into attention, output diverges (gate = G2 PPL<2%)" : " — attention UNCHANGED");
+        if (arm_dump_dir) {   /* §3q Phase A: one self-contained K/q file per decode call (chunk) */
+            static int arm_dump_seq = 0;
+            char dpath[1024];
+            snprintf(dpath, sizeof dpath, "%s/kq_call%d.bin", arm_dump_dir, arm_dump_seq++);
+            arm_dump_f = fopen(dpath, "wb");
+            if (!arm_dump_f) { sp_set_error("xbar arm_dump: open"); goto done; }
+            int32_t fhdr[8] = { 0x4651444B /*KDQF file hdr*/, 1, NL, period, g_nh, g_nkv, g_hd, n_prompt };
+            fwrite(fhdr, sizeof(int32_t), 8, arm_dump_f);
+            fprintf(stderr, "    [xbar-dumpA] K/q dump -> %s (globals; kvd=%d qd=%d, per-rec hdr {magic,L,pos,nkv,nh,hd})\n",
+                    dpath, g_nkv*g_hd, g_nh*g_hd);
+        }
     }
 
     /* prompt into VRAM once; dpos = 0 */
@@ -2563,6 +2580,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     if (se != cudaSuccess) { fail_cuda(se, "xbar shadow sync"); goto done; }
                     cudaMemcpy(arm_kh, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost);
                     cudaMemcpy(arm_qh, dq, (size_t)qd*sizeof(float),  cudaMemcpyDeviceToHost);
+                    if (arm_dump_f) {   /* §3q Phase A corpus: post-RoPE K (kvd) + q (qd), this (L,pos) */
+                        int32_t rh[6] = { 0x504B5251 /*QRKP rec*/, L, pos, nkv, nh, hd };
+                        fwrite(rh, sizeof(int32_t), 6, arm_dump_f);
+                        fwrite(arm_kh, sizeof(float), (size_t)kvd, arm_dump_f);
+                        fwrite(arm_qh, sizeof(float), (size_t)qd,  arm_dump_f);
+                    }
                     sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
                                         arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
                     for (int h = 0; h < nh; h++) {
@@ -2948,6 +2971,7 @@ done:
     if (page_hK) cudaFreeHost(page_hK); if (page_hV) cudaFreeHost(page_hV);  /* P3.2-b-1 page-in staging */
     if (armR) free(armR); if (armG) free(armG); if (arm_projk) free(arm_projk);  /* P3.2-b-2b shadow router */
     if (arm_cand) free(arm_cand); if (arm_ri) free(arm_ri); if (arm_kh) free(arm_kh); if (arm_qh) free(arm_qh);
+    if (arm_dump_f) fclose(arm_dump_f);  /* §3q Phase A K/q dump */
     if (arm_ri_host) free(arm_ri_host); if (arm_m_host) free(arm_m_host);  /* P3.2-b-2b gather buffers */
     if (arm_ri_dev) cudaFree(arm_ri_dev); if (arm_m_dev) cudaFree(arm_m_dev);
     if (arm_page && arm_be.close) arm_be.close(arm_be.handle);  /* P3.2-b-2b G1 Ring-2 store */
