@@ -58,6 +58,19 @@ NO_OP
 Reply NO_OP unless the event genuinely requires intervention. Do not explain.
 ";
 
+/// Path A — the explicit salience-threshold action policy. Removes the "use
+/// judgment" ambiguity that left the 0.6B deaf (it judged everything not worth
+/// acting on). Gives the low-capacity model a mechanical rule it can follow.
+/// Selected by SP_KAIROS_SALIENCE_POLICY=1.
+const SYSTEM_CONTRACT_SALIENCE: &str = "\
+You are a background kernel daemon. Each tick you receive one environment event
+that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:
+NO_OP
+<ACTION>short imperative</ACTION>
+RULE: if salience >= 0.5 the event requires intervention, so reply with an
+<ACTION> line. If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain.
+";
+
 /// One tick's measured outcome.
 #[derive(Debug, Clone)]
 pub struct AlphaTick {
@@ -229,10 +242,13 @@ pub fn run_kairos_alpha(
     // Prefill the system contract ONCE (the persistent session law). In CHATML
     // mode it is wrapped as the `system` turn so every later `user` turn is
     // evaluated against it.
+    let policy_salience = std::env::var("SP_KAIROS_SALIENCE_POLICY").as_deref() == Ok("1");
+    let contract = if policy_salience { SYSTEM_CONTRACT_SALIENCE } else { SYSTEM_CONTRACT };
+    eprintln!("[kairos-alpha] action policy = {}", if policy_salience { "SALIENCE>=0.5 (explicit threshold)" } else { "JUDGMENT (default)" });
     let sys_text = if chatml {
-        format!("<|im_start|>system\n{}<|im_end|>\n", SYSTEM_CONTRACT.trim())
+        format!("<|im_start|>system\n{}<|im_end|>\n", contract.trim())
     } else {
-        SYSTEM_CONTRACT.to_string()
+        contract.to_string()
     };
     let sys_tokens = tok.encode(&sys_text)?;
     if !sys_tokens.is_empty() {
