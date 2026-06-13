@@ -6,6 +6,11 @@ REM   e.g. _run_g2_cb2_vram.bat 2048 4400 1 smoke   (de-risk: chunk1 must == sla
 REM        _run_g2_cb2_vram.bat 8192 4400 1 8k      (the cash-out: union must cap ~nh*B=4096, clip=0)
 call "%~dp0scripts\env\env-common.bat"
 set "PATH=%SP_PIN_CUDA_ROOT%\bin;%PATH%"
+REM measurement hygiene (feedback_pin_clocks_for_tests): lock GPU clocks so timing is
+REM reproducible; best-effort (needs admin; GeForce mem-clock lock may be unavailable).
+REM VRAM-alloc + PPL are clock-invariant, but pin anyway for a single harness convention.
+nvidia-smi --lock-gpu-clocks=1680 >nul 2>&1
+nvidia-smi --lock-memory-clocks=7000 >nul 2>&1
 set "SP_GEMMA4_SPMODEL=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model"
 set "SP_GEMMA4_SPTOK=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-tokenizer"
 set "SP_PPL_TOKENS=%SP_ENGINE%\tests\fixtures\ppl\wiki.valid.g4tokens.txt"
@@ -26,3 +31,5 @@ set "SP_XBAR_SWA_RING=1"
 echo ===== [%TIME%] C-b.2 VRAM gate NCTX=%1 BSLAB=%2 CHUNKS=%3 (slab globals + model-SW ring) =====
 "%EXE%"
 echo ===== [%TIME%] VRAM_EXIT=%ERRORLEVEL% =====
+nvidia-smi --reset-gpu-clocks >nul 2>&1
+nvidia-smi --reset-memory-clocks >nul 2>&1
