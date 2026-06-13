@@ -349,6 +349,74 @@ static int run_kv_rewind(void) {
     return (diffs==0 && genmatch)?0:3;
 }
 
+/* ═══ SP_G4_KV_TELEMETRY=1 (KAI-1b §5.4): the O(actions)→O(1) receipt. ═══
+ * Idle-tick latency vs retained-action count A∈{1,2,4,8,16}, both modes:
+ *   PREFIX-GROW (the host hack): an idle tick re-prefills [system + A·action + frame]
+ *     via the one-shot gemma4_decode_cuda ⇒ cost ∝ A (the recompute tax).
+ *   METAL (XBAR-evict): the A actions are RESIDENT; an idle tick = kv_prefill(frame)
+ *     + kv_decode + kv_rewind ⇒ cost independent of A (flatline).
+ * Tokens arbitrary-valid (latency is token-content-independent). Min of 3 warm reps. */
+static double kvt_now(void){ struct timespec t; timespec_get(&t,TIME_UTC); return (double)t.tv_sec + (double)t.tv_nsec*1e-9; }
+static int run_kv_telemetry(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-kvtel] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-kvtel] to_gemma4 FAIL\n"); return 2; }
+    const int As[]={1,2,4,8,16}, nA=5;
+    const int sys_n=24, act_n=12, frame_n=12, ngen=8, Pmax=1024, REP=3;
+    int32_t sys[24],act[12],frm[12];
+    for(int i=0;i<sys_n;i++)sys[i]=100+i; for(int i=0;i<act_n;i++)act[i]=400+i; for(int i=0;i<frame_n;i++)frm[i]=700+i;
+    int32_t gbuf[64];
+    double t_grow[8]={0}, t_metal[8]={0};
+    fprintf(stderr,"[g4-kvtel] sweep A∈{1,2,4,8,16} sys=%d act=%d frame=%d ngen=%d (min of %d warm reps)\n",sys_n,act_n,frame_n,ngen,REP);
+    /* ── METAL: resident cache, O(1) idle tick ── */
+    for(int ai=0; ai<nA; ai++){
+        int A=As[ai];
+        sp_g4_kv *s=gemma4_kv_open(m,Pmax);
+        if(!s){ fprintf(stderr,"[g4-kvtel] kv_open FAIL\n"); return 2; }
+        if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-kvtel] metal sys FAIL\n"); return 2; }
+        for(int a=0;a<A;a++){ if(gemma4_kv_prefill(s,act,act_n)||gemma4_kv_decode(s,ngen,gbuf)){ fprintf(stderr,"[g4-kvtel] metal action FAIL\n"); return 2; } }
+        int anchor=gemma4_kv_pos(s);
+        double best=1e9;
+        for(int r=0;r<REP;r++){
+            double t0=kvt_now();
+            gemma4_kv_prefill(s,frm,frame_n); gemma4_kv_decode(s,ngen,gbuf); gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+            double dt=kvt_now()-t0; if(dt<best)best=dt;
+        }
+        t_metal[ai]=best; gemma4_kv_close(s);
+        fprintf(stderr,"[g4-kvtel] METAL  A=%2d resident_pos=%d idle_tick=%.4fs\n",A,anchor,best);
+    }
+    /* ── PREFIX-GROW: one-shot re-prefill of the accumulated prefix each idle tick ── */
+    for(int ai=0; ai<nA; ai++){
+        int A=As[ai];
+        int plen=sys_n + A*(act_n+ngen);    /* accumulated context the hack re-absorbs */
+        int n_prompt=plen+frame_n;
+        int total=n_prompt+ngen+8;
+        int32_t *seq=(int32_t*)malloc((size_t)total*sizeof(int32_t));
+        for(int i=0;i<n_prompt;i++) seq[i]=100+(i%200);   /* valid ids */
+        double best=1e9;
+        for(int r=0;r<REP;r++){
+            double t0=kvt_now();
+            int n=gemma4_decode_cuda(m,seq,n_prompt,ngen,-1);
+            double dt=kvt_now()-t0; if(n<n_prompt){ fprintf(stderr,"[g4-kvtel] grow decode FAIL\n"); free(seq); return 2; } if(dt<best)best=dt;
+        }
+        t_grow[ai]=best; free(seq);
+        fprintf(stderr,"[g4-kvtel] GROW   A=%2d prefix_len=%d idle_tick=%.4fs\n",A,plen,best);
+    }
+    fprintf(stderr,"\n[g4-kvtel] ── O(actions)→O(1) RECEIPT ──\n  A : prefix-grow(s) : metal(s) : grow/metal\n");
+    for(int ai=0; ai<nA; ai++)
+        fprintf(stderr,"  %2d : %10.4f : %8.4f : %.2fx\n",As[ai],t_grow[ai],t_metal[ai], t_metal[ai]>0?t_grow[ai]/t_metal[ai]:0.0);
+    double grow_slope=(t_grow[nA-1]-t_grow[0])/(double)(As[nA-1]-As[0]);
+    double metal_slope=(t_metal[nA-1]-t_metal[0])/(double)(As[nA-1]-As[0]);
+    fprintf(stderr,"[g4-kvtel] slope d(idle)/dA: prefix-grow=%.5f s/action  metal=%.5f s/action\n",grow_slope,metal_slope);
+    fprintf(stderr,"[g4-kvtel] VERDICT: %s (grow rises with A; metal flat)\n",
+        (grow_slope > 5.0*fabs(metal_slope)+1e-4)?"O(actions) vs O(1) CONFIRMED":"inconclusive");
+    sp_model_unload(handle);
+    return 0;
+}
+
 /* GELU tanh approximation — verbatim gemma4.c g4_gelu (static in the oracle TU). */
 static float g4_gelu(float v) {
     const float k = 0.7978845608028654f;
@@ -1067,6 +1135,7 @@ int main(void) {
     if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
+    if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
     return SP_DONE();
 }
