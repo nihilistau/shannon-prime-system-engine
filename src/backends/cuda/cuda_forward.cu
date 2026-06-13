@@ -1435,6 +1435,18 @@ extern "C" void gemma4_score_result(double *nll, long *cnt) {
     if (cnt) *cnt = g_g4_score_cnt;
 }
 
+/* XBAR P3.2-b-2b Phase-1 shadow-router result handoff (G-P3-GEOM.a oracle parity).
+ * mism = # of projk floats where the incrementally-minted global sidecar (built
+ * from the seam's post-RoPE K) differs from a fresh reprojection of the FINAL
+ * global K cache — must be 0 (the K fed to the router IS the K attention reads).
+ * sel = total host selections run (must be > 0 to prove the router executed). */
+static long g_arm_shadow_mism = -1;
+static long g_arm_shadow_sel  = 0;
+extern "C" void xbar_arm_shadow_result(long *mism, long *sel) {
+    if (mism) *mism = g_arm_shadow_mism;
+    if (sel)  *sel  = g_arm_shadow_sel;
+}
+
 /* ═══════════ ETA.5b: device-fed Gemma4 decode kernels ═══════════
  * Token identity and position live in VRAM (dseq[*dpos]); these kernels read
  * them there so a generate step has ZERO host round-trips and is graph-capturable. */
@@ -1699,6 +1711,24 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     const int   swa_ring = (getenv("SP_XBAR_SWA_RING") != NULL);
     const int   Wring = (ws < P) ? ws : P;                      /* ring slots (degenerates to P when no eviction) */
     const int   swa_active = (swa_ring || swa_w_ovr > 0);       /* either knob forces the per-step path */
+    /* XBAR P3.2-b-2b Phase 0/1: SHADOW global recall router (the policy-domain entry).
+     * SP_ARM_SHADOW=1 enables it; per global step we D2H the post-RoPE K + q, mint the
+     * geom projk sidecar host-side, and run the FROZEN ±1 projection router
+     * `sp_arm_select_geom` per global query head — but the recall set is LOGGED ONLY,
+     * attention is UNCHANGED (full cache), so the live decode stays bit-exact (Phase 0/1).
+     * B=0 = identity (null floor); B>0 exercises the sparse selection. Gate G-P3-GEOM.a =
+     * the incrementally-minted projk == a fresh reprojection of the FINAL global K cache
+     * (the K fed to the router IS the K attention reads) + decode byte-identical to no-flag.
+     * Wiring the recall set INTO attention (the lossy step) is Phase 2 — NOT here. */
+    const int   shadow_on = (getenv("SP_ARM_SHADOW") != NULL);
+    const int   arm_B    = (getenv("SP_ARM_B")    ? atoi(getenv("SP_ARM_B"))    : 0);
+    const int   arm_W    = (getenv("SP_ARM_W")    ? atoi(getenv("SP_ARM_W"))    : 0);
+    const int   arm_sink = (getenv("SP_ARM_SINK") ? atoi(getenv("SP_ARM_SINK")) : 0);
+    const int   arm_r    = (getenv("SP_ARM_R")    ? atoi(getenv("SP_ARM_R"))    : 32);
+    int         arm_hd_max = 0;                                /* set in setup (needs g_hd/s_hd, declared below) */
+    signed char    *armR = NULL; sp_arm_geom *armG = NULL; float *arm_projk = NULL;
+    sp_arm_sidx    *arm_cand = NULL; int *arm_ri = NULL; float *arm_kh = NULL, *arm_qh = NULL;
+    size_t          arm_projk_n = 0; long arm_sel = 0, arm_msum = 0;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2057,6 +2087,31 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 page_on ? " (per-step recall off disk, live source POISONED)" : " (per-step owner K/V, Ring-2 stdio)");
     }
 
+    /* ── XBAR P3.2-b-2b Phase 0/1: shadow-router setup (frozen ±1 projection, geom API) ──
+     * Build ONE Rademacher R at hd_max=512 (globals project full-width; SWA would use the
+     * first 256 cols, but the shadow runs globals-only). Lay out the per-class projk sidecar
+     * (sp_arm_geom_layout, kind=0 f32). Host scratch for the per-step K/q D2H + select. */
+    if (shadow_on) {
+        arm_hd_max = (g_hd > s_hd) ? g_hd : s_hd;             /* 512 — R built at max class head_dim */
+        armR = (signed char *)malloc((size_t)arm_r * arm_hd_max);
+        armG = (sp_arm_geom *)malloc((size_t)NL * sizeof(sp_arm_geom));
+        if (!armR || !armG) { sp_set_error("xbar shadow R/G OOM"); goto done; }
+        sp_arm_build_R(armR, arm_r, arm_hd_max);
+        for (int L = 0; L < NL; L++) {
+            const int gl = ((L % period) == period - 1);
+            armG[L].nkv = gl ? g_nkv : s_nkv; armG[L].hd = gl ? g_hd : s_hd;
+        }
+        arm_projk_n = sp_arm_geom_layout(armG, NL, P, arm_r, 0);
+        arm_projk = (float *)calloc(arm_projk_n ? arm_projk_n : 1, sizeof(float));
+        arm_cand  = (sp_arm_sidx *)malloc((size_t)P * sizeof(sp_arm_sidx));
+        arm_ri    = (int *)malloc((size_t)P * sizeof(int));
+        arm_kh    = (float *)malloc((size_t)arm_hd_max * sizeof(float));
+        arm_qh    = (float *)malloc((size_t)g_nh * g_hd * sizeof(float));
+        if (!arm_projk || !arm_cand || !arm_ri || !arm_kh || !arm_qh) { sp_set_error("xbar shadow scratch OOM"); goto done; }
+        fprintf(stderr, "    [xbar-p3.2b2b] SHADOW router ON: B=%d W=%d sink=%d r=%d, GLOBALS ONLY, attention UNCHANGED (Phase 0/1, live decode stays bit-exact)\n",
+                arm_B, arm_W, arm_sink, arm_r);
+    }
+
     /* prompt into VRAM once; dpos = 0 */
     if (cudaMemcpyAsync(dseq, seq, (size_t)n_prompt*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("g4 prompt H2D"); goto done; }
@@ -2075,7 +2130,7 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * step) + fixed attn shm (P floats) within the 48KB sm_75 default. */
     {
         const char *ge = getenv("SP_CUDA_DECODE_GRAPH");
-        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on && !xbar_hist_on && !spill_on && !swa_active;  /* XBAR / recall / history / spill / SWA-ring = per-step only */
+        const int use_graph = (ge && ge[0] == '1') && !xbar_on && !xbar_recall_on && !xbar_hist_on && !spill_on && !swa_active && !shadow_on;  /* XBAR / recall / history / spill / SWA-ring / shadow-router = per-step only */
         const size_t attn_shm = (size_t)P * sizeof(float);
         if (use_graph && attn_shm <= 48u*1024u && n_gen > 0 && (!PL || dev_ple)) {
             cublasSetStream(cb, st);
@@ -2415,6 +2470,23 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 cudaMemcpyAsync(dKc[L] + wslot*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 cudaMemcpyAsync(dVc[L] + wslot*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 Kuse = dKc[L]; Vuse = dVc[L];
+                /* ── XBAR P3.2-b-2b Phase 0/1: host shadow-select on the GLOBAL owners.
+                 * D2H the just-finalized post-RoPE K (dk == the cache row) + q, mint the geom
+                 * projk sidecar incrementally, run the frozen sp_arm_select_geom per query head.
+                 * LOG ONLY — Kuse stays the full cache, so attention is byte-identical. ── */
+                if (shadow_on && global) {
+                    cudaError_t se = cudaStreamSynchronize(st);
+                    if (se != cudaSuccess) { fail_cuda(se, "xbar shadow sync"); goto done; }
+                    cudaMemcpy(arm_kh, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(arm_qh, dq, (size_t)qd*sizeof(float),  cudaMemcpyDeviceToHost);
+                    sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
+                                        arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
+                    for (int h = 0; h < nh; h++) {
+                        int m = sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
+                                                   arm_projk, P, 0, arm_B, arm_W, arm_sink, pos, arm_cand, arm_ri);
+                        arm_sel++; arm_msum += m;
+                    }
+                }
                 if (xbar_recall_on) {   /* P3.1: read attention from the episode store @ off[L] */
                     if (xbar_mirror) {  /* SELFTEST/WRITE: mirror the live KV into the store first; LOAD reads disk as-is */
                         cudaMemcpyAsync(d_xbar_K + xbar_off[L] + (size_t)pos*kvd*4, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
@@ -2645,6 +2717,26 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         k_incr_pos<<<1, 1, 0, st>>>(dpos);         /* keep dpos == pos+1 */
     }
 download:
+    if (shadow_on && armR) {   /* ── P3.2-b-2b Phase 1 gate: G-P3-GEOM.a oracle parity ──
+        * The K fed to the router must BE the K attention reads. Re-project the FINAL global
+        * K cache fresh and compare to the incrementally-minted projk: mismatch ⇒ a wrong-K
+        * capture or a sidecar-indexing fault (the bug class Phase 1 isolates from router logic). */
+        cudaStreamSynchronize(st);
+        long mism = 0; float oproj[SP_ARM_R_MAX];
+        for (int L = 0; L < kvfs && L < NL; L++) {
+            if (((L % period) == period - 1) == 0) continue;   /* globals only (L%6==5) */
+            const int kvd2 = armG[L].nkv * armG[L].hd;
+            for (int p2 = 0; p2 < P - 1; p2++) {               /* the loop minted [0,P-1) */
+                cudaMemcpy(arm_kh, dKc[L] + (size_t)p2*kvd2, (size_t)kvd2*sizeof(float), cudaMemcpyDeviceToHost);
+                sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh, oproj);
+                const float *inc = arm_projk + armG[L].off + (size_t)p2*armG[L].nkv*arm_r;
+                for (int p = 0; p < arm_r; p++) if (oproj[p] != inc[p]) mism++;
+            }
+        }
+        g_arm_shadow_mism = mism; g_arm_shadow_sel = arm_sel;
+        fprintf(stderr, "    [xbar-p3.2b2b] G-P3-GEOM.a oracle parity: global projk fresh-vs-incremental mismatches=%ld; selections=%ld avg|recall|=%.1f => %s\n",
+                mism, arm_sel, arm_sel ? (double)arm_msum/arm_sel : 0.0, mism == 0 ? "PARITY OK" : "MISMATCH");
+    }
     if (probe_xs) {   /* flush the layer-bisect dump (diagnostic only) */
         FILE *pf = fopen(pdump, "wb");
         if (pf) { fwrite(probe_xs, sizeof(float), (size_t)NL * E, pf); fclose(pf); }
@@ -2734,6 +2826,8 @@ done:
     if (spill_on && spill_be.close) spill_be.close(spill_be.handle);  /* P3.2-a Ring-2 spill store */
     if (spill_off) free(spill_off); if (spill_hK) cudaFreeHost(spill_hK); if (spill_hV) cudaFreeHost(spill_hV);
     if (page_hK) cudaFreeHost(page_hK); if (page_hV) cudaFreeHost(page_hV);  /* P3.2-b-1 page-in staging */
+    if (armR) free(armR); if (armG) free(armG); if (arm_projk) free(arm_projk);  /* P3.2-b-2b shadow router */
+    if (arm_cand) free(arm_cand); if (arm_ri) free(arm_ri); if (arm_kh) free(arm_kh); if (arm_qh) free(arm_qh);
     if (dVc) { for (int L = 0; L < NL; L++) if (dVc[L]) cudaFree(dVc[L]); free(dVc); }
     if (dnll) cudaFree(dnll);
     free(probe_xs);

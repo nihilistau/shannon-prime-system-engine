@@ -59,6 +59,7 @@ int  gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
                          float *logits);
 int  gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
                         int n_gen, int eos_id);
+void xbar_arm_shadow_result(long *mism, long *sel);   /* P3.2-b-2b Phase-1 oracle parity handoff */
 void sp_cuda_model_release(const qwen3_model *m);
 
 /* Engine-symbol SHIM (the documented cross-seam alias pattern, cf.
@@ -643,6 +644,47 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
             fprintf(stderr, "        ring:"); for (int i = 0; i < SPT; i++) fprintf(stderr, " %d", rng[i]); fprintf(stderr, "\n");
             SP_CHECK(dnr == SPT && dng == SPT, "P3.2-b-2a: both decodes produced full length");
             SP_CHECK(diffs == 0, "P3.2-b-2a SWA ring: ring decode == full-cache windowed decode (bit-exact)");
+            return SP_DONE();
+        }
+    }
+
+    /* ════ E_G4_CU_ARM (XBAR P3.2-b-2b Phase 0/1): shadow-router parity gate ════
+     * The frozen sp_arm_select_geom runs host-side on the 8 GLOBAL owners but only LOGS
+     * the recall set — attention is untouched. So (1) the decode output must be byte-identical
+     * to no-flag (the diffs=0 constraint), and (2) the incrementally-minted global projk must
+     * equal a fresh reprojection of the FINAL global K cache (G-P3-GEOM.a oracle parity: the K
+     * fed the router IS the K attention reads). B=0 = Phase-0 null floor (identity selection),
+     * B=8 = Phase-1 sparse selection. */
+    {
+        const char *ag = getenv("SP_ARM_GATE");
+        if (ag && atoi(ag) > 0) {
+            enum { ANP = 4, ANG = 12, APT = ANP + ANG };
+            const int32_t ap[ANP] = { 2, 10, 100, 1000 };
+            char ev[300];
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=1");
+            int32_t ref[APT]; for (int i = 0; i < ANP; i++) ref[i] = ap[i];
+            int dnr = gemma4_decode_cuda(m, ref, ANP, ANG, -1);          /* no-flag baseline */
+            int total_diffs = 0; long worst_mism = 0, total_sel = 0;
+            const char *Bs[2] = { "0", "8" };                           /* Phase-0 null, Phase-1 sparse */
+            for (int bi = 0; bi < 2; bi++) {
+                _putenv("SP_ARM_SHADOW=1");
+                snprintf(ev, sizeof(ev), "SP_ARM_B=%s", Bs[bi]); _putenv(ev);
+                _putenv("SP_ARM_W=2"); _putenv("SP_ARM_SINK=1"); _putenv("SP_ARM_R=32");
+                int32_t sh[APT]; for (int i = 0; i < ANP; i++) sh[i] = ap[i];
+                int dns = gemma4_decode_cuda(m, sh, ANP, ANG, -1);
+                _putenv("SP_ARM_SHADOW="); _putenv("SP_ARM_B="); _putenv("SP_ARM_W="); _putenv("SP_ARM_SINK="); _putenv("SP_ARM_R=");
+                long mism = -1, sel = 0; xbar_arm_shadow_result(&mism, &sel);
+                int d = 0, n = (dnr < dns ? dnr : dns); if (n > APT) n = APT;
+                for (int i = ANP; i < n; i++) if (ref[i] != sh[i]) d++;
+                total_diffs += d; if (mism > worst_mism) worst_mism = mism; total_sel += sel;
+                fprintf(stderr, "    [g4-cuda-ARM] B=%s  shadow dn=%d  diffs[%d..%d)=%d  projk-mism=%ld  selections=%ld\n",
+                        Bs[bi], dns, ANP, APT, d, mism, sel);
+            }
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+            SP_CHECK(dnr == APT, "P3.2-b-2b: baseline decode full length");
+            SP_CHECK(total_diffs == 0, "P3.2-b-2b Phase 0/1: shadow decode == no-flag (live output bit-exact)");
+            SP_CHECK(worst_mism == 0, "P3.2-b-2b G-P3-GEOM.a: global projk fresh-vs-incremental parity (K-capture faithful)");
+            SP_CHECK(total_sel > 0, "P3.2-b-2b: shadow router executed (selections > 0)");
             return SP_DONE();
         }
     }
