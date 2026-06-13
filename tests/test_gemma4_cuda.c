@@ -72,6 +72,92 @@ void sp_cuda_model_release(const qwen3_model *m);
 const float *sp_as_f32(const qwen3_model *m, const gguf_tensor *t);
 const float *as_f32(const qwen3_model *m, const gguf_tensor *t) { return sp_as_f32(m, t); }
 
+/* SP_G4_NIAH=1 mode: Needle-In-A-Haystack under the XBAR slab/ring/poison.
+ * Conditions are pure env (SP_XBAR_SWA_RING / SP_ARM_*) — this harness is
+ * condition-agnostic; it asserts SWA-isolation (needle_end <= n_prompt - W) so a
+ * HIT can ONLY have traversed the global crossbar. Everything is TOKEN-SPACE
+ * (no tokenizer linkage): haystack ids from SP_PPL_TOKENS; the needle/query/secret
+ * ids are pre-tokenized with the gemma-4 vocab (sp_tok_dump, BOS stripped — the
+ * .sp-tokenizer lane is T_G4_TOK_PARITY-identical). HIT = the 6 secret-digit
+ * tokens appear as a contiguous subsequence in the generated output. 0=HIT 3=MISS 2=err. */
+static const int32_t NIAH_NEEDLE[] = { 669,6789,8918,573,506,10839,1629,43248,563,236743,236828,236800,236832,236812,236819,236778,236761,21429,625,236761,236743 };
+static const int32_t NIAH_QUERY[]  = { 2900,563,506,6789,8918,573,506,10839,1629,43248,236881,669,8918,563 };
+static const int32_t NIAH_SECRET[] = { 236828,236800,236832,236812,236819,236778 };  /* "837492" digit tokens */
+static int run_niah(void) {
+    const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
+    const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
+    const char *toksf = getenv("SP_PPL_TOKENS");
+    int N     = getenv("SP_NIAH_N")     ? atoi(getenv("SP_NIAH_N"))     : 16384;
+    int depth = getenv("SP_NIAH_DEPTH") ? atoi(getenv("SP_NIAH_DEPTH")) : 50;
+    int n_gen = getenv("SP_NIAH_GEN")   ? atoi(getenv("SP_NIAH_GEN"))   : 24;
+    if (depth < 0) depth = 0; if (depth > 100) depth = 100;
+    if (!toksf) { fprintf(stderr, "[g4-niah] set SP_PPL_TOKENS to the pre-tokenized haystack\n"); return 2; }
+
+    sp_model *handle = NULL;
+    if (sp_model_load(spm, stk, &handle) != SP_OK || !handle) { fprintf(stderr, "[g4-niah] sp_model_load FAIL\n"); return 2; }
+    qwen3_model *m = sp_model_to_gemma4(handle);
+    if (!m) { fprintf(stderr, "[g4-niah] sp_model_to_gemma4 FAIL\n"); return 2; }
+    int W = (int)m->cfg.sliding_window; if (W <= 0) W = 1024;
+    const int nn = (int)(sizeof NIAH_NEEDLE / sizeof NIAH_NEEDLE[0]);
+    const int nq = (int)(sizeof NIAH_QUERY  / sizeof NIAH_QUERY[0]);
+    const int ns = (int)(sizeof NIAH_SECRET / sizeof NIAH_SECRET[0]);
+
+    FILE *tf = fopen(toksf, "rb");
+    if (!tf) { fprintf(stderr, "[g4-niah] cannot open %s\n", toksf); return 2; }
+    int cap_hay = N + 8;
+    int32_t *hay = (int32_t *)malloc((size_t)cap_hay * sizeof(int32_t));
+    long nh = 0; int v;
+    while (nh < cap_hay && fscanf(tf, "%d", &v) == 1) hay[nh++] = (int32_t)v;
+    fclose(tf);
+    if (nh < 64) { fprintf(stderr, "[g4-niah] haystack too short (%ld)\n", nh); return 2; }
+
+    long budget = (long)N - nn - nq;
+    if (budget < 64) budget = 64;
+    if (budget > nh) budget = nh;
+    long inj = (budget * depth) / 100;
+    if (inj > budget) inj = budget;
+
+    int32_t *seq = (int32_t *)malloc((size_t)(budget + nn + nq + n_gen + 8) * sizeof(int32_t));
+    int p = 0;
+    for (long i = 0; i < inj; i++)       seq[p++] = hay[i];
+    long needle_start = p;
+    for (int i = 0; i < nn; i++)         seq[p++] = NIAH_NEEDLE[i];
+    long needle_end = p;                 /* one past last needle token */
+    for (long i = inj; i < budget; i++)  seq[p++] = hay[i];
+    for (int i = 0; i < nq; i++)         seq[p++] = NIAH_QUERY[i];
+    int n_prompt = p;
+
+    /* SWA-ISOLATION (the central control): the needle must sit strictly outside the
+     * sliding window at the generation point, so only the GLOBAL crossbar can serve it. */
+    long swa_gap = (long)n_prompt - needle_end;
+    fprintf(stderr, "[g4-niah] N=%d depth=%d%% n_prompt=%d needle@[%ld,%ld) W=%d swa_gap=%ld\n",
+            N, depth, n_prompt, needle_start, needle_end, W, swa_gap);
+    if (needle_end > n_prompt - W) {
+        fprintf(stderr, "[g4-niah] ABORT: needle NOT SWA-isolated (needle_end %ld > n_prompt-W %d) — raise N or lower depth\n",
+                needle_end, n_prompt - W);
+        return 2;
+    }
+
+    int n = gemma4_decode_cuda(m, seq, n_prompt, n_gen, -1);
+    if (n < n_prompt) { fprintf(stderr, "[g4-niah] decode FAIL (n=%d) err=%s\n", n, sp_last_error()); return 2; }
+
+    /* token-space subsequence match of the secret digits in the generated tail */
+    int hit = 0;
+    for (int s = n_prompt; s + ns <= n && !hit; s++) {
+        int ok = 1; for (int k = 0; k < ns; k++) if (seq[s + k] != NIAH_SECRET[k]) { ok = 0; break; }
+        if (ok) hit = 1;
+    }
+    char gentoks[1024]; int gl = 0;
+    for (int i = n_prompt; i < n && gl < (int)sizeof(gentoks) - 12; i++)
+        gl += snprintf(gentoks + gl, sizeof(gentoks) - gl, "%d ", seq[i]);
+    const char *lsh = getenv("SP_ARM_LSH"); const char *slab = getenv("SP_ARM_SLAB");
+    const char *page = getenv("SP_ARM_PAGE"); const char *ring = getenv("SP_XBAR_SWA_RING");
+    fprintf(stderr, "[g4-niah] %-4s depth=%d%% LSH=%s SLAB=%s PAGE=%s SWA_RING=%s gen_ids=[%.200s]\n",
+            hit ? "HIT" : "MISS", depth, lsh?"on":"off", slab?"on":"off", page?"on":"off", ring?"on":"off", gentoks);
+    free(hay); free(seq);
+    return hit ? 0 : 3;
+}
+
 /* GELU tanh approximation — verbatim gemma4.c g4_gelu (static in the oracle TU). */
 static float g4_gelu(float v) {
     const float k = 0.7978845608028654f;
@@ -787,6 +873,7 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
 }
 
 int main(void) {
+    if (getenv("SP_G4_NIAH")) return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
     return SP_DONE();
 }

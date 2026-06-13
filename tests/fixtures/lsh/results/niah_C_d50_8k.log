@@ -1,0 +1,12 @@
+[env-common] paths pinned: SP_REPO_ROOT=D:\F\shannon-prime-repos
+[env-common] toolchain pins: CPU=MinGW-gcc-15.2 (build/), CUDA-host=VS2019 BT + CUDA 13.2, Tier3-MSVC-parity=VS18 (D:), Vulkan >= 1.3.250, Hexagon SDK C:\Qualcomm\Hexagon_SDK\5.5.6.0
+===== [ 0:32:58.90] C-c NIAH cond=C depth=50 N=8192 =====
+[g4-niah] N=8192 depth=50% n_prompt=8192 needle@[4078,4099) W=1024 swa_gap=4093
+    [xbar-swa] ring=1 ws=1024 Wring=1024 P=8216 swa_active=1 (SWA owners alloc Wring slots)
+    [xbar-lsh] Learned-LSH M=R·Rᵀ loaded (D:\F\shannon-prime-repos\_xbar\p2b\lsh_M_r32.bin); select = top-B by (Mq)·K
+    [xbar-lsh-r] C-b.1 projected-key sidecar ON: r=32, select scores RᵀK (resident r-dim, not full K)
+    [xbar-slab] C-b.2 COMPACT GLOBAL SLAB: globals capped at 4400 slots (was P=8216); full K/V in host RAM, union paged per step
+    [xbar-p3.2b2b] GATHER (Phase 2, LOSSY) router ON: B=256 W=0 sink=0 r=32, GLOBALS ONLY — recall set wired into attention, output diverges (gate = G2 PPL<2%)
+    [xbar-slab] C-b.2 union telemetry: max per-step union = 2171 (slab depth 4400, B=256); clip events = 0
+[g4-niah] HIT  depth=50% LSH=on SLAB=on PAGE=off SWA_RING=on gen_ids=[236743 236828 236800 236832 236812 236819 236778 236761 84831 258882 3605 1031 96829 1017 44655 84831 3605 1031 96829 1017 44655 84831 32336 3605 ]
+===== [ 0:42:19.12] NIAH_EXIT=0 (0=HIT 3=MISS 2=err) =====
