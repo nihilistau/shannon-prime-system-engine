@@ -48,6 +48,11 @@ use crate::tokenizer::SptbTokenizer;
 /// `NO_OP` (1–3 tokens) or `<ACTION>verb</ACTION>` (a handful) — 24 is slack.
 const MAX_DECISION_TOKENS: usize = 24;
 
+/// gemma4 arch id (mirrors tokenizer.rs ARCH_GEMMA3). When the loaded model is
+/// gemma, the template auto-routes to `<start_of_turn>` turns and the qwen
+/// `<think>` bypass is dropped (gemma is not a reasoning hybrid).
+const GEMMA3_ARCH_ID: u32 = 3;
+
 /// The strict kernel contract prefilled once at session start. Plain text
 /// (Alpha simplification — see module header).
 const SYSTEM_CONTRACT: &str = "\
@@ -146,6 +151,17 @@ fn frame_prompt_raw(ev: &TapeEvent) -> String {
 /// (its fine-tuned boundary), not a narrative continuation. `<|im_start|>` /
 /// `<|im_end|>` are registered special tokens (tokenizer.rs:163-170), so they
 /// encode to their single IDs; `<|im_end|>` is an EOS id, so decode self-stops.
+/// GEMMA per-tick frame — gemma's native `<start_of_turn>` turn structure. No
+/// `<think>` bypass (gemma is not a reasoning hybrid). `<end_of_turn>` is an
+/// EOS id so the model turn self-stops. The persistent KV already holds the
+/// contract turn + ack (see run_kairos_alpha), so this is just the event turn.
+fn frame_prompt_gemma(ev: &TapeEvent) -> String {
+    format!(
+        "<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n",
+        event_body(ev)
+    )
+}
+
 fn frame_prompt_chatml(ev: &TapeEvent) -> String {
     // No-think suppression (SP_KAIROS_NOTHINK=1): pre-fill a CLOSED thinking
     // block immediately after the assistant header, hijacking the token
@@ -245,7 +261,23 @@ pub fn run_kairos_alpha(
     let policy_salience = std::env::var("SP_KAIROS_SALIENCE_POLICY").as_deref() == Ok("1");
     let contract = if policy_salience { SYSTEM_CONTRACT_SALIENCE } else { SYSTEM_CONTRACT };
     eprintln!("[kairos-alpha] action policy = {}", if policy_salience { "SALIENCE>=0.5 (explicit threshold)" } else { "JUDGMENT (default)" });
-    let sys_text = if chatml {
+
+    // Template auto-routes on the loaded model's arch. Gemma uses
+    // <start_of_turn> turns (no system role → contract as a user turn + a model
+    // ack; no <think> bypass). Qwen uses ChatML (<|im_start|> + optional
+    // no-think). Raw = un-templated baseline.
+    let use_gemma = arch.arch_id == GEMMA3_ARCH_ID;
+    if chatml {
+        eprintln!("[kairos-alpha] template = {}", if use_gemma { "GEMMA3 <start_of_turn>" } else { "QWEN ChatML" });
+    }
+    let sys_text = if chatml && use_gemma {
+        // Gemma has no system role: seat the contract as a user turn + a short
+        // model ack so the alternation is clean for the per-tick user turns.
+        format!(
+            "<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n",
+            contract.trim()
+        )
+    } else if chatml {
         format!("<|im_start|>system\n{}<|im_end|>\n", contract.trim())
     } else {
         contract.to_string()
@@ -268,7 +300,13 @@ pub fn run_kairos_alpha(
         let t0 = Instant::now();
         // Position BEFORE this tick touches the cache — the cold-evict anchor.
         let pre_pos = session.position().unwrap_or(0);
-        let frame = if chatml { frame_prompt_chatml(ev) } else { frame_prompt_raw(ev) };
+        let frame = if chatml && use_gemma {
+            frame_prompt_gemma(ev)
+        } else if chatml {
+            frame_prompt_chatml(ev)
+        } else {
+            frame_prompt_raw(ev)
+        };
         let frame_tokens = tok.encode(&frame)?;
         let raw = decode_decision(&mut session, &tok, &mut logits, &frame_tokens)?;
         let decided = parse_decision(&raw);
