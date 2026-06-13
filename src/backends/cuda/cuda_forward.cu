@@ -393,6 +393,19 @@ static int sp_oracle_top_b(const float *sc, int ctx, int B, float *hs, int *hi, 
     return n;
 }
 
+/* §3q Learned-LSH: transform query per head q'[h] = M·q[h] (M=R·Rᵀ, [HD,HD] row-major).
+ * Then (Mq)·K == (Rq)·(RK) is the learned-projection score, fed to k_qk_scores. nh blocks. */
+__global__ void k_apply_M(const float *q, const float *M, int nh, int HD, float *qp) {
+    int h = blockIdx.x;
+    const float *qh = q + (size_t)h * HD;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        const float *Mi = M + (size_t)i * HD;
+        float acc = 0.0f;
+        for (int j = 0; j < HD; j++) acc += Mi[j] * qh[j];
+        qp[(size_t)h * HD + i] = acc;
+    }
+}
+
 /* ETA.2 (Gemma4): final-logit softcap, z = tanh(z/cap)*cap (gemma4.c). Applied
  * to the LM-head logits ONLY — gemma4 has NO attention-score cap (that was
  * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
@@ -1839,6 +1852,13 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * Scores on the GPU (q.K GEMV, microseconds), top-B on the host (min-heap). Implies gather. */
     const int   arm_oracle = (getenv("SP_ARM_ORACLE") != NULL) && arm_gather;
     float      *arm_dscores = NULL, *arm_scores_h = NULL, *arm_hs = NULL; int *arm_hi = NULL;
+    /* §3q Phase B Learned-LSH: SP_ARM_LSH=M.bin (raw f32 [hd*hd] = R·Rᵀ). Selection is
+     * top-B by (Rq)·(RK) = qᵀ(RRᵀ)K = (Mq)·K — reuse k_qk_scores on the transformed query
+     * q'=Mq, identical select to the deployed r-dim projection, zero new hot-path kernels. */
+    const char *arm_lsh_path = getenv("SP_ARM_LSH");
+    const int   arm_lsh = (arm_lsh_path != NULL) && arm_gather;
+    const int   arm_gpusel = arm_oracle || arm_lsh;   /* both score on GPU + top-B on host */
+    float      *arm_dM = NULL, *arm_dqp = NULL;
     const float eps = c->rms_eps, embscale = sqrtf((float)E);
     const float softcap = c->g4_logit_softcap;
     const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
@@ -2240,13 +2260,25 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
             arm_union= (int *)malloc((size_t)P * sizeof(int));
             if (!arm_phK || !arm_phV || !arm_seen || !arm_union) { sp_set_error("xbar arm_page scratch OOM"); goto done; }
         }
-        if (arm_oracle) {   /* §3q ceiling: GPU q.K scores [g_nh x P] + host min-heap scratch */
-            if (cudaMalloc((void **)&arm_dscores, (size_t)g_nh * P * sizeof(float)) != cudaSuccess) { sp_set_error("xbar oracle dscores OOM"); goto done; }
+        if (arm_gpusel) {   /* §3q oracle/LSH: GPU scores [g_nh x P] + host min-heap scratch */
+            if (cudaMalloc((void **)&arm_dscores, (size_t)g_nh * P * sizeof(float)) != cudaSuccess) { sp_set_error("xbar gpusel dscores OOM"); goto done; }
             arm_scores_h = (float *)malloc((size_t)g_nh * P * sizeof(float));
             arm_hs = (float *)malloc((size_t)(arm_B > 0 ? arm_B : 1) * sizeof(float));
             arm_hi = (int   *)malloc((size_t)(arm_B > 0 ? arm_B : 1) * sizeof(int));
-            if (!arm_scores_h || !arm_hs || !arm_hi) { sp_set_error("xbar oracle host OOM"); goto done; }
-            fprintf(stderr, "    [xbar-oracle] EXACT top-B by q.K selection (the selection ceiling)\n");
+            if (!arm_scores_h || !arm_hs || !arm_hi) { sp_set_error("xbar gpusel host OOM"); goto done; }
+            if (arm_oracle) fprintf(stderr, "    [xbar-oracle] EXACT top-B by q.K selection (the selection ceiling)\n");
+        }
+        if (arm_lsh) {   /* §3q Phase B: load M=R·Rᵀ [g_hd x g_hd] f32, alloc transformed-query buffer */
+            FILE *mf = fopen(arm_lsh_path, "rb");
+            if (!mf) { sp_set_error("xbar LSH: open M.bin"); goto done; }
+            size_t mn = (size_t)g_hd * g_hd;
+            float *Mh = (float *)malloc(mn * sizeof(float));
+            if (!Mh || fread(Mh, sizeof(float), mn, mf) != mn) { fclose(mf); free(Mh); sp_set_error("xbar LSH: read M"); goto done; }
+            fclose(mf);
+            if (cudaMalloc((void **)&arm_dM, mn * sizeof(float)) != cudaSuccess ||
+                cudaMalloc((void **)&arm_dqp, (size_t)g_nh * g_hd * sizeof(float)) != cudaSuccess) { free(Mh); sp_set_error("xbar LSH dev OOM"); goto done; }
+            cudaMemcpy(arm_dM, Mh, mn * sizeof(float), cudaMemcpyHostToDevice); free(Mh);
+            fprintf(stderr, "    [xbar-lsh] Learned-LSH M=R·Rᵀ loaded (%s); select = top-B by (Mq)·K\n", arm_lsh_path);
         }
         fprintf(stderr, "    [xbar-p3.2b2b] %s router ON: B=%d W=%d sink=%d r=%d, GLOBALS ONLY%s\n",
                 arm_gather ? "GATHER (Phase 2, LOSSY)" : "SHADOW (Phase 0/1, bit-exact)",
@@ -2639,17 +2671,22 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                         fwrite(arm_kh, sizeof(float), (size_t)kvd, arm_dump_f);
                         fwrite(arm_qh, sizeof(float), (size_t)qd,  arm_dump_f);
                     }
-                    if (arm_oracle) {   /* §3q ceiling: exact q.K scores on GPU, top-B on host */
-                        k_qk_scores<<<nh, 256, 0, st>>>(dq, dKc[L], pos + 1, P, kvd, hd, grp, arm_dscores);
+                    if (arm_gpusel) {   /* §3q oracle/LSH: GPU scores, top-B on host */
+                        const float *qsel = dq;
+                        if (arm_lsh) {  /* transform q' = M·q per head, then score on q' */
+                            k_apply_M<<<nh, 256, 0, st>>>(dq, arm_dM, nh, hd, arm_dqp);
+                            qsel = arm_dqp;
+                        }
+                        k_qk_scores<<<nh, 256, 0, st>>>(qsel, dKc[L], pos + 1, P, kvd, hd, grp, arm_dscores);
                         cudaError_t oe = cudaStreamSynchronize(st);
-                        if (oe != cudaSuccess) { fail_cuda(oe, "xbar oracle scores sync"); goto done; }
+                        if (oe != cudaSuccess) { fail_cuda(oe, "xbar gpusel scores sync"); goto done; }
                         cudaMemcpy(arm_scores_h, arm_dscores, (size_t)nh * P * sizeof(float), cudaMemcpyDeviceToHost);
                     } else {
                         sp_arm_project_geom(armR, arm_r, arm_hd_max, armG[L].hd, arm_kh,
                                             arm_projk + armG[L].off + (size_t)pos*armG[L].nkv*arm_r);
                     }
                     for (int h = 0; h < nh; h++) {
-                        int m = arm_oracle
+                        int m = arm_gpusel
                             ? sp_oracle_top_b(arm_scores_h + (size_t)h*P, pos + 1, arm_B, arm_hs, arm_hi, arm_ri)
                             : sp_arm_select_geom(armR, arm_r, arm_hd_max, &armG[L], arm_qh + (size_t)h*hd,
                                                  arm_projk, P, 0, arm_B, arm_W, arm_sink, pos, arm_cand, arm_ri);
@@ -3036,6 +3073,7 @@ done:
     if (arm_dump_f) fclose(arm_dump_f);  /* §3q Phase A K/q dump */
     if (arm_dscores) cudaFree(arm_dscores); if (arm_scores_h) free(arm_scores_h);  /* §3q oracle ceiling */
     if (arm_hs) free(arm_hs); if (arm_hi) free(arm_hi);
+    if (arm_dM) cudaFree(arm_dM); if (arm_dqp) cudaFree(arm_dqp);  /* §3q Learned-LSH */
     if (arm_ri_host) free(arm_ri_host); if (arm_m_host) free(arm_m_host);  /* P3.2-b-2b gather buffers */
     if (arm_ri_dev) cudaFree(arm_ri_dev); if (arm_m_dev) cudaFree(arm_m_dev);
     if (arm_page && arm_be.close) arm_be.close(arm_be.handle);  /* P3.2-b-2b G1 Ring-2 store */
