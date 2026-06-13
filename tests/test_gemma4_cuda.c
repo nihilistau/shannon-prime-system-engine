@@ -34,6 +34,7 @@
 #include "sp/sp_status.h"
 #include "sp/forward_dispatch.h"   /* sp_matmul / sp_embed_row / sp_as_f32 (CPU mirror) */
 #include "sp/forward_kernels.h"    /* sp_rmsnorm / sp_rmsnorm_head / sp_rope_neox_freqs / sp_attn_head */
+#include "sp_engine/tokenizer.h"   /* sp_tokenizer_* — the parity-validated .sp-tokenizer blob lane (SP_G4_KAIROS) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,6 +157,131 @@ static int run_niah(void) {
             hit ? "HIT" : "MISS", depth, lsh?"on":"off", slab?"on":"off", page?"on":"off", ring?"on":"off", gentoks);
     free(hay); free(seq);
     return hit ? 0 : 3;
+}
+
+/* ═══ SP_G4_KAIROS=1 (KAI-1 Path B): the cognitive crucible on the 12B GPU. ═══
+ * Ports the Rust kairos_runner control plane to the engine CUDA forward. The
+ * mechanism (proven on qwen3-0.6B) is: gemma <start_of_turn> template +
+ * SALIENCE>=0.5 action policy + cold-evict NO_OP prune. gemma4_decode_cuda is
+ * ONE-SHOT (rebuilds KV from seq[0..n_prompt) each call), so the prune is a
+ * PREFIX-GROW: an idle NO_OP tick leaves the persistent prefix UNTOUCHED, so the
+ * next idle tick re-enters a context byte-identical to the first (O(Δ), defeats
+ * the corruption attractor); an ACTION GROWS the prefix (tick-5 crucible: the
+ * next idle tick then sees the retained action). Tokenizer = the parity-
+ * validated .sp-tokenizer blob lane (sp_tokenizer_*, T_G4_TOK_PARITY 5432/5432).
+ * Env: SP_GEMMA4_SPMODEL/SPTOK (12B -b1), SP_KAIROS_TAPE (the §2b tape). */
+#define KAIROS_MAXTICK 64
+#define KAIROS_GEN     16
+typedef struct { int expect_action; float sal; char kind[48]; char payload[96]; } ktick_t;
+
+static int run_kairos(void) {
+    const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
+    const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
+    const char *tapef = getenv("SP_KAIROS_TAPE");
+    if (!tapef) { fprintf(stderr, "[g4-kairos] set SP_KAIROS_TAPE to the §2b tape file\n"); return 2; }
+
+    /* ── load model + gemma4 + the parity-validated tokenizer ── */
+    sp_model *handle = NULL;
+    if (sp_model_load(spm, stk, &handle) != SP_OK || !handle) { fprintf(stderr, "[g4-kairos] sp_model_load FAIL: %s\n", sp_last_error()); return 2; }
+    qwen3_model *m = sp_model_to_gemma4(handle);
+    if (!m) { fprintf(stderr, "[g4-kairos] sp_model_to_gemma4 FAIL: %s\n", sp_last_error()); return 2; }
+    sp_tokenizer *tk = sp_tokenizer_load_tokfile(stk);
+    if (!tk) { fprintf(stderr, "[g4-kairos] sp_tokenizer_load_tokfile FAIL: %s\n", stk); return 2; }
+
+    /* ── parse the §2b tape: "tick kind payload salience expect", '#'/blank skipped, payload may be "quoted" ── */
+    ktick_t ticks[KAIROS_MAXTICK]; int nt = 0;
+    FILE *tf = fopen(tapef, "rb");
+    if (!tf) { fprintf(stderr, "[g4-kairos] cannot open tape %s\n", tapef); return 2; }
+    char line[512];
+    while (nt < KAIROS_MAXTICK && fgets(line, sizeof line, tf)) {
+        char *s = line; while (*s==' '||*s=='\t') s++;
+        if (*s=='#' || *s=='\n' || *s=='\r' || *s==0) continue;
+        long tickidx; char kind[48]={0}, payload[96]={0}, expect[16]={0}; float sal=0;
+        /* field 1: tick idx */
+        char *end; tickidx = strtol(s, &end, 10); if (end==s) continue; s=end; (void)tickidx;
+        while (*s==' '||*s=='\t') s++;
+        /* field 2: kind */
+        { int i=0; while (*s && *s!=' ' && *s!='\t' && i<47) kind[i++]=*s++; kind[i]=0; }
+        while (*s==' '||*s=='\t') s++;
+        /* field 3: payload (quoted or single token; '-' = empty) */
+        if (*s=='"') { s++; int i=0; while (*s && *s!='"' && i<95) payload[i++]=*s++; payload[i]=0; if (*s=='"') s++; }
+        else { int i=0; while (*s && *s!=' ' && *s!='\t' && i<95) payload[i++]=*s++; payload[i]=0; }
+        if (payload[0]=='-' && payload[1]==0) payload[0]=0;
+        while (*s==' '||*s=='\t') s++;
+        /* field 4: salience */
+        sal = strtof(s, &end); if (end!=s) s=end;
+        while (*s==' '||*s=='\t') s++;
+        /* field 5: expect */
+        { int i=0; while (*s && *s!=' ' && *s!='\t' && *s!='\n' && *s!='\r' && i<15) expect[i++]=*s++; expect[i]=0; }
+        ticks[nt].expect_action = (expect[0]=='A'||expect[0]=='a');
+        ticks[nt].sal = sal;
+        snprintf(ticks[nt].kind, sizeof ticks[nt].kind, "%s", kind);
+        snprintf(ticks[nt].payload, sizeof ticks[nt].payload, "%s", payload);
+        nt++;
+    }
+    fclose(tf);
+    int n_act = 0; for (int i=0;i<nt;i++) n_act += ticks[i].expect_action;
+    fprintf(stderr, "[g4-kairos] tape=%s ticks=%d (salient=%d idle=%d)\n", tapef, nt, n_act, nt-n_act);
+
+    /* ── system contract (SALIENCE>=0.5 policy) wrapped in the gemma turn frame, prefilled ONCE ── */
+    const char *SYS =
+        "<start_of_turn>user\n"
+        "You are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+        "NO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+
+    int cap = 8192;
+    int32_t *seq = (int32_t *)malloc((size_t)cap * sizeof(int32_t));
+    int32_t *tmp = (int32_t *)malloc((size_t)1024 * sizeof(int32_t));
+    char     dbuf[2048];
+    long pn = sp_tokenizer_encode(tk, SYS, strlen(SYS), /*parse_special=*/1, seq, cap);
+    if (pn <= 0) { fprintf(stderr, "[g4-kairos] system encode FAIL (%ld)\n", pn); return 2; }
+    int prefix_n = (int)pn;
+    fprintf(stderr, "[g4-kairos] system contract prefilled (%d tokens)\n", prefix_n);
+
+    /* ── the heartbeat: prefix-grow = cold-evict prune ── */
+    int noop_ok=0, act_ok=0, false_act=0, missed=0, malformed=0;
+    for (int i = 0; i < nt; i++) {
+        char frame[256];
+        snprintf(frame, sizeof frame,
+                 "<start_of_turn>user\nEVENT kind=%s salience=%.2f payload=\"%s\"<end_of_turn>\n<start_of_turn>model\n",
+                 ticks[i].kind, ticks[i].sal, ticks[i].payload);
+        long fn = sp_tokenizer_encode(tk, frame, strlen(frame), 1, tmp, 1024);
+        if (fn <= 0) { fprintf(stderr, "[g4-kairos] tick %d frame encode FAIL\n", i); continue; }
+        if (prefix_n + (int)fn + KAIROS_GEN + 8 > cap) { fprintf(stderr, "[g4-kairos] seq cap hit\n"); break; }
+        for (int k=0;k<fn;k++) seq[prefix_n+k] = tmp[k];
+        int n_prompt = prefix_n + (int)fn;
+        double t0 = now_s();
+        int n = gemma4_decode_cuda(m, seq, n_prompt, KAIROS_GEN, -1);
+        double dt = now_s() - t0;
+        if (n < n_prompt) { fprintf(stderr, "[g4-kairos] tick %d decode FAIL (n=%d) %s\n", i, n, sp_last_error()); continue; }
+        long bl = sp_tokenizer_decode(tk, seq + n_prompt, n - n_prompt, dbuf, sizeof dbuf - 1);
+        if (bl < 0) bl = 0; dbuf[bl] = 0;
+        /* parse in text space: <ACTION> wins; else NO_OP/NOOP; else malformed */
+        int is_act = (strstr(dbuf, "<ACTION>") != NULL);
+        int is_noop = (!is_act) && (strstr(dbuf, "NO_OP") != NULL || strstr(dbuf, "NOOP") != NULL);
+        const char *dec = is_act ? "ACTION" : (is_noop ? "NOOP" : "MALFORMED");
+        if (ticks[i].expect_action) { if (is_act) act_ok++; else if (is_noop) missed++; else malformed++; }
+        else                        { if (is_act) false_act++; else if (is_noop) noop_ok++; else malformed++; }
+        /* prefix-grow prune: keep ONLY on a real ACTION; NO_OP/malformed discard (prefix unchanged) */
+        int kept = 0;
+        if (is_act) { prefix_n = n; kept = 1; }
+        /* trim the printed raw to one line */
+        for (char *p=dbuf; *p; p++) if (*p=='\n'||*p=='\r') { *p=' '; }
+        fprintf(stderr, "[g4-kairos] tick %3d expect=%-6s decided=%-9s prefix=%d%s %.1fs raw=\"%.60s\"\n",
+                i, ticks[i].expect_action?"Action":"Noop", dec, prefix_n,
+                kept?" (kept)":" (pruned->flat)", dt, dbuf);
+    }
+    fprintf(stderr, "[g4-kairos] DONE ticks=%d noop_ok=%d action_ok=%d false_action=%d missed=%d malformed=%d\n",
+            nt, noop_ok, act_ok, false_act, missed, malformed);
+    free(seq); free(tmp);
+    sp_tokenizer_free(tk);
+    sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    /* gate: zero false-actions AND zero missed-events = the cognitive crucible passed */
+    return (false_act==0 && missed==0 && malformed==0) ? 0 : 3;
 }
 
 /* GELU tanh approximation — verbatim gemma4.c g4_gelu (static in the oracle TU). */
@@ -873,7 +999,8 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
 }
 
 int main(void) {
-    if (getenv("SP_G4_NIAH")) return run_niah();   /* C-c NIAH mode (env-driven conditions) */
+    if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
+    if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
     return SP_DONE();
 }
