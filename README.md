@@ -82,6 +82,8 @@ consolidation loop) are **[DESIGN]** — RFC-XBAR §3.1 / §7.
 
 1. [What this repo provides](#1-what-this-repo-provides)
 2. [Current status — honest table](#2-current-status--honest-table)
+   - [2.1 Harness modes (env-var test gates)](#21-harness-modes--the-env-var-test-gates)
+   - [2.2 Dated-update history](#22-dated-update-history-consolidated)
 3. [Quick start](#3-quick-start)
 4. [Architecture](#4-architecture)
 5. [The backends](#5-the-backends)
@@ -98,13 +100,23 @@ consolidation loop) are **[DESIGN]** — RFC-XBAR §3.1 / §7.
 
 ## 1. What this repo provides
 
-This repo wires the math-core forward onto four accelerator backends plus the `sp_daemon` server. **Measured here:** the citable **Gemma-4-12B 26.1 tok/s @ wikitext PPL 5.12 on the RTX 2060** (CUDA, OK_Q4B sovereign artifact — ledger 06-R10, §5.2.1d), the **two-ring memory envelope** (910× resident KV @32k, 7.57 µs/read off Optane) and the **WIRE-CPU integer pipe** (Qwen3-0.6B 0.84 → 39.52 tok/s, 47×, ~1.34× behind llama.cpp Q8_0) — the latter two on the CPU backend — over a forward that is bit-exact on **5 arch families** (Qwen3, Qwen2.5-Coder, Gemma3, Gemma4, Qwen3.6-35B-A3B MoE).
+This repo wires the math-core forward onto four accelerator backends plus the `sp_daemon` server, and on the CUDA path it carries the **space ⊗ time ⊗ cognition** crossbar substrate on the real 12B. **Measured here:**
+
+- **Space (XBAR Phase C — O(1) KV):** the cache is decoupled from context length — flat VRAM from 8k→16k (~50 MiB delta) with a learned-LSH sparse router (8× global compression at **+0.47% PPL**), and a needle planted in a 16k haystack **survives the compaction** at every depth (C-c NIAH).
+- **Time (KAIROS time-axis, persistent-KV ABI):** a resident KV cache that can be **rewound by an O(1) memory-coordinate shear** — bit-exact (`rewind` byte-identical across all 48 owner layers), with a journaled-ring variant (KAI-1c) that is wrap-aware. The rewind is **127× flatter per action** than the host re-prefill ("prefix-grow") hack it replaces.
+- **Cognition (KAIROS crucible):** a 12B held to **disciplined silence** on idle ticks (`NO_OP`), acting coherently only on salient events and reverting cleanly — perfect on a 24-event tape (0 false / 0 missed / 0 drift), running the time + space machinery underneath.
+- **The throughput floor:** the citable **Gemma-4-12B 26.1 tok/s @ wikitext PPL 5.12 on the RTX 2060** (CUDA, OK_Q4B sovereign artifact — ledger 06-R10, §5.2.1d), the **two-ring memory envelope** (910× resident KV @32k, 7.57 µs/read off Optane) and the **WIRE-CPU integer pipe** (Qwen3-0.6B 0.84 → 39.52 tok/s, 47×, ~1.34× behind llama.cpp Q8_0) — over a forward that is bit-exact on **5 arch families** (Qwen3, Qwen2.5-Coder, Gemma3, Gemma4, Qwen3.6-35B-A3B MoE).
+
+The KAIROS / XBAR / metal-eviction work all ships **test-path, env-gated, byte-inert when off** — the one-shot production decode (`gemma4_decode_cuda`) is left **byte-untouched** (the "null floor"), so every previously-closed throughput/PPL/NIAH gate stays valid. See [§2.1 Harness modes](#21-harness-modes--the-env-var-test-gates) for the env → gate map.
 
 | Slot | Path | Status |
 |------|------|--------|
 | **Math-core submodule** | `lib/shannon-prime-system/` | linked into every backend; frozen L1 ABI |
+| **KAIROS time-axis kernel** (cognitive crucible + metal eviction loop) | `tests/test_gemma4_cuda.c` (`SP_G4_KAIROS` / `_METAL` / `_SOAK`) + daemon scheduler `tools/sp_daemon/src/kairos.rs`, `kairos_runner.rs` (feature `kairos`, off by default) | shipped (test-path, env-gated); semantic crucible CLOSED, ≥24h soak harness built + endurance run in progress |
+| **Persistent-KV ABI** (resident cache w/ O(1) rewind) | `src/backends/cuda/cuda_forward.cu` — `gemma4_kv_open/prefill/decode/rewind/commit/pos/snapshot/close`, `struct sp_g4_kv` (`ring_W`, `Jmax`, `commit_pos`, `jK`/`jV` undo-journal) | shipped (twin of `gemma4_decode_cuda`, which is left byte-untouched = null floor); rewind bit-exact, O(1) |
 | **CPU backend** | `src/backends/cpu/` (`cpu_forward.c`, `cpu_overlay.c`, `cpu_gemma3.c`, `avx512/`) | built |
 | **Two-ring memory (PPT-ARM)** | `src/backends/cpu/cpu_forward.c` (±1 recall router + window shrink + compact-and-spill fusion) + `ring2_disk.c` (Optane NO_BUFFERING + IOCP) | shipped + measured (910× @32k, 7.57 µs/read) |
+| **XBAR Phase C — O(1) KV + NIAH** (slab + ring + learned-LSH router) | `src/backends/cuda/cuda_forward.cu` (`SP_ARM_*` slab/ring/select) + `tests/test_gemma4_cuda.c` (`SP_G4_NIAH`) + `tools/xbar_lsh/train_lsh.py` | shipped + gated (8k↔16k flat ~50 MiB; 8× +0.47% PPL; needle survives) |
 | **CUDA backend** | `src/backends/cuda/` (`cuda_forward.cu`, `ptx_mma*.cuh`, `ptx_ntt.cuh`, `ptx_spinor.cuh`, `ptx_hash.cuh`) | built |
 | **Vulkan backend** | `src/backends/vulkan/` (`vulkan_forward.cpp`, `shaders/`) | built |
 | **Hexagon HVX backend (host)** | `src/backends/hexagon/sp_hex_host.c` + `sp_hex_rt.c` + `inc/` | built |
@@ -122,15 +134,29 @@ This repo wires the math-core forward onto four accelerator backends plus the `s
 
 ## 2. Current status — honest table
 
-**Update 2026-06-14 — KAIROS time-axis CLOSED (KAI-1 + KAI-1b).** A 12B now runs as a resident background daemon: mathematically silent and O(Δ)-flat until a high-salience event, then acts, and stays stable after acting (perfect 24-tick crucible; public ledger KAIROS-01). **KAI-1b** drops the cold-evict to the metal: persistent-KV `gemma4_kv_open/prefill/decode/rewind/pos/snapshot/close` in `src/backends/cuda/cuda_forward.cu` (`gemma4_decode_cuda` left byte-untouched). `rewind(Δ)` is **bit-exact** (G-1b-REWIND-NULL: 48 owner layers / 16.5 MB / diffs=0 + gen-reproduce) and **O(1)** (idle-tick latency flat — metal slope 0.0073 vs prefix-grow 0.924 s/action, 127× shallower; 16.7× @ 16 retained actions). Lattice CONTRACT-KAIROS-K0-K1 §5; receipts `results/kai1b_*.log`.
+**Current state first; the chronological dated-update log is consolidated in [§2.2](#22-dated-update-history-consolidated).** The table below is phase-grouped: the latest crossbar substrate (KAIROS time-axis, XBAR Phase C, Gemma4/OK_Q4B) on top, the daemon/backend wiring snapshot below. Every "on" result is a controlled delta against a byte-identical baseline — the production decode path (`gemma4_decode_cuda`) is never touched.
 
-**Update 2026-06-13 — XBAR §P3.2-b-2b CLOSED: the KV cache is decoupled from context on the real 12B.** The global sparse-recall router landed end-to-end in `cuda_forward.cu` (all flag-gated, byte-inert off): per-step shadow-select on the 8 global owners → `k_attn_decode_gather` index-list attention → Ring-2 spill/poison/page. The v0 frozen ±1 projection router fails 8× global compression at +4.17% PPL (larger-N G2, wikitext-2 N=2048×3); the **on-engine oracle (exact top-B by q·K) proved 8× is learnable at −0.08%** (`SP_ARM_ORACLE`); a trained **512×32 Learned-LSH projection** (`SP_ARM_LSH=M.bin`, M=R·Rᵀ, select = top-B by (Mq)·K — zero new hot-path kernels, cost independent of r) **wins 8× at +0.47% PPL** (engine `222463a`; weight `tests/fixtures/lsh/lsh_M_r32.bin`; trainer `tools/xbar_lsh/train_lsh.py`). Combined with the b-2a SWA ring shrink (40/48 layers), both KV terms are constant in context — the SWA at `W`, the globals at the GQA union `nh·B` (= 16·256 = 4096, NOT `B`: C-b.2 measured the per-step union at 1511/2048, because the 16 query heads pick near-orthogonal top-B sets on gemma's diffuse globals). **Phase C alloc-shrink CLOSED GREEN (2026-06-14):** `SP_ARM_DEVSEL` device-select (`7195100`) + `SP_ARM_LSH_R` sidecar (`7cd7482`) + `SP_ARM_SLAB` compact slab (`33ac632`; full K/V in host Ring-2, per-step union paged into a `nh·B`-capped slab). **O(1) realized** — N=8192 vs N=16384 `nvidia-smi` flat within ~50 MiB (cache alloc byte-identical; a full cache adds ~5.4 GiB) — and **C-c NIAH retention** (`test_gemma4_cuda` SP_G4_NIAH mode, engine `3218d73`): the needle survives the compaction at depths 10%/50%/90% (exact, learned-router-only; frozen ±1 control MISSes) under SWA-isolation + slab compaction. **Select → realize → retain, end-to-end on the real 12B.** (Free-decode needs the tied-head int8 path `SP_CUDA_DECODE_INT8=1`; full-attention baseline at 16k is physically impossible on the 2060 — ctx-softmax shared-mem >64 KB + cache OOM — which is the motivation.) Full record: lattice `CONTRACT-XBAR-P3` + `PPT-LAT-STATE` §5.14.
+### Current state — phase-grouped
 
-**Update 2026-06-10 — gemma4 tokenizer dispatch (#115) CLOSED; 12B text-in LIVE.** New tokenizer module `src/tokenizer/gemma4_bpe.c` + family dispatch (`GEMMA4_BPE` family tag written into `.sp-tokenizer` by `sp_transcode`; unknown family = hard error). Gates `T_G4_TOK_PARITY` + `T_G4_TOK_ROUNDTRIP`: **5432/5432 HF-parity exact, both lanes** (GGUF lane + `.sp-tokenizer` blob lane; engine `3253a82`, core `9d3cc72`). Deployment (engine `d8ba947`): the installed 12B blobs were regenerated via `sp_transcode --tok-only` and each paired `.sp-model` header SHA re-paired the way `sp_transcode` pairs at creation; new gate `T_G4_TOK_12B_PAIRED` (proven sensitive — a legacy type_id=2 blob fails it 0/5432); B1 GPU decode smoke 6/6 on the 2060. Also: the E_CPU_9 byte-identity lanes now pin `SP_CPU_SCALAR=1` (the common AVX2 dot kernel reassociates; engine `5cd5870`), and the submodule carries core `64b698c` — the **`sp_arm_*_geom` per-layer-class router API** (`T_ARM_GEOM` 26/26), the G-P3-GEOM substrate for the gemma4 ring port.
+| Group | Component | Status | Headline receipt |
+|-------|-----------|:------:|------------------|
+| **KAIROS time-axis (KAI-1/1b/1c)** | Semantic crucible (`SP_G4_KAIROS` / `_METAL`) — disciplined-silence loop on the 12B | CLOSED | 24-event tape **0 false / 0 missed / 0 drift**; the 3 salient ticks acted coherently + reverted clean. Negative control: a 0.6B collapses into a corruption attractor — proves it's model *capacity* through correct machinery, not plumbing |
+| | Persistent-KV ABI — O(1) rewind (KAI-1b) | CLOSED | `gemma4_kv_rewind(Δ)` **byte-identical across all 48 owner layers** (16.5 MB, diffs=0) + gen-reproduce; **O(1)** — metal slope 0.0073 vs prefix-grow 0.924 s/action (**127× shallower**), 16.7× @ 16 retained actions |
+| | Wrap-aware journaled ring (KAI-1c) | CLOSED | forced wrap-crossing tick **clobbered live slots in all 40 SWA layers** (non-vacuity), post-rewind ring **byte-identical (diffs=0)** + identical tokens; ring O(1) telemetry slope 0.00365 ≈ full-cache 0.00371 |
+| | ≥24h endurance soak (`SP_G4_KAIROS_SOAK`, G-KAIROS-1) | **IN-FLIGHT** | harness **built**; tripwire-armed (CUDA error / false-action / pos-violation / malformed / latency / VRAM-leak / thermal); 3-loop smoke clean — **endurance run in progress, no verdict from a mid-run log** |
+| **XBAR Phase C (O(1) KV + NIAH)** | O(1) KV — slab + SWA ring + device-select | CLOSED | N=8192 vs 16384 **VRAM flat within ~50 MiB** (a full O(N) cache adds ~5.4 GiB). Scope: the *KV term* is O(1); the ~11.4 GiB absolute floor is the resident 9.4 GiB model (a `test_gemma4_ppl_cuda` harness artifact that bypasses streaming — we deliberately do **not** claim "12B @ 16k on 12 GB") |
+| | Learned-LSH sparse router (8×) | CLOSED | **+0.47% PPL** @ 8× global compression (oracle −0.08%; frozen ±1 +4.17% RED) — 512×32 projection, zero new hot-path kernels; weight `tests/fixtures/lsh/lsh_M_r32.bin` |
+| | C-c NIAH retention (`SP_G4_NIAH`) | CLOSED | needle **survives the compaction** at depths 10%/50%/90% (learned-router only; frozen ±1 control **MISSes**) under SWA-isolation. Full-attention baseline @16k is physically impossible on the 2060 — the motivation |
+| **Gemma4 + OK_Q4B (CITABLE)** | Gemma-4-12B GPU decode + sovereign pipeline (06-R10, §5.2.1d) | CLOSED | **26.1 tok/s @ wikitext PPL 5.12** on the RTX 2060 12 GB (24/24 gates; CUDA graph EXACT 256/256; dp4a top-1 256/256). Triple-agree 5.1259/5.1259/5.1160. llama.cpp 31.29 tok/s but on artifacts at PPL 192–506 (both halves stated) |
+| | gemma4 tokenizer dispatch (#115) | CLOSED | `GEMMA4_BPE` family dispatch **5432/5432 HF-parity exact, both lanes**; installed 12B re-paired (`T_G4_TOK_12B_PAIRED`) |
+| **Two-ring memory + WIRE** | Two-ring memory (PPT-ARM, CPU backend) | shipped + measured | **910× resident KV shrink @32k** (7.5 GB → 8.3 MB); needle off NVMe @ **7.57 µs/read**; 8× @ +0.69% PPL; bit-exact when off. Honest negative kept on the board: the C2.4 32k NIAH finale was a **MISS** (64× budget; Ring 3 is the designed fix) |
+| | WIRE-CPU integer pipe (CPU backend) | shipped + measured | Qwen3-0.6B **0.84 → 39.52 tok/s (47×)**, ~1.34× behind llama.cpp Q8_0 (memory layout, not ALU) |
 
-**Update 2026-06-08 — the gemma-4 campaign closed; the sovereign quantization pipeline ships here.** `sp_transcode` gained **Safetensors Direct** (`--st <model.safetensors>`: weight VALUES from the official checkpoint; GGUF supplies verified-clean metadata/tokenizer only; mapped-but-missing = hard error) and the **OK_Q4B** codec (`--q4b` / `--q4b-ffn` recipe B1: per-32-block f16 scales, store-then-derive). The CUDA backend gained `k_gemv_q4b_dp4a_v2` (per-block scale inside the dp4a chunk loop) + `k_dequant_arena_q4b` + `DevTensor.bscale` routing; the core arena moved to layout v2 (formal migration). Result, gated 24/24 on the RTX 2060 12GB: **Gemma-4-12B at 26.1 tok/s and wikitext PPL 5.12** (GPU PPL gate 5.1160 vs the hand-written gold reference 4.6776; sim/CPU/GPU triple-agreement at 5.1259/5.1259/5.1160). Context: every gemma-4 GGUF measurable in June 2026 carries broken weights (192–506 by engine-independent measurement) — see the public repo's `GEMMA4-QUANT-FIX.md`. The earlier 34.2 tok/s headline is retired (its artifact failed the PPL gate).
+History and the chronological dated-update log move to [§2.2](#22-dated-update-history-consolidated). The daemon-wiring snapshot table (Built / Wired) follows below.
 
-**Update 2026-06-06.** New since the snapshot below: the engine drives the canonical math-core decode at engine speed via the `cpu_overlay.c` dispatch seam (the duplicate decode was deleted); AVX2 `sp_pr_resdot` + `sp_ntt_fwd_batch` (lanes=heads) + AVX512-VPOPCNTDQ `sp_arm_scan_sig` overrides; the dual-size + **split-device** Optane Ring-2 store (`ring2_arm_backend.c`, `SP_RING2_OPTANE_DIR_V`) with `read_batch2` concurrent dual-queue fetch and a bounded LRU temporal staging cache (`SP_RING2_CACHE_MB`); the QUIC Ring-2 peer + two-process showpiece (`sp_ring2_showpiece`). **CUDA backend (RTX 2060 sm_75): gated on real silicon** — prefill `qwen3_forward_cuda` f32+Q8 argmax-exact, and a NEW autoregressive **`qwen3_decode_cuda`** (KV resident in VRAM, device argmax; gate `M_QWEN3_DECODE_CUDA`) generating at 6.93→11.97 tok/s (Q8). Detail in the lattice `papers/PPT-LAT-Roadmap.md` §21 + `SESSION-CLOSED-stage-beta-s0.md`.
+### Backend + daemon wiring snapshot
+
+**Update 2026-06-06.** Since the 06-03 snapshot below: the engine drives the canonical math-core decode at engine speed via the `cpu_overlay.c` dispatch seam (the duplicate decode was deleted); AVX2 `sp_pr_resdot` + `sp_ntt_fwd_batch` (lanes=heads) + AVX512-VPOPCNTDQ `sp_arm_scan_sig` overrides; the dual-size + **split-device** Optane Ring-2 store (`ring2_arm_backend.c`, `SP_RING2_OPTANE_DIR_V`) with `read_batch2` concurrent dual-queue fetch and a bounded LRU temporal staging cache (`SP_RING2_CACHE_MB`); the QUIC Ring-2 peer + two-process showpiece (`sp_ring2_showpiece`). **CUDA backend (RTX 2060 sm_75): gated on real silicon** — prefill `qwen3_forward_cuda` f32+Q8 argmax-exact, and a NEW autoregressive **`qwen3_decode_cuda`** (KV resident in VRAM, device argmax; gate `M_QWEN3_DECODE_CUDA`) generating at 6.93→11.97 tok/s (Q8). Detail in the lattice `papers/PPT-LAT-Roadmap.md` §21 + `SESSION-CLOSED-stage-beta-s0.md`.
 
 Snapshot 2026-06-03. **Built** means the artefact compiles and
 passes its own gates. **Wired** means the daemon routes inference
@@ -184,6 +210,51 @@ for the wiring sprint** — the on-device `libsp_hex_skel.so` needs to be
 rebuilt with `tools/sp_compute_skel/inc/sp_hex.idl` (a different IDL
 from `sp_compute.idl`) and pushed to `/data/local/tmp/sp22u/`. Full
 detail: `tools/sp_compute_skel/docs/CLOSURE-WIRE-HEX.md`.
+
+---
+
+### 2.1 Harness modes — the env-var test gates
+
+The KAIROS time-axis and the C-c NIAH retention gates ship as **env-var-dispatched
+modes inside one CUDA test binary** (`tests/test_gemma4_cuda.c`) — each is byte-inert
+when its env is unset, and runs the real 12B (gemma4-12b-b1) on the persistent-KV ABI
+in `src/backends/cuda/cuda_forward.cu`. Set the env, run the binary; the mode prints
+its receipt and exits. The daemon-side scheduler (`tools/sp_daemon/src/kairos.rs`,
+`kairos_runner.rs`) is a separate, off-by-default `kairos` cargo feature — see
+**[`tools/sp_daemon/docs/KAIROS-API.md`](tools/sp_daemon/docs/KAIROS-API.md)** for the
+kernel-not-harness design, the `SessionHandoff` coordinate ABI, and the null-floor
+invariant.
+
+| Env var | Gate | What it proves |
+|---------|------|----------------|
+| `SP_G4_NIAH` | C-c NIAH retention | A needle planted in a 16k haystack (forced outside the SWA window, so it can *only* cross the global crossbar) survives the slab/ring/poison compaction at depths 10/50/90% — learned-router only; frozen ±1 control MISSes |
+| `SP_G4_KAIROS` | Cognitive crucible (prefix-grow) | The 12B holds `NO_OP` silence on idle ticks and acts coherently on salient events, over the deterministic event tape — measured before the metal eviction lands |
+| `SP_G4_KAIROS_METAL` | Semantic loop on the journaled ring | The same crucible wired onto the journaled-ring ABI: `NO_OP ⇒ rewind` to the committed anchor (cold-evict the tick), `ACTION ⇒ commit` — perfect 24-tick run, every idle revert clean |
+| `SP_G4_KAIROS_SOAK` | G-KAIROS-1 (≥24h endurance) | The deterministic tape looped under in-process tripwires (CUDA error / false-action / pos-violation / 3-consecutive malformed / 5-consecutive latency spikes / VRAM leak / thermal). **Built; endurance run in progress — not yet passed** |
+| `SP_G4_KV_REWIND` | G-1b-REWIND-NULL | `gemma4_kv_rewind(Δ)` produces a cache **byte-identical** (48 owner layers, diffs=0) to one that never ran the idle tick, and re-running the tick reproduces identical tokens (perfect inverse, full cache) |
+| `SP_G4_KV_WRAP` | G-1b-WRAP-NULL | On the *space-optimized ring* a wrap-crossing idle tick aliases live-window slots; the undo-journal restores them — clobbered = 40 SWA layers (non-vacuity), post-rewind diffs=0 + identical tokens |
+| `SP_G4_KV_TELEMETRY` | KAI-1b §5.4 O(actions)→O(1) | Sweep retained-actions A∈{1,2,4,8,16}, time an idle tick under each: metal slope 0.0073 vs prefix-grow 0.924 s/action (127× shallower) — the flatline *is* the O(1) claim, measured |
+| `SP_G4_KV_RING_TEL` | KAI-1c journaled-ring tax | The same A-sweep through the journal path: ring slope 0.00365 ≈ full-cache 0.00371 — the undo-journal adds no asymptotic cost |
+
+> **Measurement note (this card):** the RTX 2060 cannot lock its memory clock
+> (`nvidia-smi`: "not supported"), so bandwidth-bound decode jitters ±~12%. The
+> O(1) *slopes* above are measured within one leg (drift-robust); never difference
+> two sequential wall-clock series for sub-10% deltas on this host.
+
+---
+
+### 2.2 Dated-update history (consolidated)
+
+Chronological log of when each capability closed. The current-state tables in §2 / §2.1
+are authoritative; these entries are the audit trail.
+
+**2026-06-14 — KAIROS time-axis CLOSED (KAI-1 + KAI-1b).** A 12B now runs as a resident background daemon: mathematically silent and O(Δ)-flat until a high-salience event, then acts, and stays stable after acting (perfect 24-tick crucible; public ledger KAIROS-01). **KAI-1b** drops the cold-evict to the metal: persistent-KV `gemma4_kv_open/prefill/decode/rewind/commit/pos/snapshot/close` in `src/backends/cuda/cuda_forward.cu` (`gemma4_decode_cuda` left byte-untouched). `rewind(Δ)` is **bit-exact** (G-1b-REWIND-NULL: 48 owner layers / 16.5 MB / diffs=0 + gen-reproduce) and **O(1)** (idle-tick latency flat — metal slope 0.0073 vs prefix-grow 0.924 s/action, 127× shallower; 16.7× @ 16 retained actions). The wrap-aware ring (KAI-1c) adds an undo-journal so the rewind stays bit-exact on the space-optimized ring (G-1b-WRAP-NULL: 40 SWA layers clobbered then restored, diffs=0). The ≥24h endurance soak harness (`SP_G4_KAIROS_SOAK`) is built and **running — no verdict yet**. Lattice CONTRACT-KAIROS-K0-K1 §5; receipts `results/kai1b_*.log`.
+
+**2026-06-13 — XBAR §P3.2-b-2b CLOSED: the KV cache is decoupled from context on the real 12B.** The global sparse-recall router landed end-to-end in `cuda_forward.cu` (all flag-gated, byte-inert off): per-step shadow-select on the 8 global owners → `k_attn_decode_gather` index-list attention → Ring-2 spill/poison/page. The v0 frozen ±1 projection router fails 8× global compression at +4.17% PPL (larger-N G2, wikitext-2 N=2048×3); the **on-engine oracle (exact top-B by q·K) proved 8× is learnable at −0.08%** (`SP_ARM_ORACLE`); a trained **512×32 Learned-LSH projection** (`SP_ARM_LSH=M.bin`, M=R·Rᵀ, select = top-B by (Mq)·K — zero new hot-path kernels, cost independent of r) **wins 8× at +0.47% PPL** (engine `222463a`; weight `tests/fixtures/lsh/lsh_M_r32.bin`; trainer `tools/xbar_lsh/train_lsh.py`). Combined with the b-2a SWA ring shrink (40/48 layers), both KV terms are constant in context — the SWA at `W`, the globals at the GQA union `nh·B` (= 16·256 = 4096, NOT `B`: C-b.2 measured the per-step union at 1511/2048, because the 16 query heads pick near-orthogonal top-B sets on gemma's diffuse globals). **Phase C alloc-shrink CLOSED GREEN (2026-06-14):** `SP_ARM_DEVSEL` device-select (`7195100`) + `SP_ARM_LSH_R` sidecar (`7cd7482`) + `SP_ARM_SLAB` compact slab (`33ac632`; full K/V in host Ring-2, per-step union paged into a `nh·B`-capped slab). **O(1) realized** — N=8192 vs N=16384 `nvidia-smi` flat within ~50 MiB (cache alloc byte-identical; a full cache adds ~5.4 GiB) — and **C-c NIAH retention** (`test_gemma4_cuda` SP_G4_NIAH mode, engine `3218d73`): the needle survives the compaction at depths 10%/50%/90% (exact, learned-router-only; frozen ±1 control MISSes) under SWA-isolation + slab compaction. **Select → realize → retain, end-to-end on the real 12B.** (Free-decode needs the tied-head int8 path `SP_CUDA_DECODE_INT8=1`; full-attention baseline at 16k is physically impossible on the 2060 — ctx-softmax shared-mem >64 KB + cache OOM — which is the motivation.) Full record: lattice `CONTRACT-XBAR-P3` + `PPT-LAT-STATE` §5.14.
+
+**2026-06-10 — gemma4 tokenizer dispatch (#115) CLOSED; 12B text-in LIVE.** New tokenizer module `src/tokenizer/gemma4_bpe.c` + family dispatch (`GEMMA4_BPE` family tag written into `.sp-tokenizer` by `sp_transcode`; unknown family = hard error). Gates `T_G4_TOK_PARITY` + `T_G4_TOK_ROUNDTRIP`: **5432/5432 HF-parity exact, both lanes** (GGUF lane + `.sp-tokenizer` blob lane; engine `3253a82`, core `9d3cc72`). Deployment (engine `d8ba947`): the installed 12B blobs were regenerated via `sp_transcode --tok-only` and each paired `.sp-model` header SHA re-paired the way `sp_transcode` pairs at creation; new gate `T_G4_TOK_12B_PAIRED` (proven sensitive — a legacy type_id=2 blob fails it 0/5432); B1 GPU decode smoke 6/6 on the 2060. Also: the E_CPU_9 byte-identity lanes now pin `SP_CPU_SCALAR=1` (the common AVX2 dot kernel reassociates; engine `5cd5870`), and the submodule carries core `64b698c` — the **`sp_arm_*_geom` per-layer-class router API** (`T_ARM_GEOM` 26/26), the G-P3-GEOM substrate for the gemma4 ring port.
+
+**2026-06-08 — the gemma-4 campaign closed; the sovereign quantization pipeline ships here.** `sp_transcode` gained **Safetensors Direct** (`--st <model.safetensors>`: weight VALUES from the official checkpoint; GGUF supplies verified-clean metadata/tokenizer only; mapped-but-missing = hard error) and the **OK_Q4B** codec (`--q4b` / `--q4b-ffn` recipe B1: per-32-block f16 scales, store-then-derive). The CUDA backend gained `k_gemv_q4b_dp4a_v2` (per-block scale inside the dp4a chunk loop) + `k_dequant_arena_q4b` + `DevTensor.bscale` routing; the core arena moved to layout v2 (formal migration). Result, gated 24/24 on the RTX 2060 12GB: **Gemma-4-12B at 26.1 tok/s and wikitext PPL 5.12** (GPU PPL gate 5.1160 vs the hand-written gold reference 4.6776; sim/CPU/GPU triple-agreement at 5.1259/5.1259/5.1160). Context: every gemma-4 GGUF measurable in June 2026 carries broken weights (192–506 by engine-independent measurement) — see the public repo's `GEMMA4-QUANT-FIX.md`. The earlier 34.2 tok/s headline is retired (its artifact failed the PPL gate).
 
 ---
 
@@ -1202,214 +1273,4 @@ Per `shannon-prime-lattice/papers/PPT-LAT-SP-MODEL-v0.md`:
   adjacent (no interposing tensor), so the loader reconstructs a
   bit-identical packed arena via a single `memcpy` per row.
 - **`.sp-tokenizer`** — self-describing serialization of the GGUF
-  tokenizer arrays (tokens, scores, merges) + 128-byte header carrying
-  type_id, vocab size, BOS/EOS/PAD/UNK IDs, and a SHA-256 over the
-  whole file. The L1 loader binds models to tokenizers by this hash
-  (`SP_ETOKENIZER_HASH` if mismatched).
-
-### 10.4 Validation
-
-`--verify` mode reports per-tensor stats:
-
-```
-qwen3.layers.0.attn_q.weight (4096 x 4096, Q8):
-    rms_err 0.000183  max_rel_err 0.0021  promoted 0/4096 to Q8
-```
-
-For Q4 mode (`SP_ARENA=q4`), rows exceeding `SP_Q4_PROMOTE` (default
-`0.01`) get promoted to Q8 — the promoted count reports as
-`sp_arena_promoted(arena)`.
-
----
-
-## 11. Peering / QUIC mesh
-
-The mesh is a **dual-prime CRT shard fabric** today, with the
-Fibonacci-Prime DHT spec'd for Phase 8 (see
-`shannon-prime-lattice/papers/PPT-LAT-Roadmap.md` §8).
-
-### 11.1 Wire format
-
-Each peer-to-peer message is a 64-byte `ShardBlockHeader` followed by N
-× 4 bytes of u32 residue payload:
-
-```
-byte  0..8   seq_id           u64 LE   global sequence counter
-byte  8..12  token_pos        u32 LE   token position in context
-byte 12..16  layer_id         u32 LE   transformer layer index
-byte 16      prime_selector   u8       0 = q_1 = 1073738753, 1 = q_2 = 1073732609
-byte 17..64  reserved         zeros
-```
-
-Max payload: 64 + 512·4 = 2112 bytes (`N ≤ 512` per the frozen-primes
-NTT cap). Streams are unidirectional QUIC streams — one per residue
-block; independent delivery; no head-of-line coupling.
-
-### 11.2 Topology
-
-- **Coordinator** (`SpQuicCoordinator::bind`) accepts incoming connections
-  and per-stream residue blocks; calls `run_garner_loop` to Garner-
-  recombine paired (q_1, q_2) residues for the same `seq_id` into
-  centered signed coefficients.
-- **Worker** (`SpQuicWorker::connect`) dials a coordinator and sends
-  `ResidueBlock`s on independent unidirectional streams.
-
-Each peer is assigned one prime (its `shard_id`). Two-peer topology
-covers both primes; the coordinator Garner-recombines into the centered
-signed result and feeds it back into the forward path.
-
-### 11.3 TLS / identity
-
-Dev-mode TLS uses self-signed certs with a `SkipServerVerification`
-verifier — acceptable for the inference-cluster smoke. Phase 5+
-swaps this for ed25519 dominance identity verification against a known
-lattice node registry; the integration point is documented in
-`tools/sp_daemon/src/network/quic_shard.rs` (search "INTEGRATION POINT:
-Replace with Phase 5 ed25519 dominance identity").
-
-### 11.4 Receipt replay
-
-PoUW receipts minted on one node can be replayed byte-identically on
-another node via `Ledger::canonical_sort` (stable sort on
-`(turn_index, input_hash[..2])`) → `Ledger::replay_canonical_into`
-(write a new ledger with canonical order). Cross-device byte-identity
-is the M.4 + mesh-canonical-order gate; see closure
-`CLOSURE-MESH-CANONICAL-ORDER.md`.
-
-### 11.5 Connecting peers
-
-```cmd
-sp-daemon start --model ... --tokenizer ... ^
-                --port 8080 --quic-port 5000 ^
-                --peers 192.0.2.10:5001,192.0.2.11:5002
-```
-
-`/v1/mesh/peers` reports the live peers. `/v1/node/telemetry`
-WebSocket pushes `dht_peers_active` every second.
-
----
-
-## 12. Development workflow
-
-### 12.1 Build matrix
-
-| Build | Command |
-|-------|---------|
-| CPU host (Windows) | `scripts\build\build-cpu.bat` |
-| CUDA host (Windows) | `scripts\build\build-cuda.bat` |
-| Vulkan host (Windows) | `scripts\build\build-vulkan.bat` |
-| Hexagon host-side libs (Windows) | `scripts\build\build-hexagon.bat` |
-| Hexagon cDSP skel | `scripts\build\build-hexagon.bat dsp` |
-| Daemon-linkable hex backend lib | `tools\sp_daemon\build-android-hex-backend.bat` |
-| Cross-compile math-core to android | `tools\sp_daemon\build-android-libs.bat` |
-| `sp_daemon` cargo build (host) | `cd tools\sp_daemon && cargo build --release` |
-| `sp_daemon` cargo build (android) | `cargo build --target aarch64-linux-android --release` |
-| `sp_daemon` with WIRE-HEX | `cargo build --target aarch64-linux-android --release --features wire_hex_backend` |
-
-### 12.2 Run smoke tests
-
-```bash
-# All ctest gates on a build directory
-ctest --test-dir build-cpu --output-on-failure -j
-
-# A specific smoke binary (host)
-cd tools/sp_daemon && cargo run --release --bin probe
-
-# Android-only smokes (push + run via adb)
-adb push target/aarch64-linux-android/release/sp_chat_dialogue_smoke /data/local/tmp/
-adb shell /data/local/tmp/sp_chat_dialogue_smoke
-```
-
-Closures from recent smokes live under
-`tools/sp_compute_skel/docs/CLOSURE-*.md`. They are the audit trail.
-
-### 12.3 Adding a new backend
-
-The canonical pattern is sprint WIRE-HEX
-(`tools/sp_compute_skel/docs/CLOSURE-WIRE-HEX.md`). Five stages:
-
-1. **Math-core: add §6 forward-backend hook** — already shipped in
-   `include/sp/sp_l1.h` (`sp_session_register_forward_backend`,
-   `sp_forward_dispatch_fn` typedef, `sp_session_qwen3_model`
-   accessor).
-2. **Engine: build a daemon-linkable static lib** at
-   `tools/sp_daemon/c_backend/lib<name>_daemon_backend.a` containing
-   your `<arch>_forward_<backend>` entry point + a kernel-name shim
-   that aliases `matmul`/`embed_row`/`as_f32` to the math-core
-   `sp_*` variants (avoids `cpu_overlay.c` symbol collisions).
-3. **Rust trampoline** at `tools/sp_daemon/src/<backend>_forward_dispatch.rs`
-   implementing the §6 ABI; bump a process-static dispatch counter.
-4. **AppState wiring** in `tools/sp_daemon/src/daemon.rs`: env-gate via
-   `SP_DAEMON_BACKEND=<backend>`; register on the TARGET session
-   pre-Mutex-wrap; surface via `AppState.<backend>_active`.
-5. **Smoke**: drive `/v1/chat` + `/v1/debug/backend_counts` to confirm
-   `<backend>_forward_count > 0` after one prefill.
-
-For NTT-dispatch overlay backends (Hexagon NTT.5b, future Vulkan-NTT),
-the pattern is `sp_pr_bluestein_set_backend` in
-`lib/shannon-prime-system/core/poly_ring_bluestein/` (see
-`tools/sp_daemon/src/ntt_hex_dispatch.rs` for the template).
-
-### 12.4 Adding / updating an IDL method
-
-1. Edit `tools/sp_compute_skel/inc/sp_compute.idl`. Add the new method
-   at the end (renumber if a parallel sprint took your anticipated
-   method id at merge time).
-2. Regenerate skel stubs via qaic. The build script handles this; if
-   you need to do it manually:
-   ```cmd
-   set HEXAGON_SDK_ROOT=C:\Qualcomm\Hexagon_SDK\5.5.6.0
-   "%HEXAGON_SDK_ROOT%\tools\qaic\Ubuntu18\qaic" -mdll ^
-       -o tools\sp_compute_skel\gen ^
-       tools\sp_compute_skel\inc\sp_compute.idl
-   ```
-3. Implement the method body in `tools/sp_compute_skel/src_dsp/`.
-4. Rebuild + push the skel: `scripts\build\build-hexagon.bat dsp` then
-   `adb push <skel.so> /data/local/tmp/sp22u/`.
-5. Add a Rust trampoline if a daemon-facing surface is desired.
-
-### 12.5 Parallel-agent worktree discipline
-
-Per `feedback-parallel-agents-separate-worktrees`: when dispatching 2+
-agents concurrently on the same repo, **each agent operates in its own
-git worktree** (`git worktree add ../wt-<sprint> main`). Otherwise
-concurrent `git add` cross-contaminates: one agent's uncommitted files
-get swept into another's commit. The operational fix is per-worktree
-dispatch before agents start; the technical recovery (if it slips) is
-to honestly disclose contamination in the closure rather than rewriting
-shared history.
-
----
-
-## 13. Known issues / pending
-
-The user has been frustrated by hours of work that turned out to
-bypass the production critical path. This section names what's pending
-honestly.
-
-| Issue | Workaround | Resolution |
-|-------|-----------|------------|
-| **WIRE-HEX BIT-EXACT gate blocked by cDSP skel mismatch** | None for the headline tok/s win | Future HX-SKEL-REBUILD sprint owns rebuilding `libsp_hex_skel.so` against current `src/backends/hexagon/inc/sp_hex.idl` and pushing to `/data/local/tmp/sp22u/` |
-| **CUDA / Vulkan backends not wired to `sp_daemon`** (CPU IS wired — sprint WIRE-CPU, `SP_DAEMON_BACKEND=cpu`) | Use math-core reference path / CPU backend | Two symmetric WIRE-HEX-style sprints; each one is ~1 day of plumbing once the WIRE-HEX template is in hand |
-| **`sp_decode_step` uses fp32 reference even with `SP_ENGINE_NTT_ATTN=1`** | Decode is the path where this matters most for tok/s; current architecture re-runs full forward on prefill backends | NTT.5e (filed, not shipped) wires decode-path NTT routing |
-| **HD=128 direct path can't use Hexagon backend** | Bluestein at HD=64 covers Qwen3 / Qwen2.5-Coder; Gemma3-1B uses HD=256 (direct N=256 NTT works) | NTT.5d (filed, not shipped) wires a direct backend path at HD=128 |
-| **Hexagon backend re-runs full forward per call** | Decode path stays on math-core reference; bypasses the issue | HEX-DECODE-1 sprint would add per-backend persistent-KV variant |
-| **CPU backend's `cpu_overlay.c` symbol-collides with math-core's `sp_*` kernels** | The daemon-link backend lib uses a kernel-name shim (`sp_daemon_hex_glue.c`) to alias names | Same shim pattern applies to future CUDA / Vulkan daemon links |
-| **TLS in QUIC mesh accepts any cert** | Dev-only; lattice clusters today are operator-controlled | Phase 5 ed25519 dominance identity verification swap |
-| **Tokenizer chat-template support varies by arch** | `/v1/chat` falls back to `prompt` / `prompt_tokens` if `messages` template lookup fails | Per-arch template registration is an open task |
-| **`tracing_subscriber` filter set at daemon start, not hot-reloadable** | Restart daemon to change `RUST_LOG` | `sp-daemon reload` is a no-op for v0 |
-| **CRT-mesh today is two-node (one shard per peer)** | Sufficient for the dual-prime CRT bit-exact smoke | Fibonacci-Prime DHT is spec'd (`papers/PPT-LAT-Roadmap.md` §8) |
-
-For the audit trail of what shipped when (and what didn't), the
-canonical reference is the chronological closure list under
-`tools/sp_compute_skel/docs/CLOSURE-*.md` plus the lattice
-`papers/SESSION-CLOSED-*.md`. The most recent closures
-(`CLOSURE-WIRE-HEX.md`, `CLOSURE-NTT-bench.md`, `CLOSURE-NTT-5c.md`,
-`CLOSURE-LEDGER-AUTOWIRE.md`, `CLOSURE-MESH-CANONICAL-ORDER.md`) are
-the up-to-date status of record.
-
----
-
-## License
-
-MIT. See `LICENSE`.
+  tokenizer arrays (tokens, scores, merge
