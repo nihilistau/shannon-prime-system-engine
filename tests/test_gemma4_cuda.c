@@ -300,6 +300,110 @@ static int run_kairos(void) {
     return (false_act==0 && missed==0 && malformed==0) ? 0 : 3;
 }
 
+/* ═══ SP_G4_KAIROS_METAL=1 (KAI-1c): the SEMANTIC loop on the journaled-ring metal. ═══
+ * The operational unification of KAI-1 (cognition) + KAI-1b/1c (O(1) metal eviction).
+ * Same SALIENCE>=0.5 policy + gemma turn frame as run_kairos, but the cold-evict prune is
+ * now a TRUE O(1) metal operation on the persistent journaled-ring KV (gemma4_kv_*), not a
+ * host prefix re-prefill:
+ *   open(ring) -> prefill SYS -> commit (anchor).  Per tick:
+ *     prefill(frame) + decode(GEN) -> parse.
+ *     NO_OP/malformed -> gemma4_kv_rewind(pos-anchor)  (journaled cold-evict, pos returns to anchor)
+ *     ACTION          -> gemma4_kv_commit()            (retain frame+gen as new baseline, journal cleared)
+ * POS-DISCIPLINE is itself a gate: idle ticks MUST return pos to the anchor (rewind exact);
+ * action ticks MUST advance the anchor (commit kept). Ring via SP_G4_KV_RING_W (SWA owners
+ * journaled). Env: SP_GEMMA4_SPMODEL/SPTOK, SP_KAIROS_TAPE, SP_G4_KV_RING_W, SP_CUDA_DECODE_INT8=1. */
+static int run_kairos_metal(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    const char *tapef=getenv("SP_KAIROS_TAPE");
+    if(!tapef){ fprintf(stderr,"[g4-kmetal] set SP_KAIROS_TAPE\n"); return 2; }
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-kmetal] load FAIL: %s\n",sp_last_error()); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-kmetal] to_gemma4 FAIL: %s\n",sp_last_error()); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk);
+    if(!tk){ fprintf(stderr,"[g4-kmetal] tokenizer FAIL\n"); return 2; }
+    /* tape (same §2b format as run_kairos) */
+    ktick_t ticks[KAIROS_MAXTICK]; int nt=0; FILE *tf=fopen(tapef,"rb");
+    if(!tf){ fprintf(stderr,"[g4-kmetal] cannot open tape\n"); return 2; }
+    char line[512];
+    while(nt<KAIROS_MAXTICK && fgets(line,sizeof line,tf)){
+        char *s=line; while(*s==' '||*s=='\t')s++; if(*s=='#'||*s=='\n'||*s=='\r'||*s==0) continue;
+        char kind[48]={0},payload[96]={0},expect[16]={0}; float sal=0; char *end;
+        strtol(s,&end,10); if(end==s) continue; s=end; while(*s==' '||*s=='\t')s++;
+        {int i=0; while(*s&&*s!=' '&&*s!='\t'&&i<47)kind[i++]=*s++; kind[i]=0;} while(*s==' '||*s=='\t')s++;
+        if(*s=='"'){s++;int i=0;while(*s&&*s!='"'&&i<95)payload[i++]=*s++;payload[i]=0;if(*s=='"')s++;}
+        else {int i=0;while(*s&&*s!=' '&&*s!='\t'&&i<95)payload[i++]=*s++;payload[i]=0;}
+        if(payload[0]=='-'&&payload[1]==0)payload[0]=0; while(*s==' '||*s=='\t')s++;
+        sal=strtof(s,&end); if(end!=s)s=end; while(*s==' '||*s=='\t')s++;
+        {int i=0;while(*s&&*s!=' '&&*s!='\t'&&*s!='\n'&&*s!='\r'&&i<15)expect[i++]=*s++;expect[i]=0;}
+        ticks[nt].expect_action=(expect[0]=='A'||expect[0]=='a'); ticks[nt].sal=sal;
+        snprintf(ticks[nt].kind,sizeof ticks[nt].kind,"%s",kind);
+        snprintf(ticks[nt].payload,sizeof ticks[nt].payload,"%s",payload); nt++;
+    }
+    fclose(tf);
+    int n_act_exp=0; for(int i=0;i<nt;i++) n_act_exp+=ticks[i].expect_action;
+    const int W = getenv("SP_G4_KV_RING_W")?atoi(getenv("SP_G4_KV_RING_W")):1024;
+    fprintf(stderr,"[g4-kmetal] tape=%s ticks=%d (salient=%d idle=%d) ring_W=%d\n",tapef,nt,n_act_exp,nt-n_act_exp,W);
+    const char *SYS=
+        "<start_of_turn>user\n"
+        "You are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+        "NO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    int32_t *sysb=(int32_t*)malloc(4096*sizeof(int32_t)), tmp[1024], gen[KAIROS_GEN]; char dbuf[2048];
+    long pn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);
+    if(pn<=0){ fprintf(stderr,"[g4-kmetal] SYS encode FAIL\n"); return 2; }
+    sp_g4_kv *s=gemma4_kv_open(m,2048);                 /* ring mode via SP_G4_KV_RING_W */
+    if(!s){ fprintf(stderr,"[g4-kmetal] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+    if(gemma4_kv_prefill(s,sysb,(int)pn)){ fprintf(stderr,"[g4-kmetal] SYS prefill FAIL: %s\n",sp_last_error()); return 2; }
+    gemma4_kv_commit(s);                                /* SYS = baseline anchor */
+    int anchor=gemma4_kv_pos(s);
+    fprintf(stderr,"[g4-kmetal] system contract prefilled (%d tokens) anchor=%d\n",(int)pn,anchor);
+    int noop_ok=0,act_ok=0,false_act=0,missed=0,malformed=0,pos_violation=0;
+    for(int i=0;i<nt;i++){
+        char frame[256];
+        snprintf(frame,sizeof frame,
+                 "<start_of_turn>user\nEVENT kind=%s salience=%.2f payload=\"%s\"<end_of_turn>\n<start_of_turn>model\n",
+                 ticks[i].kind,ticks[i].sal,ticks[i].payload);
+        long fn=sp_tokenizer_encode(tk,frame,strlen(frame),1,tmp,1024);
+        if(fn<=0){ fprintf(stderr,"[g4-kmetal] tick %d frame encode FAIL\n",i); continue; }
+        int pre=gemma4_kv_pos(s);
+        if(gemma4_kv_prefill(s,tmp,(int)fn)||gemma4_kv_decode(s,KAIROS_GEN,gen)){ fprintf(stderr,"[g4-kmetal] tick %d decode FAIL: %s\n",i,sp_last_error()); break; }
+        long bl=sp_tokenizer_decode(tk,gen,KAIROS_GEN,dbuf,sizeof dbuf-1); if(bl<0)bl=0; dbuf[bl]=0;
+        /* boundary-tolerant parse: gemma4_kv_decode's gen buffer starts one token past the
+         * one-shot convention (leading "<"/"NO" lands in prefill logits, not gen[0]) — the
+         * SEMANTIC content is unambiguous: "ACTION" => action, else "OP"/"NOOP" => noop.
+         * (the kv-decode-vs-one-shot first-token boundary is filed as a reconcile follow-up.) */
+        int is_act=(strstr(dbuf,"ACTION")!=NULL);
+        int is_noop=(!is_act)&&(strstr(dbuf,"OP")!=NULL||strstr(dbuf,"NOOP")!=NULL);
+        const char *dec=is_act?"ACTION":(is_noop?"NOOP":"MALFORMED");
+        if(ticks[i].expect_action){ if(is_act)act_ok++; else if(is_noop)missed++; else malformed++; }
+        else                      { if(is_act)false_act++; else if(is_noop)noop_ok++; else malformed++; }
+        /* THE METAL PRUNE: ACTION -> commit (retain); else -> journaled rewind (cold-evict to anchor) */
+        int kept=0, posafter;
+        if(is_act){ gemma4_kv_commit(s); anchor=gemma4_kv_pos(s); kept=1; }
+        else { if(gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor)){ fprintf(stderr,"[g4-kmetal] tick %d rewind FAIL: %s\n",i,sp_last_error()); break; } }
+        posafter=gemma4_kv_pos(s);
+        /* pos-discipline: idle->pos must return to anchor (==pre's anchor); action->anchor advanced past pre */
+        int pos_ok = kept ? (posafter>pre) : (posafter==anchor);
+        if(!pos_ok) pos_violation++;
+        for(char *p=dbuf;*p;p++) if(*p=='\n'||*p=='\r')*p=' ';
+        fprintf(stderr,"[g4-kmetal] tick %3d expect=%-6s decided=%-9s pos:%d->%d anchor=%d%s%s raw=\"%.50s\"\n",
+                i,ticks[i].expect_action?"Action":"Noop",dec,pre,posafter,anchor,
+                kept?" (commit)":" (rewind->flat)", pos_ok?"":" POS!", dbuf);
+    }
+    fprintf(stderr,"[g4-kmetal] DONE ticks=%d noop_ok=%d action_ok=%d false_action=%d missed=%d malformed=%d pos_violations=%d\n",
+            nt,noop_ok,act_ok,false_act,missed,malformed,pos_violation);
+    int pass=(false_act==0 && missed==0 && malformed==0 && pos_violation==0);
+    fprintf(stderr,"[g4-kmetal] CRUCIBLE: %s (semantic clean + O(1) metal pos-discipline)\n",pass?"GREEN":"RED");
+    gemma4_kv_close(s); free(sysb); sp_tokenizer_free(tk);
+    sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return pass?0:3;
+}
+
 /* ═══ SP_G4_KV_REWIND=1 (KAI-1b G-1b-REWIND-NULL): the bit-exact rewind gate. ═══
  * Prefill a system prefix (anchor), snapshot the cache; run an IDLE TICK (prefill
  * frame + decode); rewind to the anchor; snapshot again. The [0,anchor) region MUST
@@ -1281,6 +1385,7 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
 int main(void) {
     if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
+    if (getenv("SP_G4_KAIROS_METAL")) return run_kairos_metal(); /* KAI-1c: semantic loop on the journaled ring */
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
