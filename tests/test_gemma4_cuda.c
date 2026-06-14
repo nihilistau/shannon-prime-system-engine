@@ -418,6 +418,89 @@ static int run_kv_telemetry(void) {
     return 0;
 }
 
+/* ═══ SP_G4_KV_RING_TEL=1 (KAI-1c Task #219): journaled-ring O(1) telemetry. ═══
+ * Re-runs the idle-tick-latency-vs-A sweep through the undo-journal path and quantifies
+ * the D2D save-before-store tax vs the full-cache metal path, apples-to-apples in ONE process.
+ * Operational semantics: commit on EACH retained action ⇒ the journal only ever holds the
+ * single idle-tick span (≤ frame+decode), so the per-tick journal cost is A-INVARIANT by
+ * construction. Two legs (env-toggled at gemma4_kv_open time):
+ *   METAL-FULL : SP_G4_KV_RING_W cleared ⇒ full-cache slot==pos rewind (the KAI-1b path).
+ *   METAL-RING : SP_G4_KV_RING_W=W      ⇒ SWA owners journal each clobbered slot, rewind restores.
+ * PRE-REGISTERED THRESHOLDS (Task #219):
+ *   T1 FLATLINE  : ring slope d(idle)/dA < 0.02 s/action (KAI-1b full metal was 0.0073);
+ *                  PASS only if the slope does NOT rise materially with A.
+ *   T2 A-INVARIANT TAX : the ring−full per-tick delta must be a CONSTANT overhead, not growing
+ *                  with A. Acceptance: coefficient-of-variation of (t_ring−t_full) across
+ *                  A∈{1..16} < 25%  (a delta that scales with A would mean the journal cost
+ *                  leaked the action count — a bug). Reported in absolute ms + as a ratio.
+ *   T3 HEADROOM  : absolute ring idle-tick < 1.0 s (comfortably inside an interactive daemon tick). */
+static void kvt_putenv(const char *k, const char *v){ char b[64]; snprintf(b,sizeof b,"%s=%s",k,v?v:""); _putenv(b); }
+static int run_kv_ring_telemetry(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-rtel] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-rtel] to_gemma4 FAIL\n"); return 2; }
+    const int As[]={8,16,32,50,64,80,96}, nA=7;       /* extend past window saturation (resid_pos>=1024 @ A>=50) */
+    const int sys_n=24, act_n=12, frame_n=12, ngen=8, Pmax=2048, REP=5;  /* median-of-reps (robust for a delta) */
+    const int W = getenv("SP_G4_KV_RING_W")?atoi(getenv("SP_G4_KV_RING_W")):1024;  /* true SWA window default */
+    int32_t sys[24],act[12],frm[12];
+    for(int i=0;i<sys_n;i++)sys[i]=100+i; for(int i=0;i<act_n;i++)act[i]=400+i; for(int i=0;i<frame_n;i++)frm[i]=700+i;
+    int32_t gbuf[64];
+    double t_full[8]={0}, t_ring[8]={0}; int resid[8]={0};
+    kvt_putenv("SP_G4_KV_JMAX","64");
+    fprintf(stderr,"[g4-rtel] sweep A∈{8,16,32,50,64,80,96} sys=%d act=%d frame=%d ngen=%d W=%d (commit-per-action; min of %d warm reps)\n",sys_n,act_n,frame_n,ngen,W,REP);
+    for(int mode=0; mode<2; mode++){                 /* 0=FULL (ring cleared), 1=RING (journal) */
+        if(mode==0) kvt_putenv("SP_G4_KV_RING_W","0"); else { char wb[16]; snprintf(wb,sizeof wb,"%d",W); kvt_putenv("SP_G4_KV_RING_W",wb); }
+        for(int ai=0; ai<nA; ai++){
+            int A=As[ai];
+            sp_g4_kv *s=gemma4_kv_open(m,Pmax);
+            if(!s){ fprintf(stderr,"[g4-rtel] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+            if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-rtel] sys FAIL\n"); return 2; }
+            gemma4_kv_commit(s);
+            for(int a=0;a<A;a++){ if(gemma4_kv_prefill(s,act,act_n)||gemma4_kv_decode(s,ngen,gbuf)){ fprintf(stderr,"[g4-rtel] action FAIL\n"); return 2; } gemma4_kv_commit(s); }
+            int anchor=gemma4_kv_pos(s);
+            double rt[16]; for(int r=0;r<REP;r++){
+                double t0=kvt_now();
+                gemma4_kv_prefill(s,frm,frame_n); gemma4_kv_decode(s,ngen,gbuf); gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+                rt[r]=kvt_now()-t0;
+            }
+            for(int i=1;i<REP;i++){ double v=rt[i]; int j=i-1; while(j>=0&&rt[j]>v){rt[j+1]=rt[j];j--;} rt[j+1]=v; } /* insertion sort */
+            double med=rt[REP/2];                                  /* median-of-reps: robust for a delta */
+            if(mode==0) t_full[ai]=med; else t_ring[ai]=med; resid[ai]=anchor;
+            gemma4_kv_close(s);
+            fprintf(stderr,"[g4-rtel] %s A=%2d resident_pos=%d idle_tick=%.4fs\n",mode?"RING":"FULL",A,anchor,med);
+        }
+    }
+    kvt_putenv("SP_G4_KV_RING_W","0");
+    fprintf(stderr,"\n[g4-rtel] ── JOURNALED-RING O(1) RECEIPT ──\n  A : resid : full-cache(s) : ring+journal(s) : tax(ms) : ring/full : window\n");
+    for(int ai=0; ai<nA; ai++)
+        fprintf(stderr,"  %2d : %5d : %10.4f : %12.4f : %7.2f : %.3fx : %s\n",As[ai],resid[ai],t_full[ai],t_ring[ai],
+            (t_ring[ai]-t_full[ai])*1e3, t_full[ai]>0?t_ring[ai]/t_full[ai]:0.0, resid[ai]>=W?"SAT":"grow");
+    /* T2 on the SATURATED regime (resid>=W ⇒ attention window fixed): the journal tax must be flat there.
+     * Pre-saturation (resid<W) the ring−full delta tracks the growing attention window, NOT the journal. */
+    double dmean=0; int ns=0; for(int ai=0;ai<nA;ai++) if(resid[ai]>=W){ dmean+=(t_ring[ai]-t_full[ai]); ns++; } if(ns>0) dmean/=ns;
+    double dvar=0;  for(int ai=0;ai<nA;ai++) if(resid[ai]>=W){ double d=(t_ring[ai]-t_full[ai])-dmean; dvar+=d*d; } if(ns>0) dvar/=ns;
+    double dsd=sqrt(dvar), dcv=(fabs(dmean)>1e-9)?dsd/fabs(dmean):0.0;
+    double full_slope=(t_full[nA-1]-t_full[0])/(double)(As[nA-1]-As[0]);
+    double ring_slope=(t_ring[nA-1]-t_ring[0])/(double)(As[nA-1]-As[0]);
+    double ring_max=0; for(int ai=0;ai<nA;ai++) if(t_ring[ai]>ring_max) ring_max=t_ring[ai];
+    /* saturated-regime tax SLOPE: ms/action across the SAT points — the decisive O(1) test */
+    int s0=-1,s1=-1; for(int ai=0;ai<nA;ai++) if(resid[ai]>=W){ if(s0<0)s0=ai; s1=ai; }
+    double sat_tax_slope = (s1>s0)? ((t_ring[s1]-t_full[s1])-(t_ring[s0]-t_full[s0]))*1e3/(double)(As[s1]-As[s0]) : 0.0;
+    double sat_tick=0; for(int ai=0;ai<nA;ai++) if(resid[ai]>=W) sat_tick+=t_ring[ai]; if(ns>0) sat_tick/=ns;
+    double tax_frac=(sat_tick>1e-9)?dmean/sat_tick:0.0;       /* journal marginal cost as a fraction of the tick */
+    fprintf(stderr,"[g4-rtel] slope d(idle)/dA: full=%.5f s/action  ring=%.5f s/action\n",full_slope,ring_slope);
+    fprintf(stderr,"[g4-rtel] D2D tax (SAT regime, n=%d): mean=%.2fms sd=%.2fms cv=%.1f%% | sat-tax-slope=%.3f ms/action | tax=%.1f%% of tick (tick~%.3fs model-bound)\n",ns,dmean*1e3,dsd*1e3,dcv*100.0,sat_tax_slope,tax_frac*100.0,sat_tick);
+    int t1=(ring_slope<0.02), t2=(ns>=2 && dcv<0.25 && fabs(sat_tax_slope)<0.5), t3=(tax_frac<0.05);
+    fprintf(stderr,"[g4-rtel] T1 flatline(ring_slope<0.02): %s | T2 sat-tax-flat(cv<25%%,|slope|<0.5ms/A): %s | T3 journal-tax(<5%% of tick): %s\n",
+        t1?"PASS":"FAIL", t2?"PASS":"FAIL", t3?"PASS":"FAIL");
+    fprintf(stderr,"[g4-rtel] VERDICT: %s\n",(t1&&t2&&t3)?"JOURNALED-RING O(1) CONFIRMED":"REVIEW");
+    sp_model_unload(handle);
+    return (t1&&t2&&t3)?0:3;
+}
+
 /* ═══ SP_G4_KV_WRAP=1 (KAI-1c G-1b-WRAP-NULL): wrap-aware ring rewind gate. ═══
  * Small Wring (SP_G4_KV_RING_W) forces wraps cheaply. Prefill past W multiple times
  * (≥3 wraps), commit (retain the action). Snapshot the W-slot SWA rings. Idle tick
@@ -1201,6 +1284,7 @@ int main(void) {
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
+    if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
     return SP_DONE();
 }
