@@ -3303,6 +3303,15 @@ struct sp_g4_kv {
     int   E,NL,V,SW,period,kvfs,PL,NLPL,FFmax,QDmax,KVDmax;
     int   g_nh,g_nkv,g_hd,s_nh,s_nkv,s_hd;
     float g_base,s_base,eps,embscale,softcap;
+    /* KAI-1c wrap-aware ring: SWA owners use a Wring-slot ring (slot=pos%Wring);
+     * the per-tick undo-journal saves each clobbered slot BEFORE overwrite so
+     * rewind restores it (the wrap-crossing perfect inverse). ring_W=0 ⇒ full
+     * cache (KAI-1b, every owner Pmax slots, no journal). commit_pos = the
+     * baseline a rewind cannot pass (cleared by gemma4_kv_commit on ACTION);
+     * jcur = journal depth = dpos_host - commit_pos. jK/jV[L] = [Jmax*kvd] per
+     * SWA owner; globals stay full-cache (no window ⇒ no alias ⇒ no journal). */
+    int   ring_W, Jmax, commit_pos, jcur;
+    float **jK, **jV;
 };
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
@@ -3363,7 +3372,18 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
             if (ffac) k_rope_freqs_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, rbase, ffac, dpos);
             else      k_rope_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, kvd, rbase, dpos);
             k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(s->dv, nkv, hd, kvd, eps);
-            k_kv_store<<<(unsigned)((kvd+255)/256), 256, 0, st>>>(dKc[L], dVc[L], s->dk, s->dv, dpos, 0, kvd);
+            if (s->ring_W > 0 && !global) {            /* KAI-1c: SWA-owner ring write + undo-journal */
+                const size_t ws = (size_t)(s->dpos_host % s->ring_W);
+                const size_t j  = (size_t)(s->dpos_host - s->commit_pos);   /* journal index for this step */
+                if (j >= (size_t)s->Jmax) { sp_set_error("g4_kv ring: uncommitted tick span exceeds Jmax"); return -1; }
+                /* save the slot's pre-write K/V (the clobbered live-window position) BEFORE overwrite */
+                cudaMemcpyAsync(s->jK[L] + j*kvd, dKc[L] + ws*kvd, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(s->jV[L] + j*kvd, dVc[L] + ws*kvd, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(dKc[L] + ws*kvd, s->dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(dVc[L] + ws*kvd, s->dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            } else {
+                k_kv_store<<<(unsigned)((kvd+255)/256), 256, 0, st>>>(dKc[L], dVc[L], s->dk, s->dv, dpos, 0, kvd);
+            }
             Kuse = dKc[L]; Vuse = dVc[L];
         } else {
             const int src = kvfs - (global ? 1 : 2);
@@ -3371,8 +3391,16 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
             if (!Kuse || !Vuse) { sp_set_error("g4_kv: sharer before owner"); return -1; }
         }
         {   int bd = hd > 256 ? hd : 256; if (bd > 1024) bd = 1024;
-            k_attn_decode_win_dyn<<<nh, bd, attn_shm, st>>>(
-                s->dq, Kuse, Vuse, dpos, kvd, hd, grp, 1.0f, win, s->dao); }
+            if (s->ring_W > 0 && !global) {           /* KAI-1c: ring attention (slot=(s0+j)%Wring) */
+                const int ctx = s->dpos_host + 1;
+                const int s0 = (win >= 0 && ctx - win > 0) ? ctx - win : 0;
+                const int wl = ctx - s0;
+                k_attn_decode_ring<<<nh, bd, (size_t)wl*sizeof(float), st>>>(
+                    s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->ring_W, s->dao);
+            } else {
+                k_attn_decode_win_dyn<<<nh, bd, attn_shm, st>>>(
+                    s->dq, Kuse, Vuse, dpos, kvd, hd, grp, 1.0f, win, s->dao);
+            } }
         KMMD(&g_w.Wo[L], s->dao, s->dap);
         k_rmsnorm<<<1, 256, 0, st>>>(s->dap, g_w.post_attn[L], E, eps, s->dnx);
         k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
@@ -3444,15 +3472,27 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     if (s->use_int8){ int mx=s->E; if(s->QDmax>mx)mx=s->QDmax; if(s->FFmax>mx)mx=s->FFmax;
         size_t npad=(size_t)((mx+31)&~31);
         if (cudaMalloc(&s->dqx,npad)!=cudaSuccess) ok=0; KA(s->dsx,npad>>4); }
-    /* the JAGGED cache — owners only, per-layer width; FULL P=Pmax (no ring, KAI-1b base). */
+    /* KAI-1c ring config (env-gated; unset = full cache = KAI-1b base). SWA owners
+     * shrink to a ring_W-slot ring (the X-R2 space win) + a Jmax-deep undo-journal;
+     * globals stay full-cache (no window ⇒ no alias). */
+    s->ring_W = getenv("SP_G4_KV_RING_W") ? atoi(getenv("SP_G4_KV_RING_W")) : 0;
+    s->Jmax   = getenv("SP_G4_KV_JMAX")   ? atoi(getenv("SP_G4_KV_JMAX"))   : 64;
+    if (s->ring_W < 0 || s->ring_W > Pmax) s->ring_W = 0;
+    if (s->Jmax < 1) s->Jmax = 1;
+    s->commit_pos = 0; s->jcur = 0; s->jK = NULL; s->jV = NULL;
+    /* the JAGGED cache — owners only, per-layer width. */
     s->dKc=(float**)calloc((size_t)s->NL,sizeof(float*));
     s->dVc=(float**)calloc((size_t)s->NL,sizeof(float*));
     if (!s->dKc||!s->dVc) ok=0;
+    if (s->ring_W>0){ s->jK=(float**)calloc((size_t)s->NL,sizeof(float*)); s->jV=(float**)calloc((size_t)s->NL,sizeof(float*)); if(!s->jK||!s->jV) ok=0; }
     for (int L=0; ok && L<s->kvfs && L<s->NL; L++){
         const int global=((L%s->period)==s->period-1);
         const int kvd=(global?s->g_nkv:s->s_nkv)*(global?s->g_hd:s->s_hd);
-        KA(s->dKc[L],(size_t)Pmax*kvd); KA(s->dVc[L],(size_t)Pmax*kvd);
+        const size_t slots=(s->ring_W>0 && !global)?(size_t)s->ring_W:(size_t)Pmax;
+        KA(s->dKc[L],slots*kvd); KA(s->dVc[L],slots*kvd);
+        if (s->ring_W>0 && !global){ KA(s->jK[L],(size_t)s->Jmax*kvd); KA(s->jV[L],(size_t)s->Jmax*kvd); }
     }
+    if (s->ring_W>0) fprintf(stderr,"    [g4-kv] RING mode: Wring=%d Jmax=%d (SWA owners ring+journal; globals full-cache)\n",s->ring_W,s->Jmax);
     #undef KA
     if (!ok) { sp_set_error("gemma4_kv_open: device OOM"); gemma4_kv_close(s); return NULL; }
     return s;
@@ -3494,9 +3534,38 @@ extern "C" int gemma4_kv_decode(sp_g4_kv *s, int n_gen, int32_t *out) {
  * inverse (the G-1b-REWIND-NULL invariant; T8.1 analog on the GPU). */
 extern "C" int gemma4_kv_rewind(sp_g4_kv *s, int delta) {
     if (!s || delta < 0 || delta > s->dpos_host) { sp_set_error("gemma4_kv_rewind: bad delta"); return -1; }
+    if (s->ring_W > 0) {
+        /* KAI-1c wrap-aware: restore each clobbered SWA ring slot from the journal.
+         * REVERSE order (highest position first) so on intra-tick slot reuse the
+         * EARLIEST snapshot (the true pre-tick value) wins the final write. */
+        if (delta > s->dpos_host - s->commit_pos) { sp_set_error("gemma4_kv_rewind: delta crosses a commit (journal cleared)"); return -1; }
+        cudaStream_t st = g_w.stream;
+        for (int d = 0; d < delta; d++) {
+            const int p  = s->dpos_host - 1 - d;          /* a position written this tick */
+            const size_t ws = (size_t)(p % s->ring_W);
+            const size_t j  = (size_t)(p - s->commit_pos);/* its journal slot */
+            for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+                if (((L % s->period) == s->period - 1)) continue;   /* globals: full-cache, no journal */
+                const int kvd = s->s_nkv * s->s_hd;
+                cudaMemcpyAsync(s->dKc[L] + ws*kvd, s->jK[L] + j*kvd, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(s->dVc[L] + ws*kvd, s->jV[L] + j*kvd, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            }
+        }
+        cudaStreamSynchronize(st);
+    }
     s->dpos_host -= delta;
     if (cudaMemcpy(s->dpos, &s->dpos_host, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
         sp_set_error("g4_kv rewind dpos H2D"); return -1; }
+    return 0;
+}
+
+/* KAI-1c: an ACTION is retained — the current cache becomes permanent and the
+ * undo-journal window resets (so the next idle tick's journal starts fresh and a
+ * later rewind cannot pass this baseline). For the full cache this is a no-op. */
+extern "C" int gemma4_kv_commit(sp_g4_kv *s) {
+    if (!s) return -1;
+    s->commit_pos = s->dpos_host;
+    s->jcur = 0;
     return 0;
 }
 
@@ -3512,7 +3581,8 @@ extern "C" long gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV) {
     for (int L = 0; L < s->kvfs && L < s->NL; L++) {
         const int global = ((L % s->period) == s->period - 1);
         const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
-        size_t nb = (size_t)s->Pmax * kvd * sizeof(float);
+        const size_t slots = (s->ring_W > 0 && !global) ? (size_t)s->ring_W : (size_t)s->Pmax;  /* KAI-1c: ring buffers are Wring */
+        size_t nb = slots * kvd * sizeof(float);
         if (hK[L] && cudaMemcpy(hK[L], s->dKc[L], nb, cudaMemcpyDeviceToHost) != cudaSuccess) return -1;
         if (hV[L] && cudaMemcpy(hV[L], s->dVc[L], nb, cudaMemcpyDeviceToHost) != cudaSuccess) return -1;
         bytes += 2 * (long)nb;
@@ -3529,6 +3599,8 @@ extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (s->dqx) cudaFree(s->dqx);
     if (s->dKc) { for (int L=0;L<s->NL;L++) if (s->dKc[L]) cudaFree(s->dKc[L]); free(s->dKc); }
     if (s->dVc) { for (int L=0;L<s->NL;L++) if (s->dVc[L]) cudaFree(s->dVc[L]); free(s->dVc); }
+    if (s->jK) { for (int L=0;L<s->NL;L++) if (s->jK[L]) cudaFree(s->jK[L]); free(s->jK); }   /* KAI-1c undo-journal */
+    if (s->jV) { for (int L=0;L<s->NL;L++) if (s->jV[L]) cudaFree(s->jV[L]); free(s->jV); }
     free(s);
 }
 

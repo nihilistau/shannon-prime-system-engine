@@ -66,6 +66,7 @@ sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
 int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
 int   gemma4_kv_decode(sp_g4_kv *s, int n_gen, int32_t *out);
 int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
+int   gemma4_kv_commit(sp_g4_kv *s);
 int   gemma4_kv_pos(const sp_g4_kv *s);
 long  gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV);
 void  gemma4_kv_close(sp_g4_kv *s);
@@ -415,6 +416,69 @@ static int run_kv_telemetry(void) {
         (grow_slope > 5.0*fabs(metal_slope)+1e-4)?"O(actions) vs O(1) CONFIRMED":"inconclusive");
     sp_model_unload(handle);
     return 0;
+}
+
+/* ═══ SP_G4_KV_WRAP=1 (KAI-1c G-1b-WRAP-NULL): wrap-aware ring rewind gate. ═══
+ * Small Wring (SP_G4_KV_RING_W) forces wraps cheaply. Prefill past W multiple times
+ * (≥3 wraps), commit (retain the action). Snapshot the W-slot SWA rings. Idle tick
+ * whose span crosses a wrap boundary; wrap-crossing rewind; snapshot again. The SWA
+ * rings MUST be byte-identical (the undo-journal is a perfect inverse across the wrap),
+ * and the re-run idle tick reproduces identical tokens. */
+static int run_kv_wrap(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-wrap] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-wrap] to_gemma4 FAIL: %s\n",sp_last_error()); return 2; }
+    const qwen3_config *c=&m->cfg;
+    const int NL=(int)c->n_layers, period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
+    const int kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:NL;
+    const int g_nkv=(int)c->n_head_kv,g_hd=(int)c->head_dim,s_nkv=(int)c->g4_nkv_swa,s_hd=(int)c->g4_hd_swa;
+    const int W = getenv("SP_G4_KV_RING_W")?atoi(getenv("SP_G4_KV_RING_W")):16;
+    const int Pmax=160, sys_n=50, frm_n=12, ngen=8;     /* sys 50 > 3W -> ≥3 wraps; tick 20 > W -> wrap-crossing */
+    if(W<=0){ fprintf(stderr,"[g4-wrap] need SP_G4_KV_RING_W>0\n"); return 2; }
+    sp_g4_kv *s=gemma4_kv_open(m,Pmax);                  /* ring mode via SP_G4_KV_RING_W env */
+    if(!s){ fprintf(stderr,"[g4-wrap] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+    int32_t sys[64]; for(int i=0;i<sys_n;i++) sys[i]=100+(i%200);
+    int32_t frm[16]; for(int i=0;i<frm_n;i++) frm[i]=500+i;
+    if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-wrap] sys prefill FAIL: %s\n",sp_last_error()); return 2; }
+    gemma4_kv_commit(s);                                 /* the retained action: baseline + journal reset */
+    int anchor=gemma4_kv_pos(s);
+    float **hK0=(float**)calloc(NL,sizeof(float*)),**hV0=(float**)calloc(NL,sizeof(float*));
+    float **hK1=(float**)calloc(NL,sizeof(float*)),**hV1=(float**)calloc(NL,sizeof(float*));
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        size_t slots=global?(size_t)Pmax:(size_t)W; size_t nb=slots*kvd*sizeof(float);
+        hK0[L]=malloc(nb);hV0[L]=malloc(nb);hK1[L]=malloc(nb);hV1[L]=malloc(nb); }
+    gemma4_kv_snapshot(s,hK0,hV0);
+    int32_t gen1[8];
+    if(gemma4_kv_prefill(s,frm,frm_n)||gemma4_kv_decode(s,ngen,gen1)){ fprintf(stderr,"[g4-wrap] tick1 FAIL: %s\n",sp_last_error()); return 2; }
+    int after=gemma4_kv_pos(s);
+    int wraps_crossed=(after/W)-(anchor/W);
+    /* NON-VACUITY: ring AFTER tick (pre-rewind). The wrap-crossing tick MUST clobber live
+     * window slots (aliasing) — if pre==mid the rewind would be trivially identity. */
+    float **hKm=(float**)calloc(NL,sizeof(float*)),**hVm=(float**)calloc(NL,sizeof(float*));
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        size_t slots=global?(size_t)Pmax:(size_t)W; size_t nb=slots*kvd*sizeof(float); hKm[L]=malloc(nb);hVm[L]=malloc(nb); }
+    gemma4_kv_snapshot(s,hKm,hVm);
+    long clobbered=0;
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); if(global) continue;
+        int kvd=s_nkv*s_hd; size_t nb=(size_t)W*kvd*sizeof(float); if(memcmp(hK0[L],hKm[L],nb)) clobbered++; }
+    if(gemma4_kv_rewind(s,after-anchor)){ fprintf(stderr,"[g4-wrap] rewind FAIL: %s\n",sp_last_error()); return 2; }
+    gemma4_kv_snapshot(s,hK1,hV1);
+    long diffs=0;
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); if(global) continue;   /* SWA rings only */
+        int kvd=s_nkv*s_hd; size_t nb=(size_t)W*kvd*sizeof(float);
+        if(memcmp(hK0[L],hK1[L],nb)) diffs++; if(memcmp(hV0[L],hV1[L],nb)) diffs++; }
+    int32_t gen2[8]; int genmatch=1;
+    if(gemma4_kv_prefill(s,frm,frm_n)||gemma4_kv_decode(s,ngen,gen2)){ fprintf(stderr,"[g4-wrap] tick2 FAIL\n"); return 2; }
+    for(int i=0;i<ngen;i++) if(gen1[i]!=gen2[i]) genmatch=0;
+    gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+    fprintf(stderr,"[g4-wrap] W=%d anchor=%d after=%d wraps_crossed=%d (anchor%%W=%d tick_span=%d) clobbered_owners=%ld\n",W,anchor,after,wraps_crossed,anchor%W,after-anchor,clobbered);
+    fprintf(stderr,"[g4-wrap] WRAP-NULL: %s (swa-ring-diffs=%ld) | EQUIV gen-reproduce: %s [%d %d %d %d ...] | non-vacuous: %s\n",
+        diffs==0?"GREEN":"RED",diffs, genmatch?"GREEN":"RED", gen1[0],gen1[1],gen1[2],gen1[3], clobbered>0?"YES":"NO(VACUOUS!)");
+    gemma4_kv_close(s); sp_model_unload(handle);
+    return (diffs==0 && genmatch && clobbered>0)?0:3;
 }
 
 /* GELU tanh approximation — verbatim gemma4.c g4_gelu (static in the oracle TU). */
@@ -1135,6 +1199,7 @@ int main(void) {
     if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
+    if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
     return SP_DONE();
