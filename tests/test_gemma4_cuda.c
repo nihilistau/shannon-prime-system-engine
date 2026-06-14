@@ -404,6 +404,141 @@ static int run_kairos_metal(void) {
     return pass?0:3;
 }
 
+/* ═══ SP_G4_KAIROS_SOAK=1 (G-KAIROS-1): the ≥24h unattended endurance soak. ═══
+ * Loops the deterministic §2b tape with per-loop re-anchor (close+reopen ⇒ bounded state),
+ * the full journaled-ring metal loop each tick, two-tier streamed/flushed telemetry, and
+ * in-process hard tripwires (CUDA / semantic-safety / pos / latency-consecutive / VRAM-leak /
+ * thermal). Env: SP_SOAK_HOURS (default 24), SP_SOAK_MAXLOOPS (overrides, for smoke),
+ * SP_SOAK_LOG (per-tick detail log), + the metal envs. */
+static int soak_probe_vram_temp(long *vram_mib, int *temp_c){   /* one nvidia-smi sample (loop cadence) */
+    *vram_mib=-1; *temp_c=-1;
+    FILE *p=_popen("nvidia-smi --query-gpu=memory.used,temperature.gpu --format=csv,noheader,nounits","r");
+    if(!p) return -1;
+    int ok=(fscanf(p,"%ld , %d",vram_mib,temp_c)==2); _pclose(p); return ok?0:-1;
+}
+static int run_kairos_soak(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    const char *tapef=getenv("SP_KAIROS_TAPE");   if(!tapef){ fprintf(stderr,"[g4-soak] set SP_KAIROS_TAPE\n"); return 2; }
+    const char *logf=getenv("SP_SOAK_LOG");       if(!logf) logf="results/kairos_soak_detail.log";
+    double soak_hours = getenv("SP_SOAK_HOURS")? atof(getenv("SP_SOAK_HOURS")) : 24.0;
+    long   maxloops   = getenv("SP_SOAK_MAXLOOPS")? atol(getenv("SP_SOAK_MAXLOOPS")) : -1;
+    const int W = getenv("SP_G4_KV_RING_W")?atoi(getenv("SP_G4_KV_RING_W")):1024;
+    /* model + tokenizer loaded ONCE (resident across all loops) */
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-soak] load FAIL: %s\n",sp_last_error()); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-soak] to_gemma4 FAIL\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk);
+    if(!tk){ fprintf(stderr,"[g4-soak] tokenizer FAIL\n"); return 2; }
+    /* tape (parsed once) */
+    ktick_t ticks[KAIROS_MAXTICK]; int nt=0; FILE *tf=fopen(tapef,"rb");
+    if(!tf){ fprintf(stderr,"[g4-soak] cannot open tape\n"); return 2; }
+    char line[512];
+    while(nt<KAIROS_MAXTICK && fgets(line,sizeof line,tf)){
+        char *s=line; while(*s==' '||*s=='\t')s++; if(*s=='#'||*s=='\n'||*s=='\r'||*s==0) continue;
+        char kind[48]={0},payload[96]={0},expect[16]={0}; float sal=0; char *end;
+        strtol(s,&end,10); if(end==s) continue; s=end; while(*s==' '||*s=='\t')s++;
+        {int i=0; while(*s&&*s!=' '&&*s!='\t'&&i<47)kind[i++]=*s++; kind[i]=0;} while(*s==' '||*s=='\t')s++;
+        if(*s=='"'){s++;int i=0;while(*s&&*s!='"'&&i<95)payload[i++]=*s++;payload[i]=0;if(*s=='"')s++;}
+        else {int i=0;while(*s&&*s!=' '&&*s!='\t'&&i<95)payload[i++]=*s++;payload[i]=0;}
+        if(payload[0]=='-'&&payload[1]==0)payload[0]=0; while(*s==' '||*s=='\t')s++;
+        sal=strtof(s,&end); if(end!=s)s=end; while(*s==' '||*s=='\t')s++;
+        {int i=0;while(*s&&*s!=' '&&*s!='\t'&&*s!='\n'&&*s!='\r'&&i<15)expect[i++]=*s++;expect[i]=0;}
+        ticks[nt].expect_action=(expect[0]=='A'||expect[0]=='a'); ticks[nt].sal=sal;
+        snprintf(ticks[nt].kind,sizeof ticks[nt].kind,"%s",kind);
+        snprintf(ticks[nt].payload,sizeof ticks[nt].payload,"%s",payload); nt++;
+    }
+    fclose(tf);
+    const char *SYS=
+        "<start_of_turn>user\n"
+        "You are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+        "NO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    int32_t *sysb=(int32_t*)malloc(4096*sizeof(int32_t)), tmp[1024], gen[KAIROS_GEN]; char dbuf[2048];
+    long pn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);
+    if(pn<=0){ fprintf(stderr,"[g4-soak] SYS encode FAIL\n"); return 2; }
+    FILE *dl=fopen(logf,"w");
+    if(dl){ fprintf(dl,"# loop tick expect decided pos latency_ms\n"); fflush(dl); }
+    /* aggregate counters (fixed-size; zero RAM growth over the run) */
+    long T_noop=0,T_act=0,T_false=0,T_missed=0,T_malf=0,T_pos=0,T_ticks=0;
+    int consec_malf=0, consec_slow=0;
+    double lat_med=0; long base_vram=-1;
+    double t_start=kairos_now_s(), deadline=t_start+soak_hours*3600.0;
+    int abort_code=0; const char *abort_why="";
+    fprintf(stderr,"[g4-soak] START hours=%.2f maxloops=%ld tape_ticks=%d ring_W=%d sys=%ldtok log=%s\n",
+            soak_hours,maxloops,nt,W,pn,logf);
+    long loop=0;
+    for(; ; loop++){
+        if(maxloops>=0 && loop>=maxloops){ abort_why="reached SP_SOAK_MAXLOOPS"; break; }
+        if(kairos_now_s()>=deadline){ abort_why="reached SP_SOAK_HOURS (clean stop)"; break; }
+        sp_g4_kv *s=gemma4_kv_open(m,2048);
+        if(!s){ abort_code=2; abort_why="kv_open FAIL"; break; }
+        if(gemma4_kv_prefill(s,sysb,(int)pn)){ gemma4_kv_close(s); abort_code=2; abort_why="SYS prefill FAIL"; break; }
+        gemma4_kv_commit(s); int anchor=gemma4_kv_pos(s);
+        double loop_lmin=1e9,loop_lmax=0,loop_lsum=0; int loop_n=0;
+        for(int i=0;i<nt;i++){
+            char frame[256];
+            snprintf(frame,sizeof frame,
+                     "<start_of_turn>user\nEVENT kind=%s salience=%.2f payload=\"%s\"<end_of_turn>\n<start_of_turn>model\n",
+                     ticks[i].kind,ticks[i].sal,ticks[i].payload);
+            long fn=sp_tokenizer_encode(tk,frame,strlen(frame),1,tmp,1024);
+            if(fn<=0){ abort_code=2; abort_why="frame encode FAIL"; break; }
+            int pre=gemma4_kv_pos(s);
+            double t0=kairos_now_s();
+            if(gemma4_kv_prefill(s,tmp,(int)fn)||gemma4_kv_decode(s,KAIROS_GEN,gen)){ abort_code=2; abort_why=sp_last_error(); break; }
+            long bl=sp_tokenizer_decode(tk,gen,KAIROS_GEN,dbuf,sizeof dbuf-1); if(bl<0)bl=0; dbuf[bl]=0;
+            int is_act=(strstr(dbuf,"ACTION")!=NULL);
+            int is_noop=(!is_act)&&(strstr(dbuf,"OP")!=NULL||strstr(dbuf,"NOOP")!=NULL);
+            const char *dec=is_act?"ACTION":(is_noop?"NOOP":"MALFORMED");
+            int kept=0;
+            if(is_act){ gemma4_kv_commit(s); anchor=gemma4_kv_pos(s); kept=1; }
+            else { if(gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor)){ abort_code=2; abort_why="rewind FAIL"; break; } }
+            int posafter=gemma4_kv_pos(s);
+            double lat=(kairos_now_s()-t0)*1e3;
+            /* counters */
+            T_ticks++; loop_n++; loop_lsum+=lat; if(lat<loop_lmin)loop_lmin=lat; if(lat>loop_lmax)loop_lmax=lat;
+            int pos_ok = kept ? (posafter>pre) : (posafter==anchor);
+            if(ticks[i].expect_action){ if(is_act)T_act++; else if(is_noop)T_missed++; else T_malf++; }
+            else                      { if(is_act)T_false++; else if(is_noop)T_noop++; else T_malf++; }
+            if(!pos_ok) T_pos++;
+            consec_malf = (!is_act&&!is_noop)? consec_malf+1 : 0;
+            if(dl){ fprintf(dl,"%ld %d %s %s %d %.1f\n",loop,i,ticks[i].expect_action?"A":"N",dec,posafter,lat); fflush(dl); }
+            /* ── TRIPWIRES (in-process, hard) ── */
+            if(ticks[i].expect_action && is_noop){ abort_code=3; abort_why="SEMANTIC: missed salient event"; break; }
+            if(!ticks[i].expect_action && is_act){ abort_code=3; abort_why="SEMANTIC: false action on idle"; break; }
+            if(!pos_ok){ abort_code=3; abort_why="POS-DISCIPLINE violation"; break; }
+            if(consec_malf>=3){ abort_code=3; abort_why="SEMANTIC DRIFT: 3 consecutive malformed"; break; }
+            if(lat_med>0 && lat>3.0*lat_med){ consec_slow++; } else consec_slow=0;
+            if(consec_slow>=5){ abort_code=3; abort_why="LATENCY: 5 consecutive ticks > 3x median"; break; }
+            if(lat>30000.0){ abort_code=3; abort_why="LATENCY: single tick > 30s (hang)"; break; }
+        }
+        gemma4_kv_close(s);                       /* per-loop re-anchor: bounded state */
+        if(abort_code) break;
+        /* establish warm-up latency median + VRAM baseline after loop 0 */
+        double loop_lmed = (loop_n>0)? loop_lsum/loop_n : 0;   /* loop-mean as median proxy (cheap) */
+        if(loop==0){ lat_med = loop_lmed; }
+        long vram=-1; int temp=-1; soak_probe_vram_temp(&vram,&temp);
+        if(loop==0 && vram>0) base_vram=vram;
+        if(base_vram>0 && vram>0 && vram-base_vram>256){ abort_code=3; abort_why="VRAM LEAK: >256MiB over baseline"; }
+        if(temp>87){ abort_code=3; abort_why="THERMAL: GPU temp > 87C"; }
+        double elapsed=kairos_now_s()-t_start;
+        fprintf(stderr,"[g4-soak] loop %6ld t=%.0fs ticks=%ld noop=%ld act=%ld FALSE=%ld MISS=%ld malf=%ld pos!=%ld lat{%.0f/%.0f/%.0f}ms vram=%ldMiB(+%ld) temp=%dC\n",
+                loop,elapsed,T_ticks,T_noop,T_act,T_false,T_missed,T_malf,T_pos,loop_lmin,loop_lmed,loop_lmax,vram,(base_vram>0&&vram>0)?vram-base_vram:0,temp);
+        if(abort_code) break;
+    }
+    if(dl) fclose(dl);
+    int pass=(abort_code==0 && T_false==0 && T_missed==0 && T_malf==0 && T_pos==0);
+    fprintf(stderr,"[g4-soak] DONE loops=%ld ticks=%ld | noop_ok=%ld action_ok=%ld false=%ld missed=%ld malformed=%ld pos_violations=%ld\n",
+            loop,T_ticks,T_noop,T_act,T_false,T_missed,T_malf,T_pos);
+    fprintf(stderr,"[g4-soak] VERDICT: %s (%s)\n", pass?"GREEN":"RED/ABORT", abort_why);
+    free(sysb); sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return pass?0:(abort_code?abort_code:3);
+}
+
 /* ═══ SP_G4_KV_REWIND=1 (KAI-1b G-1b-REWIND-NULL): the bit-exact rewind gate. ═══
  * Prefill a system prefix (anchor), snapshot the cache; run an IDLE TICK (prefill
  * frame + decode); rewind to the anchor; snapshot again. The [0,anchor) region MUST
@@ -1386,6 +1521,7 @@ int main(void) {
     if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
     if (getenv("SP_G4_KAIROS_METAL")) return run_kairos_metal(); /* KAI-1c: semantic loop on the journaled ring */
+    if (getenv("SP_G4_KAIROS_SOAK")) return run_kairos_soak();   /* G-KAIROS-1: >=24h unattended endurance soak */
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
