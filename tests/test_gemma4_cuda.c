@@ -68,6 +68,8 @@ int   gemma4_kv_decode(sp_g4_kv *s, int n_gen, int32_t *out);
 int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
 int   gemma4_kv_commit(sp_g4_kv *s);
 int   gemma4_kv_pos(const sp_g4_kv *s);
+int   gemma4_kv_reset(sp_g4_kv *s);        /* in-place re-anchor (no free/realloc) — soak leak fix */
+long  gemma4_kv_devfree_mib(void);          /* free VRAM in MiB (cudaMemGetInfo, fragmentation-aware) */
 long  gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV);
 void  gemma4_kv_close(sp_g4_kv *s);
 void xbar_arm_shadow_result(long *mism, long *sel);   /* P3.2-b-2b Phase-1 oracle parity handoff */
@@ -469,15 +471,20 @@ static int run_kairos_soak(void) {
     double lat_med=0; long base_vram=-1;
     double t_start=kairos_now_s(), deadline=t_start+soak_hours*3600.0;
     int abort_code=0; const char *abort_why="";
-    fprintf(stderr,"[g4-soak] START hours=%.2f maxloops=%ld tape_ticks=%d ring_W=%d sys=%ldtok log=%s\n",
-            soak_hours,maxloops,nt,W,pn,logf);
+    /* ONE long-lived session for the whole soak — no per-loop open/close (the leak fix:
+     * 209 close/reopen cycles fragmented VRAM ⇒ kv_open OOM at ~3.6h). Re-anchor each loop
+     * with the in-place gemma4_kv_reset (zero counters, no realloc). */
+    sp_g4_kv *s=gemma4_kv_open(m,2048);
+    if(!s){ fprintf(stderr,"[g4-soak] kv_open FAIL: %s\n",sp_last_error()); if(dl)fclose(dl); sp_model_unload(handle); return 2; }
+    long base_free=gemma4_kv_devfree_mib();   /* fragmentation-aware leak baseline (free VRAM MiB) */
+    fprintf(stderr,"[g4-soak] START hours=%.2f maxloops=%ld tape_ticks=%d ring_W=%d sys=%ldtok base_free=%ldMiB log=%s\n",
+            soak_hours,maxloops,nt,W,pn,base_free,logf);
     long loop=0;
     for(; ; loop++){
         if(maxloops>=0 && loop>=maxloops){ abort_why="reached SP_SOAK_MAXLOOPS"; break; }
         if(kairos_now_s()>=deadline){ abort_why="reached SP_SOAK_HOURS (clean stop)"; break; }
-        sp_g4_kv *s=gemma4_kv_open(m,2048);
-        if(!s){ abort_code=2; abort_why="kv_open FAIL"; break; }
-        if(gemma4_kv_prefill(s,sysb,(int)pn)){ gemma4_kv_close(s); abort_code=2; abort_why="SYS prefill FAIL"; break; }
+        if(gemma4_kv_reset(s)){ abort_code=2; abort_why="kv_reset FAIL"; break; }
+        if(gemma4_kv_prefill(s,sysb,(int)pn)){ abort_code=2; abort_why="SYS prefill FAIL"; break; }
         gemma4_kv_commit(s); int anchor=gemma4_kv_pos(s);
         double loop_lmin=1e9,loop_lmax=0,loop_lsum=0; int loop_n=0;
         for(int i=0;i<nt;i++){
@@ -516,18 +523,19 @@ static int run_kairos_soak(void) {
             if(consec_slow>=5){ abort_code=3; abort_why="LATENCY: 5 consecutive ticks > 3x median"; break; }
             if(lat>30000.0){ abort_code=3; abort_why="LATENCY: single tick > 30s (hang)"; break; }
         }
-        gemma4_kv_close(s);                       /* per-loop re-anchor: bounded state */
-        if(abort_code) break;
-        /* establish warm-up latency median + VRAM baseline after loop 0 */
+        if(abort_code) break;                     /* (no per-loop close — one resident session) */
+        /* establish warm-up latency median after loop 0 */
         double loop_lmed = (loop_n>0)? loop_lsum/loop_n : 0;   /* loop-mean as median proxy (cheap) */
         if(loop==0){ lat_med = loop_lmed; }
-        long vram=-1; int temp=-1; soak_probe_vram_temp(&vram,&temp);
+        long vram=-1; int temp=-1; soak_probe_vram_temp(&vram,&temp);   /* nvidia-smi: thermal + coarse log */
+        long curfree=gemma4_kv_devfree_mib();      /* the real leak signal (fragmentation-aware) */
+        long freedrop=(base_free>0 && curfree>0)?(base_free-curfree):0;
         if(loop==0 && vram>0) base_vram=vram;
-        if(base_vram>0 && vram>0 && vram-base_vram>256){ abort_code=3; abort_why="VRAM LEAK: >256MiB over baseline"; }
+        if(freedrop>256){ abort_code=3; abort_why="VRAM LEAK: free VRAM dropped >256MiB (cudaMemGetInfo)"; }
         if(temp>87){ abort_code=3; abort_why="THERMAL: GPU temp > 87C"; }
         double elapsed=kairos_now_s()-t_start;
-        fprintf(stderr,"[g4-soak] loop %6ld t=%.0fs ticks=%ld noop=%ld act=%ld FALSE=%ld MISS=%ld malf=%ld pos!=%ld lat{%.0f/%.0f/%.0f}ms vram=%ldMiB(+%ld) temp=%dC\n",
-                loop,elapsed,T_ticks,T_noop,T_act,T_false,T_missed,T_malf,T_pos,loop_lmin,loop_lmed,loop_lmax,vram,(base_vram>0&&vram>0)?vram-base_vram:0,temp);
+        fprintf(stderr,"[g4-soak] loop %6ld t=%.0fs ticks=%ld noop=%ld act=%ld FALSE=%ld MISS=%ld malf=%ld pos!=%ld lat{%.0f/%.0f/%.0f}ms free=%ldMiB(-%ld) vram=%ldMiB temp=%dC\n",
+                loop,elapsed,T_ticks,T_noop,T_act,T_false,T_missed,T_malf,T_pos,loop_lmin,loop_lmed,loop_lmax,curfree,freedrop,vram,temp);
         if(abort_code) break;
     }
     if(dl) fclose(dl);
@@ -535,6 +543,7 @@ static int run_kairos_soak(void) {
     fprintf(stderr,"[g4-soak] DONE loops=%ld ticks=%ld | noop_ok=%ld action_ok=%ld false=%ld missed=%ld malformed=%ld pos_violations=%ld\n",
             loop,T_ticks,T_noop,T_act,T_false,T_missed,T_malf,T_pos);
     fprintf(stderr,"[g4-soak] VERDICT: %s (%s)\n", pass?"GREEN":"RED/ABORT", abort_why);
+    gemma4_kv_close(s);                        /* one close for the whole soak */
     free(sysb); sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
     return pass?0:(abort_code?abort_code:3);
 }

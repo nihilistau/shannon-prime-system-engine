@@ -3571,6 +3571,28 @@ extern "C" int gemma4_kv_commit(sp_g4_kv *s) {
 
 extern "C" int gemma4_kv_pos(const sp_g4_kv *s) { return s ? s->dpos_host : -1; }
 
+/* In-place re-anchor: reset the session to empty WITHOUT free/realloc (the soak leak fix —
+ * per-loop close/reopen fragmented VRAM ⇒ kv_open OOM at ~loop 209). Buffers stay allocated;
+ * only the position counters reset. Next prefill overwrites slots from pos=0; stale slots
+ * beyond the new window are never read (attention reads [s0,ctx) only). */
+extern "C" int gemma4_kv_reset(sp_g4_kv *s) {
+    if (!s) return -1;
+    s->dpos_host = 0; s->commit_pos = 0; s->jcur = 0;
+    int zero = 0;
+    if (cudaMemcpy(s->dpos, &zero, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("gemma4_kv_reset: dpos H2D"); return -1;
+    }
+    return 0;
+}
+
+/* Free device VRAM in MiB (cudaMemGetInfo) — fragmentation-aware, unlike nvidia-smi's coarse
+ * 'used'. Lets the soak tripwire watch the allocator's real headroom. */
+extern "C" long gemma4_kv_devfree_mib(void) {
+    size_t freeb = 0, totalb = 0;
+    if (cudaMemGetInfo(&freeb, &totalb) != cudaSuccess) return -1;
+    return (long)(freeb / (1024u * 1024u));
+}
+
 /* D2H the live K/V cache for all owner layers into host buffers (the gate's
  * byte-comparator). Caller passes pre-sized host arrays [NL][Pmax*kvd]; only
  * owner layers (L<kvfs) are filled. Returns total bytes copied. */
