@@ -756,6 +756,75 @@ static int run_kv_ring_telemetry(void) {
     return (t1&&t2&&t3)?0:3;
 }
 
+/* ═══ SP_G4_KAIROS_INTERRUPT=1 (KAI-2 G-KAIROS-2 A/B): latent-vs-text event delivery latency. ═══
+ * Self-null proved inject(own-embedding)==text, so a raw-embedding arm is vacuous — the latency win can
+ * only come from COMPRESSION. Arm B uses an UNTRAINED baseline: mean-pool the event frame's token
+ * embeddings → 1 vector, injected in ONE step. Arm A delivers the same event as the full text frame.
+ * Metric: total steps-to-ACTION (delivery steps + decode steps until "<ACTION>" appears). If the pooled
+ * 1-vector still pivots the resident, latent delivery beats text (1 vs frame_len delivery); if not, an
+ * honest negative pointing to the phase-2 trained adapter (the roadmap's named fallback). */
+static int run_kairos_interrupt(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-int] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-int] to_gemma4 FAIL\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk);
+    if(!tk){ fprintf(stderr,"[g4-int] tokenizer FAIL\n"); return 2; }
+    const qwen3_config *c=&m->cfg; const int E=(int)c->n_embd;
+    const char *SYS=
+        "<start_of_turn>user\nYou are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\nNO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain.<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    const char *FRAME="<start_of_turn>user\nEVENT kind=EVENT.timer salience=0.90 payload=\"build finished\"<end_of_turn>\n<start_of_turn>model\n";
+    int32_t sysb[4096], frm[512], gen[1]; char dbuf[256];
+    long pn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);
+    long fn=sp_tokenizer_encode(tk,FRAME,strlen(FRAME),1,frm,512);
+    if(pn<=0||fn<=0){ fprintf(stderr,"[g4-int] encode FAIL\n"); return 2; }
+    sp_g4_kv *s=gemma4_kv_open(m,2048);
+    if(!s){ fprintf(stderr,"[g4-int] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+    if(gemma4_kv_prefill(s,sysb,(int)pn)){ fprintf(stderr,"[g4-int] SYS prefill FAIL\n"); return 2; }
+    gemma4_kv_commit(s); int anchor=gemma4_kv_pos(s);
+    const int KGEN=12;
+    /* mint the latent packet: mean-pool the FRAME token embeddings (untrained k=1 compression).
+     * capture each token's post-embed residual via a throwaway prefill, then rewind back to anchor. */
+    float *acc=(float*)calloc(E,sizeof(float)), *cap=(float*)malloc((size_t)E*sizeof(float)), *mean=(float*)malloc((size_t)E*sizeof(float));
+    for(int i=0;i<fn;i++){ gemma4_kv_capture(s,cap); if(gemma4_kv_prefill(s,&frm[i],1)){ fprintf(stderr,"[g4-int] mint FAIL\n"); return 2; } for(int e=0;e<E;e++) acc[e]+=cap[e]; }
+    gemma4_kv_rewind(s,(int)fn);   /* back to anchor (mint was non-destructive) */
+    for(int e=0;e<E;e++) mean[e]=acc[e]/(float)fn;
+    /* helper: free-decode until "<ACTION>" appears or KGEN exhausted; returns steps-to-action (or -1) */
+    #define STEPS_TO_ACTION(out_steps, out_txt) do { (out_steps)=-1; (out_txt)[0]=0; char run[512]={0}; \
+        for(int g=0; g<KGEN; g++){ if(gemma4_kv_decode(s,1,gen)){ break; } long bl=sp_tokenizer_decode(tk,gen,1,dbuf,sizeof dbuf-1); if(bl<0)bl=0; dbuf[bl]=0; \
+            strncat(run,dbuf,sizeof(run)-strlen(run)-1); if(strstr(run,"ACTION")){ (out_steps)=g+1; break; } } \
+        for(char*p=run;*p;p++) if(*p=='\n'||*p=='\r')*p=' '; snprintf((out_txt),120,"%.118s",run); } while(0)
+    char txtA[128], txtB[128]; int decA=0,decB=0;
+    /* ── Arm A (text): deliver full frame, then decode to action ── */
+    if(gemma4_kv_prefill(s,frm,(int)fn)){ fprintf(stderr,"[g4-int] A frame FAIL\n"); return 2; }
+    STEPS_TO_ACTION(decA,txtA);
+    int totalA = (decA<0)? -1 : (int)fn + decA;
+    gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+    /* ── Arm B (latent, mean-pool k=1): inject ONE vector (rides the first decode step), decode to action ──
+     * delivery is FUSED into step 1 (gemma4_kv_inject overrides the next step's residual) ⇒ total = decode steps. */
+    gemma4_kv_inject(s,mean);
+    STEPS_TO_ACTION(decB,txtB);
+    int totalB = (decB<0)? -1 : decB;
+    fprintf(stderr,"[g4-int] frame_len=%ld KGEN=%d\n",fn,KGEN);
+    fprintf(stderr,"[g4-int] ARM A (text):   pivot=%s decode_steps=%d total_steps=%d raw=\"%s\"\n", decA>0?"YES":"NO",decA,totalA,txtA);
+    fprintf(stderr,"[g4-int] ARM B (latent k=1 mean-pool): pivot=%s total_steps=%d raw=\"%s\"\n", decB>0?"YES":"NO",totalB,txtB);
+    if(decA>0 && decB>0)
+        fprintf(stderr,"[g4-int] G-KAIROS-2 A/B: latent total=%d vs text total=%d ⇒ %s\n",totalB,totalA,
+            totalB<totalA?"LATENT FASTER (compression wins)":(totalB==totalA?"TIE":"text faster"));
+    else
+        fprintf(stderr,"[g4-int] G-KAIROS-2 A/B: %s (Arm B pivot=%s — untrained mean-pool %s; phase-2 trained adapter is the path)\n",
+            decB>0?"latent pivoted":"HONEST NEGATIVE: untrained k=1 mean-pool did NOT pivot",decB>0?"YES":"NO", decB>0?"sufficed":"insufficient");
+    #undef STEPS_TO_ACTION
+    free(acc);free(cap);free(mean);
+    gemma4_kv_close(s); sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return 0;   /* exploratory measurement, not pass/fail */
+}
+
 /* ═══ SP_G4_KV_INJECT_NULL=1 (KAI-2 G-KAIROS-2 self-null): the latent-inject seam is bit-exact inert. ═══
  * Capture the model's OWN post-embed residual at a position, then re-inject it: the decode MUST be
  * byte-identical to no injection (the X-R1 G0 analog on the persistent ABI). Non-vacuity: a PERTURBED
@@ -1597,6 +1666,7 @@ int main(void) {
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_INJECT_NULL")) return run_kv_inject_null(); /* KAI-2: G-KAIROS-2 inject self-null */
+    if (getenv("SP_G4_KAIROS_INTERRUPT")) return run_kairos_interrupt(); /* KAI-2: G-KAIROS-2 latent-vs-text A/B */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
