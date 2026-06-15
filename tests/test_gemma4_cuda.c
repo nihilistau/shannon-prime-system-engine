@@ -69,6 +69,8 @@ int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
 int   gemma4_kv_commit(sp_g4_kv *s);
 int   gemma4_kv_pos(const sp_g4_kv *s);
 int   gemma4_kv_reset(sp_g4_kv *s);        /* in-place re-anchor (no free/realloc) — soak leak fix */
+int   gemma4_kv_capture(sp_g4_kv *s, float *emb_out);  /* KAI-2: next step D2H its post-embed residual */
+int   gemma4_kv_inject(sp_g4_kv *s, const float *emb); /* KAI-2: override next step's residual (latent entry) */
 long  gemma4_kv_devfree_mib(void);          /* free VRAM in MiB (cudaMemGetInfo, fragmentation-aware) */
 long  gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV);
 void  gemma4_kv_close(sp_g4_kv *s);
@@ -752,6 +754,62 @@ static int run_kv_ring_telemetry(void) {
     fprintf(stderr,"[g4-rtel] VERDICT: %s\n",(t1&&t2&&t3)?"JOURNALED-RING O(1) CONFIRMED":"REVIEW");
     sp_model_unload(handle);
     return (t1&&t2&&t3)?0:3;
+}
+
+/* ═══ SP_G4_KV_INJECT_NULL=1 (KAI-2 G-KAIROS-2 self-null): the latent-inject seam is bit-exact inert. ═══
+ * Capture the model's OWN post-embed residual at a position, then re-inject it: the decode MUST be
+ * byte-identical to no injection (the X-R1 G0 analog on the persistent ABI). Non-vacuity: a PERTURBED
+ * residual must CHANGE the output (proves the inject path is live, not silently skipped). */
+static int run_kv_inject_null(void) {
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[g4-inj] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle);
+    if(!m){ fprintf(stderr,"[g4-inj] to_gemma4 FAIL: %s\n",sp_last_error()); return 2; }
+    const qwen3_config *c=&m->cfg;
+    const int E=(int)c->n_embd, NL=(int)c->n_layers, period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
+    const int kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:NL;
+    const int g_nkv=(int)c->n_head_kv,g_hd=(int)c->head_dim,s_nkv=(int)c->g4_nkv_swa,s_hd=(int)c->g4_hd_swa;
+    const int Pmax=256, sys_n=24;
+    sp_g4_kv *s=gemma4_kv_open(m,Pmax);   /* full cache (SP_G4_KV_RING_W unset) */
+    if(!s){ fprintf(stderr,"[g4-inj] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+    int32_t sys[32]; for(int i=0;i<sys_n;i++) sys[i]=100+i;
+    if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-inj] prefill FAIL: %s\n",sp_last_error()); return 2; }
+    /* snapshot buffers (owners, full cache = Pmax slots) */
+    float **hK0=(float**)calloc(NL,sizeof(float*)),**hV0=(float**)calloc(NL,sizeof(float*));
+    float **hK1=(float**)calloc(NL,sizeof(float*)),**hV1=(float**)calloc(NL,sizeof(float*));
+    for(int L=0;L<kvfs&&L<NL;L++){ int gl=((L%period)==period-1); int kvd=(gl?g_nkv:s_nkv)*(gl?g_hd:s_hd);
+        size_t nb=(size_t)Pmax*kvd*sizeof(float); hK0[L]=malloc(nb);hV0[L]=malloc(nb);hK1[L]=malloc(nb);hV1[L]=malloc(nb); }
+    float *cap=(float*)malloc((size_t)E*sizeof(float));
+    /* ── A: capture the model's own post-embed residual at this position, normal decode ── */
+    gemma4_kv_capture(s,cap);
+    int32_t genA[1]; if(gemma4_kv_decode(s,1,genA)){ fprintf(stderr,"[g4-inj] decode A FAIL: %s\n",sp_last_error()); return 2; }
+    gemma4_kv_snapshot(s,hK0,hV0);
+    gemma4_kv_rewind(s,1);
+    /* ── B: re-inject the captured residual (== the model's own) → must be byte-identical ── */
+    gemma4_kv_inject(s,cap);
+    int32_t genB[1]; if(gemma4_kv_decode(s,1,genB)){ fprintf(stderr,"[g4-inj] decode B FAIL: %s\n",sp_last_error()); return 2; }
+    gemma4_kv_snapshot(s,hK1,hV1);
+    long diffs=0; for(int L=0;L<kvfs&&L<NL;L++){ int gl=((L%period)==period-1); int kvd=(gl?g_nkv:s_nkv)*(gl?g_hd:s_hd);
+        size_t nb=(size_t)Pmax*kvd*sizeof(float); if(memcmp(hK0[L],hK1[L],nb))diffs++; if(memcmp(hV0[L],hV1[L],nb))diffs++; }
+    int self_null = (genA[0]==genB[0] && diffs==0);
+    /* ── C (non-vacuity): a PERTURBED residual must change the output ── */
+    gemma4_kv_rewind(s,1);
+    float *cap2=(float*)malloc((size_t)E*sizeof(float));
+    for(int i=0;i<E;i++) cap2[i]=cap[i]+ (i<8? 2.0f : 0.0f);   /* perturb a few dims */
+    gemma4_kv_inject(s,cap2);
+    int32_t genC[1]; gemma4_kv_decode(s,1,genC);
+    gemma4_kv_snapshot(s,hK1,hV1);
+    long pdiffs=0; for(int L=0;L<kvfs&&L<NL;L++){ int gl=((L%period)==period-1); int kvd=(gl?g_nkv:s_nkv)*(gl?g_hd:s_hd);
+        size_t nb=(size_t)Pmax*kvd*sizeof(float); if(memcmp(hK0[L],hK1[L],nb))pdiffs++; }
+    int nonvacuous = (genC[0]!=genA[0] || pdiffs>0);
+    fprintf(stderr,"[g4-inj] self-null: genA=%d genB=%d kv-diffs=%ld | perturbed: genC=%d kv-changed=%ld\n",
+            genA[0],genB[0],diffs,genC[0],pdiffs);
+    fprintf(stderr,"[g4-inj] G-KAIROS-2 SELF-NULL: %s (inject seam bit-exact inert) | non-vacuous: %s (seam is live)\n",
+            self_null?"GREEN":"RED", nonvacuous?"YES":"NO(VACUOUS!)");
+    gemma4_kv_close(s); sp_model_unload(handle);
+    return (self_null && nonvacuous)?0:3;
 }
 
 /* ═══ SP_G4_KV_WRAP=1 (KAI-1c G-1b-WRAP-NULL): wrap-aware ring rewind gate. ═══
@@ -1538,6 +1596,7 @@ int main(void) {
     if (getenv("SP_G4_KAIROS_SOAK")) return run_kairos_soak();   /* G-KAIROS-1: >=24h unattended endurance soak */
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
+    if (getenv("SP_G4_KV_INJECT_NULL")) return run_kv_inject_null(); /* KAI-2: G-KAIROS-2 inject self-null */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);

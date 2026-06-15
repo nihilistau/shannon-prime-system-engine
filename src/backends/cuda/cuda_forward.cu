@@ -3312,6 +3312,11 @@ struct sp_g4_kv {
      * SWA owner; globals stay full-cache (no window ⇒ no alias ⇒ no journal). */
     int   ring_W, Jmax, commit_pos, jcur;
     float **jK, **jV;
+    /* KAI-2 latent interrupt: residual-entry capture/inject at the post-embed/pre-layer
+     * point (the SP_XBAR_EMB seam, persistent-ABI edition). Off by default = null floor.
+     * cap_active ⇒ next step D2H its post-embed dx into cap_host; inj_active ⇒ next step
+     * overrides dx with dinj (E floats). One-shot flags, cleared after the step consumes them. */
+    float *dinj; float *cap_host; int inj_active, cap_active;
 };
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
@@ -3340,6 +3345,17 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
     else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
             g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
             g_w.embd_packed.row_prec, dseq, dpos, E, embscale, s->dx);
+    /* KAI-2: residual-entry capture/inject (post-embed, pre-layer — the SP_XBAR_EMB point).
+     * Off by default (both flags 0) ⇒ identical to a stock step = the null floor. */
+    if (s->cap_active && s->cap_host) {
+        cudaStreamSynchronize(st);
+        cudaMemcpy(s->cap_host, s->dx, (size_t)E*sizeof(float), cudaMemcpyDeviceToHost);
+        s->cap_active = 0;
+    }
+    if (s->inj_active && s->dinj) {
+        cudaMemcpyAsync(s->dx, s->dinj, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
+        s->inj_active = 0;
+    }
     if (PL) {
         k_ple_gather_at<<<(unsigned)((NLPL+255)/256), 256, 0, st>>>(
             g_w.pl_tok_embd.codes, g_w.pl_tok_embd.row_off, g_w.pl_tok_embd.row_scale,
@@ -3585,6 +3601,25 @@ extern "C" int gemma4_kv_reset(sp_g4_kv *s) {
     return 0;
 }
 
+/* KAI-2: arm a capture — the NEXT step D2H-copies its post-embed residual (E floats) into
+ * emb_out. Used by the self-null gate to grab the model's own residual and feed it back. */
+extern "C" int gemma4_kv_capture(sp_g4_kv *s, float *emb_out) {
+    if (!s || !emb_out) return -1;
+    s->cap_host = emb_out; s->cap_active = 1;
+    return 0;
+}
+
+/* KAI-2: stage a latent event packet (one E-float residual) to OVERRIDE the next step's
+ * post-embed residual (residual-entry injection). The forward then mints K/V natively at the
+ * live dpos ⇒ RoPE phase correct by construction. One-shot (consumed by the next step). */
+extern "C" int gemma4_kv_inject(sp_g4_kv *s, const float *emb) {
+    if (!s || !emb) return -1;
+    if (!s->dinj) { if (cudaMalloc(&s->dinj, (size_t)s->E*sizeof(float)) != cudaSuccess) { sp_set_error("gemma4_kv_inject: dinj OOM"); return -1; } }
+    if (cudaMemcpy(s->dinj, emb, (size_t)s->E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) { sp_set_error("gemma4_kv_inject: H2D"); return -1; }
+    s->inj_active = 1;
+    return 0;
+}
+
 /* Free device VRAM in MiB (cudaMemGetInfo) — fragmentation-aware, unlike nvidia-smi's coarse
  * 'used'. Lets the soak tripwire watch the allocator's real headroom. */
 extern "C" long gemma4_kv_devfree_mib(void) {
@@ -3623,6 +3658,7 @@ extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (s->dVc) { for (int L=0;L<s->NL;L++) if (s->dVc[L]) cudaFree(s->dVc[L]); free(s->dVc); }
     if (s->jK) { for (int L=0;L<s->NL;L++) if (s->jK[L]) cudaFree(s->jK[L]); free(s->jK); }   /* KAI-1c undo-journal */
     if (s->jV) { for (int L=0;L<s->NL;L++) if (s->jV[L]) cudaFree(s->jV[L]); free(s->jV); }
+    if (s->dinj) cudaFree(s->dinj);   /* KAI-2 inject staging */
     free(s);
 }
 
