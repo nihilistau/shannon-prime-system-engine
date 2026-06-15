@@ -467,7 +467,7 @@ static int run_kairos_soak(void) {
     if(dl){ fprintf(dl,"# loop tick expect decided pos latency_ms\n"); fflush(dl); }
     /* aggregate counters (fixed-size; zero RAM growth over the run) */
     long T_noop=0,T_act=0,T_false=0,T_missed=0,T_malf=0,T_pos=0,T_ticks=0;
-    int consec_malf=0, consec_slow=0;
+    int consec_malf=0, consec_slow=0, consec_lowfree=0;
     double lat_med=0; long base_vram=-1;
     double t_start=kairos_now_s(), deadline=t_start+soak_hours*3600.0;
     int abort_code=0; const char *abort_why="";
@@ -531,7 +531,12 @@ static int run_kairos_soak(void) {
         long curfree=gemma4_kv_devfree_mib();      /* the real leak signal (fragmentation-aware) */
         long freedrop=(base_free>0 && curfree>0)?(base_free-curfree):0;
         if(loop==0 && vram>0) base_vram=vram;
-        if(freedrop>256){ abort_code=3; abort_why="VRAM LEAK: free VRAM dropped >256MiB (cudaMemGetInfo)"; }
+        /* cudaMemGetInfo free is DEVICE-GLOBAL (includes other processes), so a single-sample
+         * threshold false-fires on transient external GPU use on a shared desktop. A real leak is
+         * MONOTONIC + sustained; external contention is a step that may recover. Require the drop to
+         * persist K=10 consecutive loops (~10 min) before aborting, and don't over-claim "leak". */
+        if(freedrop>256) consec_lowfree++; else consec_lowfree=0;
+        if(consec_lowfree>=10){ abort_code=3; abort_why="VRAM PRESSURE sustained >256MiB for 10 loops (residual leak OR external GPU contention)"; }
         if(temp>87){ abort_code=3; abort_why="THERMAL: GPU temp > 87C"; }
         double elapsed=kairos_now_s()-t_start;
         fprintf(stderr,"[g4-soak] loop %6ld t=%.0fs ticks=%ld noop=%ld act=%ld FALSE=%ld MISS=%ld malf=%ld pos!=%ld lat{%.0f/%.0f/%.0f}ms free=%ldMiB(-%ld) vram=%ldMiB temp=%dC\n",
