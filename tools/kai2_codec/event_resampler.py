@@ -20,6 +20,12 @@ runs at dim 640, audio_samples_per_token=640 (40ms/frame @16kHz ~25 tok/s), then
 lifts 640 -> text hidden 3840. So the frozen model was JOINTLY TRAINED to interpret continuous
 non-text vectors at our exact inject port.
 
+SUPERSEDED AS PRIMARY (2026-06-15): tensor inspection of the local bf16 checkpoint showed the
+native audio projector is a SINGLE linear (model.embed_audio.embedding_projection.weight [3840,640],
+no bias) — no pooler, no encoder. So the adopted codec is a single nn.Linear (see
+tools/kai2_codec/train_kai2_codec.py :: KAI2Codec); this Perceiver resampler is the HEAVIER FALLBACK
+only (kept for the case the single-linear packet underfits the action-pivot).
+
 Two routes (see CONTRACT-KAIROS §6.3):
   ROUTE A (native-audio mimic, strongest): extract the audio projector from the HF safetensors,
     deliver the event AS audio (TTS or synthesized 640-sample frames) -> real audio-soft-token
