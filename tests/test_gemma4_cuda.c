@@ -1099,6 +1099,78 @@ static int run_inject_seq_null(void){
     return pass==2 ? 0 : 3;
 }
 
+/* ═══ SP_G4_TOK_DUMP (KAI-3 §7.3 support): dump real gemma-4 token ids for a line-per-event text file. ═══
+ * Uses the engine's .sp-tokenizer (same one the metal gates use) — no Python tokenizer / no cloud needed.
+ * SP_G4_TOK_DUMP_IN = text file (one event per line); SP_G4_TOK_DUMP_OUT = output ("id id id" per line). */
+static int run_tok_dump(void){
+    const char *stk=getenv("SP_GEMMA4_SPTOK"); if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    const char *in=getenv("SP_G4_TOK_DUMP_IN"), *out=getenv("SP_G4_TOK_DUMP_OUT");
+    if(!in||!out){ fprintf(stderr,"[tokdump] need SP_G4_TOK_DUMP_IN + SP_G4_TOK_DUMP_OUT\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk); if(!tk){ fprintf(stderr,"[tokdump] tok FAIL\n"); return 2; }
+    FILE *fi=fopen(in,"rb"), *fo=fopen(out,"wb");
+    if(!fi||!fo){ fprintf(stderr,"[tokdump] open FAIL\n"); return 2; }
+    char line[1024]; int32_t ids[512]; long nl=0;
+    while(fgets(line,sizeof line,fi)){
+        size_t L=strlen(line); while(L&&(line[L-1]=='\n'||line[L-1]=='\r')) line[--L]=0;
+        if(L==0){ fprintf(fo,"\n"); continue; }
+        long n=sp_tokenizer_encode(tk,line,L,0,ids,512);
+        if(n<=0){ fprintf(fo,"\n"); continue; }
+        for(long i=0;i<n;i++) fprintf(fo,"%d%s",ids[i],i+1<n?" ":"");
+        fprintf(fo,"\n"); nl++;
+    }
+    fclose(fi); fclose(fo); sp_tokenizer_free(tk);
+    fprintf(stderr,"[tokdump] wrote %ld lines -> %s\n",nl,out);
+    return 0;
+}
+
+/* ═══ SP_G4_KAI3=manifest (KAI-3 §7.3 G-KAIROS-3 metal pivot gate): inject PROJECTOR packets as a ═══
+ * sequence and check the 12B pivots salient->ACTION / idle->NO_OP. Manifest lines: "<path.bin> <EXPECT>".
+ * Each packet (KAI2 fmt, k x E on-manifold frame vectors) is injected via gemma4_kv_inject_seq inside the
+ * exact soak scaffold (SYS + user-open + <packet seq> + user-close), then decoded. This is the composition
+ * receipt: projector output -> real metal -> pivot. */
+static int run_kai3_gate(void){
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    const char *man=getenv("SP_G4_KAI3");        if(!man){ fprintf(stderr,"[kai3] need SP_G4_KAI3=manifest\n"); return 2; }
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[kai3] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle); if(!m){ fprintf(stderr,"[kai3] to_gemma4 FAIL\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk); if(!tk){ fprintf(stderr,"[kai3] tok FAIL\n"); return 2; }
+    const int E=(int)m->cfg.n_embd; const int PH=258881;
+    const char *SYS=
+        "<start_of_turn>user\n"
+        "You are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+        "NO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    const char *UOPEN="<start_of_turn>user\n", *UCLOSE="<end_of_turn>\n<start_of_turn>model\n";
+    int32_t sysb[4096], uob[64], ucb[64];
+    long sn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);
+    long uon=sp_tokenizer_encode(tk,UOPEN,strlen(UOPEN),1,uob,64);
+    long ucn=sp_tokenizer_encode(tk,UCLOSE,strlen(UCLOSE),0,ucb,64);
+    FILE *fm=fopen(man,"rb"); if(!fm){ fprintf(stderr,"[kai3] manifest open FAIL\n"); return 2; }
+    char path[512], expect[32]; int pass=0, tot=0;
+    while(fscanf(fm,"%511s %31s",path,expect)==2){
+        int k=0; float *vecs=NULL; if(kai2_read_packet(path,E,&k,&vecs)!=0){ fprintf(stderr,"[kai3] packet read FAIL %s\n",path); continue; }
+        sp_g4_kv *s=gemma4_kv_open(m,2048); if(!s){ free(vecs); continue; }
+        char tD[128]; const char *dec="FAIL";
+        if(!gemma4_kv_prefill(s,sysb,(int)sn)){ gemma4_kv_commit(s);
+            if(!gemma4_kv_prefill(s,uob,(int)uon) && !gemma4_kv_inject_seq(s,vecs,k,PH) && !gemma4_kv_prefill(s,ucb,(int)ucn))
+                dec=kai2_decide(s,tk,tD);
+        }
+        int ok=(strcmp(dec,expect)==0); pass+=ok; tot++;
+        fprintf(stderr,"[kai3] %s expect=%s | PACKET(k=%d via inject_seq)->%s (\"%s\") [%s]\n",
+                path,expect,k,dec,tD,ok?"PASS":"miss");
+        gemma4_kv_close(s); free(vecs);
+    }
+    fclose(fm);
+    fprintf(stderr,"[kai3] G-KAIROS-3 PROJECTED-FRAME PIVOT GATE: %d/%d\n",pass,tot);
+    sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return (tot>0 && pass==tot) ? 0 : 3;
+}
+
 /* ═══ SP_G4_KV_WRAP=1 (KAI-1c G-1b-WRAP-NULL): wrap-aware ring rewind gate. ═══
  * Small Wring (SP_G4_KV_RING_W) forces wraps cheaply. Prefill past W multiple times
  * (≥3 wraps), commit (retain the action). Snapshot the W-slot SWA rings. Idle tick
@@ -1887,6 +1959,8 @@ int main(void) {
     if (getenv("SP_G4_KAIROS_INTERRUPT")) return run_kairos_interrupt(); /* KAI-2: G-KAIROS-2 latent-vs-text A/B */
     if (getenv("SP_G4_KAI2_PACKET")) return run_kai2_packet_gate(); /* KAI-2: G-KAIROS-2 trained-packet pivot+selectivity gate */
     if (getenv("SP_G4_INJ_SEQ")) return run_inject_seq_null(); /* KAI-3 §7.2: G-KAIROS-3-NULL sequence-wrapper null floor */
+    if (getenv("SP_G4_TOK_DUMP_IN")) return run_tok_dump();     /* KAI-3 §7.3: real gemma tokenizer id dump (local, no cloud) */
+    if (getenv("SP_G4_KAI3")) return run_kai3_gate();           /* KAI-3 §7.3: G-KAIROS-3 projected-frame pivot gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);

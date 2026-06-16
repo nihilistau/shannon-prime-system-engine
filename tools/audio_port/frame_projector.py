@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--out", default="frame_projector.pt")
     ap.add_argument("--export", action="store_true")
     ap.add_argument("--packets_dir", default="kai3_packets")
+    ap.add_argument("--manifest_out", default=None, help="write '<prefix><pkt> <EXPECT>' lines for the metal gate")
+    ap.add_argument("--manifest_prefix", default="", help="Windows path prefix for packet paths in the manifest")
     args = ap.parse_args()
 
     import torch
@@ -125,14 +127,18 @@ def main():
     if args.export:
         os.makedirs(args.packets_dir, exist_ok=True)
         texts  = d["eval_texts"]; expect = d["eval_expect"]; elen = d["eval_len"]
+        man = open(args.manifest_out, "w") if args.manifest_out else None
         with torch.no_grad():
             for i in range(evX.shape[0]):
                 n = int(elen[i])
                 L = net(evX[i:i+1, :n]) / args.export_tau
                 Eout = (F.softmax(L, -1) @ Wsub)[0].cpu().numpy()      # [n, H]
-                fn = os.path.join(args.packets_dir, f"eval_{i:02d}_{str(expect[i])}.bin")
+                base = f"eval_{i:02d}_{str(expect[i])}.bin"
+                fn = os.path.join(args.packets_dir, base)
                 write_kai2_packet(fn, Eout)
+                if man: man.write(f"{args.manifest_prefix}{base} {str(expect[i])}\n")
                 print(f"[export] {fn}  k={n} hidden={H} expect={expect[i]}", flush=True)
+        if man: man.close(); print(f"[export] manifest -> {args.manifest_out}", flush=True)
 
 if __name__ == "__main__":
     main()

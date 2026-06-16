@@ -63,6 +63,9 @@ def main():
     ap.add_argument("--max_len", type=int, default=28)
     ap.add_argument("--use_tokenizer", action="store_true",
                     help="encode real EVENT text (needs transformers/tokenizers) — for the METAL pivot gate, NOT the architecture ladder")
+    ap.add_argument("--train_tokens", default=None, help="pre-dumped real token-id file (one event/line, space-sep) from sp engine tokenizer")
+    ap.add_argument("--eval_tokens", default=None, help="pre-dumped real token-id file for held-out EVAL events")
+    ap.add_argument("--eval_expect", default=None, help="comma list of ACTION/NO_OP per eval event (for packet naming + metal gate)")
     args = ap.parse_args()
 
     # ARCHITECTURE-LADDER mode (default): synthetic random valid-token-id sequences over a fixed V_sub.
@@ -70,7 +73,16 @@ def main():
     # the frame->token mapping is still a learned continuous->discrete problem. Real English text + the
     # ACTION/NO_OP pivot belong to the METAL G-KAIROS-3 gate (use --use_tokenizer there), not here.
     rng0 = np.random.default_rng(args.seed)
-    if args.use_tokenizer:
+    if args.train_tokens and args.eval_tokens:
+        # REAL token-id sequences dumped by the engine tokenizer (SP_G4_TOK_DUMP) — local, no cloud.
+        def rd(p): return [[int(x) for x in ln.split()] for ln in open(p) if ln.strip()]
+        tr, ev = rd(args.train_tokens), rd(args.eval_tokens)
+        vsub = sorted({i for seq in tr + ev for i in seq})
+        g2l = {g: l for l, g in enumerate(vsub)}
+        train_ids = [([g2l[i] for i in seq], 0.0) for seq in tr]
+        eval_ids  = [([g2l[i] for i in seq], 0.0) for seq in ev]
+        _expect = (args.eval_expect.split(",") if args.eval_expect else ["NO_OP"] * len(eval_ids))
+    elif args.use_tokenizer:
         try:
             from tokenizers import Tokenizer
             _tk = Tokenizer.from_file(os.path.join(args.model, "tokenizer.json"))
@@ -129,8 +141,9 @@ def main():
              eval_X=evXp,  eval_T=evTp,  eval_len=evLa,
              vsub_ids=np.array(vsub, dtype=np.int64),
              eval_texts=np.array([t for t, _ in EVAL_EVENTS] if args.use_tokenizer
-                                 else [f"synth_{i}" for i in range(len(eval_ids))]),
-             eval_expect=np.array(["ACTION" if s >= 0.5 else "NO_OP" for _, s in eval_ids]),
+                                 else [f"ev_{i}" for i in range(len(eval_ids))]),
+             eval_expect=np.array(_expect if (args.train_tokens and args.eval_tokens)
+                                  else ["ACTION" if s >= 0.5 else "NO_OP" for _, s in eval_ids]),
              A=A, sigma=np.float32(sigma), normA=np.float32(normA),
              frame_dim=np.int64(args.frame_dim))
     print(f"[gen] V_sub={V} train_events={len(train_ids)} eval_events={len(eval_ids)} "
