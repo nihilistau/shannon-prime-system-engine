@@ -9,13 +9,17 @@ set "VD=C:\Projects\voxtral-mini-realtime-rs\models\voxtral-tts-q4-gguf\voice_em
 set "K=D:\F\shannon-prime-repos\_xbar\p2b\kai3"
 set "VOICE=%~1"
 if "%VOICE%"=="" set "VOICE=casual_female"
+set "MAXTRAIN=%~2"
+if "%MAXTRAIN%"=="" set "MAXTRAIN=100000"
 if not exist "%K%\wav" mkdir "%K%\wav"
 for %%S in (train eval) do (
   set /a i=0
   for /f "usebackq delims=" %%L in ("%K%\%%S.txt") do (
     set "TXT=%%L"
     set "OUT=%K%\wav\%%S_!i!_%VOICE%.wav"
-    if not exist "!OUT!" "%VX%" speak --gguf "%M%" --voices-dir "%VD%" --voice %VOICE% --euler-steps 3 --text "!TXT!" --output "!OUT!" 1>nul 2>nul
+    set "SKIP="
+    if "%%S"=="train" if !i! GEQ %MAXTRAIN% set "SKIP=1"
+    if not defined SKIP if not exist "!OUT!" "%VX%" speak --gguf "%M%" --voices-dir "%VD%" --voice %VOICE% --euler-steps 3 --text "!TXT!" --output "!OUT!" 1>nul 2>nul
     set /a i+=1
   )
   echo done %%S voice=%VOICE%

@@ -91,6 +91,11 @@ def main():
 
     vsub = sorted(vsub); g2l = {g: l for l, g in enumerate(vsub)}
     save = {"vsub_ids": np.array(vsub, np.int64), "n_mels": np.int64(a.n_mels)}
+    # propagate the held-out ACTION/NO_OP labels (from emit_corpus expect.txt) so the metal gate scores
+    # against real decision labels, not packet indices (the 0/7-vs-3/7 harness bug, fixed 2026-06-16)
+    expf = os.path.join(a.kai3_dir, "expect.txt")
+    if os.path.exists(expf):
+        save["eval_expect"] = np.array(open(expf).read().strip().split(","))
     for split, (feats, targs, flens, tlens) in splits.items():
         if not feats: continue
         Tm = max(flens); Um = max(tlens)
