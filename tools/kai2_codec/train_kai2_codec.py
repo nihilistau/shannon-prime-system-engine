@@ -170,6 +170,20 @@ def decision_logits_inject(model, embed, tok, event_text, codec, raw_dim, device
     return out.logits[:, -1, :]
 
 
+def teacher_decision(model, tok, event_text, device):
+    """Greedy-generate the teacher's decision on the TEXT path; classify ACTION vs NO_OP (mirrors the
+    engine gate's detection). Used for the pre-distillation selectivity gate."""
+    ids = tok(SYSTEM + event_text + DECIDE, return_tensors="pt").input_ids.to(device)
+    with torch.no_grad():
+        out = model.generate(input_ids=ids, max_new_tokens=8, do_sample=False)
+    txt = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=False).replace("\n", " ")
+    if "ACTION" in txt:
+        return "ACTION", txt
+    if "OP" in txt or "NOOP" in txt:
+        return "NO_OP", txt
+    return "NEITHER", txt
+
+
 # ───────────────────────────────────────── train ────────────────────────────────────────────────
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -201,6 +215,19 @@ def train(args):
         return
 
     model, lm, embed, tok = load_teacher(args.model)
+    # ── PRE-DISTILLATION TEACHER-SELECTIVITY GATE (ABORT if the distillation target is invalid) ──
+    sal = next(it for it in corpus if it["expect"] == "ACTION")
+    idl = next(it for it in corpus if it["expect"] == "NO_OP")
+    sd, stx = teacher_decision(model, tok, sal["text"], device)
+    idd, itx = teacher_decision(model, tok, idl["text"], device)
+    selective = (sd == "ACTION" and idd == "NO_OP")
+    print(f"[teacher-check] salient->{sd} (\"{stx[:48]}\") | idle->{idd} (\"{itx[:48]}\") | SELECTIVE={selective}", flush=True)
+    if not selective:
+        print("[teacher-check] ABORT rc=4: teacher is NOT selective on this scaffold — distilling against it is "
+              "garbage-in. Fix the scaffold/prompt before training.", flush=True)
+        sys.exit(4)
+    # ── distill ──
+    kl_curve = []
     for ep in range(args.epochs):
         tot = 0.0
         for it in corpus:
@@ -209,9 +236,11 @@ def train(args):
             loss = distillation_loss(s_log, t_log, args.tau)
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item()
-        print(f"[train] epoch {ep} mean_KL={tot/len(corpus):.4f}")
+        mk = tot / len(corpus); kl_curve.append(mk)
+        print(f"[train] epoch {ep} mean_KL={mk:.5f}", flush=True)
+    print(f"[train] KL_curve={['%.5f' % x for x in kl_curve]} (flat-from-start = mode collapse; decreasing = learning)", flush=True)
     torch.save({"codec": codec.state_dict(), "args": vars(args)}, args.out)
-    print(f"[train] saved {args.out}")
+    print(f"[train] saved {args.out}", flush=True)
 
 
 # ───────────────────────── export k-vector packets for the C engine (gemma4_kv_inject) ───────────
