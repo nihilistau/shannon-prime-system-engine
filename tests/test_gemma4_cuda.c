@@ -881,6 +881,78 @@ static int run_kv_inject_null(void) {
     return (self_null && nonvacuous)?0:3;
 }
 
+/* ═══ SP_G4_KAI2_PACKET=1 (KAI-2 G-KAIROS-2 GATE): inject the TRAINED codec packet, measure pivot + selectivity ═══
+ * Replicates train_kai2_codec.py's scaffold EXACTLY: SYSTEM text + k codec soft-vectors (the trained packet,
+ * injected over k decode steps) + DECIDE text, decision read next. TEXT control arm (SYSTEM+event_text+DECIDE)
+ * isolates codec transfer from resident-model capability (teacher was bf16; resident is OK_Q4B, PPL-parity).
+ * Two cases (salient→ACTION, idle→NO_OP) = selectivity. GATE: the PACKET arm reproduces the expected decision
+ * for BOTH cases. Packets = tests/fixtures/kai2/event_*.bin ('KAI2'|u32 k|u32 hidden|k*hidden f32). */
+static int kai2_read_packet(const char *path, int E, int *out_k, float **out){
+    FILE *f=fopen(path,"rb"); if(!f) return -1; char mg[4]; uint32_t k=0,h=0;
+    if(fread(mg,1,4,f)!=4||memcmp(mg,"KAI2",4)){fclose(f);return -2;}
+    if(fread(&k,4,1,f)!=1||fread(&h,4,1,f)!=1){fclose(f);return -3;}
+    if((int)h!=E){fclose(f);return -4;}
+    float *v=(float*)malloc((size_t)k*h*sizeof(float));
+    if(fread(v,sizeof(float),(size_t)k*h,f)!=(size_t)k*h){free(v);fclose(f);return -5;}
+    fclose(f); *out_k=(int)k; *out=v; return 0;
+}
+static const char* kai2_decide(sp_g4_kv*s, sp_tokenizer*tk, const int32_t*decb, int dn, char*txt){
+    const int KGEN=10; int32_t gen[1]; char dbuf[256], run[512]={0};
+    if(gemma4_kv_prefill(s,decb,dn)){ txt[0]=0; return "PREFILL_FAIL"; }
+    for(int g=0; g<KGEN; g++){ if(gemma4_kv_decode(s,1,gen)) break; long bl=sp_tokenizer_decode(tk,gen,1,dbuf,sizeof dbuf-1); if(bl<0)bl=0; dbuf[bl]=0;
+        strncat(run,dbuf,sizeof(run)-strlen(run)-1); if(strstr(run,"ACTION")||strstr(run,"NO_OP")) break; }
+    for(char*p=run;*p;p++) if(*p=='\n'||*p=='\r')*p=' '; snprintf(txt,120,"%.118s",run);
+    if(strstr(run,"ACTION")) return "ACTION"; if(strstr(run,"NO_OP")) return "NO_OP"; return "NEITHER";
+}
+static int run_kai2_packet_gate(void){
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[kai2] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle); if(!m){ fprintf(stderr,"[kai2] to_gemma4 FAIL\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk); if(!tk){ fprintf(stderr,"[kai2] tok FAIL\n"); return 2; }
+    const int E=(int)m->cfg.n_embd;
+    /* EXACT scaffold from train_kai2_codec.py (SYSTEM/DECIDE) */
+    const char *SYS="You are a background monitor. Read the event. Emit <ACTION> if it needs intervention (salience>=0.5), else NO_OP.\nEVENT: ";
+    const char *DEC="\nDECIDE: ";
+    struct { const char*text; const char*pkt; const char*expect; } cs[2]={
+        {"EVENT build_id=4471 status=FAILED tests=3_broken salience=0.85", "tests/fixtures/kai2/event_000_ACTION.bin", "ACTION"},
+        {"EVENT heartbeat ok cpu=12% salience=0.10",                        "tests/fixtures/kai2/event_004_NO_OP.bin", "NO_OP"}};
+    int32_t sysb[2048], decb[64]; char tT[128], tP[128];
+    long sn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,2048);
+    long dn=sp_tokenizer_encode(tk,DEC,strlen(DEC),0,decb,64);
+    if(sn<=0||dn<=0){ fprintf(stderr,"[kai2] scaffold encode FAIL\n"); return 2; }
+    int pass=0;
+    for(int i=0;i<2;i++){
+        sp_g4_kv *s=gemma4_kv_open(m,2048); if(!s){ fprintf(stderr,"[kai2] kv_open FAIL\n"); return 2; }
+        if(gemma4_kv_prefill(s,sysb,(int)sn)){ fprintf(stderr,"[kai2] SYS prefill FAIL\n"); return 2; }
+        gemma4_kv_commit(s); int anchor=gemma4_kv_pos(s);
+        /* TEXT control: SYSTEM + event_text + DECIDE -> decision */
+        int32_t evb[256]; long en=sp_tokenizer_encode(tk,cs[i].text,strlen(cs[i].text),0,evb,256);
+        if(en<=0){ fprintf(stderr,"[kai2] event encode FAIL\n"); return 2; }
+        if(gemma4_kv_prefill(s,evb,(int)en)){ fprintf(stderr,"[kai2] text prefill FAIL\n"); return 2; }
+        const char *decT=kai2_decide(s,tk,decb,(int)dn,tT);
+        gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+        /* PACKET arm: SYSTEM + inject(k codec vectors over k steps) + DECIDE -> decision */
+        int k=0; float *vecs=NULL; int rc=kai2_read_packet(cs[i].pkt,E,&k,&vecs);
+        const char *decP="PKT_FAIL";
+        if(rc==0){
+            int32_t junk[1];
+            for(int j=0;j<k;j++){ gemma4_kv_inject(s,vecs+(size_t)j*E); if(gemma4_kv_decode(s,1,junk)){ fprintf(stderr,"[kai2] inject-decode FAIL\n"); break; } }
+            decP=kai2_decide(s,tk,decb,(int)dn,tP);
+            free(vecs);
+        } else { fprintf(stderr,"[kai2] packet read rc=%d (%s)\n",rc,cs[i].pkt); tP[0]=0; }
+        int ok = (strcmp(decP,cs[i].expect)==0);
+        pass += ok;
+        fprintf(stderr,"[kai2] case=%s expect=%s | TEXT->%s (\"%s\") | PACKET(k=%d)->%s (\"%s\") | %s\n",
+                cs[i].expect[0]=='A'?"salient":"idle", cs[i].expect, decT,tT, k, decP,tP, ok?"PASS":"FAIL");
+        gemma4_kv_close(s);
+    }
+    fprintf(stderr,"[kai2] G-KAIROS-2 PACKET GATE: %d/2 cases ⇒ %s\n", pass, pass==2?"GREEN (trained packet pivots + selective)":"RED (codec did not transfer)");
+    sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return pass==2 ? 0 : 3;
+}
+
 /* ═══ SP_G4_KV_WRAP=1 (KAI-1c G-1b-WRAP-NULL): wrap-aware ring rewind gate. ═══
  * Small Wring (SP_G4_KV_RING_W) forces wraps cheaply. Prefill past W multiple times
  * (≥3 wraps), commit (retain the action). Snapshot the W-slot SWA rings. Idle tick
@@ -1667,6 +1739,7 @@ int main(void) {
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_INJECT_NULL")) return run_kv_inject_null(); /* KAI-2: G-KAIROS-2 inject self-null */
     if (getenv("SP_G4_KAIROS_INTERRUPT")) return run_kairos_interrupt(); /* KAI-2: G-KAIROS-2 latent-vs-text A/B */
+    if (getenv("SP_G4_KAI2_PACKET")) return run_kai2_packet_gate(); /* KAI-2: G-KAIROS-2 trained-packet pivot+selectivity gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);

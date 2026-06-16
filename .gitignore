@@ -106,3 +106,4 @@ _p31_ep/
 
 build_*.log
 run_*.log
+results/
