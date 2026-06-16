@@ -122,9 +122,19 @@ def build_corpus(path: str | None):
 
 
 # ───────────────────────── teacher/student forward (the frozen 12B in the loop) ──────────────────
-SYSTEM = ("You are a background monitor. Read the event. Emit <ACTION> if it needs intervention "
-          "(salience>=0.5), else NO_OP.\nEVENT: ")
-DECIDE = "\nDECIDE: "
+# EXACT gemma chat-template scaffold the 6h soak proved selective (the raw template-less version lobotomized
+# the 12B's instruction-following -> non-selective teacher -> the v1 codec memorized that failure, G-KAIROS-2
+# RED 2026-06-16). SYSTEM = the system daemon turn + the OPEN of the event user-turn; DECIDE = the CLOSE of the
+# user-turn + the model-turn start. The k codec soft-vectors are injected BETWEEN them, in place of the event text.
+SYSTEM = ("<start_of_turn>user\n"
+          "You are a background kernel daemon. Each tick you receive one environment event "
+          "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+          "NO_OP\n<ACTION>short imperative</ACTION>\n"
+          "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+          "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+          "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n"
+          "<start_of_turn>user\n")
+DECIDE = "<end_of_turn>\n<start_of_turn>model\n"
 
 
 def load_teacher(model_id: str):

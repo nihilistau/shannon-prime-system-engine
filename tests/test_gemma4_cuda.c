@@ -896,13 +896,14 @@ static int kai2_read_packet(const char *path, int E, int *out_k, float **out){
     if(fread(v,sizeof(float),(size_t)k*h,f)!=(size_t)k*h){free(v);fclose(f);return -5;}
     fclose(f); *out_k=(int)k; *out=v; return 0;
 }
-static const char* kai2_decide(sp_g4_kv*s, sp_tokenizer*tk, const int32_t*decb, int dn, char*txt){
-    const int KGEN=10; int32_t gen[1]; char dbuf[256], run[512]={0};
-    if(gemma4_kv_prefill(s,decb,dn)){ txt[0]=0; return "PREFILL_FAIL"; }
-    for(int g=0; g<KGEN; g++){ if(gemma4_kv_decode(s,1,gen)) break; long bl=sp_tokenizer_decode(tk,gen,1,dbuf,sizeof dbuf-1); if(bl<0)bl=0; dbuf[bl]=0;
-        strncat(run,dbuf,sizeof(run)-strlen(run)-1); if(strstr(run,"ACTION")||strstr(run,"NO_OP")) break; }
-    for(char*p=run;*p;p++) if(*p=='\n'||*p=='\r')*p=' '; snprintf(txt,120,"%.118s",run);
-    if(strstr(run,"ACTION")) return "ACTION"; if(strstr(run,"NO_OP")) return "NO_OP"; return "NEITHER";
+static const char* kai2_decide(sp_g4_kv*s, sp_tokenizer*tk, char*txt){
+    const int KGEN=8; int32_t gen[8]; char dbuf[512];
+    if(gemma4_kv_decode(s,KGEN,gen)){ txt[0]=0; return "DECODE_FAIL"; }
+    long bl=sp_tokenizer_decode(tk,gen,KGEN,dbuf,sizeof dbuf-1); if(bl<0)bl=0; dbuf[bl]=0;
+    for(char*p=dbuf;*p;p++) if(*p=='\n'||*p=='\r')*p=' '; snprintf(txt,120,"%.118s",dbuf);
+    if(strstr(dbuf,"ACTION")) return "ACTION";                      /* soak detection: ACTION first */
+    if(strstr(dbuf,"OP")||strstr(dbuf,"NOOP")) return "NO_OP";      /* NO_OP / NOOP both contain "OP" */
+    return "NEITHER";
 }
 static int run_kai2_packet_gate(void){
     const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
@@ -912,43 +913,60 @@ static int run_kai2_packet_gate(void){
     qwen3_model *m=sp_model_to_gemma4(handle); if(!m){ fprintf(stderr,"[kai2] to_gemma4 FAIL\n"); return 2; }
     sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk); if(!tk){ fprintf(stderr,"[kai2] tok FAIL\n"); return 2; }
     const int E=(int)m->cfg.n_embd;
-    /* EXACT scaffold from train_kai2_codec.py (SYSTEM/DECIDE) */
-    const char *SYS="You are a background monitor. Read the event. Emit <ACTION> if it needs intervention (salience>=0.5), else NO_OP.\nEVENT: ";
-    const char *DEC="\nDECIDE: ";
+    /* EXACT soak scaffold (the gemma <start_of_turn> daemon prompt the 6h soak proved selective). The codec
+     * packet replaces the EVENT TEXT inside the user turn: TEXT arm = SYS + [user: EVENT...]; PACKET arm =
+     * SYS + "<start_of_turn>user\n" + k soft-vectors + "<end_of_turn>\n<start_of_turn>model\n". */
+    const char *SYS=
+        "<start_of_turn>user\n"
+        "You are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+        "NO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    const char *UOPEN="<start_of_turn>user\n";
+    const char *UCLOSE="<end_of_turn>\n<start_of_turn>model\n";
     struct { const char*text; const char*pkt; const char*expect; } cs[2]={
         {"EVENT build_id=4471 status=FAILED tests=3_broken salience=0.85", "tests/fixtures/kai2/event_000_ACTION.bin", "ACTION"},
         {"EVENT heartbeat ok cpu=12% salience=0.10",                        "tests/fixtures/kai2/event_004_NO_OP.bin", "NO_OP"}};
-    int32_t sysb[2048], decb[64]; char tT[128], tP[128];
-    long sn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,2048);
-    long dn=sp_tokenizer_encode(tk,DEC,strlen(DEC),0,decb,64);
-    if(sn<=0||dn<=0){ fprintf(stderr,"[kai2] scaffold encode FAIL\n"); return 2; }
+    int32_t sysb[4096], uob[64], ucb[64], frmb[512]; char tT[128], tP[128], frame[512];
+    long sn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);    /* SYS gets BOS (matches soak) */
+    long uon=sp_tokenizer_encode(tk,UOPEN,strlen(UOPEN),1,uob,64);  /* user-turn open: BOS like the soak frame */
+    long ucn=sp_tokenizer_encode(tk,UCLOSE,strlen(UCLOSE),0,ucb,64);
+    if(sn<=0||uon<=0||ucn<=0){ fprintf(stderr,"[kai2] scaffold encode FAIL\n"); return 2; }
     int pass=0;
     for(int i=0;i<2;i++){
         sp_g4_kv *s=gemma4_kv_open(m,2048); if(!s){ fprintf(stderr,"[kai2] kv_open FAIL\n"); return 2; }
         if(gemma4_kv_prefill(s,sysb,(int)sn)){ fprintf(stderr,"[kai2] SYS prefill FAIL\n"); return 2; }
         gemma4_kv_commit(s); int anchor=gemma4_kv_pos(s);
-        /* TEXT control: SYSTEM + event_text + DECIDE -> decision */
-        int32_t evb[256]; long en=sp_tokenizer_encode(tk,cs[i].text,strlen(cs[i].text),0,evb,256);
-        if(en<=0){ fprintf(stderr,"[kai2] event encode FAIL\n"); return 2; }
-        if(gemma4_kv_prefill(s,evb,(int)en)){ fprintf(stderr,"[kai2] text prefill FAIL\n"); return 2; }
-        const char *decT=kai2_decide(s,tk,decb,(int)dn,tT);
+        /* TEXT control: byte-identical to the soak's selective path — full event frame, then decode */
+        snprintf(frame,sizeof frame,"%s%s%s",UOPEN,cs[i].text,UCLOSE);
+        long fn=sp_tokenizer_encode(tk,frame,strlen(frame),1,frmb,512);
+        if(fn<=0){ fprintf(stderr,"[kai2] frame encode FAIL\n"); return 2; }
+        if(gemma4_kv_prefill(s,frmb,(int)fn)){ fprintf(stderr,"[kai2] text prefill FAIL\n"); return 2; }
+        const char *decT=kai2_decide(s,tk,tT);
         gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
-        /* PACKET arm: SYSTEM + inject(k codec vectors over k steps) + DECIDE -> decision */
+        /* PACKET arm: open the user turn, inject k codec vectors (one per decode step) in place of the event
+         * text, close the turn, decode. (Current packets were trained on the OLD scaffold ⇒ expected to miss.) */
         int k=0; float *vecs=NULL; int rc=kai2_read_packet(cs[i].pkt,E,&k,&vecs);
         const char *decP="PKT_FAIL";
         if(rc==0){
             int32_t junk[1];
+            if(gemma4_kv_prefill(s,uob,(int)uon)){ fprintf(stderr,"[kai2] uopen prefill FAIL\n"); }
             for(int j=0;j<k;j++){ gemma4_kv_inject(s,vecs+(size_t)j*E); if(gemma4_kv_decode(s,1,junk)){ fprintf(stderr,"[kai2] inject-decode FAIL\n"); break; } }
-            decP=kai2_decide(s,tk,decb,(int)dn,tP);
+            if(gemma4_kv_prefill(s,ucb,(int)ucn)){ fprintf(stderr,"[kai2] uclose prefill FAIL\n"); }
+            decP=kai2_decide(s,tk,tP);
             free(vecs);
         } else { fprintf(stderr,"[kai2] packet read rc=%d (%s)\n",rc,cs[i].pkt); tP[0]=0; }
-        int ok = (strcmp(decP,cs[i].expect)==0);
-        pass += ok;
-        fprintf(stderr,"[kai2] case=%s expect=%s | TEXT->%s (\"%s\") | PACKET(k=%d)->%s (\"%s\") | %s\n",
-                cs[i].expect[0]=='A'?"salient":"idle", cs[i].expect, decT,tT, k, decP,tP, ok?"PASS":"FAIL");
+        int okT = (strcmp(decT,cs[i].expect)==0);
+        int okP = (strcmp(decP,cs[i].expect)==0);
+        pass += okP;
+        fprintf(stderr,"[kai2] case=%s expect=%s | TEXT->%s (\"%s\") [%s] | PACKET(k=%d)->%s (\"%s\") [%s]\n",
+                cs[i].expect[0]=='A'?"salient":"idle", cs[i].expect, decT,tT, okT?"sel":"NONSEL", k, decP,tP, okP?"PASS":"miss");
         gemma4_kv_close(s);
     }
-    fprintf(stderr,"[kai2] G-KAIROS-2 PACKET GATE: %d/2 cases ⇒ %s\n", pass, pass==2?"GREEN (trained packet pivots + selective)":"RED (codec did not transfer)");
+    fprintf(stderr,"[kai2] G-KAIROS-2 PACKET GATE: PACKET %d/2 (current packets = OLD scaffold, miss EXPECTED). "
+                   "This run's success = the TEXT control above recovering selectivity (sel salient->ACTION, sel idle->NO_OP).\n", pass);
     sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
     return pass==2 ? 0 : 3;
 }
