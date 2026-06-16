@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--frames", required=True, help=".npz from gen_audio_frames.py")
     ap.add_argument("--model", required=True, help="gemma-4 safetensors dir (embed_tokens for W_sub)")
     ap.add_argument("--epochs", type=int, default=120); ap.add_argument("--lr", type=float, default=2e-3)
+    ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--hidden", type=int, default=256)   # GNA-conservative: out-ch <=256
     ap.add_argument("--export_tau", type=float, default=0.2)
     ap.add_argument("--out", default="audio_ctc.pt")
@@ -86,9 +87,15 @@ def main():
                 ok += sum(1 for j in range(min(len(col), len(tg))) if col[j] == tg[j]); tot += len(tg)
             return ok / max(tot, 1)
 
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=1e-5)
+    N = trX.shape[0]; bs = a.batch_size
     best = -1.0; best_state = None
     for ep in range(a.epochs):
-        net.train(); opt.zero_grad(); loss = ctc(trX, trY, trFL, trTL); loss.backward(); opt.step()
+        net.train(); perm = torch.randperm(N, device=dev); acc=0.0
+        for s in range(0, N, bs):
+            idx = perm[s:s+bs]; opt.zero_grad()
+            loss = ctc(trX[idx], trY[idx], trFL[idx], trTL[idx]); loss.backward(); opt.step(); acc += float(loss)
+        sched.step(); loss = acc / max(1, (N + bs - 1)//bs)
         if ep % 10 == 0 or ep == a.epochs - 1:
             net.eval()
             ev = greedy_tok_acc(torch.tensor(d["eval_X"], device=dev), torch.tensor(d["eval_Y"], device=dev),

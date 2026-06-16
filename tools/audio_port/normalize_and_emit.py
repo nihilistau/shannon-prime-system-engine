@@ -10,7 +10,9 @@ KW = r"D:\F\shannon-prime-repos\_xbar\p2b\kai3"
 VXR = r"C:\Projects\voxtral-mini-realtime-rs"
 EXE = r"target\release\voxtral.exe"; M = r"models\voxtral-tts-q4-gguf\voxtral-tts-q4.gguf"
 VD = r"models\voxtral-tts-q4-gguf\voice_embedding"
-MAXTRAIN = 64
+import os as _os
+MAXTRAIN = int(_os.environ.get("KAI3_MAXTRAIN", "512"))
+VOICES = _os.environ.get("KAI3_VOICES", "casual_female,casual_male").split(",")  # M+F speaker variance
 
 def spoken(raw):
     # raw: "EVENT <type> id=N status=S metric=M% salience=V"
@@ -32,10 +34,11 @@ for split in ("eval", "train"):
     open(os.path.join(K, f"{split}_spoken.txt"), "w").write("\n".join(sp) + "\n")
     n = len(sp) if split == "eval" else min(len(sp), MAXTRAIN)
     for i in range(n):
-        wav = f"{KW}\\wav\\{split}_{i}_casual_female.wav"
-        lines.append(f'if not exist "{wav}" {EXE} speak --gguf {M} --voices-dir {VD} '
-                     f'--voice casual_female --euler-steps 3 --text "{sp[i]}" --output "{wav}"')
-    print(f"[norm] {split}: {len(sp)} short events, {n} queued; sample: {sp[0]!r}")
+        for v in VOICES:
+            wav = f"{KW}\\wav\\{split}_{i}_{v}.wav"
+            lines.append(f'if not exist "{wav}" {EXE} speak --gguf {M} --voices-dir {VD} '
+                         f'--voice {v} --euler-steps 3 --text "{sp[i]}" --output "{wav}"')
+    print(f"[norm] {split}: {len(sp)} short events x {len(VOICES)} voices, {n*len(VOICES)} queued; sample: {sp[0]!r}")
 lines.append("echo RENDER_ALL_DONE")
 open(os.path.join(K, "render_all.cmd"), "w").write("\r\n".join(lines) + "\r\n")
 print(f"[norm] emitted render_all.cmd ({len(lines)-2} lines)")

@@ -82,7 +82,12 @@ def main():
             if not wavs: continue
             for wv in wavs:                                  # each voice = an augmented sample
                 x, sr = load_wav_mono(wv); x = resample_to(x, sr, 16000)
+                dur = len(x) / 16000.0
+                if dur > 8.0:                                 # quality filter: short events are ~3-5s;
+                    continue                                  # >8s = TTS runaway (no ASR oracle locally)
                 lm = log_mel(x, 16000, a.hop, a.n_fft, a.n_mels)
+                if lm.shape[0] < len(target):                 # CTC needs frames >= label length
+                    continue
                 feats.append(lm); targs.append(np.array(target, np.int64))
                 flens.append(lm.shape[0]); tlens.append(len(target)); vsub.update(target)
         splits[split] = (feats, targs, flens, tlens)
