@@ -3352,14 +3352,23 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         cudaMemcpy(s->cap_host, s->dx, (size_t)E*sizeof(float), cudaMemcpyDeviceToHost);
         s->cap_active = 0;
     }
+    int injecting = 0;
     if (s->inj_active && s->dinj) {
         cudaMemcpyAsync(s->dx, s->dinj, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
-        s->inj_active = 0;
+        s->inj_active = 0; injecting = 1;
     }
     if (PL) {
         k_ple_gather_at<<<(unsigned)((NLPL+255)/256), 256, 0, st>>>(
             g_w.pl_tok_embd.codes, g_w.pl_tok_embd.row_off, g_w.pl_tok_embd.row_scale,
             g_w.pl_tok_embd.row_prec, dseq, dpos, NLPL, s->dple);
+        /* KAI-2 PLE-suppression probe (SP_KAI2_INJ_NOPLE): gemma4's AltUp folds per-layer embeddings
+         * gathered from the PLACEHOLDER token id (dseq[dpos]) into the residual at EVERY layer. The
+         * inject overrides only the main embedding stream (dx), so the placeholder token leaks back in
+         * via PLE — and the codec was distilled against an inputs_embeds forward that had no token-PLE.
+         * Zeroing dple at the injected position removes that leak so serving matches training. */
+        static int nople = -1;
+        if (nople < 0) { const char *e = getenv("SP_KAI2_INJ_NOPLE"); nople = (e && e[0]=='1') ? 1 : 0; }
+        if (injecting && nople) cudaMemsetAsync(s->dple, 0, (size_t)NLPL*sizeof(float), st);
         KMMD(&g_w.pl_model_proj, s->dx, s->dipl);
         k_altup_ipl<<<NL, 256, 0, st>>>(s->dipl, s->dple, g_w.pl_proj_norm, PL,
                                         1.0f / sqrtf((float)E), sqrtf((float)PL),
@@ -3615,8 +3624,42 @@ extern "C" int gemma4_kv_capture(sp_g4_kv *s, float *emb_out) {
 extern "C" int gemma4_kv_inject(sp_g4_kv *s, const float *emb) {
     if (!s || !emb) return -1;
     if (!s->dinj) { if (cudaMalloc(&s->dinj, (size_t)s->E*sizeof(float)) != cudaSuccess) { sp_set_error("gemma4_kv_inject: dinj OOM"); return -1; } }
-    if (cudaMemcpy(s->dinj, emb, (size_t)s->E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) { sp_set_error("gemma4_kv_inject: H2D"); return -1; }
+    /* KAI-2 inject-scale control (G-KAIROS-2 diagnostic): the codec packet is the RAW residual the
+     * teacher saw at the inputs_embeds seam. If gemma-4's text forward applies the sqrt(hidden)
+     * embedding-normalizer to inputs_embeds during distillation but the engine seam injects the raw
+     * value (post-embed, NO embscale — see the k_embed_scale_at at the decode head), the packet lands
+     * ~sqrt(E)≈62x too weak ⇒ inert. SP_KAI2_INJSCALE lets us sweep {1, sqrt(E)} on metal without a
+     * retrain to localize scale-mismatch vs structural. Default 1.0 = byte-identical to the null floor. */
+    static float inj_scale = -1.0f;
+    if (inj_scale < 0.0f) { const char *e = getenv("SP_KAI2_INJSCALE"); inj_scale = (e && *e) ? (float)atof(e) : 1.0f; }
+    const float *src = emb; float *tmp = NULL;
+    if (inj_scale != 1.0f) {
+        tmp = (float*)malloc((size_t)s->E * sizeof(float));
+        if (!tmp) { sp_set_error("gemma4_kv_inject: scale tmp OOM"); return -1; }
+        for (int i = 0; i < s->E; i++) tmp[i] = emb[i] * inj_scale;
+        src = tmp;
+    }
+    int rc = (cudaMemcpy(s->dinj, src, (size_t)s->E*sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess) ? 0 : -1;
+    if (tmp) free(tmp);
+    if (rc) { sp_set_error("gemma4_kv_inject: H2D"); return -1; }
     s->inj_active = 1;
+    return 0;
+}
+
+/* KAI-3 (§7.1): inject a SEQUENCE of n_frames raw E-float residual vectors at n_frames consecutive
+ * positions, each minted at a placeholder token (ph_token = audio_token_id 258881 for the audio port).
+ * STRICT LOOP over the verified gemma4_kv_inject + gemma4_kv_prefill primitives — NO new tensor routing.
+ * This is the exact per-position pattern the Phase-1 EMB control ran 2/2 on metal
+ * (test_gemma4_cuda.c run_kai2_packet_gate, L981-986), moved into the engine. embs = row-major
+ * [n_frames][E], raw (caller applies any scale). Advances dpos by n_frames. Null floor preserved:
+ * dead code unless called. Returns 0 on success, -1 on any inject/prefill failure. */
+extern "C" int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token) {
+    if (!s || !embs || n_frames <= 0) { sp_set_error("gemma4_kv_inject_seq: bad args"); return -1; }
+    int32_t ph = (int32_t)ph_token;
+    for (int i = 0; i < n_frames; i++) {
+        if (gemma4_kv_inject(s, embs + (size_t)i * s->E)) return -1;   /* sets error */
+        if (gemma4_kv_prefill(s, &ph, 1)) return -1;                   /* consumes inj_active at live dpos */
+    }
     return 0;
 }
 

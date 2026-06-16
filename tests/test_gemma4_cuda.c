@@ -71,6 +71,7 @@ int   gemma4_kv_pos(const sp_g4_kv *s);
 int   gemma4_kv_reset(sp_g4_kv *s);        /* in-place re-anchor (no free/realloc) — soak leak fix */
 int   gemma4_kv_capture(sp_g4_kv *s, float *emb_out);  /* KAI-2: next step D2H its post-embed residual */
 int   gemma4_kv_inject(sp_g4_kv *s, const float *emb); /* KAI-2: override next step's residual (latent entry) */
+int   gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token); /* KAI-3 §7.1: sequence wrapper */
 long  gemma4_kv_devfree_mib(void);          /* free VRAM in MiB (cudaMemGetInfo, fragmentation-aware) */
 long  gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV);
 void  gemma4_kv_close(sp_g4_kv *s);
@@ -905,6 +906,10 @@ static const char* kai2_decide(sp_g4_kv*s, sp_tokenizer*tk, char*txt){
     if(strstr(dbuf,"OP")||strstr(dbuf,"NOOP")) return "NO_OP";      /* NO_OP / NOOP both contain "OP" */
     return "NEITHER";
 }
+/* arena embed-row access (resolved at link via the engine lib; not in this TU's headers) */
+typedef struct sp_arena_tensor sp_arena_tensor;
+extern const sp_arena_tensor *sp_arena_find(const void *a, const char *name);
+extern int sp_arena_dequant_row(const sp_arena_tensor *at, int r, float *dst);
 static int run_kai2_packet_gate(void){
     const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
     const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
@@ -934,7 +939,25 @@ static int run_kai2_packet_gate(void){
     long uon=sp_tokenizer_encode(tk,UOPEN,strlen(UOPEN),1,uob,64);  /* user-turn open: BOS like the soak frame */
     long ucn=sp_tokenizer_encode(tk,UCLOSE,strlen(UCLOSE),0,ucb,64);
     if(sn<=0||uon<=0||ucn<=0){ fprintf(stderr,"[kai2] scaffold encode FAIL\n"); return 2; }
-    int pass=0;
+    /* PHASE-1 delivery control (CONTRACT-KAIROS §6): the real-token-embedding lane. */
+    const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+    const float g_embscale = sqrtf((float)E);
+    int pass=0, emb_pass=0;
+    /* STEP-1 manifold-match calibration (SP_KAI2_CAL=1): channel-wise mean/std of the OK_Q4B embedding
+     * rows (×embscale, i.e. the native injected-residual distribution), used to whiten-then-recolor the
+     * codec packet before injection. Falsifies the "purely distributional" gap (off by default = null). */
+    int do_cal = getenv("SP_KAI2_CAL") && getenv("SP_KAI2_CAL")[0]=='1';
+    float *emu=NULL, *esd=NULL;
+    if(do_cal && eat){
+        emu=(float*)calloc(E,sizeof(float)); esd=(float*)calloc(E,sizeof(float));
+        float *hr=(float*)malloc((size_t)E*sizeof(float));
+        const int S=4096; int got=0;            /* sample first S vocab rows */
+        for(int r=0;r<S;r++){ if(sp_arena_dequant_row(eat,r,hr)) continue;
+            for(int d=0;d<E;d++){ float v=hr[d]*g_embscale; emu[d]+=v; esd[d]+=v*v; } got++; }
+        if(got>0){ for(int d=0;d<E;d++){ emu[d]/=got; float var=esd[d]/got-emu[d]*emu[d]; esd[d]=var>1e-12f?sqrtf(var):1e-6f; } }
+        free(hr);
+        fprintf(stderr,"[kai2] CAL: embed channel stats over %d rows (emu[0]=%.4f esd[0]=%.4f)\n",got,emu[0],esd[0]);
+    }
     for(int i=0;i<2;i++){
         sp_g4_kv *s=gemma4_kv_open(m,2048); if(!s){ fprintf(stderr,"[kai2] kv_open FAIL\n"); return 2; }
         if(gemma4_kv_prefill(s,sysb,(int)sn)){ fprintf(stderr,"[kai2] SYS prefill FAIL\n"); return 2; }
@@ -946,14 +969,48 @@ static int run_kai2_packet_gate(void){
         if(gemma4_kv_prefill(s,frmb,(int)fn)){ fprintf(stderr,"[kai2] text prefill FAIL\n"); return 2; }
         const char *decT=kai2_decide(s,tk,tT);
         gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+        /* PHASE-1 EMB control (CONTRACT §6): inject the event's REAL token embeddings (embd[tok]*embscale ==
+         * the token's normal dx) through the SAME gemma4_kv_inject seam. If this pivots like the TEXT arm, the
+         * residual-entry delivery works and any miss is the codec; if it's inert, the seam itself is broken. */
+        char tE[128]; const char *decE="EMB_SKIP"; int ne=0;
+        if(eat){
+            int32_t etok[256]; long en=sp_tokenizer_encode(tk,cs[i].text,strlen(cs[i].text),0,etok,256);
+            int embk=getenv("SP_KAI2_EMBK")?atoi(getenv("SP_KAI2_EMBK")):0;   /* capacity probe: cap real-embd count */
+            if(embk>0 && en>embk) en=embk;
+            if(en>0){ ne=(int)en; int32_t ph[1]={258881}; float *hrow=(float*)malloc((size_t)E*sizeof(float));
+                if(gemma4_kv_prefill(s,uob,(int)uon)){ fprintf(stderr,"[kai2] EMB uopen FAIL\n"); }
+                for(long t=0;t<en;t++){
+                    if(sp_arena_dequant_row(eat,(int)etok[t],hrow)){ fprintf(stderr,"[kai2] EMB dequant FAIL tok=%d\n",(int)etok[t]); break; }
+                    for(int d=0;d<E;d++) hrow[d]*=g_embscale;
+                    gemma4_kv_inject(s,hrow);
+                    if(gemma4_kv_prefill(s,ph,1)){ fprintf(stderr,"[kai2] EMB inject-prefill FAIL\n"); break; }
+                }
+                if(gemma4_kv_prefill(s,ucb,(int)ucn)){ fprintf(stderr,"[kai2] EMB uclose FAIL\n"); }
+                decE=kai2_decide(s,tk,tE); free(hrow);
+                gemma4_kv_rewind(s,gemma4_kv_pos(s)-anchor);
+            }
+        }
+        int okE=(strcmp(decE,cs[i].expect)==0); emb_pass+=okE;
         /* PACKET arm: open the user turn, inject k codec vectors (one per decode step) in place of the event
          * text, close the turn, decode. (Current packets were trained on the OLD scaffold ⇒ expected to miss.) */
         int k=0; float *vecs=NULL; int rc=kai2_read_packet(cs[i].pkt,E,&k,&vecs);
         const char *decP="PKT_FAIL";
         if(rc==0){
-            int32_t junk[1];
+            /* Option 2 (AltUp-faithful): each soft position is a PLACEHOLDER token (gemma audio_token_id
+             * 258881) so the PLE/AltUp gathers fire exactly as in training; gemma4_kv_inject overrides ONLY
+             * the post-embed 0th stream at that position. prefill(ph,1) runs the step that consumes inj_active. */
+            int32_t ph[1]={258881};
+            float *cal=NULL, cmu=0.f, csd=1.f;
+            if(do_cal && emu){ double sum=0,ssq=0; size_t n=(size_t)k*E;
+                for(size_t z=0;z<n;z++){ sum+=vecs[z]; ssq+=(double)vecs[z]*vecs[z]; }
+                cmu=(float)(sum/n); double var=ssq/n-(double)cmu*cmu; csd=var>1e-12?(float)sqrt(var):1e-6f;
+                cal=(float*)malloc((size_t)E*sizeof(float));
+                fprintf(stderr,"[kai2] CAL: case=%s codec mu=%.4f sd=%.4f -> recolor to embed manifold\n",cs[i].expect[0]=='A'?"sal":"idle",cmu,csd); }
             if(gemma4_kv_prefill(s,uob,(int)uon)){ fprintf(stderr,"[kai2] uopen prefill FAIL\n"); }
-            for(int j=0;j<k;j++){ gemma4_kv_inject(s,vecs+(size_t)j*E); if(gemma4_kv_decode(s,1,junk)){ fprintf(stderr,"[kai2] inject-decode FAIL\n"); break; } }
+            for(int j=0;j<k;j++){ const float *src=vecs+(size_t)j*E;
+                if(cal){ for(int d=0;d<E;d++) cal[d]=(src[d]-cmu)/csd*esd[d]+emu[d]; src=cal; }
+                gemma4_kv_inject(s,src); if(gemma4_kv_prefill(s,ph,1)){ fprintf(stderr,"[kai2] inject-placeholder FAIL\n"); break; } }
+            if(cal) free(cal);
             if(gemma4_kv_prefill(s,ucb,(int)ucn)){ fprintf(stderr,"[kai2] uclose prefill FAIL\n"); }
             decP=kai2_decide(s,tk,tP);
             free(vecs);
@@ -961,12 +1018,83 @@ static int run_kai2_packet_gate(void){
         int okT = (strcmp(decT,cs[i].expect)==0);
         int okP = (strcmp(decP,cs[i].expect)==0);
         pass += okP;
-        fprintf(stderr,"[kai2] case=%s expect=%s | TEXT->%s (\"%s\") [%s] | PACKET(k=%d)->%s (\"%s\") [%s]\n",
-                cs[i].expect[0]=='A'?"salient":"idle", cs[i].expect, decT,tT, okT?"sel":"NONSEL", k, decP,tP, okP?"PASS":"miss");
+        fprintf(stderr,"[kai2] case=%s expect=%s | TEXT->%s (\"%s\") [%s] | EMB(real-embd n=%d)->%s (\"%s\") [%s] | PACKET(k=%d)->%s (\"%s\") [%s]\n",
+                cs[i].expect[0]=='A'?"salient":"idle", cs[i].expect, decT,tT, okT?"sel":"NONSEL", ne, decE,tE, okE?"PASS":"miss", k, decP,tP, okP?"PASS":"miss");
         gemma4_kv_close(s);
     }
-    fprintf(stderr,"[kai2] G-KAIROS-2 PACKET GATE: PACKET %d/2 (current packets = OLD scaffold, miss EXPECTED). "
-                   "This run's success = the TEXT control above recovering selectivity (sel salient->ACTION, sel idle->NO_OP).\n", pass);
+    fprintf(stderr,"[kai2] PHASE-1 EMB-DELIVERY GATE: %d/2 (real token embeddings injected via gemma4_kv_inject). "
+                   "PASS here = the residual-entry seam DELIVERS (salient->ACTION, idle->NO_OP); then PACKET miss = codec. "
+                   "MISS here = the kv-path inject seam is broken vs the proven one-shot SP_XBAR_EMB.\n", emb_pass);
+    fprintf(stderr,"[kai2] G-KAIROS-2 PACKET GATE: PACKET %d/2.\n", pass);
+    sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return pass==2 ? 0 : 3;
+}
+
+/* ═══ SP_G4_INJ_SEQ=1 (KAI-3 §7.2 G-KAIROS-3-NULL): the sequence-wrapper null-floor gate. ═══
+ * Replicates the Phase-1 EMB delivery path (run_kai2_packet_gate L981-986) but drives the per-position
+ * loop through the NEW engine wrapper gemma4_kv_inject_seq instead of an inline harness loop. STRICT
+ * success (CONTRACT-KAIROS §7.2): the wrapper must reproduce the Phase-1 pivot EXACTLY — salient->ACTION,
+ * idle->NO_OP, 2/2. PASS = moving the loop into the engine changed nothing (delivery path locked); any
+ * miss = a wrapper defect (loop bound / dpos advance / ph token). No training is introduced here. */
+static int run_inject_seq_null(void){
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[injseq] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle); if(!m){ fprintf(stderr,"[injseq] to_gemma4 FAIL\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk); if(!tk){ fprintf(stderr,"[injseq] tok FAIL\n"); return 2; }
+    const int E=(int)m->cfg.n_embd;
+    const char *SYS=
+        "<start_of_turn>user\n"
+        "You are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score between 0.0 and 1.0. Reply with EXACTLY one of:\n"
+        "NO_OP\n<ACTION>short imperative</ACTION>\n"
+        "RULE: if salience >= 0.5 the event requires intervention, so reply with an <ACTION> line. "
+        "If salience < 0.5, reply NO_OP. Follow the rule exactly. Do not explain."
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    const char *UOPEN="<start_of_turn>user\n";
+    const char *UCLOSE="<end_of_turn>\n<start_of_turn>model\n";
+    struct { const char*text; const char*expect; } cs[2]={
+        {"EVENT build_id=4471 status=FAILED tests=3_broken salience=0.85", "ACTION"},
+        {"EVENT heartbeat ok cpu=12% salience=0.10",                      "NO_OP"}};
+    int32_t sysb[4096], uob[64], ucb[64];
+    long sn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);
+    long uon=sp_tokenizer_encode(tk,UOPEN,strlen(UOPEN),1,uob,64);
+    long ucn=sp_tokenizer_encode(tk,UCLOSE,strlen(UCLOSE),0,ucb,64);
+    if(sn<=0||uon<=0||ucn<=0){ fprintf(stderr,"[injseq] scaffold encode FAIL\n"); return 2; }
+    const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+    if(!eat){ fprintf(stderr,"[injseq] token_embd arena tensor not found\n"); return 2; }
+    const float g_embscale = sqrtf((float)E);
+    const int PH=258881;                 /* gemma-4 audio_token_id placeholder */
+    int pass=0;
+    for(int i=0;i<2;i++){
+        sp_g4_kv *s=gemma4_kv_open(m,2048); if(!s){ fprintf(stderr,"[injseq] kv_open FAIL\n"); return 2; }
+        if(gemma4_kv_prefill(s,sysb,(int)sn)){ fprintf(stderr,"[injseq] SYS prefill FAIL\n"); return 2; }
+        gemma4_kv_commit(s); int anchor=gemma4_kv_pos(s);
+        int32_t etok[256]; long en=sp_tokenizer_encode(tk,cs[i].text,strlen(cs[i].text),0,etok,256);
+        if(en<=0){ fprintf(stderr,"[injseq] event encode FAIL\n"); return 2; }
+        /* build the contiguous [en][E] raw-embedding sequence (embd[tok]*sqrt(E) == the token's normal dx) */
+        float *embs=(float*)malloc((size_t)en*E*sizeof(float));
+        if(!embs){ fprintf(stderr,"[injseq] embs OOM\n"); return 2; }
+        int ok=1;
+        for(long t=0;t<en;t++){ float *row=embs+(size_t)t*E;
+            if(sp_arena_dequant_row(eat,(int)etok[t],row)){ fprintf(stderr,"[injseq] dequant FAIL tok=%d\n",(int)etok[t]); ok=0; break; }
+            for(int d=0;d<E;d++) row[d]*=g_embscale; }
+        char tS[128]; const char *decS="SEQ_FAIL";
+        if(ok){
+            if(gemma4_kv_prefill(s,uob,(int)uon)){ fprintf(stderr,"[injseq] uopen FAIL\n"); }
+            if(gemma4_kv_inject_seq(s,embs,(int)en,PH)){ fprintf(stderr,"[injseq] inject_seq FAIL: %s\n",sp_last_error()); }
+            else { if(gemma4_kv_prefill(s,ucb,(int)ucn)){ fprintf(stderr,"[injseq] uclose FAIL\n"); }
+                   decS=kai2_decide(s,tk,tS); }
+        }
+        free(embs);
+        int okS=(strcmp(decS,cs[i].expect)==0); pass+=okS;
+        fprintf(stderr,"[injseq] case=%s expect=%s | INJ_SEQ(n=%ld via gemma4_kv_inject_seq)->%s (\"%s\") [%s]\n",
+                cs[i].expect[0]=='A'?"salient":"idle", cs[i].expect, en, decS,tS, okS?"PASS":"miss");
+        gemma4_kv_close(s);
+    }
+    fprintf(stderr,"[injseq] G-KAIROS-3-NULL: %d/2 (sequence wrapper reproduces Phase-1 EMB pivot). "
+                   "PASS=2/2 ⇒ gemma4_kv_inject_seq is byte-faithful to the proven inline loop; delivery path locked.\n", pass);
     sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
     return pass==2 ? 0 : 3;
 }
@@ -1758,6 +1886,7 @@ int main(void) {
     if (getenv("SP_G4_KV_INJECT_NULL")) return run_kv_inject_null(); /* KAI-2: G-KAIROS-2 inject self-null */
     if (getenv("SP_G4_KAIROS_INTERRUPT")) return run_kairos_interrupt(); /* KAI-2: G-KAIROS-2 latent-vs-text A/B */
     if (getenv("SP_G4_KAI2_PACKET")) return run_kai2_packet_gate(); /* KAI-2: G-KAIROS-2 trained-packet pivot+selectivity gate */
+    if (getenv("SP_G4_INJ_SEQ")) return run_inject_seq_null(); /* KAI-3 §7.2: G-KAIROS-3-NULL sequence-wrapper null floor */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */
     SP_RUN(T_GEMMA4_CUDA_WEIGHTS);
