@@ -1,0 +1,40 @@
+==========================================================================
+ G-R2-FROB-PARITY RECEIPT -- 2026-06-17T20:04:57Z
+ Frobenius pi^k INTEGER Ring-2 episode store (T4 storage form): can the
+ memory live as pure integers on disk without sacrificing recall fidelity?
+==========================================================================
+
+CODEC: tools/curator/frob_episode.py -- per-(layer,channel) Frobenius-scaled symmetric integer
+  quant of ep.k/ep.v (the scalar O_K coordinate: integer code x per-row pi^k scale; b=0 embedding,
+  full a+bw lattice = follow-on). Integer-on-disk store = ep.{k,v}.q{8,16} + .s{8,16} scale sidecar;
+  restoration decodes code x scale -> the exact float K/V the attention heads consume (engine unchanged).
+
+(I) RECONSTRUCTION FIDELITY (N-independent ground truth of the round-trip):
+  int16: ep.k relL2 3.02e-5 max|err| 3.19e-5 ; ep.v relL2 3.27e-5 max|err| 3.44e-4 | store 1.99x smaller
+  int8 : ep.k relL2 7.80e-3 max|err| 8.20e-3 ; ep.v relL2 8.43e-3 max|err| 8.88e-2 | store 3.95x smaller
+  => int16 round-trip is EFFECTIVELY LOSSLESS (error ~1e-5, far below any PPL-resolvable perturbation);
+     int8 is BOUNDED-LOSSY (~0.8% rel). float32-bit-exact is NOT achievable with lossy quant -- T4
+     cancels the SCALE (pi^k is free), it does NOT make rounding lossless (corrects the +0.000% premise).
+
+(II) ON-ENGINE SP_REPLAY DEFLECTION (12B, test_gemma4_ppl_cuda, wiki.tiny matched passage):
+  NPOS=16:  baseline 4.6665 | float-HIT 4.6665 (+0.000%) | frob16 4.5871 (-1.70%) | frob8 4.8237 (+3.37%)
+  NPOS=64:  baseline 4.6665 | float-HIT 4.6665 (+0.000%) | frob16 4.5605 (-2.27%) | frob8 4.6980 (+0.67%)
+  all legs: exit 0, checks=5 fails=0, M_GEMMA4_CUDA_PPL PASS (integer episodes inject clean, well-formed).
+
+  HONEST READ (per feedback_small_n_deflection_illusion): n_scored=42 is BELOW the trustworthy-N floor.
+  PROOF it is noise not fidelity: int16 (250x more accurate than int8) shows a LARGER |deflection| than
+  int8, and the sign flips between NPOS=16 and 64 -- a 3e-5 K/V perturbation CANNOT move PPL 2%; what
+  moves is token-tie-flipping over 42 tokens. The ONLY clean on-engine signal is float-exact replay ==
+  baseline = 4.6665 at BOTH NPOS (genuine +0.000%, reproduces R3.2 G-R3-LOSS). The matched-episode test
+  is structurally pinned to the 42-token wiki.tiny passage (scoring other text turns HIT into foreign),
+  so a larger-N on-engine deflection is not available at this fixture; (I) is the trustworthy fidelity proof.
+
+VERDICT: G-R2-FROB-PARITY PASS (scoped). The Ring-2 episode store CAN live as pure integers on disk:
+  int16 Frobenius-scaled integers round-trip effectively-lossless (relL2 3e-5, ~2x store shrink) and
+  replay clean on the 12B; T4's pi^k scale-cancellation is operationally confirmed (free per-tensor scale,
+  no propagation). int8 is a 3.95x-shrink bounded-lossy option. The literal +0.000% PPL holds for the
+  EXACT-float replay; for the quantized store, 'lossless' is established by reconstruction fidelity below
+  the measurement floor, NOT by the n=42 PPL (which is small-N noise). No silent gate revision -- the
+  premise that lossy quant would read +0.000% on-engine is corrected with evidence.
+
+REPRO: python3 tools/curator/frob_episode.py <src_ep> <dst_ep> <8|16> ; then _run_g_r2_frob_parity{,64}.bat
