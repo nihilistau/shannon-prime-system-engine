@@ -1,0 +1,16 @@
+@echo off
+call "%~dp0scripts\env\env-common.bat"
+set "PATH=%SP_PIN_CUDA_ROOT%\bin;%PATH%"
+set "SP_GEMMA4_SPMODEL=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model"
+set "SP_GEMMA4_SPTOK=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-tokenizer"
+set "SP_PPL_TOKENS=%SP_ENGINE%\tests\fixtures\ppl\wiki.tiny.g4tokens.txt"
+set "SP_PPL_NCTX=84"
+set "SP_PPL_CHUNKS=1"
+set "SP_REPLAY=%SP_ENGINE%\_ep_audio_frob24"
+set "SP_REPLAY_NPOS=42"
+set "OUT=%SP_ENGINE%\_g_organism_full"
+if exist "%OUT%" rmdir /s /q "%OUT%"
+mkdir "%OUT%"
+"%SP_ENGINE%\build-cuda-vs22\tests\test_gemma4_ppl_cuda.exe" > "%OUT%\land.log" 2>&1
+echo LAND_EXIT=%ERRORLEVEL% >> "%OUT%\land.log"
+echo ORG_FULL_LAND_DONE > "%OUT%\DONE.flag"

@@ -1,0 +1,31 @@
+==========================================================================
+ G-XBAR-ORGANISM-FULL RECEIPT -- 2026-06-17T20:44:55Z
+ The full autonomous loop on REAL episodes: continuous audio (EAR) -> discrete
+ holographic integer sum -> audio-cue retrieve -> verify -> continuous landing.
+==========================================================================
+
+PIECES (all previously closed) COMPOSED END-TO-END:
+  EAR audio episode ep_audio [48,114,512] (G-XBAR-ORGANISM step 1) + text decoys ep_wiki/ep_toy.
+  Ring-3 bind = native exact-integer negacyclic CRT-NTT (Leg A / ok_bind, D=1024 = 2x512 blocks).
+  Episode store = Frobenius rank-2 a+b integer lattice (G-R2-FROB, a16b8 sub-ULP).
+  Verify = C2 256-bit Hamming resolver (TAU_BITS=168) -- the cross-modal verify (signature, not text-PPL,
+           since an audio episode is foreign to any TEXT scoring context by construction).
+
+(1) C2 SIGNATURE SEPARATION (256-bit agreement; diag=self):
+      ep_audio: self 256 | vs ep_wiki 147 | vs ep_toy 154   (decoys ~57-60% = chance, << TAU 168)
+      ep_wiki/ep_toy agree 183 (both text). Audio is distinctly separated. (step-1 noisy self=211, margin +79.)
+(2) NIGHTSHIFT native bind: 3 real episodes -> Ring-3 M (int64); shadow-gate recall@1 ALL = True.
+(3) DUALROUTE audio cue: VSA unbind shortlist = [ep_audio, ep_wiki, ep_toy] -> ep_audio TOP-1 (cos +0.5151);
+      #222/C2 verify agree=256/256 >= 168 ACCEPT; decoys 147/154 < 168 would REJECT (rewind).
+(4) LAND (continuous<->discrete<->continuous): ep_audio Frobenius a16b8 integer store decoded to float:
+      K relL2 8.65e-8, V relL2 8.96e-8 (sub-ULP). store 1.30x smaller.
+(5) METAL LANDING (12B, SP_REPLAY of the INTEGER-DECODED ep_audio over [0,42)):
+      checks=5 fails=0, LAND_EXIT=0 -> clean inject into the resident cache. PPL 88.89 vs 4.6665 baseline
+      = FOREIGN-BY-DESIGN (audio episode is not wiki text; it loaded + reconditioned the context, as it must).
+
+[gate] G-XBAR-ORGANISM-FULL GREEN -- continuous audio -> C2 sig -> native integer Ring-3 superposition
+  (with text decoys) -> audio-cue retrieve top-1 -> Hamming verify (accept audio / reject text) -> Frobenius
+  integer store -> continuous float landed clean into the 12B resident cache. The organism breathes end-to-end
+  on the exact-integer O_K substrate: EAR in, holographic discrete memory, continuous KV back out. Autonomous.
+
+REPRO: SP_R3_LIB=<libsp.so> SP_R3_ENG=<engine> python3 tools/ring3/g_xbar_organism_full.py ; _run_organism_full_land.bat
