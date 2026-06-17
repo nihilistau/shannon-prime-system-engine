@@ -1,0 +1,36 @@
+[env-common] paths pinned: SP_REPO_ROOT=D:\F\shannon-prime-repos
+[env-common] toolchain pins: CPU=MinGW-gcc-15.2 (build/), CUDA-host=VS2019 BT + CUDA 13.2, Tier3-MSVC-parity=VS18 (D:), Vulkan >= 1.3.250, Hexagon SDK C:\Qualcomm\Hexagon_SDK\5.5.6.0
+[run] P3.3 SP_REPLAY gate, episode dir=D:\F\shannon-prime-repos\shannon-prime-system-engine\_p33_ep
+    dense gemma4 (PL=0): no AltUp/PLE; rope_freqs present, out_scale[0] present
+    [g4-cuda-w] L=48 global=8 swa=40 kv-owners=48 sharers=0 ff=[15360..15360] PL=0 qd(g)=8192 qd(s)=4096 kvd(g)=512 kvd(s)=2048 plmp=0x0 prec(Wq0)=8
+    [g4-cuda-L0] stage nx (attn_norm)    max rel 0.000e+00  max abs 0.000e+00  (telemetry)
+    [g4-cuda-L0] stage q  (norm+rope)    max rel 1.502e-02  max abs 1.574e-05  (telemetry)
+    [g4-cuda-L0] stage ao (attention)    max rel 1.277e-02  max abs 1.240e-05  (telemetry)
+    [g4-cuda-L0] stage ap (Wo, pre-norm) max rel 4.476e-02  max abs 4.101e-05  (telemetry)
+    [g4-cuda-L0] stage x  (attn residual) max rel 1.796e-01  max abs 1.526e-04  (telemetry)
+    [g4-cuda-L4] stage nx (attn_norm)    max rel 4.126e-02  max abs 6.104e-04  (telemetry)
+    [g4-cuda-L4] stage q  (norm+rope)    max rel 5.656e-01  max abs 4.458e-05  (telemetry)
+    [g4-cuda-L4] stage ao (attention)    max rel 1.059e-01  max abs 4.852e-05  (telemetry)
+    [g4-cuda-L4] stage ap (Wo, pre-norm) max rel 1.746e-01  max abs 3.815e-05  (telemetry)
+    [g4-cuda-L4] stage x  (attn residual) max rel 2.278e-02  max abs 1.526e-03  (telemetry)
+    [g4-cuda-L15-sharer] stage nx (attn_norm)    max rel 5.825e-01  max abs 1.160e-03  (telemetry)
+    [g4-cuda-L15-sharer] stage q  (norm+rope)    max rel 1.392e-01  max abs 1.979e-05  (telemetry)
+    [g4-cuda-L15-sharer] stage ao (attention)    max rel 8.445e-02  max abs 2.384e-05  (telemetry)
+    [g4-cuda-L15-sharer] stage ap (Wo, pre-norm) max rel 2.193e-01  max abs 4.292e-05  (telemetry)
+    [g4-cuda-L15-sharer] stage x  (attn residual) max rel 7.757e-02  max abs 6.348e-03  (telemetry)
+    [g4-cuda-FULL] SKIP: f32 embd not resident (12B-class VRAM budget); the decode oracle gate below is the live check
+    [g4-cuda-DEC] 12B-class: decode runs dp4a (f32 embd not resident); oracle teacher-force is still the gate
+    [g4-cuda-DEC] 12 gen tokens; oracle teacher-forced: ALL; seq: 2 10 100 1000 2530 1714 236779 750 2811 236768 107 236782 107 145 1708 2530
+    [xbar-p3.1] recall WRITE: store 5.2 MiB, off[L] owner-resolved over 48 layers
+    [xbar-p3.1b] WROTE episode (manifest 2000 B + K/V store 5.2 MiB) -> D:\F\shannon-prime-repos\shannon-prime-system-engine\_p33_ep
+    [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,4) (intact)
+    [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,4) ZEROED (G-P3-SHARED divergence control)
+    [g4-cuda-REPLAY] ref dn=16 intact dn=16 zero dn=16 | intact_diffs[4..16)=0 zero_diffs=12
+        ref   : 2 10 100 1000 2530 1714 236779 750 2811 236768 107 236782 107 145 1708 2530
+        intact: 2 10 100 1000 2530 1714 236779 750 2811 236768 107 236782 107 145 1708 2530
+        zero  : 2 10 100 1000 258882 258882 258882 258882 258882 258882 258882 258882 258882 258882 258882 258882
+---- checks=20 fails=0 ----
+[T_GEMMA4_CUDA_WEIGHTS] PASS
+---- checks=20 fails=0 ----
+TEST_EXIT=0
+GATE_LAUNCH_DONE 

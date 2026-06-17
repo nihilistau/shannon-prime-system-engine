@@ -1,0 +1,33 @@
+[env-common] paths pinned: SP_REPO_ROOT=D:\F\shannon-prime-repos
+[env-common] toolchain pins: CPU=MinGW-gcc-15.2 (build/), CUDA-host=VS2019 BT + CUDA 13.2, Tier3-MSVC-parity=VS18 (D:), Vulkan >= 1.3.250, Hexagon SDK C:\Qualcomm\Hexagon_SDK\5.5.6.0
+[run] P3.3 SP_REPLAY gate on E2B (15 owners / 20 sharers)
+    [g4-cuda-w] L=35 global=7 swa=28 kv-owners=15 sharers=20 ff=[6144..12288] PL=256 qd(g)=4096 qd(s)=2048 kvd(g)=512 kvd(s)=256 plmp=1536x8960 prec(Wq0)=8
+    [g4-cuda-L0] stage nx (attn_norm)    max rel 0.000e+00  max abs 0.000e+00
+    [g4-cuda-L0] stage q  (norm+rope)    max rel 6.324e-03  max abs 8.583e-06
+    [g4-cuda-L0] stage ao (attention)    max rel 1.539e-02  max abs 3.189e-05
+    [g4-cuda-L0] stage ap (Wo, pre-norm) max rel 3.141e-02  max abs 6.294e-05
+    [g4-cuda-L0] stage x  (attn residual) max rel 3.534e-03  max abs 1.587e-03
+    [g4-cuda-L4] stage nx (attn_norm)    max rel 1.831e-02  max abs 1.106e-04
+    [g4-cuda-L4] stage q  (norm+rope)    max rel 3.600e-01  max abs 1.150e-05
+    [g4-cuda-L4] stage ao (attention)    max rel 1.231e-01  max abs 5.150e-05
+    [g4-cuda-L4] stage ap (Wo, pre-norm) max rel 1.747e-02  max abs 8.154e-05
+    [g4-cuda-L4] stage x  (attn residual) max rel 1.143e-01  max abs 1.587e-03
+    [g4-cuda-L15-sharer] stage nx (attn_norm)    max rel 2.836e-02  max abs 2.365e-04
+    [g4-cuda-L15-sharer] stage q  (norm+rope)    max rel 3.262e-02  max abs 2.670e-05
+    [g4-cuda-L15-sharer] stage ao (attention)    max rel 1.979e-01  max abs 1.109e-05
+    [g4-cuda-L15-sharer] stage ap (Wo, pre-norm) max rel 2.897e-02  max abs 2.003e-05
+    [g4-cuda-L15-sharer] stage x  (attn residual) max rel 3.914e-02  max abs 2.975e-03
+    [g4-cuda-FULL] argmax 12/12  max KL 2.663e-10  max |dlogit| 1.841e-04
+    [g4-cuda-DEC] 12 gen tokens; oracle teacher-forced: ALL; seq: 2 10 100 1000 236779 1005 236779 1071 236779 1005 236779 1071 236779 1005 236779 1071
+    [xbar-p3.1] recall WRITE: store 0.3 MiB, off[L] owner-resolved over 35 layers
+    [xbar-p3.1b] WROTE episode (manifest 1480 B + K/V store 0.3 MiB) -> D:\F\shannon-prime-repos\shannon-prime-system-engine\_p33_ep_e2b
+    [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,4) (intact)
+    [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,4) ZEROED (G-P3-SHARED divergence control)
+    [g4-cuda-REPLAY] ref dn=16 intact dn=16 zero dn=16 | intact_diffs[4..16)=0 zero_diffs=12
+        ref   : 2 10 100 1000 236779 1005 236779 1071 236779 1005 236779 1071 236779 1005 236779 1071
+        intact: 2 10 100 1000 236779 1005 236779 1071 236779 1005 236779 1071 236779 1005 236779 1071
+        zero  : 2 10 100 1000 1480 1480 1480 1480 1480 1480 1480 1480 1480 1480 1480 1480
+---- checks=40 fails=0 ----
+[T_GEMMA4_CUDA_WEIGHTS] PASS
+---- checks=40 fails=0 ----
+TEST_EXIT=0
