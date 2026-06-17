@@ -8,6 +8,8 @@
 - `tools/sp_transcode/` — **`sp_transcode --st`**: the safetensors-direct pipeline (the ONLY trusted gemma4-12B weight path; GGUF lane is dead, see ledger 06-R8). Writes OK_Q8 / OK_Q4B `.sp-model`.
 - `tests/test_gemma4_cuda.c`, `tests/test_xbar_p1_cuda.c`, `tests/bench_gemv_int8.cu`.
 
+**Current edge (2026-06-17):** **XBAR P3 CLOSED end-to-end (P3.0→P3.4)** — P3.3 replay-write is the `SP_REPLAY` seam in `cuda_forward.cu` (inject the episode owner-K/V over prefill rows `[0,NPOS)` at BOTH `gemma4_decode_cuda` prefill stores, graph + velocity; `G-P3-SHARED` 3-leg PASS on 12B + E2B), and P3.4 recall-quality (`G-P3-PPL` +1.38% < 2% via `SP_G4_SCORE` ∘ `SP_REPLAY`, zero new engine code) are both CLOSED GREEN. **GNA "EAR" line CLOSED on physical silicon** — real speech → 12B 7/8, POT GNA-native i16 = 0.877 full recovery, GNA_HW on the Intel GNA 2.0 = 0.877 == emu == FP32; tooling in `tools/audio_port/` (`ov_gna_score.py`/`pot_gna_quantize.py`/`run_gna_hw.bat` + `GNA_HW_BRINGUP.md`). NEXT (lattice-side) = the Memo curator / Ring-3 orchestration tier above P3. The one-shot `gemma4_decode_cuda` stays byte-untouched (null floor); all new work is env-gated.
+
 **Build:** **CUDA host = VS2019 BuildTools + CUDA, `build-cuda/` dir, ninja** (sm_75 on the dev 2060). Canonical **CPU = MinGW gcc 15.2, `build/` dir** (MSVC cannot build CPU). Authoritative doc: `docs/BUILD-ENV.md`. GPU numbers need warmup + long window + **both clocks pinned** (`-lgc` is SM-only; a weight-GEMV is memory-bound).
 
 **Git (binding lesson):** `lib/shannon-prime-system` is a submodule of the same repo as the standalone `shannon-prime-system` checkout, so the two can diverge. `git fetch` + check `behind` before building/committing; commit + push every repo touched per milestone.
