@@ -63,8 +63,8 @@ write to canonical memory is receipted, gated, and rewindable.
   (working KV)   episodic Spinor KV,       promote-on-accept w/ receipt,
                  "hippocampus")            or REWIND)
                    ▲                          │ promote (gated)
-                   └── Ring 3 (adapter-compressed consolidated,
-                       "neocortex"; G-R3-LOSS bounded)        [DESIGN]
+                   └── Ring 3 (VSA/HRR gist consolidation;
+                       R3.1–R3.4 CLOSED; engine tools/ring3/)
 ```
 
 The engine owns: Exec's accelerated forwards (CUDA `gemma4_forward_cuda` /
@@ -73,8 +73,10 @@ harness** in `cuda_forward.cu` (P1 KV transplant + P2.a residual injection
 — ledger X-R1), the **Optane / QUIC Ring-2 stores**, the sovereign weight
 pipeline, the tokenizer modules, and the daemon/QUIC tier. The math core
 owns the decode loop, the ARM recall router, and the Ring 2′ curator
-transaction. **Ring 3** + **NIGHTSHIFT** (the offline Ring 2 → Ring 3
-consolidation loop) are **[DESIGN]** — RFC-XBAR §3.1 / §7.
+transaction. **Ring 3 Path A** (VSA/HRR, parameter-free) is now **CLOSED**
+(R3.1–R3.4 GREEN, `tools/ring3/`); the real-domain VSA is host-numpy — the
+Z_q/NTT native port is the deferred math-core follow-on. **NIGHTSHIFT**
+(idle consolidation, R3.4) is also GREEN — RFC-XBAR §7.
 
 ---
 
@@ -157,6 +159,10 @@ The KAIROS / XBAR / metal-eviction work all ships **test-path, env-gated, byte-i
 | | C-c NIAH retention (`SP_G4_NIAH`) | CLOSED | needle **survives the compaction** at depths 10%/50%/90% (learned-router only; frozen ±1 control **MISSes**) under SWA-isolation. Full-attention baseline @16k is physically impossible on the 2060 — the motivation |
 | | P3.3 replay-write — `SP_REPLAY` (`SP_G4_REPLAY_GATE`) | CLOSED GREEN | `SP_REPLAY` injects a stored episode's owner-K/V over prefill rows `[0,NPOS)` at the cache-store boundary, before attention. `G-P3-SHARED` 3-leg PASS on BOTH **12B** (48 owners) + **E2B** (15 owners / 20 sharers, owner-indirection): intact episode **bit-identical** to baseline (diffs=0), zeroed episode **diverges 12/12**, unset = floor. Inject at **both** `gemma4_decode_cuda` prefill stores (graph ~L2516 + velocity ~L2825; velocity is the path the gate runs). Receipts `tests/fixtures/xbar_p3_replay/G-P3-SHARED_{12B,E2B}_GREEN.log` |
 | | P3.4 recall quality — `G-P3-PPL` (`SP_G4_SCORE` ∘ `SP_REPLAY`) | CLOSED GREEN | the PPL scorer **is** `gemma4_decode_cuda` in `SP_G4_SCORE` mode → `SP_REPLAY` composed with **zero new engine code**. wiki.tiny n_ctx=84: recall-OFF 4.6665 → recall-ON (NPOS=4) 4.7311 = **+1.38% deflection < 2.0% gate → PASS**. Caveat: n_scored=42 single chunk (deterministic, not router-sampled); larger-N multi-chunk = the named hardening lever. Receipt `tests/fixtures/xbar_p3_replay/G-P3-PPL_run.log`. **XBAR P3 CLOSED end-to-end (P3.0→P3.4)** |
+| **C2 Memo curator** | Autonomous Ring-2 recall loop above P3: registry + discrete bit-collision resolver + online loop | CLOSED GREEN | 256-bit LSH hash, integer Hamming TAU_BITS=168, r=256 (reduction-order-immune). G-MEMO-{NULL,CUE,LOOP} GREEN on 12B: matched +0.000% / corrupted +40106% safety valve. Code: `tools/curator/{build_registry.py,discrete_resolve.py,resolve_cue.py,curator_loop.py}`. Receipts: `tests/fixtures/xbar_c2/` |
+| **#222 — `gemma4_kv_replay`** | SP_REPLAY ported into persistent gemma4_kv_* ABI + O(1) bit-exact rewind | CLOSED GREEN | G-222 GREEN on E2B + 12B: rewind resets [0,anchor) diffs=0. G-222-WRAP GREEN (SWA-ring KAI-1c journal). Harness mode `SP_G4_KV_REPLAY_GATE` in `tests/test_gemma4_cuda.c`. Seam in `src/backends/cuda/cuda_forward.cu` |
+| **Ring-3 Path A** | VSA/HRR gist consolidation, parameter-free (R3.1→R3.4) | CLOSED GREEN | R3.1 BIND: recall@1=1.0 to N=32 @D=1024. R3.2 LOSS: hit 0.000% / miss +8.04% gate-caught; budget ≤32/vector. R3.3 DUALROUTE: retrieve-and-verify pipe. R3.4 NIGHTSHIFT: idle consolidation 349.8MB resident→16.3KB index. Code: `tools/ring3/{g_r3_bind.py,g_r3_dualroute.py,g_r3_nightshift.py}` + `_run_g_r3_loss.bat`. Receipts: `tests/fixtures/xbar_r3/`. **Note:** real-domain VSA is host-numpy; Z_q/NTT engine port (using math-core `core/ntt_crt` + `core/poly_ring`) is the deferred deployment follow-on |
+| **G-XBAR-ORGANISM step 1** | EAR→Ring-2 write seam: audio packet → conditioned cache → serialized episode | GREEN | `SP_G4_KAI3_WRITE` in `tests/test_gemma4_cuda.c`. 12B cache geometry confirmed: global 1×512, SWA 8×256=2048 (jagged), episode clamps to global 512. ep_audio serialized in canonical uniform-512 [NL,P,512] format. Receipts: `tests/fixtures/xbar_organism/`. Engine commit `6600cf4`. Full organism loop is follow-on |
 | **Gemma4 + OK_Q4B (CITABLE)** | Gemma-4-12B GPU decode + sovereign pipeline (06-R10, §5.2.1d) | CLOSED | **26.1 tok/s @ wikitext PPL 5.12** on the RTX 2060 12 GB (24/24 gates; CUDA graph EXACT 256/256; dp4a top-1 256/256). Triple-agree 5.1259/5.1259/5.1160. llama.cpp 31.29 tok/s but on artifacts at PPL 192–506 (both halves stated) |
 | | gemma4 tokenizer dispatch (#115) | CLOSED | `GEMMA4_BPE` family dispatch **5432/5432 HF-parity exact, both lanes**; installed 12B re-paired (`T_G4_TOK_12B_PAIRED`) |
 | **Two-ring memory + WIRE** | Two-ring memory (PPT-ARM, CPU backend) | shipped + measured | **910× resident KV shrink @32k** (7.5 GB → 8.3 MB); needle off NVMe @ **7.57 µs/read**; 8× @ +0.69% PPL; bit-exact when off. Honest negative kept on the board: the C2.4 32k NIAH finale was a **MISS** (64× budget; Ring 3 is the designed fix) |
@@ -260,6 +266,8 @@ invariant.
 
 Chronological log of when each capability closed. The current-state tables in §2 / §2.1
 are authoritative; these entries are the audit trail.
+
+**2026-06-17 — C2 Memo curator + #222 + Ring-3 Path A + EAR→Ring-2 organism bridge all CLOSED.** Everything below is on the 12B/E2B, parameter-free (no training budget), all env-gated on the null floor. **C2 Memo curator** (autonomous Ring-2 recall loop above P3): discrete bit-collision resolver (256-bit LSH hash, integer Hamming radius TAU_BITS=168, r=256; reduction-order-immune; Gemini's "dot IS Hamming" reframe was false on the real centroids — an r-sweep closed the win instead) + online loop G-MEMO-{NULL,CUE,LOOP} GREEN on 12B (matched +0.000% / corrupted +40106% safety valve). Code: `tools/curator/{build_registry.py,discrete_resolve.py,resolve_cue.py,curator_loop.py}`, receipts `tests/fixtures/xbar_c2/`. **#222** (`gemma4_kv_replay`): SP_REPLAY ported into the persistent `gemma4_kv_*` ABI — O(1) bit-exact rewind via the same [0,anchor) shear; G-222 GREEN on E2B+12B (diffs=0) + G-222-WRAP GREEN (SWA-ring KAI-1c journal). Harness `SP_G4_KV_REPLAY_GATE` in `tests/test_gemma4_cuda.c`. **Ring-3 Path A** (VSA/HRR, parameter-free gist consolidation): R3.1 BIND (recall@1=1.0 to N=32 @D=1024) → R3.2 LOSS (step function: hit 0.000% / miss +8.04% gate-caught, budget ≤32/vector) → R3.3 DUALROUTE (retrieve-and-verify) → R3.4 NIGHTSHIFT (idle consolidation; 349.8MB resident→16.3KB index) all GREEN. Code: `tools/ring3/{g_r3_bind.py,g_r3_dualroute.py,g_r3_nightshift.py}` + `_run_g_r3_loss.bat`, receipts `tests/fixtures/xbar_r3/`. The real-domain VSA is host-numpy; the Z_q/NTT native port (math-core `core/ntt_crt` + `core/poly_ring`) is the deferred deployment follow-on. **G-XBAR-ORGANISM step 1 GREEN** (EAR→Ring-2 write seam): `SP_G4_KAI3_WRITE` injects a real audio packet (KAI-3 path) → conditioned cache npos=114 → serializes ep_audio in canonical uniform-512 [NL,P,512] format (SWA jagged 2048 clamped to global 512). Receipts `tests/fixtures/xbar_organism/`, engine commit `6600cf4`. Sig separates (self 211, margin +79). Full organism loop is the immediate follow-on.
 
 **2026-06-14 — KAIROS time-axis CLOSED (KAI-1 + KAI-1b).** A 12B now runs as a resident background daemon: mathematically silent and O(Δ)-flat until a high-salience event, then acts, and stays stable after acting (perfect 24-tick crucible; public ledger KAIROS-01). **KAI-1b** drops the cold-evict to the metal: persistent-KV `gemma4_kv_open/prefill/decode/rewind/commit/pos/snapshot/close` in `src/backends/cuda/cuda_forward.cu` (`gemma4_decode_cuda` left byte-untouched). `rewind(Δ)` is **bit-exact** (G-1b-REWIND-NULL: 48 owner layers / 16.5 MB / diffs=0 + gen-reproduce) and **O(1)** (idle-tick latency flat — metal slope 0.0073 vs prefix-grow 0.924 s/action, 127× shallower; 16.7× @ 16 retained actions). The wrap-aware ring (KAI-1c) adds an undo-journal so the rewind stays bit-exact on the space-optimized ring (G-1b-WRAP-NULL: 40 SWA layers clobbered then restored, diffs=0). The ≥24h endurance soak harness (`SP_G4_KAIROS_SOAK`) is built and **running — no verdict yet**. Lattice CONTRACT-KAIROS-K0-K1 §5; receipts `results/kai1b_*.log`.
 
