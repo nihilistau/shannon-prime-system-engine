@@ -1,0 +1,29 @@
+# G-R3-DUALROUTE — R3.3 receipt: the continuous retrieve-and-verify pipe (raw cue -> land correct memory)
+# date: 2026-06-17  cmd: python3 tools/ring3/g_r3_dualroute.py
+# COMPOSITION gate: every stage individually metal-proven; this wires them into one pipe + proves control flow.
+#   RETRIEVE = VSA unbind (R3.1 G-R3-BIND, recall@1=1.0 to N=32) ; VERIFY scores = 12B metal (R3.2 G-R3-LOSS:
+#   correct +0.000% ACCEPT / foreign +8.04% REJECT, gate 2.0%) ; LAND/UNDO = gemma4_kv_replay + rewind O(1) (#222).
+
+[dr] verify outcomes from R3.2 G-R3-LOSS 12B metal: correct=+0.000% ACCEPT, foreign=+8.04% REJECT (gate=2.0%)
+
+[dr] (a) CLEAN HIT - cue=ep_wiki, store={ep_toy,ep_wiki} (N=2, recall@1=1.0):
+  cue[ep_wiki] -> shortlist ['ep_wiki', 'ep_toy']
+    [1] verify ep_wiki  deflection=+0.000% -> ACCEPT (promote->resident cache)
+    => landed=ep_wiki scan_len=1 [PASS]
+
+[dr] (b) DECOY SCAN - adversarial shortlist [ep_toy decoy, ep_wiki correct] exercises reject->rewind->accept:
+  cue[ep_wiki] -> shortlist ['ep_toy', 'ep_wiki'] (adversarial order)
+    [1] verify ep_toy   deflection=+8.040% -> REJECT (gemma4_kv_rewind O(1))
+    [2] verify ep_wiki  deflection=+0.000% -> ACCEPT (promote->resident cache)
+    => landed=ep_wiki scan_len=2 (decoy rejected+rewound, correct accepted) [PASS]
+
+[dr] (c) NULL PARITY - empty Ring-3 index:
+    cue -> shortlist [] -> NULL -> no inject -> baseline 4.6665 byte-exact (C2 G-MEMO-NULL). [PASS]
+
+[gate] G-R3-DUALROUTE GREEN -- raw cue -> VSA unbind -> top-K shortlist -> #222 verify scan (reject+rewind foreign, accept correct) -> correct memory landed; empty-index null parity
+
+# (a) clean hit: shortlist top-1 = correct -> accept, scan_len=1.
+# (b) decoy scan (adversarial order): rank-1 foreign rejected + O(1) rewound -> rank-2 correct accepted, scan_len=2
+#     -- this is the top-K (P2.b top-5) door: the verify scan survives a wrong shortlist candidate and still lands the fact.
+# (c) null parity: empty Ring-3 -> empty shortlist -> NULL -> no inject -> baseline byte-exact (== no module); scan O(1).
+# DUALROUTE CLOSED: the full stack — live cue -> VSA unbind -> top-K shortlist -> #222 verify/land/rewind — is one continuous pipe.
