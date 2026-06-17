@@ -1,0 +1,28 @@
+# G-MEMO-CUE (resolver) — C2 Build Step 2 receipt
+# date: 2026-06-17
+# cmd:  python3 tools/curator/resolve_cue.py   (registry on Optane /mnt/f/ring2/episodes, fixture copy in tests/fixtures/xbar_c2)
+# TAU_CUE=0.30  (pre-registered: targets self-score +0.3730/+0.6863; background noise floor peaks ~+0.2162/+0.2562)
+# resolver: argmax over registry.jsonl sig dots; returns episode_id IFF best>tau, else NULL
+
+[res] registry: /sessions/friendly-dreamy-ramanujan/mnt/shannon-prime-system-engine/tests/fixtures/xbar_c2/registry.jsonl  (2 episodes)  TAU_CUE=0.3
+[res]   id=0 ep_toy   |sig|=1.000
+[res]   id=1 ep_wiki  |sig|=1.000
+
+[pos] held-out cue -> resolve (must hit OWN id, score > tau):
+  cue[ep_toy  ] -> ep_toy   score=+0.6863 (tau=0.3)  [PASS]
+  cue[ep_wiki ] -> ep_wiki  score=+0.3730 (tau=0.3)  [PASS]
+
+[neg] unrelated query -> resolve (must be NULL, no forced match):
+  neg[0] -> NULL     score=-0.2293  [PASS]
+  neg[1] -> NULL     score=+0.2562  [PASS]
+  neg[2] -> NULL     score=+0.2422  [PASS]
+  neg[3] -> NULL     score=+0.0461  [PASS]
+  neg[4] -> NULL     score=-0.1764  [PASS]
+  neg[5] -> NULL     score=+0.0238  [PASS]
+  neg[6] -> NULL     score=-0.2192  [PASS]
+  neg[7] -> NULL     score=-0.0711  [PASS]
+
+[gate] G-MEMO-CUE(resolver) GREEN -- positives resolve, negatives reject
+
+# separation: lowest positive +0.3730 (ep_wiki) vs highest negative +0.2562 (neg[1])  =>  gap +0.1168
+#   tau=0.30 clears positives by >=+0.073 and rejects negatives by >=+0.044  (strict two-sided separation)
