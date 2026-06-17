@@ -33,3 +33,18 @@ weights + insert R^T so attention is invariant, then PPL at reduced bits. Bounda
 exact container; geometry helps quantization (rotation), never lossless structure-on-noise.
 
 REPRO: python3 tools/ring3/g_weight_transforms.py (operates on the extracted _embed_block.bf16; scratch, not committed).
+
+--- ADDENDUM: block-granularity of the incoherence rotation (design-determining) ---
+The incoherence win is BLOCK-LOCAL and smaller blocks win (outliers are channel-local):
+  int4: direct 0.3030 | full-4096 0.1517 | blk-512 0.1326 | blk-256 0.1247 | blk-128 0.1156 | blk-64 0.1061
+  int8: direct 0.02168 | full-4096 0.00836 | blk-256 0.00687 | blk-128 0.00637 (3.4x better than direct)
+=> R is a BLOCK-DIAGONAL Hadamard (block 64-128), NOT a residual-stream rotation. Consequences:
+  - never commutes through RMSNorm-gamma / softcap / AltUp (sidesteps SpinQuant's global-R headache).
+  - WEIGHT side folds OFFLINE into weight input-columns at transcode (rotate->Frobenius-quantize->store), zero runtime.
+  - ACTIVATION side: R^T = block-128 WHT butterfly FUSED into the existing k_quant_act_int8 kernel (rotate-then-
+    quantize in one pass; no extra kernel/HBM round-trip; NEON adds on ARM). A dense dxd R would bottleneck; the
+    fast block-WHT is free (O(d*log blk)).
+  - deterministic +/-1 Hadamard (regenerated, zero storage; optional per-block random sign diag for more incoherence).
+NEXT (the gate that decides it): survey cuda_forward.cu gamma/softcap/AltUp placement for fold-correctness, then
+ON-MODEL PPL at 3/4-bit with R/R^T folded -- slots into the T4 Frobenius weight-quant campaign. (Measured here =
+weight reconstruction error, the proxy; on-model PPL is the real gate.)
