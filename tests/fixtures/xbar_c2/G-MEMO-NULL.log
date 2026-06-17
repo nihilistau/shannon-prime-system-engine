@@ -1,0 +1,33 @@
+# G-MEMO-NULL — C2 Step 3.0 receipt: the curator orchestrator is INERT WHEN OFF (12B-b1)
+# date: 2026-06-17
+# cmd: _run_memo_null.bat (LEG A baseline / LEG B SP_ARM_SHADOW+SP_ARM_DUMP) -> curator_loop.py --null
+# claim: the per-tick cue-extraction seam does NOT perturb the decode; OFF resolve (empty registry) = NULL
+
+## LEG A — baseline (curator OFF, no observer)
+    [g4-ppl] chunk 1: ppl 4.6665 (n=42)
+    [g4-ppl] SP PPL=4.6665 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+[M_GEMMA4_CUDA_PPL] PASS
+---- checks=5 fails=0 ----
+
+## LEG B — cue-extraction ON (SP_ARM_SHADOW + SP_ARM_DUMP, the orchestrator's per-tick observer)
+    [xbar-p3.2b2b] SHADOW (Phase 0/1, bit-exact) router ON: B=0 W=0 sink=0 r=32, GLOBALS ONLY — attention UNCHANGED
+    [xbar-dumpA] K/q dump -> D:\F\shannon-prime-repos\shannon-prime-system-engine\_memo_null\cue_dump/kq_call0.bin (globals; kvd=512 qd=8192, per-rec hdr {magic,L,pos,nkv,nh,hd})
+    [xbar-p3.2b2b] G-P3-GEOM.a oracle parity: global projk fresh-vs-incremental mismatches=0; selections=10624 avg|recall|=42.0 => PARITY OK
+    [g4-ppl] chunk 1: ppl 4.6665 (n=42)
+    [g4-ppl] SP PPL=4.6665 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+[M_GEMMA4_CUDA_PPL] PASS
+---- checks=5 fails=0 ----
+
+## VERDICT (curator_loop.py --null)
+[null] PPL baseline       = 4.6665
+[null] PPL cue-extract on = 4.6665
+[null] dump observer fired: 1 file(s), 23133792 bytes
+[null] OFF resolve (registry=empty) -> NULL
+[null]   bit-exact-when-off (PPL identical): PASS
+[null]   cue extraction live (dump fired)  : PASS
+[null]   OFF resolve is NULL               : PASS
+
+[gate] G-MEMO-NULL GREEN — orchestrator perfectly inert when off
+
+# NOTE: PPL 4.6665 == 4.6665 bit-identical; SP_ARM shadow oracle parity mismatches=0; dump fired 23,133,792 bytes.
+# gemma4_decode_cuda byte-untouched (null floor holds). Orchestrator = host state machine over inert-by-default seams.
