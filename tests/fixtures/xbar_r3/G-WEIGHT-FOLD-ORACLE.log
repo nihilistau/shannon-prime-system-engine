@@ -44,3 +44,17 @@ already PPL 4.6665 ~ gold 4.68) that unlocks NO lower bit-width, is negative cos
 (9.49e-16) and the rotation is real, but it is REDUNDANT against per-32-block OK_Q4B. 7th structure-on-content
 lever convicted; the boundary thesis holds (the engine's exact per-block container already sits near the frontier).
 Cost to convict: 3 numpy runs. Cost avoided: the whole transcoder+kernel+bake campaign.
+
+--- ROBUSTNESS ADDENDUM (operator challenge: conviction was n=1 / a SWA layer; OK_Q4B IS ours) ---
+CLARIFICATION: OK_Q4B is the PROJECT'S OWN quant (O_K Frobenius lift sp_frob_q4_pack + per-32-block .bscale,
+PPL 4.6665, beat the broken llama GGUF). sp_frob_q4_pack verified NATURAL-ORDER (no permutation; the "Mobius
+reorder" is the separate VHT2/Spinor codec, not the OK_Q4B path). The CONVICTION used our faithful OK_Q4B; only
+the EARLIER transform/oracle tests used a generic per-row strawman (the inflated 2-4x). Corrected.
+RE-MEASURED across SWA + GLOBAL layers and weight classes vs faithful OK_Q4B (matmul-output relerr):
+  q_proj  L0 SWA   : int4 1.37x  int3 1.16x
+  q_proj  L5 GLOBAL: int4 1.29x  int3 1.03x   (global differs -> WEAKER, not stronger)
+  down_proj L0 FFN : int4 1.27x  int3 1.23x   (no-gamma input class, the biggest tensors)
+VERDICT HOLDS, now n=3 across SWA/global/FFN: consistent ~1.3x SAME-bit win at int4, NO 3-bit unlock anywhere
+(rotated-int3 always worse than direct-int4, e.g. global 0.200 vs 0.110 = 1.8x worse). OK_Q4B is already at
+PPL 4.6665 ~ gold 4.68 (no headroom), so 1.3x buys ~nothing and cannot enable int3. Convicted -- do NOT build the
+rotation campaign. The operator's n=1/SWA challenge upgraded the conviction from n=1 to robust.
