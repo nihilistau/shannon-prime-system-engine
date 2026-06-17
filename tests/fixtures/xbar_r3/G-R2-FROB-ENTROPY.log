@@ -1,0 +1,29 @@
+==========================================================================
+ G-R2-FROB-ENTROPY RECEIPT -- 2026-06-17T20:38:14Z  [MEASURED NEGATIVE]
+ Does lossless entropy coding shrink the Frobenius integer episode codes?
+==========================================================================
+
+MEASUREMENT (ep_wiki, lzma preset6 + zlib-9 on the a/b code lanes):
+  float32 baseline: ep.k 28.90MB + ep.v 28.90MB = 57.8MB
+  a16b8 (24b sub-ULP, relL2 1.2e-7):
+    a16 lane 14.5MB -> lzma 14.1MB (1.03x) ;  b8 residual 7.2MB -> lzma 7.18MB (1.00x, INCOMPRESSIBLE)
+    a16b8 + lzma = 21.3MB/tensor = 1.02x vs uncompressed Frobenius, 1.36x vs float32
+  a8b4 (12b, int4-packed, relL2 6e-4): + lzma = ~10.0MB/tensor = 2.86-2.90x vs float32
+  TOTAL ep_wiki sub-ULP (a16b8+lzma): 57.8MB -> 42.3MB = 1.37x
+
+LAYOUT due-diligence (a16 lane, lzma): as-is 1.03x | transpose 1.02x | delta-P 1.01x | delta+trans 1.01x
+  => NO exploitable layout redundancy; delta HURTS (codes have no positional smoothness).
+
+VERDICT: entropy coding on the quantized KV codes is NEGLIGIBLE (~1.02x). The codes are high-entropy
+  by nature -- per-(layer,channel) Frobenius scaling already removed the cross-channel structure, and
+  the int8 residual is near-random by construction. The earlier zlib 2.56x on the dense Ring-3 M was a
+  red herring (M's int32 values are small -> zlib ate leading-zero bytes; the int8/16 codes fill their
+  range). Prediction of 'staggering structural redundancy' is MEASURED-FALSE.
+
+THE REAL (AND ONLY) LEVER = BIT-WIDTH (quantization), not entropy coding:
+  12b a8b4  : 2.86x vs f32  (lossy, relL2 6e-4)
+  16b a16   : 2.00x vs f32  (effectively lossless, relL2 3e-5)   <- the lossless operating point
+  24b a16b8 : 1.36x vs f32  (sub-ULP, relL2 1.2e-7)              <- 'how small can sub-ULP get': 42.3MB
+  => do NOT bolt entropy coding onto the codec (dead weight + CPU). Pick the bit-width operating point.
+
+REPRO: python3 (load ep.k/ep.v; per-(layer,channel) quant; lzma/zlib the a,b lanes)  -- see this receipt.
