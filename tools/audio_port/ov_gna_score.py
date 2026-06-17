@@ -21,6 +21,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", required=True); ap.add_argument("--ckpt", required=True)
     ap.add_argument("--workdir", required=True); ap.add_argument("--T", type=int, default=0)
+    ap.add_argument("--pad", type=int, default=1, help="conv padding; GNA HW requires 0 (VALID)")
     a = ap.parse_args(); os.makedirs(a.workdir, exist_ok=True)
     import torch, torch.nn as nn, openvino as ov
 
@@ -31,21 +32,26 @@ def main():
     Tmax = a.T or int(evX.shape[1])
     print(f"[gna] V_sub={V} n_mels={n_mels} eval={evX.shape} compile_T={Tmax} expect={exp}", flush=True)
 
+    P = a.pad
+    HEAD = ((V + 1 + 3) // 4) * 4 if a.pad == 0 else V + 1   # GNA HW: #filters must be a multiple of 4
     class Enc(nn.Module):
         def __init__(s, h=256):
             super().__init__()
-            s.net = nn.Sequential(nn.Conv1d(n_mels, h, 3, padding=1), nn.ReLU(),
-                                  nn.Conv1d(h, h, 3, padding=1), nn.ReLU(),
-                                  nn.Conv1d(h, h, 3, padding=1), nn.ReLU())
-            s.head = nn.Conv1d(h, V + 1, 1)
-        def forward(s, x): return s.head(s.net(x))     # x [B, n_mels, T] -> [B, V+1, T]
-    net = Enc().eval(); ck = torch.load(a.ckpt, map_location="cpu"); net.load_state_dict(ck["state"])
-    print(f"[gna] ckpt best={ck.get('best','?')}", flush=True)
+            s.net = nn.Sequential(nn.Conv1d(n_mels, h, 3, padding=P), nn.ReLU(),
+                                  nn.Conv1d(h, h, 3, padding=P), nn.ReLU(),
+                                  nn.Conv1d(h, h, 3, padding=P), nn.ReLU())
+            s.head = nn.Conv1d(h, HEAD, 1)             # HEAD>=V+1, multiple of 4 for GNA; dummies sliced in scoring
+        def forward(s, x): return s.head(s.net(x))     # x [B, n_mels, T] -> [B, HEAD, T'] (T'=T-6 if VALID)
+    net = Enc().eval(); ck = torch.load(a.ckpt, map_location="cpu"); sd = ck["state"]
+    net.net.load_state_dict({k[4:]: v for k, v in sd.items() if k.startswith("net.")})
+    net.head.weight.data.zero_(); net.head.bias.data.zero_()
+    net.head.weight.data[:V + 1] = sd["head.weight"]; net.head.bias.data[:V + 1] = sd["head.bias"]
+    print(f"[gna] ckpt best={ck.get('best','?')} HEAD={HEAD} (V+1={V+1})", flush=True)
 
-    # torch FP32 reference (full-T then slice, to match the OV/GNA convention exactly)
+    # torch FP32 reference (full-T then slice; slice dummy head channels to V+1)
     def tlog(i):
         x = torch.zeros(1, n_mels, Tmax); T = int(evFL[i]); x[0, :, :T] = torch.tensor(evX[i, :T].T)
-        with torch.no_grad(): return net(x)[0].T.numpy()[:T]
+        with torch.no_grad(): return net(x)[0].T.numpy()[:T, :V + 1]
     base_full = greedy_recovery([tlog(i) for i in range(evX.shape[0])], evY, evFL, evTL, V, BLANK)
     print(f"[gna] TORCH FP32 (full-T,slice) recovery = {base_full:.3f}", flush=True)
 
@@ -60,7 +66,7 @@ def main():
         for i in range(evX.shape[0]):
             T = int(evFL[i]); xin = np.zeros((1, n_mels, Tmax), np.float32); xin[0, :, :T] = evX[i, :T].T
             out = compiled(xin)[compiled.outputs[0]]
-            logs.append(out[0].T[:T])
+            logs.append(out[0].T[:T, :V + 1])
         r = greedy_recovery(logs, evY, evFL, evTL, V, BLANK)
         # per-event decision (ACTION/NO_OP) hit, mirroring the metal harness, just for context
         print(f"[gna] {tag} recovery = {r:.3f}  (delta vs FP32 {r-base_full:+.3f})", flush=True)

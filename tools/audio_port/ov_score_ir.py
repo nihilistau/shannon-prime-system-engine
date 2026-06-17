@@ -18,6 +18,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", required=True); ap.add_argument("--ir", required=True)
     ap.add_argument("--tag", default="IR"); ap.add_argument("--T", type=int, default=0)
+    ap.add_argument("--mode", default="GNA_SW_EXACT",
+                    help="GNA_SW_EXACT (WSL/CPU emulation) | GNA_HW (native Windows silicon) | GNA_SW_FP32")
     a = ap.parse_args()
     import openvino as ov
     d = np.load(a.frames, allow_pickle=True)
@@ -32,21 +34,22 @@ def main():
         for i in range(evX.shape[0]):
             T = int(evFL[i]); xin = np.zeros((1, n_mels, Tmax), np.float32); xin[0, :, :T] = evX[i, :T].T
             out = compiled(xin)[compiled.outputs[0]]
-            logs.append(out[0].T[:T])
+            logs.append(out[0].T[:T, :V + 1])    # slice GNA dummy head channels (HEAD padded to mult-of-4)
         r = greedy_recovery(logs, evY, evFL, evTL, V, BLANK)
         print(f"[ir] {tag} recovery = {r:.3f}", flush=True); return r
 
     score(core.compile_model(m, "CPU"), f"{a.tag} CPU")
     best = -1; bsf = None
     for sf in [None, 64.0, 1024.0, 2048.0]:
-        cfg = {"GNA_DEVICE_MODE": "GNA_SW_EXACT", "INFERENCE_PRECISION_HINT": "i16"}
+        cfg = {"GNA_DEVICE_MODE": a.mode, "INFERENCE_PRECISION_HINT": "i16"}
         if sf is not None: cfg["GNA_SCALE_FACTOR_0"] = str(sf)
         try:
-            r = score(core.compile_model(m, "GNA", cfg), f"{a.tag} GNA_SW_EXACT i16 scale={sf}")
+            r = score(core.compile_model(m, "GNA", cfg), f"{a.tag} {a.mode} i16 scale={sf}")
             if r > best: best, bsf = r, sf
+            if a.mode == "GNA_HW": break    # HW: one pass (the POT IR carries its own scale factors)
         except Exception as e:
-            print(f"[ir] GNA [scale={sf}] FAILED: {type(e).__name__}: {str(e)[:200]}", flush=True)
-    print(f"[ir] BEST {a.tag} GNA i16 = {best:.3f} @ scale={bsf}", flush=True)
+            print(f"[ir] GNA [{a.mode} scale={sf}] FAILED: {type(e).__name__}: {str(e)[:240]}", flush=True)
+    print(f"[ir] BEST {a.tag} {a.mode} i16 = {best:.3f} @ scale={bsf}", flush=True)
     print("[ir] IR_SCORE_DONE", flush=True)
 
 if __name__ == "__main__":
