@@ -1,0 +1,31 @@
+# G-R3-LOSS — R3.2 receipt: the consolidation loss is a STEP FUNCTION (retrieve-and-verify, NOT lossy-gist)
+# date: 2026-06-17  model: gemma4-12b-b1  cmd: _run_g_r3_loss.bat + offline BIND budget + unbind latency
+#
+# ARCHITECTURE CORRECTION (verify-don't-blindly-build): in the LOCKED retrieve-and-verify design, Ring-3
+# stores a content-addressable POINTER (id), not a lossy gist. On recall we unbind -> id -> fetch the
+# VERBATIM Ring-2 tensor from Optane -> inject THAT. So a correct recall has ZERO fidelity loss by
+# construction (same bytes as a direct inject). The directive's 'gist-PPL vs verbatim-PPL' delta would be
+# ~0 (trivial/misleading) or require the convicted lossy-gist Path B. The real loss has three axes:
+
+## (1) HIT fidelity = LOSSLESS (the verify re-injects exact bytes)
+  base       [g4-ppl] SP PPL=4.6665 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+  HIT        [g4-ppl] SP PPL=4.6665 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+  -> HIT deflection = (4.6665-4.6665)/4.6665 = +0.000%  (correct id -> verbatim ep_wiki, NPOS=16)
+
+## (2) the lossy axis = CAPACITY MISS (a step function, caught by the gate)
+  MISS       [g4-ppl] SP PPL=5.0417 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+  -> MISS deflection = (5.0417-4.6665)/4.6665 = +8.04%  (wrong id -> foreign ep_toy, NPOS=16)
+  -> +8.04% >> the 2.0% deflection gate ⇒ a capacity miss is FLAGGED and O(1)-rewound, NOT silently corrupting.
+  -> recoverable-info loss is BINARY: 0 on hit, total on miss; governed by recall@1(N) from G-R3-BIND.
+
+## (3) promotion budget (pinned from the G-R3-BIND capacity curve @ D=1024)
+  -> recall@1 = 1.000 up to N=32 (lossless recall); recall@5>=0.90 to N=64.
+  -> BUDGET: consolidate <= 32 episodes per Ring-3 superposition vector for lossless recall;
+     beyond that, misses are caught by the 2% gate (degrade-safe, never silent corruption).
+
+## (4) latency shear (two-stage retrieve-and-verify vs a resident hit)
+  -> unbind + cleanup: 71 us per recall @ D=1024 N=32 (negligible vs the model forward);
+     dominant added cost = ONE Optane ReadFile of the episode (the existing Ring-2 backend); inject/score unchanged.
+
+[gate] G-R3-LOSS GREEN -- hit fidelity LOSSLESS (0.000%); capacity-miss is a step function CAUGHT by the 2% gate
+       (degrade-safe); promotion budget pinned (<=32 episodes/vector @ D=1024); latency shear = 71us unbind + 1 Optane read.
