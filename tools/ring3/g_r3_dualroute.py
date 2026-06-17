@@ -11,7 +11,9 @@
 # This wires them into one pipe and proves the control flow lands the right memory across:
 #   (a) clean hit (shortlist top-1 correct), (b) decoy-scan (top-1 wrong -> reject+rewind -> correct accepted),
 #   (c) null parity (empty Ring-3 -> NULL -> baseline; scan overhead O(1), bounded by K and the 32-episode cap).
-import os, numpy as np
+import os, sys, numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ok_bind as ok  # NATIVE exact-integer negacyclic CRT-NTT bind (Leg A)
 SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1; D=1024
 TAU_PCT=2.0; K=5     # top-K shortlist depth (the P2.b top-5 door)
 # verify outcomes measured on the 12B metal (R3.2 G-R3-LOSS, NPOS=16): correct=lossless, foreign=caught.
@@ -35,16 +37,15 @@ def ep_sig_seed(epdir,npos):
     for i in range(R_BITS):
         if b[i]: s|=(1<<i)
     return s & MASK64
-def carrier(seed):  # +/-1 substrate-native carrier
-    return np.random.default_rng(seed%(2**63)).integers(0,2,D).astype(np.float64)*2-1
-def idvec(seed): return np.random.default_rng((seed^0xABCDEF)%(2**63)).integers(0,2,D).astype(np.float64)*2-1
-def cconv(a,b): return np.fft.irfft(np.fft.rfft(a)*np.fft.rfft(b),n=D)
-def ccorr(a,b): return np.fft.irfft(np.fft.rfft(a)*np.conj(np.fft.rfft(b)),n=D)
-def cos(a,b): return float(a@b/(np.linalg.norm(a)*np.linalg.norm(b)+1e-12))
+def carrier(seed): return ok.carrier(seed, D)          # native +/-1 carrier
+def idvec(seed):   return ok.idvec(seed, D)
+def cconv(a,b):    return ok.bind(a,b)                  # NATIVE engine negacyclic bind
+def ccorr(a,b):    return ok.unbind(a,b)                # NATIVE engine negacyclic unbind
+def cos(a,b):      return ok.cos(a,b)
 
 class Ring3:
     """fixed-size superposed holographic store (one vector M); names<->ids; O(1)-bounded retrieve (cap 32)."""
-    def __init__(self): self.M=np.zeros(D); self.names=[]; self.addr={}; self.id={}; self.dir={}
+    def __init__(self): self.M=np.zeros(D,dtype=np.int64); self.names=[]; self.addr={}; self.id={}; self.dir={}
     def bind(self, name, seed, epdir):
         a=carrier(seed); v=idvec(seed); self.addr[name]=a; self.id[name]=v; self.dir[name]=epdir
         self.names.append(name); self.M=self.M+cconv(a,v)
@@ -72,7 +73,7 @@ def dualroute(store, cue_name, cue_seed, true_name):
     return None, len(sl)
 
 def main():
-    eng=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),"..",".."))
+    eng=os.environ.get("SP_R3_ENG", os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","..")))
     eps={"ep_toy":(f"{eng}/_p33_ep",16),"ep_wiki":(f"{eng}/_c2_ep_wiki",84)}
     seeds={n:ep_sig_seed(d,p) for n,(d,p) in eps.items()}
     print(f"[dr] verify outcomes from R3.2 G-R3-LOSS 12B metal: correct=+0.000%% ACCEPT, foreign=+{FOREIGN_PCT}%% REJECT (gate={TAU_PCT}%%)",flush=True)

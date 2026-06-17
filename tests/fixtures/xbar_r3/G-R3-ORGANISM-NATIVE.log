@@ -1,0 +1,72 @@
+==========================================================================
+ G-R3-ORGANISM-NATIVE RECEIPT -- 2026-06-17T19:51:30Z
+ The Ring-3 organism breathing PURELY on the native discrete C-engine math:
+ host float-FFT bind/unbind RIPPED OUT; bind/unbind now route through the
+ exact-integer dual-prime negacyclic CRT-NTT (core/poly_ring sp_pr_mul),
+ the same primitive proven bit-identical + reduction-order-immune in Leg A.
+==========================================================================
+
+WIRING: tools/ring3/ok_bind.py -- ctypes -> libsp_poly_ring/libsp_ntt_crt (sp_pr_mul).
+  bind(addr,id)=addr (x) id ; unbind(M,addr)=M (x) addr* ; negacyclic over Z[x]/(x^N+1).
+  DEGREE: engine ring N in {128,256,512}. Logical D tiled as a DIRECT SUM of <=512 blocks
+  (D=1024 = 512 (+) 512) so capacity tracks total D while every coeff stays exact integer.
+  Carriers/ids are +/-1 -> encode boundary is identity (lossless, Leg A). No numpy FFT on the path.
+REPRO: SP_R3_LIB=<path>/libsp.so python3 tools/ring3/g_r3_dualroute.py ; ... g_r3_nightshift.py
+
+--- G-R3-DUALROUTE (native bind) ---
+[dr] verify outcomes from R3.2 G-R3-LOSS 12B metal: correct=+0.000%% ACCEPT, foreign=+8.04%% REJECT (gate=2.0%%)
+
+[dr] (a) CLEAN HIT — cue=ep_wiki, store={ep_toy,ep_wiki} (N=2, recall@1=1.0):
+  cue[ep_wiki] -> shortlist ['ep_wiki', 'ep_toy']
+    [1] verify ep_wiki  deflection=+0.000%  -> ACCEPT (promote->resident cache via gemma4_kv_replay+commit)
+    => landed=ep_wiki scan_len=1 [PASS]
+
+[dr] (b) DECOY SCAN — adversarial shortlist (foreign decoy ranked AHEAD of correct) to exercise the
+        reject->rewind->continue control flow (the recall@5-not-@1 regime; tests the exhaust path directly):
+  cue[ep_wiki] -> shortlist ['ep_toy', 'ep_wiki'] (adversarial order)
+    [1] verify ep_toy   deflection=+8.040%  -> REJECT (gemma4_kv_rewind O(1))
+    [2] verify ep_wiki  deflection=+0.000%  -> ACCEPT (promote->resident cache)
+    => landed=ep_wiki scan_len=2 (decoy rejected+rewound, correct accepted) [PASS]
+
+[dr] (c) NULL PARITY — empty Ring-3 index:
+    cue -> shortlist [] -> NULL -> no inject -> baseline 4.6665 byte-exact (C2 G-MEMO-NULL). [PASS]
+
+[gate] G-R3-DUALROUTE GREEN -- continuous pipe: raw cue -> VSA unbind -> top-K shortlist -> #222 verify scan (reject+rewind foreign, accept correct) -> correct memory landed; empty-index null parity O(1)
+
+--- G-R3-NIGHTSHIFT (native bind) ---
+[ns] NIGHTSHIFT consolidation loop — SELECT->BIND->SHADOW-GATE->PROMOTE+EVICT->SATURATE&SEAL
+
+[ns] (A) production D=1024, CAP=32 (R3.2 budget): gate holds to the cap, vector seals at 32, fresh vector continues
+  [run D=1024 CAP=32] batch=40 episodes; resident pool starts at 40
+    seal vector #1 at 32 episodes [CAP] -> init fresh vector
+    -> 40 consolidated across 2 vectors [32, 8]; sealed=1; resident pool now 0
+    -> resident KV freed (demoted to Optane): 349.8 MB ; Ring-3 resident footprint: 16.3 KB
+    -> all consolidated episodes recall@1 in their vector: GREEN
+
+[ns] (B) small D=128: capacity ~D/8 << CAP — the SHADOW-GATE must fire BEFORE the count cap (seal is the MATH, not 32)
+  [run D=128 CAP=32] batch=40 episodes; resident pool starts at 40
+    seal vector #1 at 11 episodes [gate (capacity)] -> init fresh vector
+    seal vector #2 at 10 episodes [gate (capacity)] -> init fresh vector
+    seal vector #3 at 11 episodes [gate (capacity)] -> init fresh vector
+    -> 40 consolidated across 4 vectors [11, 10, 11, 8]; sealed=3; resident pool now 0
+    -> resident KV freed (demoted to Optane): 349.8 MB ; Ring-3 resident footprint: 4.3 KB
+    -> all consolidated episodes recall@1 in their vector: GREEN
+
+[ns]   (A) all recall@1 + vectors seal at CAP=32: PASS (sizes [32, 8])
+[ns]   (B) gate-driven seal before CAP (max vector 11 < 32): PASS (sizes [11, 10, 11, 8])
+
+[gate] G-R3-NIGHTSHIFT GREEN -- autonomous consolidation: bind -> shadow-gate (whole-set recall) -> promote+evict (verbatim to Optane) -> saturate&seal; seal is gate-driven with CAP=32 safety cap; resident pool bounded
+
+--- VERDICT ---
+DUALROUTE GREEN: (a) clean hit -- native engine unbind ranks the correct episode top-1, ACCEPT scan_len=1;
+  (b) decoy scan -- foreign rank-1 REJECT+rewind, correct rank-2 ACCEPT scan_len=2; (c) null parity O(1).
+NIGHTSHIFT GREEN: (A) D=1024 (two 512 native blocks) CAP=32 -- seals at 32, all recall@1 GREEN, 349.8MB
+  resident KV demoted to Optane, Ring-3 footprint 16.3KB; (B) D=128 (one native block) -- SHADOW-GATE fires
+  BEFORE the cap (sizes [11,10,11,8], max 11<32) = seal is the MATH not the constant. All recall@1 GREEN.
+CAPACITY: the 512-block direct-sum tiling preserved the CAP=32 budget @ D=1024 -- the move to the native ring
+  ring degree did NOT regress the R3.2/R3.4 capacity gates (no silent goalpost move). D=128 cell numbers differ
+  from the prior float run (negacyclic vs cyclic + exact carriers) but the qualitative gate is identical.
+
+[gate] G-R3-ORGANISM-NATIVE GREEN -- the retrieve-and-verify loop (consolidate via NIGHTSHIFT, recall via
+  DUALROUTE) runs end-to-end on the exact-integer C-engine bind. The XBAR memory tier is no longer a float
+  bolt-on; it is arithmetic on the proven O_K/R_q substrate. Leg A primitive -> live deployment.

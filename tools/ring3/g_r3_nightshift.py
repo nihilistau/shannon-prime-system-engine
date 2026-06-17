@@ -12,7 +12,9 @@
 # The SEAL is gate-driven (capacity), with CAP=32 as the pre-registered safety cap (R3.2 budget @ D=1024).
 # Proven twice: (A) D=1024 CAP=32 production — gate holds to the cap; (B) small D — the GATE fires BEFORE the
 # cap, proving the seal is the math, not a magic constant. Telemetry: resident footprint stays bounded.
-import os, numpy as np
+import os, sys, numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ok_bind as ok  # NATIVE exact-integer negacyclic CRT-NTT bind (Leg A)
 SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1; CAP=32
 def smix(seed,n):
     s=seed&MASK64; out=np.empty(n,dtype=np.int8)
@@ -34,12 +36,12 @@ def ep_sig_seed(epdir,npos):
 
 class ActiveVector:
     def __init__(self,D):
-        self.D=D; self.M=np.zeros(D); self.eps=[]; self.addr={}; self.id={}; self.sealed=False
-    def _carrier(self,seed): return np.random.default_rng(seed%(2**63)).integers(0,2,self.D).astype(np.float64)*2-1
-    def _id(self,seed): return np.random.default_rng((seed^0xABCDEF)%(2**63)).integers(0,2,self.D).astype(np.float64)*2-1
-    def _cconv(self,a,b): return np.fft.irfft(np.fft.rfft(a)*np.fft.rfft(b),n=self.D)
-    def _ccorr(self,a,b): return np.fft.irfft(np.fft.rfft(a)*np.conj(np.fft.rfft(b)),n=self.D)
-    def _cos(self,a,b): return float(a@b/(np.linalg.norm(a)*np.linalg.norm(b)+1e-12))
+        self.D=D; self.M=np.zeros(D,dtype=np.int64); self.eps=[]; self.addr={}; self.id={}; self.sealed=False
+    def _carrier(self,seed): return ok.carrier(seed, self.D)
+    def _id(self,seed): return ok.idvec(seed, self.D)
+    def _cconv(self,a,b): return ok.bind(a,b)        # NATIVE engine bind
+    def _ccorr(self,a,b): return ok.unbind(a,b)      # NATIVE engine unbind
+    def _cos(self,a,b): return ok.cos(a,b)
     def _recall_ok(self, M, eps):
         # SHADOW-GATE: every bound episode must recall@1 (correct id is argmax) with margin>0 over the others
         for q in eps:
@@ -84,7 +86,7 @@ def nightshift(D, batch, ep_bytes):
     return allok, cap_seal, gate_seal, sizes
 
 def main():
-    eng=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),"..",".."))
+    eng=os.environ.get("SP_R3_ENG", os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","..")))
     realK={"ep_toy":(f"{eng}/_p33_ep",16),"ep_wiki":(f"{eng}/_c2_ep_wiki",84)}
     ep_bytes={}; seeds={}
     for n,(d,p) in realK.items():
