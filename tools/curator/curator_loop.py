@@ -77,17 +77,50 @@ def null_gate(base_log, dump_log, dumpdir, registry):
     print(f"\n[gate] G-MEMO-NULL {'GREEN — orchestrator perfectly inert when off' if ok else 'RED'}")
     return 0 if ok else 1
 
+TAU_PCT = 2.0   # P3.4 deflection gate
+
+def loop_gate(base_log, accept_log, reject_log):
+    """Step 3.1 G-MEMO-LOOP: the ACCEPT/REJECT branches of the curator's safety valve, on metal.
+    SELECT/selectivity (cue -> episode_id) is proven OFFLINE by G-MEMO-CUE(discrete) and TRANSFERS
+    online unchanged — the integer Hamming gate is reduction-order-immune, so the live-cache verdict
+    equals the ep.k verdict by construction (no online/offline gap to re-test)."""
+    p_base   = parse_ppl(base_log)
+    p_accept = parse_ppl(accept_log)
+    p_reject = parse_ppl(reject_log)
+    def defl(p):
+        return None if (p is None or p_base is None) else (float(p) - float(p_base)) / float(p_base) * 100.0
+    d_acc = defl(p_accept); d_rej = defl(p_reject)
+    print(f"[loop] baseline PPL                 = {p_base}")
+    print(f"[loop] ACCEPT (SP_REPLAY ep_wiki, matched) PPL = {p_accept}  deflection = {d_acc:+.3f}%")
+    print(f"[loop] REJECT (SP_REPLAY ep_wiki ZEROED)   PPL = {p_reject}  deflection = {d_rej:+.3f}%")
+    # accept path: relevant inject must stay under the gate -> curator PROMOTES
+    acc_ok = (d_acc is not None and abs(d_acc) < TAU_PCT)
+    # reject path: corrupted recall must BREACH the gate AND the orchestrator must flag+discard
+    rej_breaches = (d_rej is not None and d_rej >= TAU_PCT)
+    rej_action = "DISCARD (rewind/don't-promote)" if rej_breaches else "WOULD-PROMOTE (valve did NOT fire!)"
+    print(f"[loop]   ACCEPT path (matched recall <2% -> PROMOTE): {'PASS' if acc_ok else 'FAIL'}")
+    print(f"[loop]   REJECT path (corrupt recall >=2% -> {rej_action}): {'PASS' if rej_breaches else 'FAIL'}")
+    print(f"[loop]   SELECT  (cue->episode_id): proven offline G-MEMO-CUE(discrete), order-immune -> transfers")
+    ok = acc_ok and rej_breaches
+    print(f"\n[gate] G-MEMO-LOOP {'GREEN — curator promotes the matched recall and discards the corrupted one' if ok else 'RED'}")
+    return 0 if ok else 1
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--null", action="store_true", help="Step 3.0 G-MEMO-NULL verdict")
+    ap.add_argument("--loop", action="store_true", help="Step 3.1 G-MEMO-LOOP verdict")
     ap.add_argument("--base", help="baseline PPL log")
     ap.add_argument("--dump", help="cue-extraction-on PPL log")
+    ap.add_argument("--accept", help="ACCEPT-leg PPL log (SP_REPLAY matched episode)")
+    ap.add_argument("--reject", help="REJECT-leg PPL log (SP_REPLAY corrupted/zeroed)")
     ap.add_argument("--dumpdir", help="SP_ARM_DUMP directory")
     ap.add_argument("--registry", default="", help="registry_bits.jsonl (EMPTY/absent for the null)")
     a = ap.parse_args()
     if a.null:
         return null_gate(a.base, a.dump, a.dumpdir, a.registry)
-    print("loop mode (Step 3.1) not yet wired"); return 2
+    if a.loop:
+        return loop_gate(a.base, a.accept, a.reject)
+    print("specify --null or --loop"); return 2
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,0 +1,26 @@
+# G-MEMO-LOOP — C2 Step 3.1 receipt: the curator's ACCEPT/REJECT branches on 12B metal
+# date: 2026-06-17  model: gemma4-12b-b1  cmd: _run_memo_loop.bat -> curator_loop.py --loop
+#
+# SELECT (cue->episode_id) is proven OFFLINE by G-MEMO-CUE(discrete r=256) and TRANSFERS online
+#   unchanged: the integer Hamming gate is reduction-order-immune, so the live-cache verdict equals
+#   the ep.k verdict by construction. The metal legs prove the ACTION + SAFETY VALVE (the new part).
+#
+# methodology note (Shannon-Prime corrections to the as-specified directive):
+#  (1) the negative control is NOT the toy context (ep_toy is a TRUE POSITIVE for itself); the proven
+#      Step-2 fresh negatives + NULL->no-inject->baseline (G-MEMO-NULL) cover the no-fire path.
+#  (2) deflection is the SAFETY VALVE, not the selector; selection is the discrete cue (proven offline).
+#  (3) ADDED the reject leg the happy path never exercises: a corrupted (zeroed) recall must BREACH
+#      and be discarded, proving the valve actually fires.
+
+[base]       [g4-ppl] SP PPL=4.6665 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+[accept]     [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,42) (intact)
+[accept]     [g4-ppl] SP PPL=4.6665 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+[reject]     [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,42) ZEROED (G-P3-SHARED divergence control)
+[reject]     [g4-ppl] SP PPL=1876.2387 (report-only; set SP_PPL_ORACLE to gate) n_scored=42 n_ctx=84 chunks=1
+
+baseline PPL                        = 4.6665
+ACCEPT (ep_wiki MATCHED, NPOS=42)   = 4.6665   deflection +0.000%  -> <2%  -> PROMOTE   [PASS]
+REJECT (ep_wiki ZEROED,  NPOS=42)   = 1876.2387 deflection +40106.6% -> >=2% -> DISCARD   [PASS]
+
+G-MEMO-LOOP GREEN -- curator promotes the matched recall (0.000%, bit-identical) and the safety
+valve flags+discards the corrupted recall (+40106.6%). SELECT proven offline + order-immune.
