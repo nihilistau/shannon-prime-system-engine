@@ -1746,6 +1746,56 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
         }
     }
 
+    /* ════ E_G4_CU_REPLAY (XBAR P3.3): SP_REPLAY injection gate — G-P3-SHARED ════
+     * Inject a stored episode's owner K/V over the freshly-minted prefill rows [0,NPOS)
+     * before attention reads them. Three legs: (1) intact replay == baseline (f32 store is
+     * lossless); (2) zeroed episode -> DIVERGES (injection is load-bearing, not a no-op);
+     * (3) SP_REPLAY unset -> baseline floor (the ref run). Owner-only; sharers ride dKc[src].
+     * Episode produced by SP_XBAR_RECALL_WRITE (the P3.1-gated bit-exact mirror == baseline). */
+    {
+        const char *rg = getenv("SP_G4_REPLAY_GATE");
+        if (rg && atoi(rg) > 0) {
+            enum { RNP = 4, RNG = 12, RPT = RNP + RNG };
+            const int32_t rp[RNP] = { 2, 10, 100, 1000 };
+            const char *dir = getenv("SP_REPLAY_DIR"); if (!dir) dir = "_p33_ep";
+            char ev[600];
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=1");
+            /* leg 3 (floor): baseline, SP_REPLAY unset */
+            int32_t ref[RPT]; for (int i = 0; i < RNP; i++) ref[i] = rp[i];
+            int dnr = gemma4_decode_cuda(m, ref, RNP, RNG, -1);
+            /* produce the episode (WRITE mirrors the live KV bit-exactly == baseline, P3.1 gated) */
+            snprintf(ev, sizeof(ev), "SP_XBAR_RECALL_WRITE=%s", dir); _putenv(ev);
+            int32_t wr[RPT]; for (int i = 0; i < RNP; i++) wr[i] = rp[i];
+            gemma4_decode_cuda(m, wr, RNP, RNG, -1);
+            _putenv("SP_XBAR_RECALL_WRITE=");
+            /* leg 1 (intact): replay episode over prefill owner rows [0,RNP) */
+            snprintf(ev, sizeof(ev), "SP_REPLAY=%s", dir); _putenv(ev);
+            snprintf(ev, sizeof(ev), "SP_REPLAY_NPOS=%d", RNP); _putenv(ev);
+            int32_t in[RPT]; for (int i = 0; i < RNP; i++) in[i] = rp[i];
+            int dni = gemma4_decode_cuda(m, in, RNP, RNG, -1);
+            /* leg 2 (zeroed): inject zeros -> must diverge */
+            _putenv("SP_REPLAY_ZERO=1");
+            int32_t zr[RPT]; for (int i = 0; i < RNP; i++) zr[i] = rp[i];
+            int dnz = gemma4_decode_cuda(m, zr, RNP, RNG, -1);
+            _putenv("SP_REPLAY="); _putenv("SP_REPLAY_NPOS="); _putenv("SP_REPLAY_ZERO=");
+            if (big_embd) _putenv("SP_CUDA_DECODE_INT8=");
+            int intact_diffs = 0, zero_diffs = 0, n;
+            n = (dnr < dni ? dnr : dni); if (n > RPT) n = RPT;
+            for (int i = RNP; i < n; i++) if (ref[i] != in[i]) intact_diffs++;
+            n = (dnr < dnz ? dnr : dnz); if (n > RPT) n = RPT;
+            for (int i = RNP; i < n; i++) if (ref[i] != zr[i]) zero_diffs++;
+            fprintf(stderr, "    [g4-cuda-REPLAY] ref dn=%d intact dn=%d zero dn=%d | intact_diffs[%d..%d)=%d zero_diffs=%d\n",
+                    dnr, dni, dnz, RNP, RPT, intact_diffs, zero_diffs);
+            fprintf(stderr, "        ref   :"); for (int i = 0; i < RPT; i++) fprintf(stderr, " %d", ref[i]); fprintf(stderr, "\n");
+            fprintf(stderr, "        intact:"); for (int i = 0; i < RPT; i++) fprintf(stderr, " %d", in[i]);  fprintf(stderr, "\n");
+            fprintf(stderr, "        zero  :"); for (int i = 0; i < RPT; i++) fprintf(stderr, " %d", zr[i]);  fprintf(stderr, "\n");
+            SP_CHECK(dnr == RPT && dni == RPT && dnz == RPT, "P3.3: all three decodes produced full length");
+            SP_CHECK(intact_diffs == 0, "G-P3-SHARED leg1: intact replay == baseline (bit-identical)");
+            SP_CHECK(zero_diffs > 0,    "G-P3-SHARED leg2: zeroed episode DIVERGES (injection load-bearing)");
+            return SP_DONE();
+        }
+    }
+
     /* ════ E_G4_CU_PAGE (XBAR P3.2-b-1): paged-read bit-exact gate ════
      * legacy full-cache decode vs SP_XBAR_PAGE decode (per step: spill pos →
      * poison [0,pos] in the live cache → page [0,pos) back off Ring-2 before

@@ -1980,6 +1980,8 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
      * formal sp_xbar_block_off link = P3.1b), and attention READS from the store instead
      * of the live cache. Diff vs a legacy run = bit-exact gate on the off[L] addressing. */
     char *d_xbar_K=NULL, *d_xbar_V=NULL; size_t *xbar_off=NULL; size_t xbar_store_bytes=0; sp_xbar_manifest xmf{};
+    /* XBAR P3.3 (SP_REPLAY): episode injected over the freshly-minted prefill owner rows [0,NPOS). */
+    char *d_replay_K=NULL, *d_replay_V=NULL; size_t *replay_off=NULL; int replay_on=0, replay_npos=0, replay_zero=0;
     /* XBAR P3.1b-2 recall-as-history: pre-load an episode's K/V into the FRONT of the live cache
      * [0,H) and decode the prompt at absolute [H,..) — pos is already absolute, so NO offset
      * threading; just skip the forward for the pre-loaded episode positions. */
@@ -2257,6 +2259,46 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
         xbar_hist_on = 1;
         fprintf(stderr, "    [xbar-p3.1b2] recall-as-history: pre-loaded episode H=%d positions into the live-cache front\n", xbar_hist_H);
     }
+    /* ── XBAR P3.3: SP_REPLAY — inject a stored episode's owner K/V over the freshly-minted
+     *    prefill rows for pos<NPOS, BEFORE the cache store lands (the decode.c:457-468 seam ported
+     *    to the CUDA store boundary). Attention stays on the LIVE cache (no recall-read reroute) —
+     *    the injected rows ARE the live cache front. Owner layers only; sharers ride by construction
+     *    (Kuse=dKc[src]). Intact replay == baseline (f32 store is lossless); zeroed -> diverge; unset
+     *    -> bit-exact floor. Episode loaded read-only from ep.{mf,k,v} (the recall serialization). */
+    const char *replay_e = getenv("SP_REPLAY");
+    if (replay_e) {
+        { const char *np = getenv("SP_REPLAY_NPOS"); replay_npos = np ? atoi(np) : 0; }
+        { const char *z  = getenv("SP_REPLAY_ZERO"); replay_zero = (z && z[0] == '1'); }
+        if (replay_npos <= 0 || replay_npos > P) { sp_set_error("SP_REPLAY_NPOS out of range (need 0<NPOS<=P)"); goto done; }
+        char rp[1024]; FILE *rf; sp_xbar_manifest rmf; memset(&rmf, 0, sizeof(rmf));
+        snprintf(rp, sizeof(rp), "%s/ep.mf", replay_e); rf = fopen(rp, "rb");
+        if (!rf) { sp_set_error("SP_REPLAY: ep.mf open"); goto done; }
+        fseek(rf, 0, SEEK_END); long rl = ftell(rf); fseek(rf, 0, SEEK_SET);
+        uint8_t *rbm = (uint8_t *)malloc((size_t)rl);
+        if (!rbm || fread(rbm, 1, (size_t)rl, rf) != (size_t)rl) { free(rbm); fclose(rf); sp_set_error("SP_REPLAY: ep.mf read"); goto done; }
+        fclose(rf);
+        if (sp_xbar_manifest_deserialize(&rmf, rbm, (size_t)rl)) { free(rbm); sp_set_error("SP_REPLAY: deserialize"); goto done; }
+        free(rbm);
+        if (rmf.P < replay_npos) { sp_xbar_manifest_free(&rmf); sp_set_error("SP_REPLAY: episode shorter than NPOS"); goto done; }
+        replay_off = (size_t *)malloc((size_t)NL * sizeof(size_t));
+        if (!replay_off) { sp_xbar_manifest_free(&rmf); sp_set_error("SP_REPLAY off OOM"); goto done; }
+        for (int L = 0; L < NL; L++) replay_off[L] = (size_t)rmf.layers[L].off;
+        size_t rsb = (size_t)rmf.store_bytes;
+        if (cudaMalloc((void **)&d_replay_K, rsb) != cudaSuccess ||
+            cudaMalloc((void **)&d_replay_V, rsb) != cudaSuccess) { sp_xbar_manifest_free(&rmf); sp_set_error("SP_REPLAY store OOM"); goto done; }
+        uint8_t *rs = (uint8_t *)malloc(rsb);
+        if (!rs) { sp_xbar_manifest_free(&rmf); sp_set_error("SP_REPLAY host OOM"); goto done; }
+        snprintf(rp, sizeof(rp), "%s/ep.k", replay_e); rf = fopen(rp, "rb");
+        if (!rf || fread(rs, 1, rsb, rf) != rsb) { free(rs); if (rf) fclose(rf); sp_xbar_manifest_free(&rmf); sp_set_error("SP_REPLAY: ep.k read"); goto done; }
+        fclose(rf); cudaMemcpy(d_replay_K, rs, rsb, cudaMemcpyHostToDevice);
+        snprintf(rp, sizeof(rp), "%s/ep.v", replay_e); rf = fopen(rp, "rb");
+        if (!rf || fread(rs, 1, rsb, rf) != rsb) { free(rs); if (rf) fclose(rf); sp_xbar_manifest_free(&rmf); sp_set_error("SP_REPLAY: ep.v read"); goto done; }
+        fclose(rf); cudaMemcpy(d_replay_V, rs, rsb, cudaMemcpyHostToDevice); free(rs);
+        sp_xbar_manifest_free(&rmf);
+        replay_on = 1;
+        fprintf(stderr, "    [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,%d)%s\n",
+                replay_npos, replay_zero ? " ZEROED (G-P3-SHARED divergence control)" : " (intact)");
+    }
     /* ── XBAR P3.2-a shadow spill: open the Ring-2 stdio store + the off[L] law ──
      * Same §3 owner prefix-sum used by the recall block; sharers resolve to the
      * owner block but are never spilled. Per-pos staging = one position across all
@@ -2473,6 +2515,17 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                         k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(dv, nkv, hd, kvd, eps);
                         cudaMemcpyAsync(dKc[L] + (size_t)pos*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                         cudaMemcpyAsync(dVc[L] + (size_t)pos*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                        if (replay_on && pos < replay_npos) {   /* P3.3: episode block over the just-minted owner row, before attention reads it */
+                            if (replay_zero) {
+                                cudaMemsetAsync(dKc[L] + (size_t)pos*kvd, 0, (size_t)kvd*sizeof(float), st);
+                                cudaMemsetAsync(dVc[L] + (size_t)pos*kvd, 0, (size_t)kvd*sizeof(float), st);
+                            } else {
+                                cudaMemcpyAsync(dKc[L] + (size_t)pos*kvd, (const float *)(d_replay_K + replay_off[L]) + (size_t)pos*kvd,
+                                                (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                                cudaMemcpyAsync(dVc[L] + (size_t)pos*kvd, (const float *)(d_replay_V + replay_off[L]) + (size_t)pos*kvd,
+                                                (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                            }
+                        }
                         Kuse = dKc[L]; Vuse = dVc[L];
                     } else {
                         const int src = kvfs - (global ? 1 : 2);
@@ -3239,6 +3292,7 @@ done:
     free(hple);
     if (dKc) { for (int L = 0; L < NL; L++) if (dKc[L]) cudaFree(dKc[L]); free(dKc); }
     if (d_xbar_K) cudaFree(d_xbar_K); if (d_xbar_V) cudaFree(d_xbar_V); if (xbar_off) free(xbar_off); sp_xbar_manifest_free(&xmf);  /* P3.1/b recall store */
+    if (d_replay_K) cudaFree(d_replay_K); if (d_replay_V) cudaFree(d_replay_V); if (replay_off) free(replay_off);  /* P3.3 SP_REPLAY */
     if (spill_on && spill_be.close) spill_be.close(spill_be.handle);  /* P3.2-a Ring-2 spill store */
     if (spill_off) free(spill_off); if (spill_hK) cudaFreeHost(spill_hK); if (spill_hV) cudaFreeHost(spill_hV);
     if (page_hK) cudaFreeHost(page_hK); if (page_hV) cudaFreeHost(page_hV);  /* P3.2-b-1 page-in staging */
