@@ -1,0 +1,29 @@
+G-WEIGHT-T4-BYTEEXACT -- 2026-06-17T22:59:43Z  [PRIMARY mission = byte-exact weights, NOT compression]
+De-conflated: the rotation/reorder probes were COMPRESSION (convicted, redundant vs per-32-block OK_Q4B).
+This is the SEPARATE primary mission: T4 Frobenius byte-exact weights, as proposed (PPT-ARM-Theory s3.2).
+
+T4 s3.2 (Projective Cancellation): store W as integer O_K coords + a PER-TENSOR Frobenius scale pi^k (an
+algebraic O_K scalar). It amplifies by pi^4k through Q.K^T->V->W_O and CANCELS exactly at RMSNorm (num and
+denom both scale by pi^2k). So the scale is FREE+EXACT (no float multiply, no drift); forward is bit-identical
+to the float reference. Validated on Gemma3-1B (PPL 13.11 vs 13.12). The cancellation REQUIRES a per-tensor
+scale (per-block f16 scales cannot cancel -- not a single tensor-wide algebraic factor).
+
+MEASUREMENT (real RAW W_q L0, gamma separate; matmul-output relerr by scale granularity):
+  W_q range +/-0.165, per-row spread 5.4x (well-behaved raw weight).
+  int4: per-TENSOR(T4) 0.399 | per-row 0.240 | per-32-block 0.122   -> per-tensor DEAD at 4-bit (3.3x worse)
+  int8: per-TENSOR(T4) 0.023 | per-row 0.013 | per-32-block 0.0067  -> per-tensor VIABLE at 8-bit (normal int8 pt)
+  (earlier per-tensor 0.83 was an artifact of absorbing gemma's wild gamma [-141,193]; corrected to raw W.)
+
+FORCED CONCLUSION: byte-exact T4 lives at OK_Q8 (per-tensor pi^k), NOT OK_Q4B. The cancellation forces
+per-tensor; per-tensor forces 8-bit (4-bit per-tensor too lossy). Cost ~2x the OK_Q4B footprint -- BIGGER,
+not smaller -- which is correct: this is the EXACTNESS/auditability mission, not compression. At OK_Q8 the
+weight enters the dp4a GEMV as PURE INTEGER CODES (no scale multiply -- pi^k cancels at gemma RMSNorm), the
+int8xint8 accumulate is already exact-integer in the engine -> byte-reproducible forward; weights join the
+memory tier in the exact-integer O_K container (completes the unification).
+
+BUILD (next campaign): (1) confirm engine OK_Q8 exists (recipe B1 = OK_Q8 rest + OK_Q4B gate/up) + check its
+scale is per-tensor or per-row. (2) make the OK_Q8 scale a per-tensor pi^k Frobenius factor; verify it cancels
+through gemma's REAL RMSNorm path (s3.2 on the engine, not just the 1B validation). (3) GATE = byte-exact
+(logits bit-identical across reduction-order/machine) AND PPL-parity vs gold 4.68. OPEN: does int8 per-tensor
+hold gold PPL across 48 layers (0.023 per-layer weight-relerr compounds -- MEASURE on-model, do not assume).
+At 4-bit, byte-exact-via-cancellation is impossible; a byte-exact-4bit would need exact per-block scales (harder).
