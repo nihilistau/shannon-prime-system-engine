@@ -1,0 +1,45 @@
+# G-MEMO-CUE (discrete / bit-collision form) — C2 Step 2 Shannon-Prime re-orientation receipt
+# date: 2026-06-17
+# WHY: drift-check vs Gemini. Gemini: 'the dot product IS a Hamming distance.' FALSE as built —
+#   the signatures are real-valued projection centroids (R@K, K float), not sign-bits.
+#   dot = r - 2*Hamming holds ONLY for +/-1 vectors. So we MEASURED the binarized form.
+
+## r-sweep: does sign-binarizing (true Hamming gate) preserve target/noise separation?
+## cmd: python3 tools/curator/rsweep.py
+   r | ep_toy self ep_wiki self | max non-target | bit-gap | clean?
+  32 |     24/32       17/32    |         18/32  |     -1 | no  (chance=16)
+  64 |     44/64       37/64    |         39/64  |     -2 | no  (chance=32)
+ 128 |     83/128      85/128   |         77/128 |     +6 | YES  (chance=64)
+ 256 |    177/256     178/256   |        158/256 |    +19 | YES  (chance=128)
+ 512 |    363/512     354/512   |        322/512 |    +32 | YES  (chance=256)
+
+## FINDING: at the router-native r=32/64 binarization COLLAPSES separation (bit-gap -1/-2) —
+##   the thin ep_wiki margin lived in MAGNITUDE, which sign discards. Recovers at r>=128.
+##   r=256 chosen: +19-bit gap, 32-byte sig, power-of-two. Discrete form is STRICTLY weaker
+##   than the real dot at equal width; we spend hash width to buy an integer/bit-exact address.
+
+## discrete resolver gate at r=256, TAU_BITS=168
+## cmd: python3 tools/curator/discrete_resolve.py
+[reg] registry_bits.jsonl -> /sessions/friendly-dreamy-ramanujan/mnt/shannon-prime-system-engine/tests/fixtures/xbar_c2/registry_bits.jsonl  (2 eps)  R_BITS=256  TAU_BITS=168
+[reg]   id=0 ep_toy   sig_bits=b298a734009f7be9... (256 bits)
+[reg]   id=1 ep_wiki  sig_bits=f9bab77ca7f173f3... (256 bits)
+
+[pos] held-out cue -> resolve (must hit OWN id, agreement >= tau):
+  cue[ep_toy  ] -> ep_toy   agree=177/256 (tau=168)  [PASS]
+  cue[ep_wiki ] -> ep_wiki  agree=178/256 (tau=168)  [PASS]
+
+[neg] unrelated query -> resolve (must be NULL):
+  neg[0] -> NULL     agree=134/256  [PASS]
+  neg[1] -> NULL     agree=140/256  [PASS]
+  neg[2] -> NULL     agree=126/256  [PASS]
+  neg[3] -> NULL     agree=128/256  [PASS]
+  neg[4] -> NULL     agree=120/256  [PASS]
+  neg[5] -> NULL     agree=131/256  [PASS]
+  neg[6] -> NULL     agree=125/256  [PASS]
+  neg[7] -> NULL     agree=134/256  [PASS]
+
+[gate] G-MEMO-CUE(discrete r=256) GREEN -- bit-collision gate separates signal from noise, rejects negatives
+
+# VERDICT: the cue is a Boolean logic gate driven by an INTEGER Hamming radius over a 256-bit
+#   LSH hash. No float in the decision; reduction-order-immune; hardware-independent verdict.
+#   Correctness safety stays MECHANICAL downstream: PPL-deflection <2% (P3.4) -> O(1) bit-exact rewind.
