@@ -1,0 +1,10 @@
+[reg] R built: (32, 512) ±1 from seed 0x5350524f4a2b (sum=-86, first row[:8]=[1, 1, 1, 1, -1, -1, 1, -1])
+[reg] ep_toy: P=56 real_pos=16 (sig from 8, cue from 8) sha=2ca572cf594249cf
+[reg] ep_wiki: P=294 real_pos=84 (sig from 42, cue from 42) sha=76aea8cc090be530
+[reg] registry.jsonl -> /mnt/f/ring2/episodes/registry.jsonl  (2 episodes)
+
+[sep] cosine(cue_e, sig_f) — target should be the row-max:
+  cue[ep_toy  ] self=+0.6863  best=ep_toy(+0.6863)  max_bg_noise=+0.2162  margin=+0.2158  [PASS]
+  cue[ep_wiki ] self=+0.3730  best=ep_wiki(+0.3730)  max_bg_noise=+0.1932  margin=+0.1534  [PASS]
+
+[sep] G-MEMO-CUE(offline) GREEN — every target separates from background
