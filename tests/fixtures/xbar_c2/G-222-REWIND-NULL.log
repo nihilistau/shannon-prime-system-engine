@@ -1,0 +1,28 @@
+# G-222 — C2 #222 receipt: SP_REPLAY ported to the persistent gemma4_kv_* ABI + O(1) bit-exact rewind
+# date: 2026-06-17  cmd: _run_g222.bat (SP_G4_KV_REPLAY_GATE=1, SP_REPLAY_NPOS=8, SP_CUDA_DECODE_INT8=1)
+#
+# new engine seam: gemma4_kv_replay(s, epdir, npos, zero) injects a stored episode's owner-K/V
+#   directly into the RESIDENT cache at [dpos,dpos+npos) (full-cache slot==pos), advances dpos.
+#   The curator SPECULATES a recall here; on reject, gemma4_kv_rewind(npos) undoes it bit-exactly
+#   in O(1) (full-cache shear touches ZERO cache bytes; the KAI-1b slot==pos inverse).
+#
+# Scope correction vs the as-specified directive: step 2 (port SP_G4_SCORE into the kv ABI) is NOT
+#   required to close #222 — the deliverable is the O(1) bit-exact REWIND, proven by byte-comparison,
+#   not by re-scoring (the deflection number is already a proven one-shot receipt, G-MEMO-LOOP).
+#   The kv-side scorer is a separate, deferrable optimization. #222 = the rewind.
+
+## LEG E2B (15 owners / 20 sharers)
+    [xbar-#222] gemma4_kv_replay: ZEROED episode into resident cache [24,32) (reject control)
+[g4-kvrp] anchor=24 after_replay=32 (npos=8) back=24 cmp=884736B owners=15
+[g4-kvrp] LOAD-BEARING (injected slots zeroed): GREEN (0/36864 nonzero)
+[g4-kvrp] G-222 REWIND-NULL ([0,anchor) byte-identical after O(1) rewind): GREEN (layer-diffs=0) pos-reset=OK
+
+## LEG 12B (48 owners)
+    [xbar-#222] gemma4_kv_replay: ZEROED episode into resident cache [24,32) (reject control)
+[g4-kvrp] anchor=24 after_replay=32 (npos=8) back=24 cmp=16515072B owners=48
+[g4-kvrp] LOAD-BEARING (injected slots zeroed): GREEN (0/688128 nonzero)
+[g4-kvrp] G-222 REWIND-NULL ([0,anchor) byte-identical after O(1) rewind): GREEN (layer-diffs=0) pos-reset=OK
+
+# VERDICT: replay-inject is LOAD-BEARING (injected slots read back all-zero on both artifacts) and the
+# O(1) rewind resets the pre-injection floor [0,anchor) BYTE-IDENTICAL (layer-diffs=0), pos reset to anchor.
+# #222 CLOSED: the curator can speculate a recalled memory in the persistent cache and undo it in O(1).

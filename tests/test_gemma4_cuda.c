@@ -74,6 +74,7 @@ int   gemma4_kv_inject(sp_g4_kv *s, const float *emb); /* KAI-2: override next s
 int   gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token); /* KAI-3 §7.1: sequence wrapper */
 long  gemma4_kv_devfree_mib(void);          /* free VRAM in MiB (cudaMemGetInfo, fragmentation-aware) */
 long  gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV);
+int   gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero);   /* C2 #222 */
 void  gemma4_kv_close(sp_g4_kv *s);
 void xbar_arm_shadow_result(long *mism, long *sel);   /* P3.2-b-2b Phase-1 oracle parity handoff */
 void sp_cuda_model_release(const qwen3_model *m);
@@ -604,6 +605,64 @@ static int run_kv_rewind(void) {
         diffs==0?"GREEN":"RED",diffs, genmatch?"GREEN":"RED", gen1[0],gen1[1],gen1[2],gen1[3]);
     gemma4_kv_close(s); sp_model_unload(handle);
     return (diffs==0 && genmatch)?0:3;
+}
+
+/* ═══ SP_G4_KV_REPLAY_GATE=1 (C2 #222 G-222): replay-inject into the persistent cache, then
+ *     O(1) bit-exact rewind back to the pre-injection floor. Prefill a system anchor, snapshot;
+ *     gemma4_kv_replay a ZEROED (corrupted) episode into [anchor,anchor+npos) (load-bearing:
+ *     the injected slots must read back all-zero); rewind(npos); snapshot. The [0,anchor) region
+ *     MUST be byte-identical (the rewind is the KAI-1b slot==pos inverse, now for a replay-inject —
+ *     proving the curator can SPECULATE a recall and UNDO it bit-exactly in O(1) on reject).
+ *     Env: SP_REPLAY=<episode dir>, SP_REPLAY_NPOS (default 8). Full cache (no SP_G4_KV_RING_W). */
+static int run_kv_replay(void) {
+    const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
+    const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
+    const char *epdir = getenv("SP_REPLAY");
+    const int npos = getenv("SP_REPLAY_NPOS") ? atoi(getenv("SP_REPLAY_NPOS")) : 8;
+    if (!epdir) { fprintf(stderr, "[g4-kvrp] set SP_REPLAY to the episode dir\n"); return 2; }
+    sp_model *handle = NULL;
+    if (sp_model_load(spm, stk, &handle) != SP_OK || !handle) { fprintf(stderr, "[g4-kvrp] load FAIL\n"); return 2; }
+    qwen3_model *m = sp_model_to_gemma4(handle);
+    if (!m) { fprintf(stderr, "[g4-kvrp] to_gemma4 FAIL: %s\n", sp_last_error()); return 2; }
+    const qwen3_config *c = &m->cfg;
+    const int NL=(int)c->n_layers, period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
+    const int kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:NL;
+    const int g_nkv=(int)c->n_head_kv,g_hd=(int)c->head_dim,s_nkv=(int)c->g4_nkv_swa,s_hd=(int)c->g4_hd_swa;
+    const int Pmax=256, sys_n=24;
+    sp_g4_kv *s=gemma4_kv_open(m,Pmax);
+    if(!s){ fprintf(stderr,"[g4-kvrp] kv_open FAIL: %s\n",sp_last_error()); return 2; }
+    int32_t sys[24]; for(int i=0;i<sys_n;i++) sys[i]=100+i;
+    if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-kvrp] sys prefill FAIL: %s\n",sp_last_error()); return 2; }
+    int anchor=gemma4_kv_pos(s);
+    float **hK0=(float**)calloc(NL,sizeof(float*)),**hV0=(float**)calloc(NL,sizeof(float*));
+    float **hK1=(float**)calloc(NL,sizeof(float*)),**hV1=(float**)calloc(NL,sizeof(float*));
+    float **hKm=(float**)calloc(NL,sizeof(float*)),**hVm=(float**)calloc(NL,sizeof(float*));
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        size_t nb=(size_t)Pmax*kvd*sizeof(float);
+        hK0[L]=(float*)malloc(nb);hV0[L]=(float*)malloc(nb);hK1[L]=(float*)malloc(nb);hV1[L]=(float*)malloc(nb);hKm[L]=(float*)malloc(nb);hVm[L]=(float*)malloc(nb); }
+    gemma4_kv_snapshot(s,hK0,hV0);                                   /* pre-injection floor [0,anchor) */
+    if(gemma4_kv_replay(s,epdir,npos,/*zero=*/1)){ fprintf(stderr,"[g4-kvrp] replay FAIL: %s\n",sp_last_error()); return 2; }
+    int after=gemma4_kv_pos(s);
+    gemma4_kv_snapshot(s,hKm,hVm);                                   /* mid: injected region must be zeroed */
+    /* load-bearing: the injected slots [anchor,after) must read back all-zero (the write landed) */
+    long inj_nonzero=0, inj_floats=0;
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        for(int p=anchor;p<after;p++){ for(int d=0;d<kvd;d++){ inj_floats++; if(hKm[L][(size_t)p*kvd+d]!=0.0f) inj_nonzero++; } } }
+    if(gemma4_kv_rewind(s,after-anchor)){ fprintf(stderr,"[g4-kvrp] rewind FAIL\n"); return 2; }
+    int back=gemma4_kv_pos(s);
+    gemma4_kv_snapshot(s,hK1,hV1);                                   /* post-rewind floor [0,anchor) */
+    long diffs=0; size_t cmp_bytes=0;
+    for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
+        size_t nb=(size_t)anchor*kvd*sizeof(float); cmp_bytes+=2*nb;
+        if(memcmp(hK0[L],hK1[L],nb)) diffs++; if(memcmp(hV0[L],hV1[L],nb)) diffs++; }
+    int load_bearing=(inj_nonzero==0 && inj_floats>0);              /* injected slots all-zero ⇒ replay wrote */
+    int pos_ok=(back==anchor);
+    fprintf(stderr,"[g4-kvrp] anchor=%d after_replay=%d (npos=%d) back=%d cmp=%zuB owners=%d\n",anchor,after,npos,back,cmp_bytes,(kvfs<NL?kvfs:NL));
+    fprintf(stderr,"[g4-kvrp] LOAD-BEARING (injected slots zeroed): %s (%ld/%ld nonzero)\n",load_bearing?"GREEN":"RED",inj_nonzero,inj_floats);
+    fprintf(stderr,"[g4-kvrp] G-222 REWIND-NULL ([0,anchor) byte-identical after O(1) rewind): %s (layer-diffs=%ld) pos-reset=%s\n",
+        diffs==0?"GREEN":"RED",diffs,pos_ok?"OK":"BAD");
+    gemma4_kv_close(s); sp_model_unload(handle);
+    return (diffs==0 && load_bearing && pos_ok)?0:3;
 }
 
 /* ═══ SP_G4_KV_TELEMETRY=1 (KAI-1b §5.4): the O(actions)→O(1) receipt. ═══
@@ -2004,6 +2063,7 @@ int main(void) {
     if (getenv("SP_G4_KAIROS_METAL")) return run_kairos_metal(); /* KAI-1c: semantic loop on the journaled ring */
     if (getenv("SP_G4_KAIROS_SOAK")) return run_kairos_soak();   /* G-KAIROS-1: >=24h unattended endurance soak */
     if (getenv("SP_G4_KV_REWIND")) return run_kv_rewind(); /* KAI-1b: G-1b-REWIND-NULL bit-exact gate */
+    if (getenv("SP_G4_KV_REPLAY_GATE")) return run_kv_replay(); /* C2 #222: replay-inject + O(1) bit-exact rewind */
     if (getenv("SP_G4_KV_WRAP")) return run_kv_wrap();     /* KAI-1c: G-1b-WRAP-NULL wrap-aware ring gate */
     if (getenv("SP_G4_KV_INJECT_NULL")) return run_kv_inject_null(); /* KAI-2: G-KAIROS-2 inject self-null */
     if (getenv("SP_G4_KAIROS_INTERRUPT")) return run_kairos_interrupt(); /* KAI-2: G-KAIROS-2 latent-vs-text A/B */

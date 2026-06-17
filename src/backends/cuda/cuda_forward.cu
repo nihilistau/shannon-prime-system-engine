@@ -3741,6 +3741,64 @@ extern "C" long gemma4_kv_devfree_mib(void) {
 /* D2H the live K/V cache for all owner layers into host buffers (the gate's
  * byte-comparator). Caller passes pre-sized host arrays [NL][Pmax*kvd]; only
  * owner layers (L<kvfs) are filled. Returns total bytes copied. */
+/* C2 #222: replay-inject a stored episode's owner K/V DIRECTLY into the resident cache at
+ * [dpos, dpos+npos) (full-cache slot==pos), then advance dpos. The persistent-ABI twin of the
+ * one-shot SP_REPLAY: the curator SPECULATES a recalled memory here, scores it, and on reject
+ * UNDOES it bit-exactly in O(1) via gemma4_kv_rewind(npos) (the KAI-1b slot==pos inverse — the
+ * sheared [dpos,..) slots are never read again). zero=1 injects a ZEROED (corrupted) episode =
+ * the reject control. Owner layers only (sharers ride owners by off-indirection). ring_W must be 0
+ * (SWA-ring replay needs the KAI-1c journal — a named follow-on). Returns 0 on success. */
+extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero) {
+    if (!s || !epdir || npos <= 0) { sp_set_error("gemma4_kv_replay: bad args"); return -1; }
+    if (s->ring_W > 0) { sp_set_error("gemma4_kv_replay: full-cache only (ring_W==0)"); return -1; }
+    if (s->dpos_host + npos > s->Pmax) { sp_set_error("gemma4_kv_replay: exceeds Pmax"); return -1; }
+    char rp[1024]; FILE *rf; sp_xbar_manifest mf; memset(&mf, 0, sizeof(mf));
+    snprintf(rp, sizeof rp, "%s/ep.mf", epdir); rf = fopen(rp, "rb");
+    if (!rf) { sp_set_error("kv_replay: ep.mf open"); return -1; }
+    fseek(rf, 0, SEEK_END); long ml = ftell(rf); fseek(rf, 0, SEEK_SET);
+    uint8_t *mb = (uint8_t *)malloc((size_t)ml);
+    if (!mb || fread(mb, 1, (size_t)ml, rf) != (size_t)ml) { free(mb); fclose(rf); sp_set_error("kv_replay: ep.mf read"); return -1; }
+    fclose(rf);
+    if (sp_xbar_manifest_deserialize(&mf, mb, (size_t)ml)) { free(mb); sp_set_error("kv_replay: deserialize"); return -1; }
+    free(mb);
+    if (mf.P < npos) { sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: episode shorter than npos"); return -1; }
+    size_t sb = (size_t)mf.store_bytes; char *dK = NULL, *dV = NULL;
+    if (cudaMalloc((void **)&dK, sb) != cudaSuccess || cudaMalloc((void **)&dV, sb) != cudaSuccess) {
+        if (dK) cudaFree(dK); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: dev OOM"); return -1; }
+    uint8_t *hs = (uint8_t *)malloc(sb);
+    if (!hs) { cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: host OOM"); return -1; }
+    snprintf(rp, sizeof rp, "%s/ep.k", epdir); rf = fopen(rp, "rb");
+    if (!rf || fread(hs, 1, sb, rf) != sb) { if (rf) fclose(rf); free(hs); cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: ep.k read"); return -1; }
+    fclose(rf); cudaMemcpy(dK, hs, sb, cudaMemcpyHostToDevice);
+    snprintf(rp, sizeof rp, "%s/ep.v", epdir); rf = fopen(rp, "rb");
+    if (!rf || fread(hs, 1, sb, rf) != sb) { if (rf) fclose(rf); free(hs); cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: ep.v read"); return -1; }
+    fclose(rf); cudaMemcpy(dV, hs, sb, cudaMemcpyHostToDevice); free(hs);
+    cudaStream_t st = g_w.stream; int base = s->dpos_host;
+    for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+        const int global = ((L % s->period) == s->period - 1);
+        const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
+        const size_t off = (size_t)mf.layers[L].off;   /* owner prefix-sum byte offset */
+        for (int p = 0; p < npos; p++) {
+            float *dstK = s->dKc[L] + (size_t)(base + p) * kvd;
+            float *dstV = s->dVc[L] + (size_t)(base + p) * kvd;
+            if (zero) {
+                cudaMemsetAsync(dstK, 0, (size_t)kvd * sizeof(float), st);
+                cudaMemsetAsync(dstV, 0, (size_t)kvd * sizeof(float), st);
+            } else {
+                cudaMemcpyAsync(dstK, (const float *)(dK + off) + (size_t)p * kvd, (size_t)kvd * sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(dstV, (const float *)(dV + off) + (size_t)p * kvd, (size_t)kvd * sizeof(float), cudaMemcpyDeviceToDevice, st);
+            }
+        }
+    }
+    cudaStreamSynchronize(st);
+    cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf);
+    s->dpos_host += npos;
+    if (cudaMemcpy(s->dpos, &s->dpos_host, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) { sp_set_error("kv_replay: dpos H2D"); return -1; }
+    fprintf(stderr, "    [xbar-#222] gemma4_kv_replay: %s episode into resident cache [%d,%d)%s\n",
+            zero ? "ZEROED" : "intact", base, base + npos, zero ? " (reject control)" : "");
+    return 0;
+}
+
 extern "C" long gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV) {
     if (!s || !hK || !hV) return -1;
     cudaStreamSynchronize(g_w.stream);
