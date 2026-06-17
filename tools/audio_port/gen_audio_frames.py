@@ -80,6 +80,7 @@ def main():
         for i, target in enumerate(toks):
             wavs = sorted(glob.glob(os.path.join(K, "wav", f"{split}_{i}_*.wav")))
             if not wavs: continue
+            if split == "eval": wavs = wavs[:1]   # held-out = 1 clean voice/event, aligned to expect.txt (8)
             for wv in wavs:                                  # each voice = an augmented sample
                 x, sr = load_wav_mono(wv); x = resample_to(x, sr, 16000)
                 dur = len(x) / 16000.0

@@ -39,6 +39,7 @@ def main():
     ap.add_argument("--hidden", type=int, default=256)   # GNA-conservative: out-ch <=256
     ap.add_argument("--export_tau", type=float, default=0.2)
     ap.add_argument("--out", default="audio_ctc.pt")
+    ap.add_argument("--load", default=None, help="load a trained ckpt and skip training (re-export only)")
     ap.add_argument("--export", action="store_true"); ap.add_argument("--packets_dir", default="kai3_audio_packets")
     ap.add_argument("--manifest_out", default=None); ap.add_argument("--manifest_prefix", default="")
     a = ap.parse_args()
@@ -87,7 +88,11 @@ def main():
                 ok += sum(1 for j in range(min(len(col), len(tg))) if col[j] == tg[j]); tot += len(tg)
             return ok / max(tot, 1)
 
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=1e-5)
+    if a.load and os.path.exists(a.load):
+        ck = torch.load(a.load, map_location=dev); net.load_state_dict(ck["state"])
+        print(f"[actc] loaded ckpt {a.load} (best={ck.get('best','?')}) — skipping train, re-export only", flush=True)
+        a.epochs = 0
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, a.epochs), eta_min=1e-5)
     N = trX.shape[0]; bs = a.batch_size
     best = -1.0; best_state = None
     for ep in range(a.epochs):
