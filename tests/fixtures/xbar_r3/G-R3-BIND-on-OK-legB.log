@@ -1,0 +1,88 @@
+==========================================================================
+ G-R3-BIND-on-O_K (Leg B) RECEIPT -- 2026-06-17T19:15:22Z  [HONEST NEGATIVE]
+ Does aligning the Ring-3 ADDRESS SPACE to the curve's splitting law
+ (split-prime O_K Dirichlet-character carriers) buy concentration over
+ the random +/-1 carrier? Heegner ladder d=-67 (streak-16) vs d=-163 (streak-40).
+==========================================================================
+
+REPRO: SP_R3_LIB=<path>/libsp.so python3 tools/ring3/g_r3_bind_ok_leg_b.py   (lib built per Leg A receipt)
+CARRIER: chi_d(n)=(d/n) Kronecker symbol = the real primitive Dirichlet char mod |d|; p splits in O_K iff chi_d(p)=+1
+  (paper split-prime law n^2+n+41 for -163 is the representable subset). Address family = cyclic shifts of chi_d.
+DEGREE: N=512 (engine ring degree), matched across both fields + random baseline.
+
+--- captured run output ---
+[legB] N=512  LIB=/tmp/spbuild/libsp.so
+[chk] chi_-163 on Euler-163 split primes: [1, 1, 1, 1, 1, 1, 1, 1]
+[chk] chi_-67  on Euler-67  split primes: [1, 1, 1, 1, 1, 1]
+[chk] d=-67: +1 fraction over first 4000 n = 0.493 (Chebotarev ~0.5)
+[chk] d=-163: +1 fraction over first 4000 n = 0.498 (Chebotarev ~0.5)
+
+[parity] OK_-67 sp_pr_mul fails=0  OK_-163 fails=0  (0 => bind bit-identical to native engine)
+
+    family  Nep |  rec@1  rec@5 |  min_mgn |  coh_max  coh_mean
+random_pm1    8 |  1.000  1.000 |   0.1695 |   0.1094    0.0400
+random_pm1   16 |  1.000  1.000 |   0.1180 |   0.1172    0.0355
+random_pm1   32 |  1.000  1.000 |   0.0183 |   0.1406    0.0343
+random_pm1   64 |  0.641  0.875 |  -0.1069 |   0.1797    0.0355
+
+    OK_-67    8 |  1.000  1.000 |   0.0340 |   0.0297    0.0151
+    OK_-67   16 |  0.688  1.000 |  -0.0312 |   0.0297    0.0154
+    OK_-67   32 |  0.406  0.812 |  -0.1122 |   0.0357    0.0153
+    OK_-67   64 |  0.172  0.438 |  -0.1448 |   0.0397    0.0153
+
+   OK_-163    8 |  1.000  1.000 |   0.0668 |   0.0138    0.0050
+   OK_-163   16 |  0.938  1.000 |  -0.0010 |   0.0314    0.0076
+   OK_-163   32 |  0.656  0.906 |  -0.0757 |   0.0314    0.0085
+   OK_-163   64 |  0.359  0.672 |  -0.1191 |   0.0393    0.0086
+
+/tmp/g_r3_bind_ok_leg_b.py:51: RuntimeWarning: invalid value encountered in divide
+  Fw=np.where(mag>1e-9, F/mag, 1.0+0j)
+   OK_-67u    8 |  1.000  1.000 |   0.0780 |   0.3370    0.0672
+   OK_-67u   16 |  0.938  1.000 |  -0.0116 |   0.3391    0.0543
+   OK_-67u   32 |  0.656  0.875 |  -0.0620 |   0.3391    0.0408
+   OK_-67u   64 |  0.266  0.531 |  -0.1245 |   0.3579    0.0325
+
+  OK_-163u    8 |  1.000  1.000 |   0.0343 |   0.0869    0.0261
+  OK_-163u   16 |  0.938  1.000 |  -0.0028 |   0.2257    0.0316
+  OK_-163u   32 |  0.656  0.938 |  -0.0521 |   0.2651    0.0320
+  OK_-163u   64 |  0.453  0.672 |  -0.1250 |   0.2651    0.0287
+
+[hamming] 256-bit SimHash inter-address distance @N=64 (min / mean; 128=ideal-orthogonal):
+          random_pm1: min= 99  mean= 128.0
+              OK_-67: min=100  mean= 129.2
+             OK_-163: min= 95  mean= 128.7
+             OK_-67u: min=101  mean= 129.0
+            OK_-163u: min= 98  mean= 128.7
+[verdict] mutual coherence @N=64 (max / mean):
+          random +/-1 : 0.1797 / 0.0355
+          OK_-67      : 0.0397 / 0.0153
+          OK_-163     : 0.0393 / 0.0086
+[verdict] recall@5 @N=64: random=0.875  OK_-67=0.438  OK_-163=0.672
+[verdict] (1) native-space coherence ladder -163<=-67<=random: TRUE (mean 0.0086<=0.0153<=0.0355)
+[verdict] (2) O_K carrier beats random on Ring-3 recall@5: FALSE (O_K-163 0.672 vs random 0.875)
+[verdict] (3) O_K carrier beats random on C2 SimHash Hamming margin: FALSE (all families ~128 mean / min ~95-101 -- random projection washes out native coherence)
+[verdict] OPERATIONAL CONCLUSION: algebraic carrier alignment lowers native coherence (real, Heegner-ordered, Weil-bound) but that advantage is INERT for both operational metrics at N=512 shift-family. Random +/-1 (Leg A: exact-integer, reduction-order-immune) STAYS the carrier. The O_K algebra's proven operational value is Leg A (exactness + order-immunity), not Leg B carrier concentration. HONEST NEGATIVE.
+
+--- VERDICT (no spin) ---
+SANITY: chi_d=+1 on every Euler split prime (both fields); +1 density ~0.5 (Chebotarev). Kronecker correct.
+C-PARITY: O_K carriers bind BIT-IDENTICAL to native sp_pr_mul (0 fails) -- the deployment claim survives the new carrier.
+
+(1) NATIVE-SPACE COHERENCE: the Heegner ladder is REAL and ordered. Mean mutual coherence @N=64:
+    random +/-1 0.0355  >  O_K(-67) 0.0153  >  O_K(-163) 0.0086  (4x lower; -163 best). Weil/character-sum, made concrete.
+(2) RING-3 RECALL: O_K carrier does NOT beat random (recall@5 @N=64: random 0.875 vs O_K-163 0.672, O_K-67 0.438).
+    ROOT CAUSE: chi_d has period |d|<<N=512 -> spiky power spectrum -> poor self-unbind (a (x) a* far from delta).
+    Unitary lift (whiten to flat spectrum, keep phase) recovers a little recall but re-raises coherence: shifts of one
+    periodic sequence are cyclic-correlated. A small-modulus character cannot supply a large independent flat-spectrum family.
+(3) C2 SIMHASH HAMMING: O_K carrier does NOT beat random (all families ~128 mean, min ~95-101 -- indistinguishable).
+    ROOT CAUSE: the random Gaussian projection in the SimHash resolver washes out native-space coherence by construction.
+
+OPERATIONAL CONCLUSION: algebraic carrier alignment lowers native coherence (real, Heegner-ordered) but that advantage is
+INERT for BOTH operational metrics at the N=512 shift-family construction. The random +/-1 carrier proven in Leg A
+(exact-integer negacyclic CRT-NTT, bit-identical to engine, reduction-order-immune) STAYS the Ring-3 carrier. The O_K
+algebra's proven OPERATIONAL value is Leg A (exactness + reduction-order immunity), NOT Leg B carrier concentration.
+
+SCOPE/CAVEAT (bounded claim, not the last word): negative is specific to (a) a shift-family of a single small-period
+character and (b) a random SimHash. A genuinely independent O_K-carrier family and/or a structure-preserving (non-random)
+hash are untested and could differ -- but on the natural construction, no operational win. Honest negative stays attached.
+
+[gate] G-R3-BIND-on-O_K (Leg B): MEASURED. Hypothesis NOT operationally supported. Leg A carrier stands.
