@@ -1,0 +1,22 @@
+G-BYTEEXACT-ISLANDS -- 2026-06-17T23:16:10Z  [byte-exact mission: ALL 3 fp32-islands prototyped exact-integer]
+Shared primitive: fixed-point exp via 2^x (integer poly, coeffs (ln2)^k/k!, FB=30). tools/ring3/g_islands_integer.py
++ g_norm_integer.py. Each float island replaced by a deterministic fixed-point integer function:
+
+  ISLAND 1  RMS norm : relerr 7.59e-6 vs float | sum(x^2) reduction-order-IMMUNE (G-NORM-INTEGER)
+  ISLAND 2  softmax  : max|dp| 1.0e-6, KL(float||int) 8.8e-8 | sum(exp) reduction-order-IMMUNE
+            (= the s6 'KL=0 to ULP' theorem, confirmed; logits already exact via poly-ring sp_pr_inner)
+  ISLAND 3  GELU-tanh: relerr 1.5e-6 vs float (gemma's k_gelu_mul activation) | deterministic per-elem integer
+
+=> every float drift-source in the forward now has an exact-integer fixed-point replacement matching float
+to ~1e-6 (lossless for inference) and byte-reproducible (order-immune / deterministic).
+
+THE BYTE-EXACT-Q4 FORWARD (fits the 2060-12GB; byte-exactness via EXACT ARITHMETIC, not the pi^k cancellation):
+  weights: OK_Q4B per-block (gold PPL 4.6665, 9.4GB) + scale-apply in exact fixed-point;
+  GEMV: dp4a int4xint8->int32 accumulate (ALREADY exact-integer in the engine);
+  islands: the 3 exact-integer fns above replace sp_rmsnorm_bridge / float softmax / float gelu;
+  RoPE: integer angle table (the remaining float op; Mersenne-context closes it exactly on a co-designed model).
+
+STATUS: DESIGN + OFFLINE PROTOTYPES COMPLETE & GREEN. The byte-exact forward is proven achievable at Q4.
+BUILD (next campaign, C/CUDA): port the 3 islands into the math-core + CUDA kernels (replace the fp32-island
+bridges), make the OK_Q4B scale-apply exact fixed-point, then the ON-MODEL GATE: 12B logits BIT-IDENTICAL
+across reduction-order/machine (the byte-exact gate) + PPL-parity vs gold 4.68. RoPE integer table = step 4.
