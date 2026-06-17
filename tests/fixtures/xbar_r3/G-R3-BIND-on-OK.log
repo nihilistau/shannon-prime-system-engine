@@ -1,0 +1,72 @@
+==========================================================================
+ G-R3-BIND-on-O_K (Leg A) RECEIPT  -- 2026-06-17T19:02:24Z
+ The XBAR Ring-3 VSA bind, re-carried from float FFT onto the engine-native
+ exact-integer dual-prime negacyclic CRT-NTT (the O_K/R_q substrate).
+==========================================================================
+
+REPRO:
+ # 1. build the native core primitives into a shared lib (Linux gcc; the
+ #    canonical .a are MinGW-built -- identical C sources, frozen primes):
+ gcc -shared -fPIC -O2 -D_POSIX_C_SOURCE=200809L -D_FILE_OFFSET_BITS=64 \
+ -Ishannon-prime-system/include \
+ shannon-prime-system/core/ntt_crt/ntt_crt.c shannon-prime-system/core/ntt_crt/ntt_batch.c \
+ shannon-prime-system/core/poly_ring/poly_ring.c shannon-prime-system/core/poly_ring/poly_ring_bluestein.c \
+ shannon-prime-system/core/poly_ring/resdot.c -o libsp.so
+ # 2. run the gate (reuses the real C2 sig-seeded addresses from _p33_ep / _c2_ep_wiki):
+ SP_R3_ENG=<engine-root> SP_R3_LIB=<path>/libsp.so python3 tools/ring3/g_r3_bind_ok.py
+
+FROZEN PARAMS: N=512 (engine ring degree; supports {128,256,512})  q1=1073738753 q2=1073732609  M=q1*q2=1152908312643096577  DELTA=2^14
+CARRIER: addr_i seeded by episode i's real C2 256-bit content signature (ties to the proven C2 resolver); id_i = clean +/-1 label (pointer to Ring-2 for exact #222 verify).
+
+--- captured run output ---
+[r3-ok] N=512  M=1152908312643096577  DELTA=16384  LIB=/tmp/spbuild/libsp.so
+[r3-ok] real C2 sig-seeds: ep_toy=0x35e9565fa4.. ep_wiki=0x75e2005f76..
+
+=== (1) C-ENGINE PARITY (ctypes -> libsp_poly_ring/libsp_ntt_crt) ===
+  checks=256 fails=0 firstfail=None
+  -> numpy-int negacyclic algebra BIT-IDENTICAL native sp_pr_mul / ntt_fwd.pw.inv / sp_pr_inner / score_kstore
+
+=== (2) MARGIN PARITY (recall@1 / recall@5 / min-margin) @ deg N=512 ===
+    mode  Nep |  rec@1  rec@5 | min_margin | toy_mgn  wiki_mgn
+ int_pm1    2 |  1.000  1.000 |     0.6013 |  0.6527  0.6013
+ int_pm1    8 |  1.000  1.000 |     0.1566 |  0.2579  0.1770
+ int_pm1   16 |  1.000  1.000 |     0.1055 |  0.1920  0.1544
+ int_pm1   32 |  0.938  1.000 |    -0.0406 |  0.1171  0.1353
+ flt_pm1    2 |  1.000  1.000 |     0.6013 |  0.6527  0.6013
+ flt_pm1    8 |  1.000  1.000 |     0.1566 |  0.2579  0.1770
+ flt_pm1   16 |  1.000  1.000 |     0.1055 |  0.1920  0.1544
+ flt_pm1   32 |  0.938  1.000 |    -0.0406 |  0.1171  0.1353
+ int_uni    2 |  1.000  1.000 |     0.6010 |  0.6010  0.6301
+ int_uni    8 |  1.000  1.000 |     0.2429 |  0.2516  0.2880
+ int_uni   16 |  1.000  1.000 |     0.0385 |  0.1819  0.1874
+ int_uni   32 |  1.000  1.000 |     0.0181 |  0.0845  0.0490
+ flt_uni    2 |  1.000  1.000 |     0.6010 |  0.6010  0.6301
+ flt_uni    8 |  1.000  1.000 |     0.2430 |  0.2516  0.2880
+ flt_uni   16 |  1.000  1.000 |     0.0386 |  0.1818  0.1874
+ flt_uni   32 |  1.000  1.000 |     0.0180 |  0.0845  0.0491
+  -> +/-1 carrier int==float recall (lossless encode): True
+  -> N=2 ep_toy+ep_wiki int recall@1=1, both margins>0: True
+
+=== (3) REDUCTION-ORDER IMMUNITY (16 episodes, 8 permutations) ===
+  integer M byte-identical across all permutations: True
+  float real-carrier M max|diff| across permutations: 4.440892e-15  (non-associative: True)
+
+[gate] G-R3-BIND-on-O_K (Leg A) GREEN -- exact-integer negacyclic CRT-NTT bind is bit-identical to the native engine primitives, recalls the correct episode id with margin>0 matching the float baseline (encode lossless on the +/-1 substrate carrier), and yields a reduction-order-immune (byte-identical) superposition the float lane cannot
+
+--- VERDICT ---
+(1) C-ENGINE PARITY: 256/256 bit-identical. The numpy-int negacyclic algebra == native
+    sp_pr_mul, ntt_forward o ntt_pointwise_mul o ntt_inverse (the deployment bind path),
+    sp_pr_inner, and sp_pr_score_kstore(sp_pr_kstore_encode(k)). Honors the header EXACTNESS
+    CONTRACT. PROVES the bind/unbind/score run on the SAME C primitives already linked into
+    sp_engine_cuda -- the bridge is a re-route, not a new bridge.
+(2) MARGIN PARITY: +/-1 substrate carrier -> int recall == float recall to all decimals
+    (encode boundary LOSSLESS); real 'unitary' carrier -> recall identical, margins agree to ~1e-4
+    (Delta=2^14 round). N=2 ep_toy+ep_wiki recall@1=1, margins +0.60/+0.60. Capacity @ deg-512:
+    recall@1=1.0 to N=16, recall@5=1.0 through N=32 (deg-512 ceiling; D=1024 cyclic baseline was the
+    larger-capacity float proof -- deployment ring is negacyclic <=512, Bluestein/Heegner-ladder for more).
+(3) REDUCTION-ORDER IMMUNITY: integer superposition M BYTE-IDENTICAL across 8 episode-summation
+    permutations; the float real-carrier M diverges (max|diff| 4.44e-15, non-associative). The exact
+    integer lane delivers the reduction-order-immune addressing the discrete C2 resolver already values;
+    the float lane provably cannot.
+
+[gate] G-R3-BIND-on-O_K (Leg A) GREEN.
