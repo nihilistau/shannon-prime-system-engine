@@ -2824,6 +2824,19 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                 } else {
                     cudaMemcpyAsync(dKc[L] + wslot*kvd, dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
                     cudaMemcpyAsync(dVc[L] + wslot*kvd, dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    /* P3.3 SP_REPLAY (VELOCITY path — the one taken when use_graph is off, i.e. under the gate):
+                     * inject the episode owner row over the just-minted [0,NPOS) prefill row before attention. */
+                    if (replay_on && pos < replay_npos) {
+                        if (replay_zero) {
+                            cudaMemsetAsync(dKc[L] + wslot*kvd, 0, (size_t)kvd*sizeof(float), st);
+                            cudaMemsetAsync(dVc[L] + wslot*kvd, 0, (size_t)kvd*sizeof(float), st);
+                        } else {
+                            cudaMemcpyAsync(dKc[L] + wslot*kvd, (const float *)(d_replay_K + replay_off[L]) + (size_t)pos*kvd,
+                                            (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                            cudaMemcpyAsync(dVc[L] + wslot*kvd, (const float *)(d_replay_V + replay_off[L]) + (size_t)pos*kvd,
+                                            (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                        }
+                    }
                 }
                 if (arm_lshr && global)   /* §3q C-b.1: mint the r-dim projected key RᵀK[pos] into the sidecar */
                     k_proj_RT<<<1, arm_r_dim, 0, st>>>(dk, arm_dR, 1, hd, arm_r_dim, arm_pk + ((size_t)L*P + pos)*arm_r_dim);
