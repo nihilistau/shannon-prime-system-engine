@@ -1,0 +1,35 @@
+G-WEIGHT-TRANSFORMS -- 2026-06-17T21:52:35Z  [model-weight tier: can geometry compress the 12B weights?]
+Tested on the real gemma-4-12b embed_tokens block (4096 x 3840, bf16). Premise (Gemini, correct): you
+cannot run number theory on raw high-entropy data; change basis, compress, change back. Three vectors:
+
+BASELINE per-row quant round-trip relL2: int8 2.17e-2 ; int4 3.03e-1.
+
+(1) G-WEIGHT-SVD (is the embedding low-rank? the real lossless lever): NEGATIVE.
+  energy-rank: 50%->470, 90%->1754, 99%->2834, 99.9%->3381 (full 3840); storage break-even rank 1981.
+  rank-2834 (99%) factored store = 1.43x of full => LARGER. The gemma embedding is HIGH-RANK; no low-rank
+  factorization compresses. ('embeddings are low-rank' falsified on this matrix.)
+
+(2) G-WEIGHT-LLL (Lenstra-Lenstra-Lovasz basis reduction): NEGATIVE (corrected prediction).
+  orthogonality defect d=16 blocks: before 8.42e6 -> after-LLL 1.15e2 = 73,000x reduction (LLL DID find a
+  far more orthogonal basis -- I had predicted marginal; wrong). BUT a unimodular re-basis is a BIJECTION on
+  integer vectors => information-conserving: the bits saved on the short basis reappear in the transform U
+  you must store to invert. Defect collapse != compression. (Asserted from info-theory, not byte-counted U.)
+
+(3) G-WEIGHT-SPINOR / Walsh-Hadamard (the 8-fold / knight's-move rotation): SPARSITY FALSE, QUANT WIN REAL.
+  sparsity: near-zero fraction (|c|<int8 floor) original 0.112 -> rotated 0.045 (FEWER zeros). An isometry
+  spreads energy; it does NOT zero dimensions. Gemini's 'chunks naturally zero out' is FALSE.
+  quant error at fixed bits (rotate->quant->inverse vs direct): int8 2.17e-2 -> 8.36e-3 (2.6x lower);
+  int4 3.03e-1 -> 1.52e-1 (2.0x lower). This is the QuIP#/SpinQuant INCOHERENCE effect, confirmed on the
+  real gemma embedding: the rotation whitens outliers so the weights quantize ~2-2.6x better at fixed bits.
+  Invertible + attention-preserving when R on weight / R^T on activation cancel. The NTT is the ring-native
+  cousin of the Hadamard (both already in the engine) => the operator's 'transform and transform back'.
+
+VERDICT: for the model WEIGHTS there is NO lossless number-theoretic compression (high-rank, high-entropy,
+info-conserving re-basis) -- the 5th 'structure-on-the-content' probe to come back inert (after Leg B,
+Mobius-on-M, entropy-on-codes, T2-on-weights). The ONE real lever is the incoherence ROTATION (Hadamard/NTT):
+not compression, not sparsity, but ~2-2.6x lower quant error at fixed bit-width = ~1 bit of headroom on the
+9.4GB model (lossy, QuIP frontier, supplied natively by the substrate). NEXT to validate on-model: rotate
+weights + insert R^T so attention is invariant, then PPL at reduced bits. Boundary thesis holds: O_K is the
+exact container; geometry helps quantization (rotation), never lossless structure-on-noise.
+
+REPRO: python3 tools/ring3/g_weight_transforms.py (operates on the extracted _embed_block.bf16; scratch, not committed).
