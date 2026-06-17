@@ -1,0 +1,20 @@
+G-NORM-INTEGER -- 2026-06-17T23:12:19Z  [byte-exact mission, KEYSTONE island: exact-integer RMS norm]
+The current engine runs RMSNorm/softmax/SiLU as FLOAT fp32-islands (sp_rmsnorm_bridge). This prototypes the
+RMSNorm replacement as EXACT-INTEGER fixed-point: y = x*sqrt(E/sum x^2)*(1+w); Sigma x^2 exact int64;
+1/sqrt via exact integer isqrt (deterministic); (1+w) in fixed-point. tools/ring3/g_norm_integer.py.
+
+FIDELITY (vs float RMSNorm, real-distribution x): relerr by inverse-rms fractional bits IB (Q=16,Qw=16):
+  IB=12 1.01e-4 | IB=16 9.0e-6 | IB=20 7.59e-6 | IB=24 7.59e-6 (saturates ~Q floor) => effectively lossless
+  (~1e4x below the int4 weight-quant error; far below any PPL-resolvable level).
+BYTE-EXACT: sum(x^2) over 5 summation permutations -> INTEGER 1 distinct value (reduction-order-IMMUNE) vs
+  FLOAT 2 distinct (drifts). The integer RMS is bit-reproducible across order/machine; the float bridge is not.
+
+CONTEXT (byte-exact-Q4 route, fits the 2060-12GB): byte-exactness = EXACT ARITHMETIC, not the pi^k cancellation.
+Keep OK_Q4B per-block (gold PPL 4.6665, 9.4GB) + make the scale-apply/accumulate exact-fixed-point + replace the
+3 float islands with integer-exact. This RMS norm is island #1 (the keystone). Remaining: integer softmax (s6
+polynomial-ring) + integer SiLU. The pi^k-cancellation/OK_Q8 route is the elegant alternative but needs 8-bit
+(~18GB, doesn't fit); the fixed-point-Q4 route keeps the card AND fidelity, trading cancellation for exact apply.
+
+GATE = GREEN (prototype): exact-integer RMS norm matches float to ~7.6e-6 and is reduction-order-immune.
+NEXT: port to C (sp_rmsnorm replacement in math-core + CUDA kernel), wire into gemma4 forward, on-model
+byte-exact gate (logits bit-identical across reduction-order/machine) + PPL-parity vs gold 4.68.
