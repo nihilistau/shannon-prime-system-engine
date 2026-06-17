@@ -1,0 +1,27 @@
+G-WEIGHT-FOLD-ORACLE -- 2026-06-17T22:25:01Z  [greenlight gate for the incoherence-rotation weight campaign]
+Offline numerical oracle on a REAL gemma-4-12b weight (layer-0 q_proj [4096,3840] + input_layernorm gamma),
+BEFORE any kernel work. Proves the gamma-absorb + block-128 Hadamard fold is EXACT and that it lowers the
+matmul-OUTPUT error at low bits (the quantity PPL actually sees).
+
+SETUP: Wg = W * (1+gamma) [absorb gemma RMSNorm gamma into input columns]; R = block-128 orthonormal WHT on
+the E=3840 input dim (30 blocks). Rotated path: store Wrot = block-WHT(Wg rows); feed activation block-WHT(x);
+y = Wrot . (R x) = Wg x (R orthonormal symmetric => RR=I). Per-output-row symmetric int quant.
+
+gamma (1+weight) range = [-141, +193] (gemma RMSNorm scales are wildly out-of-unit -> the outlier structure the
+rotation smooths; absorbing gamma BEFORE rotating is mandatory).
+
+(1) FOLD EXACTNESS: unquantized rotated matmul vs original = relerr 9.49e-16 (machine precision). The identity
+    cancels perfectly -- no transpose/sign error. This is the numeric spec the online butterfly must reproduce.
+(2) INCOHERENCE WIN on the real W_q, end-to-end through the matmul output:
+    int4: direct-quant relerr 0.3955 -> rotated 0.1745  (HELPS 2.27x)
+    int8: direct-quant relerr 0.0383 -> rotated 0.0097  (HELPS 3.96x)
+
+VERDICT: GREENLIGHT. The block-local incoherence rotation is mathematically exact (machine precision) and
+delivers 2.3-4x lower quant error on a real gemma attention weight through the real matmul. Order locked:
+(1) oracle [DONE] -> (2) offline transcode pass (sp_transcode: gamma-absorb + block-Hadamard + Frobenius-quant
+for the 7 GEMVs, head-dim blocks for W_o/W_v w/ V-less carve-out, header flag) -> (3) online butterfly in
+k_quant_act_int8 / rmsnorm epilogue -> (4) on-model 3/4-bit PPL vs OK_Q4B 4.6665. Per-layer transcode gates
+against THIS oracle (<1e-15 unquantized, beats direct-quant at 3/4b) before any .cu change.
+
+REPRO: extract layer-0 q_proj + input_layernorm from the bf16 safetensors; numpy oracle (gamma-absorb,
+block-128 WHT fold, per-row int quant, matmul-output relerr). Scratch tensors _wq_L0.bf16 / _gamma_L0.bf16 not committed.
