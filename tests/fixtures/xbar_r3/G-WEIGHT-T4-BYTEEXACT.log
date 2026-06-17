@@ -27,3 +27,21 @@ through gemma's REAL RMSNorm path (s3.2 on the engine, not just the 1B validatio
 (logits bit-identical across reduction-order/machine) AND PPL-parity vs gold 4.68. OPEN: does int8 per-tensor
 hold gold PPL across 48 layers (0.023 per-layer weight-relerr compounds -- MEASURE on-model, do not assume).
 At 4-bit, byte-exact-via-cancellation is impossible; a byte-exact-4bit would need exact per-block scales (harder).
+
+--- SCOPE CORRECTION (operator: "we replace RMSNorm with our own method") ---
+Byte-exact is a FORWARD-PASS property, not just a weight property. The current engine runs the LINEAR algebra in
+O_K (exact) but RMSNorm/softmax/SiLU as FLOAT "fp32 islands" (PPT-ARM-System s8: sp_rmsnorm_bridge decodes a+bw->
+fp32, computes 1/sqrt(mean x^2) in FLOAT, *(1+w), re-encodes, resets frobenius_scale=1). The 1B validation's only
+nonzero deltas were exactly those islands (s73). So byte-exactness is currently BROKEN at the norm/softmax/silu,
+NOT at the weights. T4-integer weights are necessary but NOT sufficient.
+THE NORM PIECE (the keystone the operator named): replace the float sp_rmsnorm_bridge with an INTEGER-EXACT RMS
+norm. Theory s10 step-2 proposes Mersenne-prime scaling + Poncelet norm-tracking (d^2=R^2-2Rr). The s3.2 pi^k
+cancellation works through ANY RMS-dividing norm (algebraic), so swapping float->integer RMS KEEPS the cancellation
+AND makes it byte-exact. GEMMA CAVEAT: Mersenne division-by-d needs a Mersenne hidden dim {8191,32767,131071};
+gemma E=3840 is NOT Mersenne -> retrofit needs a deterministic FIXED-POINT inverse-sqrt (integer Newton-Raphson /
+reproducible LUT), not the Mersenne shortcut. Mersenne is a from-scratch-model co-design (choose the dims).
+BYTE-EXACT MISSION = 3 pieces: (1) OK_Q8 per-tensor pi^k weights; (2) integer-exact RMS norm [KEYSTONE]; (3)
+integer softmax (s6 polynomial-ring) + integer SiLU. Gate: logits bit-identical across reduction-order/machine
++ PPL-parity vs gold 4.68. Completes the unification: the WHOLE forward (weights+norm+attn+memory) on the exact
+O_K substrate. NOTE: my prior framing ("verify cancellation through gemma's RMSNorm") was wrong -- we REPLACE the
+norm, we don't verify through the float one.
