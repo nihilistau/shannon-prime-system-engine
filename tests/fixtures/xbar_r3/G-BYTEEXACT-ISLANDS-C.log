@@ -1,0 +1,40 @@
+G-BYTEEXACT-ISLANDS-C -- exact-integer fp32-island C module (math-core), gcc gate
+date: 2026-06-18
+
+module: shannon-prime-system/core/exact_islands/
+  public header  include/sp/exact_islands.h
+  impl           core/exact_islands/exact_islands.c   (sp_rmsnorm_exact / sp_softmax_exact / sp_gelu_exact)
+  gate           core/exact_islands/exact_islands_test.c  (ctest T_EXACT_ISLANDS)
+  registered     root CMakeLists SP_MODULES (after forward_kernels)
+
+Direct C ports of the proven offline prototypes engine tools/ring3/g_norm_integer.py +
+g_islands_integer.py. Every integer constant (LOG2E, the (ln2)^k/k! exp-poly table, K=sqrt(2/pi),
+A=0.044715, all in FB=30 fixed-point) was lifted from those prototypes so the C path is
+bit-identical to the Python that gated GREEN. Two C<->Python correspondences kept exact:
+  - Python  x >> k  on negatives floors (arithmetic shift) == C >> on signed two's-complement (gcc).
+  - Python  a // (2^k)  is FLOOR division; the prototypes only floor-divide by a power of two
+    (Z=2^14 softmax / 2^16 gelu), so the C port uses >> k (NOT C /, which truncates toward zero).
+__int128 used for the RMS isqrt numerator (n << 2*(Q+IB)) and the GELU cubic (X*X overflows int64).
+
+== build (strict warnings: -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Wpointer-arith) ==
+clean -- no warnings.
+
+== gate T_EXACT_ISLANDS ==
+  RMS relerr=5.913e-06
+  softmax max|dp|=1.299e-06
+  GELU relerr=2.802e-06
+[T_EXACT_ISLANDS] PASS
+---- checks=6 fails=0 ----
+
+Checks:
+  1. RMSNorm exact-integer matches float reference         relerr 5.9e-6  (prototype 7.6e-6)
+  2. RMSNorm scale reduction-order-immune                  byte-identical outputs under input permutation
+  3. softmax exact-integer matches float reference         max|dp| 1.3e-6 (prototype 1.0e-6)
+  4. softmax denominator reduction-order-immune            byte-identical probs under input permutation
+  5. GELU-tanh exact-integer matches float reference       relerr 2.8e-6  (prototype 1.5e-6)
+  6. GELU-tanh deterministic                               repeat call byte-identical
+
+VERDICT: GREEN. The three fp32 islands (RMSNorm / softmax / GELU-tanh) now have an exact-integer C
+reference in the math core, fidelity-matched to the Python prototypes and reduction-order-immune /
+deterministic by construction (exact int64 reductions + integer isqrt/exp). This is the foundation
+the CPU-forward wiring, the CUDA port, and the 12B G-BYTEEXACT gate build on (CONTRACT-BYTEEXACT-forward.md).
