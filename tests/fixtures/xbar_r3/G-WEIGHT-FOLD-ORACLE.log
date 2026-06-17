@@ -58,3 +58,19 @@ VERDICT HOLDS, now n=3 across SWA/global/FFN: consistent ~1.3x SAME-bit win at i
 (rotated-int3 always worse than direct-int4, e.g. global 0.200 vs 0.110 = 1.8x worse). OK_Q4B is already at
 PPL 4.6665 ~ gold 4.68 (no headroom), so 1.3x buys ~nothing and cannot enable int3. Convicted -- do NOT build the
 rotation campaign. The operator's n=1/SWA challenge upgraded the conviction from n=1 to robust.
+
+--- REORDERING ADDENDUM (operator: prior session settled on natural-order vs the PROPOSED re-ordering) ---
+Tested column RE-ORDERING vs natural-order faithful OK_Q4B (matmul-output relerr), the deferred lever:
+  q_proj L0  : int4 MAG-reorder 1.02x | rand-perm 1.00x | rotation 1.37x ;  int3 MAG 0.90x (HURTS) | rot 1.16x
+  down_proj L0: int4 MAG-reorder 1.06x | rand-perm 1.00x | rotation 1.27x ;  int3 MAG 1.06x | rot 1.23x
+FINDING: magnitude/act-order reorder gives ~1.05x (negligible) and can HURT at int3. STRUCTURAL REASON:
+act-order/reordering is a win for COARSE per-group quant (group>=128, GPTQ-style); against our FINE per-32-block
+scaling it is nearly inert -- every 32-col block already gets its own tailored scale regardless of column order.
+The same fine granularity that made the rotation modest makes the reordering modest. The prior session's
+natural-order choice did NOT leave real value on the table (~5%, not 2x).
+CAVEAT: tested WEIGHT-magnitude reorder (weak proxy); a true ACTIVATION-importance/imatrix reorder (calibration-
+weighted) is UNTESTED and could differ, but the per-32-block argument bounds the upside + it needs calibration.
+NET (weight tier): OK_Q4B per-32-block is near the outlier-handling frontier -- rotation ~1.3% same-bit,
+reorder ~5%, model already gold PPL 4.6665~4.68. The 3-bit unlock is a DIFFERENT axis (QAT / learned codebook /
+mixed-precision on true-outlier channels), not a transcode-time ordering/rotation. Convicted across rotation AND
+reordering; do not build either as a v4 weight format. 4 offline probes, zero kernel cost.
