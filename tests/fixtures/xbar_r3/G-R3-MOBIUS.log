@@ -1,0 +1,33 @@
+==========================================================================
+ G-R3-MOBIUS RECEIPT -- 2026-06-17T20:29:10Z   [MEASURED NEGATIVE]
+ Does T2 Mobius square-free compression losslessly shrink the Ring-3 index?
+==========================================================================
+
+T2 (PPT-ARM-Theory s4.2): Mobius compression stores an INDEXED TABLE (embedding rows f:[V]->R^d,
+FFN neurons) at square-free INDICES and reconstructs COMPOSITE indices via Mobius inversion. It is
+lossless ONLY because those tables carry multiplicative redundancy across the index axis
+('provably lossless on its own algebra'). It is a MODEL-WEIGHT (vocab/FFN) compressor.
+
+PROBE (tools/ring3/g_r3_mobius_probe.py; native ok_bind, D=1024, N=32):
+  - M density: 1020/1024 = 99.6% nonzero  (dense holographic superposition by construction)
+  - baseline recall@1 (full M): 1.000
+  - square-free index density: 624/1024 = 60.94%  (matches theory 6/pi^2 = 60.79% -- the number is REAL)
+  - Mobius RECONSTRUCTION on M: divisor-reconstruct composite components -> mean|err| 135.6 vs |M|~100.3
+    = 1.35x the signal => M has NO multiplicative index redundancy; the lossless half of T2 does NOT apply.
+  - keep ONLY square-free components (39% composite zeroed) -> recall@1 = 0.969  (SHEDS ~1 of 32 memories).
+
+VERDICT: G-R3-MOBIUS FAILS on the Ring-3 superposition. With no multiplicative structure the composite
+components are unrecoverable, so 'compression' reduces to lossy ERASURE: recall@1 1.000 -> 0.969 at N=32,
+violating the pre-registered 'without shedding a single memory'. The 6/pi^2 density is a true fact about
+integers that does NOT transfer to a dense holographic vector's information content (same class as the
+Leg-B carrier-alignment negative). Also: the Ring-3 index is ALREADY ~16.3KB for 40 episodes (pointers +
+one dense M per ~32) -- it is NOT the footprint problem; the GBs are the Ring-2 verbatim episodes.
+
+WHERE T2 LEGITIMATELY APPLIES (the honored direction, correct target):
+  (a) MODEL WEIGHTS -- embedding table + FFN neurons (T2's actual object); a real lever on the 9.4GB
+      resident model, ORTHOGONAL to the memory tier.
+  (b) MEMORY-TIER FOOTPRINT = the Ring-2 verbatim episodes (28.9MB/K-V), already 2-4x smaller via the
+      Frobenius integer store (G-R2-FROB); a further LOSSLESS entropy-coding pass (zstd) on the low-entropy
+      integer codes is the honest additional shrink -- not Mobius decimation of a holographic vector.
+
+[gate] G-R3-MOBIUS: MEASURED, hypothesis NOT supported on Ring-3 M. No lossy decimator shipped as a pass.
