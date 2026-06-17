@@ -1,0 +1,10 @@
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_00_ACTION.bin expect=ACTION | PACKET(k=7 via inject_seq)->ACTION ("ACTION>restart build process</ACTION><") [PASS]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_01_NO_OP.bin expect=NO_OP | PACKET(k=9 via inject_seq)->NO_OP ("_OP<end_of_turn") [PASS]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_02_ACTION.bin expect=ACTION | PACKET(k=8 via inject_seq)->NO_OP ("_OP<end_of_turn") [miss]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_03_NO_OP.bin expect=NO_OP | PACKET(k=7 via inject_seq)->NO_OP ("_OP<end_of_turn") [PASS]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_04_ACTION.bin expect=ACTION | PACKET(k=7 via inject_seq)->ACTION ("ACTION>Fix the build issue</ACTION") [PASS]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_05_NO_OP.bin expect=NO_OP | PACKET(k=8 via inject_seq)->NO_OP ("_OP<end_of_turn") [PASS]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_06_ACTION.bin expect=ACTION | PACKET(k=7 via inject_seq)->ACTION ("ACTION>Check certificate status</ACTION><") [PASS]
+[kai3] D:\F\shannon-prime-repos\_xbar\p2b\kai3\kai3_audio_packets\aud_07_NO_OP.bin expect=NO_OP | PACKET(k=7 via inject_seq)->NO_OP ("_OP<end_of_turn") [PASS]
+[kai3] G-KAIROS-3 PROJECTED-FRAME PIVOT GATE: 7/8
+GATE_EXIT=3 

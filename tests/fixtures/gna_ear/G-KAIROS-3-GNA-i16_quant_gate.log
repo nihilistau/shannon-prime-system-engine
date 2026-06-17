@@ -1,0 +1,29 @@
+[gna] V_sub=32 n_mels=64 eval=(8, 115, 64) compile_T=115 expect=['ACTION', 'NO_OP', 'ACTION', 'NO_OP', 'ACTION', 'NO_OP', 'ACTION', 'NO_OP']
+[gna] ckpt best=-1.0
+[gna] TORCH FP32 (full-T,slice) recovery = 0.877
+[gna] OV devices: ['CPU', 'GNA']
+[gna] OV CPU FP32 recovery = 0.877  (delta vs FP32 +0.000)
+[gna] GNA_SW_EXACT i16 scale=None recovery = 0.667  (delta vs FP32 -0.211)
+[gna] GNA_SW_EXACT i16 scale=8.0 recovery = 0.667  (delta vs FP32 -0.211)
+[gna] GNA_SW_EXACT i16 scale=64.0 recovery = 0.667  (delta vs FP32 -0.211)
+[gna] GNA_SW_EXACT i16 scale=256.0 recovery = 0.667  (delta vs FP32 -0.211)
+[gna] GNA_SW_EXACT i16 scale=1024.0 recovery = 0.667  (delta vs FP32 -0.211)
+[gna] GNA_SW_EXACT i16 scale=2048.0 recovery = 0.667  (delta vs FP32 -0.211)
+[gna] GNA_SW_EXACT i16 scale=4096.0 recovery = 0.649  (delta vs FP32 -0.228)
+[gna] BEST GNA i16 recovery = 0.667 @ scale=None  (FP32 0.877, delta -0.211)
+[gna] SCORE_DONE
+
+=== NNCF PTQ recovery cycle (2026-06-17) ===
+FP32 (torch / OV CPU)        : 0.877
+NNCF calibrated INT8 (CPU)   : 0.860  (-0.017)  <- CTC head SURVIVES calibration
+GNA plugin default i16       : 0.667  (-0.211)  <- naive symmetric min/max
+NNCF FQ -> GNA SW_EXACT      : WONT COMPILE (ScaleFactorPerLayerWeightable: Incorrect weight value ...Convolution)
+Diagnosis: shear is GNA-plugin-API (rejects generic FQ), NOT a precision floor.
+NEXT: POT (GNA-native i16 PTQ) or offline per-layer GNA scale factors or activations-only FQ.
+
+=== POT DefaultQuantization GNA-native (2026-06-17) — GREEN ===
+FP32 reference               : 0.877
+GNA default i16 (naive)      : 0.667  (-0.211)
+POT GNA-native i16 (calib)   : 0.877  (-0.000)  <- FULL RECOVERY, compiles+runs on GNA_SW_EXACT
+Proof not-passthrough: SAME GNA_SW_EXACT i16 mode gives 0.667 (naive) vs 0.877 (POT scale factors).
+VERDICT: Stage 2.b quantization gate GREEN -> pipeline green-lit for Beast Canyon GNA 2.0 silicon.

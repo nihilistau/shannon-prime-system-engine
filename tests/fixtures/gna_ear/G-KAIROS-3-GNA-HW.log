@@ -1,0 +1,15 @@
+Python 3.11.9
+[setupvars.bat] OpenVINO environment initialized
+[ir] POT-GNA-WIN devices=['CPU', 'GNA.GNA_SW', 'GNA.GNA_HW', 'GPU.0', 'GPU.1'] V=32 Tmax=115
+[ir] POT-GNA-WIN CPU recovery = 0.860
+[ir] POT-GNA-WIN GNA_HW i16 scale=None recovery = 0.877
+[ir] BEST POT-GNA-WIN GNA_HW i16 = 0.877 @ scale=None
+[ir] IR_SCORE_DONE
+
+=== G-KAIROS-3-GNA-HW (2026-06-17) — PHYSICAL SILICON ===
+Host: Beast Canyon NUC i9-11900KB, Intel GNA 2.0 (driver gna_03.05.00.2116, BIOS-enabled)
+Windows OpenVINO 2023.3, GNA_DEVICE_MODE=GNA_HW i16, POT-calibrated VALID-conv 36-filter IR
+FP32 reference        : 0.877
+GNA_SW_EXACT (emu)    : 0.877
+GNA_HW (silicon)      : 0.877   <- HARDWARE == EMULATION == FP32
+VERDICT: EAR front-end PHYSICALLY REALIZED on GNA 2.0. Stage 2.b CLOSED ON SILICON.
