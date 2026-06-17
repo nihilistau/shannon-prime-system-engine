@@ -1,0 +1,21 @@
+G-PERIOD6-REBASE -- 2026-06-17T21:01:50Z
+Rebase the C2/Ring-3 content-hash period 8 -> 6 to match the TRUE 12B gemma4 SWA geometry.
+
+AUTHORITATIVE GEOMETRY (src/backends/cuda/cuda_forward.cu): gemma4 global layers =
+  (Li % g4_period) == g4_period-1, g4_period default 6  => globals {5,11,17,23,29,35,41,47} (8 of 48).
+The sig pipeline used PERIOD=8 (L%8==7 = {7,15,23,31,39,47}) -- a mostly-NON-global set. Rebased to 6
+so the content hash reads the ACTUAL global owners (matches the 'global owners only' intent + the engine).
+
+REBASED (9 files): tools/curator/{build_registry,rsweep,resolve_cue,discrete_resolve}.py +
+  tools/ring3/{g_r3_bind,g_r3_bind_ok,g_r3_dualroute,g_r3_nightshift,g_xbar_organism_full}.py
+
+RE-GATE under PERIOD=6 (separation robust to the layer subset, as predicted):
+  sig agreement (256-bit): ep_audio self 256 | vs ep_wiki 147 | vs ep_toy 129 (cleaner than period-8's 154);
+    ep_wiki vs ep_toy 198. All decoys << TAU_BITS=168.
+  G-XBAR-ORGANISM-FULL: nightshift shadow-gate recall@1 ALL; audio cue -> ep_audio TOP-1 (cos +0.4717);
+    verify 256/256 ACCEPT; Frobenius landing sub-ULP. GREEN.
+  G-R3-DUALROUTE: clean-hit / decoy-scan / null-parity all PASS. GREEN.
+
+VERDICT: period-6 rebase GREEN. The content hash now aligns to the true gemma4 global geometry; all
+prior C2/Ring-3 gates stand (the figures shift with the layer subset but the separation/recall verdicts
+are unchanged -- confirming the pre-existing claim that the gates were robust to the period choice).

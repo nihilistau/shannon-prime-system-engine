@@ -14,7 +14,7 @@
 import os, sys, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ok_bind as ok  # NATIVE exact-integer negacyclic CRT-NTT bind (Leg A)
-SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1; D=1024
+SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,6; MASK64=(1<<64)-1; D=1024
 TAU_PCT=2.0; K=5     # top-K shortlist depth (the P2.b top-5 door)
 # verify outcomes measured on the 12B metal (R3.2 G-R3-LOSS, NPOS=16): correct=lossless, foreign=caught.
 VERIFY_PCT={"ep_wiki":0.000, "ep_toy":8.04}   # %% deflection vs baseline 4.6665

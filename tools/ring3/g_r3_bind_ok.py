@@ -20,7 +20,7 @@ ENG = os.environ.get("SP_R3_ENG", os.path.normpath(os.path.join(os.path.dirname(
 LIB = os.environ.get("SP_R3_LIB", "/tmp/spbuild/libsp.so")
 
 # ---- the float baseline's content-derived addressing (reused verbatim) ----
-SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1
+SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,6; MASK64=(1<<64)-1
 def smix(seed,n):
     s=seed&MASK64; out=np.empty(n,dtype=np.int8)
     for i in range(n):

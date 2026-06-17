@@ -15,7 +15,7 @@
 import os, sys, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ok_bind as ok  # NATIVE exact-integer negacyclic CRT-NTT bind (Leg A)
-SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1; CAP=32
+SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,6; MASK64=(1<<64)-1; CAP=32
 def smix(seed,n):
     s=seed&MASK64; out=np.empty(n,dtype=np.int8)
     for i in range(n):

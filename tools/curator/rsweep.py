@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Does the DISCRETE (sign-bit Hamming) resolver separate if we widen the hash? Sweep r.
 import os, numpy as np
-SEED=0x5350524F4A2B; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1
+SEED=0x5350524F4A2B; HD=512; NL,PERIOD=48,6; MASK64=(1<<64)-1
 def smix(seed,n):
     s=seed&MASK64; out=np.empty(n,dtype=np.int8)
     for i in range(n):

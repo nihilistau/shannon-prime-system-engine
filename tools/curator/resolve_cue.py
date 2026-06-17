@@ -20,7 +20,7 @@ import numpy as np
 SEED = 0x5350524F4A2B
 R_DIM = 32
 HD = 512
-NL, PERIOD = 48, 8
+NL, PERIOD = 48, 6
 MASK64 = (1 << 64) - 1
 TAU_CUE = 0.30                      # pre-registered from Step-1 margins
 

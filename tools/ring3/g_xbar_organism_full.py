@@ -7,7 +7,7 @@ import os, sys, numpy as np, importlib.util
 sys.path.insert(0,"/tmp"); import ok_bind as ok
 spec=importlib.util.spec_from_file_location("fe","/tmp/frob_episode.py"); fe=importlib.util.module_from_spec(spec); spec.loader.exec_module(fe)
 ENG=os.environ.get("SP_R3_ENG","/sessions/friendly-dreamy-ramanujan/mnt/shannon-prime-system-engine")
-SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1; D=1024; TAU_BITS=168
+SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,6; MASK64=(1<<64)-1; D=1024; TAU_BITS=168
 def smix(seed,n):
     s=seed&MASK64; out=np.empty(n,dtype=np.int8)
     for i in range(n):

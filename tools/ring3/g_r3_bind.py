@@ -17,7 +17,7 @@
 # mathematically the engine's NTT-over-Zq (DESIGN-VSA-ring3 SS2). The DEPLOYMENT binds over Zq via the engine NTT/CRT
 # (exact integer, no float drift) — that engine port is R3.x, not this math proof.
 import os, numpy as np
-SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,8; MASK64=(1<<64)-1; D=1024
+SEED=0x5350524F4A2B; R_BITS=256; HD=512; NL,PERIOD=48,6; MASK64=(1<<64)-1; D=1024
 
 def smix(seed,n):
     s=seed&MASK64; out=np.empty(n,dtype=np.int8)

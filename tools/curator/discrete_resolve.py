@@ -18,7 +18,7 @@ import os, json, numpy as np
 SEED = 0x5350524F4A2B
 R_BITS = 256
 HD = 512
-NL, PERIOD = 48, 8
+NL, PERIOD = 48, 6
 MASK64 = (1 << 64) - 1
 TAU_BITS = 168            # in [159..177]: clears positives by >=9, rejects non-targets by >=10
 

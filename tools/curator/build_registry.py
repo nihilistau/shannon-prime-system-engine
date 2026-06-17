@@ -11,7 +11,7 @@ import numpy as np
 SEED = 0x5350524F4A2B
 R_DIM = 32
 HD = 512            # 12B global head_dim == kvd (nkv=1)
-NL, PERIOD = 48, 8  # gemma4-12b geometry (all owners; global = L%PERIOD==PERIOD-1)
+NL, PERIOD = 48, 6  # gemma4-12b geometry (all owners; global = L%PERIOD==PERIOD-1)
 MASK64 = (1 << 64) - 1
 
 def splitmix64_stream(seed, n):
