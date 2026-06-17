@@ -1,0 +1,25 @@
+# G-222-WRAP — C2 #222 finalize: replay-inject into an ACTIVE SWA-ring session + O(1) bit-exact rewind
+# date: 2026-06-17  cmd: _run_g222_wrap.bat (SP_G4_KV_RING_W=16, SP_G4_KV_JMAX=64, npos=8, anchor=24)
+#
+# gemma4_kv_replay is now ring-aware: for SWA owners it checkpoints each clobbered ring slot into
+# the KAI-1c undo-journal BEFORE overwrite (exact g4_kv_step mechanics), so gemma4_kv_rewind
+# reconstructs the pre-injection window. W=16 with anchor=24 forces the replay slots (24..31)%16 = 8..15
+# to ALIAS live earlier positions (pos 8..15) — the wrap-crossing hazard — exercising the journal.
+
+## LEG E2B (15 owners)
+    [g4-kv] RING mode: Wring=16 Jmax=64 (SWA owners ring+journal; globals full-cache)
+    [xbar-#222] gemma4_kv_replay: ZEROED episode into resident cache [24,32) (reject control)
+[g4-kvrp] mode=RING W=16 anchor=24 after_replay=32 (npos=8) back=24 cmp=688128B owners=15
+[g4-kvrp] LOAD-BEARING (injected slots zeroed): GREEN (0/36864 nonzero)
+[g4-kvrp] G-222-WRAP ([live region] byte-identical after O(1) rewind): GREEN (layer-diffs=0) pos-reset=OK
+
+## LEG 12B (48 owners)
+    [g4-kv] RING mode: Wring=16 Jmax=64 (SWA owners ring+journal; globals full-cache)
+    [xbar-#222] gemma4_kv_replay: ZEROED episode into resident cache [24,32) (reject control)
+[g4-kvrp] mode=RING W=16 anchor=24 after_replay=32 (npos=8) back=24 cmp=11272192B owners=48
+[g4-kvrp] LOAD-BEARING (injected slots zeroed): GREEN (0/688128 nonzero)
+[g4-kvrp] G-222-WRAP ([live region] byte-identical after O(1) rewind): GREEN (layer-diffs=0) pos-reset=OK
+
+# VERDICT: replay into an active sliding-window session is LOAD-BEARING (injected slots zeroed) and the
+# journal-backed rewind restores the FULL live window BYTE-IDENTICAL (layer-diffs=0), pos->anchor, in O(1).
+# Local KV substrate airtight in BOTH regimes: full-cache (G-222) + SWA-ring (G-222-WRAP). #222 finalized.

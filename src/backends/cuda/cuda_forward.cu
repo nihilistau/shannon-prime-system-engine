@@ -3746,12 +3746,17 @@ extern "C" long gemma4_kv_devfree_mib(void) {
  * one-shot SP_REPLAY: the curator SPECULATES a recalled memory here, scores it, and on reject
  * UNDOES it bit-exactly in O(1) via gemma4_kv_rewind(npos) (the KAI-1b slot==pos inverse — the
  * sheared [dpos,..) slots are never read again). zero=1 injects a ZEROED (corrupted) episode =
- * the reject control. Owner layers only (sharers ride owners by off-indirection). ring_W must be 0
- * (SWA-ring replay needs the KAI-1c journal — a named follow-on). Returns 0 on success. */
+ * the reject control. Owner layers only (sharers ride owners by off-indirection). Ring-aware (KAI-1c):
+ * in SWA-ring mode each clobbered ring slot is journaled before overwrite so rewind reconstructs the
+ * window; globals stay full-cache (slot==pos, no journal). Returns 0 on success. */
 extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero) {
     if (!s || !epdir || npos <= 0) { sp_set_error("gemma4_kv_replay: bad args"); return -1; }
-    if (s->ring_W > 0) { sp_set_error("gemma4_kv_replay: full-cache only (ring_W==0)"); return -1; }
     if (s->dpos_host + npos > s->Pmax) { sp_set_error("gemma4_kv_replay: exceeds Pmax"); return -1; }
+    /* KAI-1c: in ring mode the replay overwrites SWA ring slots that may still hold live earlier
+     * positions, so each clobbered slot is journaled BEFORE overwrite (exactly as g4_kv_step does)
+     * ⇒ gemma4_kv_rewind reconstructs the pre-injection window. Needs journal headroom past commit. */
+    if (s->ring_W > 0 && (s->dpos_host - s->commit_pos) + npos > s->Jmax) {
+        sp_set_error("gemma4_kv_replay: ring journal depth exceeded (commit before replay)"); return -1; }
     char rp[1024]; FILE *rf; sp_xbar_manifest mf; memset(&mf, 0, sizeof(mf));
     snprintf(rp, sizeof rp, "%s/ep.mf", epdir); rf = fopen(rp, "rb");
     if (!rf) { sp_set_error("kv_replay: ep.mf open"); return -1; }
@@ -3778,9 +3783,17 @@ extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int ze
         const int global = ((L % s->period) == s->period - 1);
         const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
         const size_t off = (size_t)mf.layers[L].off;   /* owner prefix-sum byte offset */
+        const int ring = (s->ring_W > 0 && !global);   /* SWA owner under a sliding window */
         for (int p = 0; p < npos; p++) {
-            float *dstK = s->dKc[L] + (size_t)(base + p) * kvd;
-            float *dstV = s->dVc[L] + (size_t)(base + p) * kvd;
+            const int pos = base + p;
+            const size_t slot = ring ? (size_t)(pos % s->ring_W) : (size_t)pos;   /* ring wraps; globals/full-cache slot==pos */
+            if (ring) {                                  /* KAI-1c: checkpoint the slot we are about to clobber */
+                const size_t j = (size_t)(pos - s->commit_pos);
+                cudaMemcpyAsync(s->jK[L] + j*kvd, s->dKc[L] + slot*kvd, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(s->jV[L] + j*kvd, s->dVc[L] + slot*kvd, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            }
+            float *dstK = s->dKc[L] + slot * kvd;
+            float *dstV = s->dVc[L] + slot * kvd;
             if (zero) {
                 cudaMemsetAsync(dstK, 0, (size_t)kvd * sizeof(float), st);
                 cudaMemsetAsync(dstV, 0, (size_t)kvd * sizeof(float), st);

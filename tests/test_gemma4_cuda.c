@@ -628,11 +628,13 @@ static int run_kv_replay(void) {
     const int NL=(int)c->n_layers, period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
     const int kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:NL;
     const int g_nkv=(int)c->n_head_kv,g_hd=(int)c->head_dim,s_nkv=(int)c->g4_nkv_swa,s_hd=(int)c->g4_hd_swa;
+    const int W = getenv("SP_G4_KV_RING_W")?atoi(getenv("SP_G4_KV_RING_W")):0;  /* ring mode if >0 */
     const int Pmax=256, sys_n=24;
     sp_g4_kv *s=gemma4_kv_open(m,Pmax);
     if(!s){ fprintf(stderr,"[g4-kvrp] kv_open FAIL: %s\n",sp_last_error()); return 2; }
     int32_t sys[24]; for(int i=0;i<sys_n;i++) sys[i]=100+i;
     if(gemma4_kv_prefill(s,sys,sys_n)){ fprintf(stderr,"[g4-kvrp] sys prefill FAIL: %s\n",sp_last_error()); return 2; }
+    if(W>0) gemma4_kv_commit(s);   /* commit the context: the speculation window's journal starts fresh at this anchor */
     int anchor=gemma4_kv_pos(s);
     float **hK0=(float**)calloc(NL,sizeof(float*)),**hV0=(float**)calloc(NL,sizeof(float*));
     float **hK1=(float**)calloc(NL,sizeof(float*)),**hV1=(float**)calloc(NL,sizeof(float*));
@@ -640,27 +642,34 @@ static int run_kv_replay(void) {
     for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
         size_t nb=(size_t)Pmax*kvd*sizeof(float);
         hK0[L]=(float*)malloc(nb);hV0[L]=(float*)malloc(nb);hK1[L]=(float*)malloc(nb);hV1[L]=(float*)malloc(nb);hKm[L]=(float*)malloc(nb);hVm[L]=(float*)malloc(nb); }
-    gemma4_kv_snapshot(s,hK0,hV0);                                   /* pre-injection floor [0,anchor) */
+    gemma4_kv_snapshot(s,hK0,hV0);                                   /* pre-injection floor (window for ring SWA owners) */
     if(gemma4_kv_replay(s,epdir,npos,/*zero=*/1)){ fprintf(stderr,"[g4-kvrp] replay FAIL: %s\n",sp_last_error()); return 2; }
     int after=gemma4_kv_pos(s);
-    gemma4_kv_snapshot(s,hKm,hVm);                                   /* mid: injected region must be zeroed */
-    /* load-bearing: the injected slots [anchor,after) must read back all-zero (the write landed) */
+    gemma4_kv_snapshot(s,hKm,hVm);                                   /* mid: injected slots must be zeroed */
+    /* load-bearing: the injected slot for each (L,p) must read back all-zero (the write landed).
+     * slot = ring SWA-owner ? (anchor+p)%W : (anchor+p) — matches gemma4_kv_replay. */
     long inj_nonzero=0, inj_floats=0;
     for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
-        for(int p=anchor;p<after;p++){ for(int d=0;d<kvd;d++){ inj_floats++; if(hKm[L][(size_t)p*kvd+d]!=0.0f) inj_nonzero++; } } }
+        int ring=(W>0&&!global);
+        for(int p=0;p<npos;p++){ size_t slot=ring?(size_t)((anchor+p)%W):(size_t)(anchor+p);
+            for(int d=0;d<kvd;d++){ inj_floats++; if(hKm[L][slot*kvd+d]!=0.0f) inj_nonzero++; } } }
     if(gemma4_kv_rewind(s,after-anchor)){ fprintf(stderr,"[g4-kvrp] rewind FAIL\n"); return 2; }
     int back=gemma4_kv_pos(s);
-    gemma4_kv_snapshot(s,hK1,hV1);                                   /* post-rewind floor [0,anchor) */
+    gemma4_kv_snapshot(s,hK1,hV1);                                   /* post-rewind floor */
+    /* compare the LIVE region: ring SWA owners = the full W-slot window (journal must have restored
+     * every clobbered slot); globals / full-cache = [0,anchor) (sheared slots are never read). */
     long diffs=0; size_t cmp_bytes=0;
     for(int L=0;L<kvfs&&L<NL;L++){ int global=((L%period)==period-1); int kvd=(global?g_nkv:s_nkv)*(global?g_hd:s_hd);
-        size_t nb=(size_t)anchor*kvd*sizeof(float); cmp_bytes+=2*nb;
+        int ring=(W>0&&!global); size_t cmp_slots=ring?(size_t)W:(size_t)anchor;
+        size_t nb=cmp_slots*kvd*sizeof(float); cmp_bytes+=2*nb;
         if(memcmp(hK0[L],hK1[L],nb)) diffs++; if(memcmp(hV0[L],hV1[L],nb)) diffs++; }
     int load_bearing=(inj_nonzero==0 && inj_floats>0);              /* injected slots all-zero ⇒ replay wrote */
     int pos_ok=(back==anchor);
-    fprintf(stderr,"[g4-kvrp] anchor=%d after_replay=%d (npos=%d) back=%d cmp=%zuB owners=%d\n",anchor,after,npos,back,cmp_bytes,(kvfs<NL?kvfs:NL));
+    fprintf(stderr,"[g4-kvrp] mode=%s W=%d anchor=%d after_replay=%d (npos=%d) back=%d cmp=%zuB owners=%d\n",
+        W>0?"RING":"FULL",W,anchor,after,npos,back,cmp_bytes,(kvfs<NL?kvfs:NL));
     fprintf(stderr,"[g4-kvrp] LOAD-BEARING (injected slots zeroed): %s (%ld/%ld nonzero)\n",load_bearing?"GREEN":"RED",inj_nonzero,inj_floats);
-    fprintf(stderr,"[g4-kvrp] G-222 REWIND-NULL ([0,anchor) byte-identical after O(1) rewind): %s (layer-diffs=%ld) pos-reset=%s\n",
-        diffs==0?"GREEN":"RED",diffs,pos_ok?"OK":"BAD");
+    fprintf(stderr,"[g4-kvrp] %s ([live region] byte-identical after O(1) rewind): %s (layer-diffs=%ld) pos-reset=%s\n",
+        W>0?"G-222-WRAP":"G-222 REWIND-NULL",diffs==0?"GREEN":"RED",diffs,pos_ok?"OK":"BAD");
     gemma4_kv_close(s); sp_model_unload(handle);
     return (diffs==0 && load_bearing && pos_ok)?0:3;
 }
