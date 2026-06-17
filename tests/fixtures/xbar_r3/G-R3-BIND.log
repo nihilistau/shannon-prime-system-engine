@@ -1,0 +1,31 @@
+# G-R3-BIND — R3.1 receipt: VSA/HRR superposition math on the real Ring-2 episode tensors (Path A, parameter-free)
+# date: 2026-06-17  cmd: python3 tools/ring3/g_r3_bind.py
+# store M = sum_i (addr_i (*) id_i); addr seeded by episode's real C2 256-bit sig; id = clean +/-1 label.
+# recall: id_est = M (corr) addr_j -> cleanup argmax over codebook. metric = margin (correct-max wrong) + z-score.
+# NOTE: first cut RED was a METRIC BUG (SNR=correct/max_other divides by ~0/negative wrong-cos at N=2);
+#       fixed to the cleanup-standard margin (>0) + z-score. recall was always correct; the math never failed.
+
+[r3] D=1024  real sig-seeds: ep_toy=0x35e9565fa4.. ep_wiki=0x75e2005f76..
+
+    kind    N |  rec@1  rec@5 | min_margin  mean_z | toy_mgn wiki_mgn
+ unitary    2 |  1.000  1.000 |     0.6919     nan |  0.6919  0.6974
+ unitary    8 |  1.000  1.000 |     0.2417   12.51 |  0.2417  0.3271
+ unitary   32 |  1.000  1.000 |     0.0460    5.91 |  0.0788  0.1060
+ unitary   64 |  0.938  0.984 |    -0.0230    3.99 |  0.0676  0.0183
+ unitary  128 |  0.570  0.844 |    -0.0759    2.79 |  0.0016 -0.0070
+ unitary  256 |  0.188  0.453 |    -0.1241    2.01 | -0.0079 -0.0174
+     pm1    2 |  1.000  1.000 |     0.5679     nan |  0.5857  0.5679
+     pm1    8 |  1.000  1.000 |     0.2349   12.65 |  0.3415  0.2349
+     pm1   32 |  1.000  1.000 |     0.0360    5.79 |  0.1166  0.1327
+     pm1   64 |  0.922  0.984 |    -0.0437    3.96 |  0.0655  0.0224
+     pm1  128 |  0.602  0.867 |    -0.0696    2.86 |  0.0106  0.0083
+     pm1  256 |  0.219  0.449 |    -0.1128    2.05 | -0.0232 -0.0983
+
+[r3] N=2 ep_toy+ep_wiki (pm1): recall@1=1/1 margins=(0.5857,0.5679) -> PASS
+[r3] capacity pm1 recall@5>=0.90 to N=64 @ D=1024: PASS
+
+[gate] G-R3-BIND GREEN -- VSA superposition recalls the right episode id strictly above crosstalk (margin>0); graceful capacity ~N=64 @ D=1024; +/-1 substrate carrier tracks the ideal unitary one
+
+# VERDICT: N=2 (ep_toy+ep_wiki) recall@1=1.0 margins +0.586/+0.568 (correct id strictly above crosstalk);
+# capacity recall@5>=0.90 to N=64 @ D=1024 (graceful degrade past ~D); +/-1 substrate carrier ~= ideal unitary.
+# Real-domain circular conv == the engine's NTT-over-Zq algebra; deployment binds over Zq via the engine NTT (R3.x).
