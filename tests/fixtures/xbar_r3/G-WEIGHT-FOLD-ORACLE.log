@@ -25,3 +25,22 @@ against THIS oracle (<1e-15 unquantized, beats direct-quant at 3/4b) before any 
 
 REPRO: extract layer-0 q_proj + input_layernorm from the bf16 safetensors; numpy oracle (gamma-absorb,
 block-128 WHT fold, per-row int quant, matmul-output relerr). Scratch tensors _wq_L0.bf16 / _gamma_L0.bf16 not committed.
+
+--- CONVICTION ADDENDUM (real-baseline re-measure -- this CORRECTS the greenlight above) ---
+The greenlight used PER-ROW int4. The REAL OK_Q4B packer (sp_transcode.c add_q4b) uses PER-32-COLUMN-BLOCK
+scales (s=maxabs/7 f16-rounded, per 32 input cols) -- itself a strong local-outlier remedy. Re-measured the
+rotation win against the ACTUAL scheme + a bit-ladder (real W_q L0, matmul-output relerr):
+  int4: direct 0.1207 rotated 0.0883  win 1.37x  (rotated-4b = 0.73x of direct-4b: modest SAME-bit bump)
+  int3: direct 0.2393 rotated 0.2067  win 1.16x  (rotated-3b = 1.71x WORSE than direct-4b: no 3-bit unlock)
+  int2: direct 0.4964 rotated 0.6238  win 0.80x  (rotation HURTS at 2-bit -- energy-spreading vs ~no levels)
+KEY: the per-32-block packer is ALREADY 3.3x better than per-row (0.121 vs 0.395 direct) -- it captures most
+of the outlier problem on its own. The rotation win SHRINKS as bits drop (1.37->1.16->0.80x), the OPPOSITE of
+what justifies the build. QuIP#/SpinQuant win big vs COARSE (per-tensor/channel) quant; vs the engine's FINE
+per-32-block OK_Q4B the incoherence headroom is largely already taken.
+
+VERDICT: CONVICTED -- do NOT build the incoherence-rotation weight campaign. A C transcoder mod + 9.4GB transcode
++ a permanent online butterfly on every GEMV + on-model bakes, for a 1.37x weight-error bump at 4-bit (OK_Q4B is
+already PPL 4.6665 ~ gold 4.68) that unlocks NO lower bit-width, is negative cost/benefit. The fold math is exact
+(9.49e-16) and the rotation is real, but it is REDUNDANT against per-32-block OK_Q4B. 7th structure-on-content
+lever convicted; the boundary thesis holds (the engine's exact per-block container already sits near the frontier).
+Cost to convict: 3 numpy runs. Cost avoided: the whole transcoder+kernel+bake campaign.
