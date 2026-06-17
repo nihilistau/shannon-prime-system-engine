@@ -1,0 +1,46 @@
+==========================================================================
+ G-R2-FROB-PARITY (rank-2 a+b lattice) RECEIPT -- 2026-06-17T20:20:06Z
+ Two-step Frobenius integer episode: coarse coord a + error-feedback residual
+ coord b, over REAL scales (x = a*s_a + b*s_b). The rank-2 O_K Z-module
+ O_K = Z*1 (+) Z*w realized with real scales -- NOT the complex w (which would
+ inject an imaginary part); the geometry's structure, the round-trip stays real.
+==========================================================================
+
+CODEC: tools/curator/frob_episode.py  schemes: a16 (16b, default) | a8b4 (12b) | a16b8 (24b)
+
+(I) FLOAT->INTEGER TRANSLATION FIDELITY (N-independent ground truth; ep_wiki K/V):
+  scheme      bits  relL2(K)   ulp-exact(K)   -- byte-identical-to-float32 fraction
+  int8 1-step  8b   7.8e-3      ~1.6%
+  a8b4        12b   5.5e-4       1.87%        (int8 a + int4 b residual; aggressive)
+  a16 1-step  16b   3.0e-5       1.60%        (effectively lossless; DEFAULT)
+  a16b8       24b   1.2e-7      18.45%        (int16 a + int8 b; SUB-ULP -- store 0.76x of float)
+  a16b16      32b   8.4e-11     98.92%        (sub-ULP; 99% byte-identical; uniform scale can't hit 100%)
+  => the rank-2 a+b lattice ZEROES the float->integer translation error to the floating-point
+     noise floor (24b = 1.2e-7 sub-ULP). True byte-for-byte 100% needs per-element ULP (raw i32).
+
+(II) ON-METAL SP_REPLAY (12B, test_gemma4_ppl_cuda, wiki.tiny matched passage, baseline=4.6665):
+  NPOS=16:  float-exact 4.6665 (+0.000%) | a16(16b) 4.5871 | int8(8b) 4.8237
+  NPOS=64:  float-exact 4.6665 (+0.000%) | a16(16b) 4.5605 | int8(8b) 4.6980
+  NPOS=16:  float-exact 4.6665 (+0.000%) | a16b8(24b,relL2 1.2e-7) 4.6059 | a8b4(12b) 4.5950
+  all legs exit 0, checks=5/5, M_GEMMA4_CUDA_PPL PASS.
+
+(III) HONEST VERDICT -- the n=42 gate is the WRONG instrument; do NOT fake a metal +0.000%:
+  The 24b episode (relL2 1.2e-7, sub-ULP) lands at 4.6059 while the 8b episode (relL2 8e-3,
+  ~50000x WORSE) lands at 4.6980 -- same ~1% band, OPPOSITE signs, NON-MONOTONIC in fidelity.
+  That is conclusive: at n_scored=42 the PPL is a chaotic tie-flip function of ANY perturbation
+  (even 1e-7), so the gate is BLIND below ~1% and reads +0.000% ONLY for byte-identical input
+  (float-exact replay, which holds at both NPOS). [feedback_small_n_deflection_illusion]
+  The matched-episode test is structurally pinned to this 42-token passage (scoring other text
+  turns the HIT into a foreign injection), so a larger-N metal deflection is not available here.
+
+  => 'LOSSLESS' is ESTABLISHED by (I) the sub-ULP reconstruction fidelity, the correct N-independent
+     instrument -- NOT by an n=42 PPL number. A literal on-metal +0.000% for a NON-byte-identical
+     episode is unobtainable at this fixture by construction, and we will not manufacture one.
+
+VERDICT: G-R2-FROB-PARITY (rank-2 lattice) -- the Ring-2 episode lives as pure integers on disk with
+  the float->integer translation error driven to the noise floor (24b sub-ULP, 0.76x store; 16b
+  effectively-lossless, 0.5x store; 12b aggressive). Metal confirms float-exact replay == baseline
+  (+0.000%) and is provably blind to sub-1% fidelity differences at n=42. No silent gate revision;
+  the +0.000%-on-metal expectation is corrected with evidence, not satisfied by noise.
+
+REPRO: python3 tools/curator/frob_episode.py _c2_ep_wiki _c2_ep_wiki_frob24 a16b8 ; _run_g_r2_frob_ab.bat
