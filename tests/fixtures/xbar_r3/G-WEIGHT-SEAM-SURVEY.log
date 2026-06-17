@@ -1,0 +1,38 @@
+G-WEIGHT-SEAM-SURVEY -- 2026-06-17T22:17:21Z  [measure-before-mutate for the incoherence-rotation + T4 weight campaign]
+Source: src/backends/cuda/cuda_forward.cu gemma4 forward (k_embed_scale, k_rmsnorm, k_rmsnorm_head[_noweight],
+k_softcap, k_gelu_mul, k_altup_gate; per-layer body ~L1410-1535). Maps where the block-local Hadamard R folds.
+
+FORWARD SEQUENCE (sandwich norms): embed*sqrt(E); per L: attn_norm -> Wq/Wk/Wv -> q_norm/k_norm(out,per-head)
++ weightless V-norm -> RoPE -> attn(NO score cap) -> Wo -> post_attn norm -> +resid ; ffn_norm -> Wgate/Wup
+-> GeGLU(gelu.up) -> Wdown -> post_ffw norm -> +resid ; AltUp(Wplig from RAW resid -> gelu.ipl -> Wplproj ->
+pl_post_norm -> +resid -> *pl_out_scale) ; final: out_norm -> tied-head -> logit softcap(tanh).
+
+FIVE BOUNDARIES + VERDICTS:
+1. INPUT RMSNorm gamma (attn_norm, ffn_norm): ABSORB gamma into downstream weight -> norm becomes pure
+   normalize -> R commutes. R=block-WHT fused into the rmsnorm epilogue (online); R^T folded into the
+   gamma-absorbed weight (offline). Covers Wq/Wk/Wv and Wgate/Wup (gate+up share input -> one butterfly).
+2. per-head q_norm/k_norm: on the OUTPUT of Wq/Wk (head-dim), NOT the input. E-dim input rotation does not
+   touch them -> NO CONFLICT (leave as-is).
+3. weightless V-norm (k_rmsnorm_head_noweight): pure per-head normalize, no gamma -> head-dim R_h commutes.
+   => o_proj/v_proj path folds BOTH ends OFFLINE = ZERO runtime (R_h into Wv out-rows, R_h^T into Wo in-cols).
+   EXCEPTION: V-less layers (dv=dk, raw-K-as-V) -> rotating V corrupts shared K; skip/special-case those.
+4. attention soft-cap: NONE in gemma4 (k_softcap is LM-head ONLY, cuda_forward.cu:457). Non-issue.
+5. GeGLU (gelu.up, k_gelu_mul): nonlinear -> NO fold-through. Wdown input rotation is ONLINE (block-WHT on
+   FF-dim fused into Wdown act-quant); R^T into Wdown offline. Rotate strictly at down_proj INPUT.
+
+TWO CONSTRAINTS THE SURVEY SURFACED (not on Gemini's list):
+A. TIED head/embedding: head is tied to embed_tokens which is ALSO the input gather (*sqrt(E)). Rotation
+   entangled at both ends -> LEAVE tied head/embedding UNROTATED in the first cut (high-rank table anyway).
+B. AltUp Wplig reads the RAW un-normed residual -> rotating it forces a GLOBAL residual R (the thing the
+   block-local result avoids) -> LEAVE AltUp projections UNROTATED first cut (small vs the 7 big GEMVs).
+
+FIRST-CAMPAIGN ROTATABLE SET = the 7 big GEMVs: Wq,Wk,Wv,Wo,Wgate,Wup,Wdown.
+  - Wo/Wv (o_proj path): head-dim R, BOTH ends offline -> zero runtime (modulo V-less layers).
+  - Wq/Wk/Wv,Wgate/Wup: E-dim input R, R^T offline + R online butterfly fused into the input rmsnorm epilogue.
+  - Wdown: FF-dim input R, R^T offline + R online butterfly fused into Wdown act-quant (post-GeGLU).
+  - LEAVE: tied head/embedding, AltUp (Wplig/Wplproj), per-layer scales, softcaps (post-matmul, irrelevant).
+
+NEXT (the gate that decides it): build the offline fold (gamma-absorb -> block-Hadamard R into the 7 GEMV
+weight tensors -> Frobenius-quantize) + the online butterfly in k_quant_act_int8, then ON-MODEL PPL at 3/4-bit
+vs the OK_Q4B baseline (4.6665). Pre-register gate: PPL deflection < the bit-drop you'd otherwise pay (i.e.,
+rotated-Nb beats direct-Nb, target rotated-3b ~ direct-4b). This is measure-before-mutate; no code changed.
