@@ -1,0 +1,38 @@
+# G-R3-NIGHTSHIFT — R3.4 receipt: the idle-loop consolidation state machine (thermodynamic GC). Path A, parameter-free.
+# date: 2026-06-17  cmd: python3 tools/ring3/g_r3_nightshift.py
+# loop: SELECT (resident Ring-2 episode) -> BIND (addr(*)id into active Ring-3 vector, SHADOW copy) ->
+#   SHADOW-GATE (re-verify EVERY bound episode still recalls@1 above margin>0 — crosstalk-safe) ->
+#   PROMOTE (commit bind) + EVICT (free resident slot; verbatim ep.k STAYS on Optane) ->
+#   SATURATE&SEAL (gate-driven; CAP=32 = the R3.2 pre-registered safety cap) -> init fresh vector.
+
+[ns] NIGHTSHIFT consolidation loop — SELECT->BIND->SHADOW-GATE->PROMOTE+EVICT->SATURATE&SEAL
+
+[ns] (A) production D=1024, CAP=32 (R3.2 budget): gate holds to the cap, vector seals at 32, fresh vector continues
+  [run D=1024 CAP=32] batch=40 episodes; resident pool starts at 40
+    seal vector #1 at 32 episodes [CAP] -> init fresh vector
+    -> 40 consolidated across 2 vectors [32, 8]; sealed=1; resident pool now 0
+    -> resident KV freed (demoted to Optane): 349.8 MB ; Ring-3 resident footprint: 16.3 KB
+    -> all consolidated episodes recall@1 in their vector: GREEN
+
+[ns] (B) small D=128: capacity ~D/8 << CAP — the SHADOW-GATE must fire BEFORE the count cap (seal is the MATH, not 32)
+  [run D=128 CAP=32] batch=40 episodes; resident pool starts at 40
+    seal vector #1 at 10 episodes [gate (capacity)] -> init fresh vector
+    seal vector #2 at 6 episodes [gate (capacity)] -> init fresh vector
+    seal vector #3 at 15 episodes [gate (capacity)] -> init fresh vector
+    seal vector #4 at 8 episodes [gate (capacity)] -> init fresh vector
+    -> 40 consolidated across 5 vectors [10, 6, 15, 8, 1]; sealed=4; resident pool now 0
+    -> resident KV freed (demoted to Optane): 349.8 MB ; Ring-3 resident footprint: 5.3 KB
+    -> all consolidated episodes recall@1 in their vector: GREEN
+
+[ns]   (A) all recall@1 + vectors seal at CAP=32: PASS (sizes [32, 8])
+[ns]   (B) gate-driven seal before CAP (max vector 15 < 32): PASS (sizes [10, 6, 15, 8, 1])
+
+[gate] G-R3-NIGHTSHIFT GREEN -- autonomous consolidation: bind -> shadow-gate (whole-set recall) -> promote+evict (verbatim to Optane) -> saturate&seal; seal is gate-driven with CAP=32 safety cap; resident pool bounded
+
+# (A) D=1024 CAP=32: gate holds to the cap; vector#1 seals at 32, vector#2 carries the remainder; resident 40->0;
+#     349.8 MB resident KV demoted to Optane, Ring-3 resident index footprint 16.3 KB (~21000x smaller addressing).
+# (B) D=128: the SHADOW-GATE fires BEFORE the cap (seals [10,6,15,8,1], max 15 < 32) -> the seal is the capacity MATH,
+#     not a magic constant. All consolidated episodes recall@1 in their sealed vector (degrade-safe).
+# EVICT = tier-demotion (resident -> Optane), NOT delete: retrieve-and-verify fetches the verbatim back; the gate
+#   guards REACHABILITY (a mis-bound episode would be unreachable) BEFORE the resident slot is freed (irreversible-aware).
+# => R3.4 CLOSED. Ring-3 Path A end-to-end: R3.1 BIND -> R3.2 LOSS -> R3.3 DUALROUTE -> R3.4 NIGHTSHIFT, all GREEN, no budget.
