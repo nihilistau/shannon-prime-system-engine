@@ -35,6 +35,7 @@
 #include "sp/forward_dispatch.h"   /* sp_matmul / sp_embed_row / sp_as_f32 (CPU mirror) */
 #include "sp/forward_kernels.h"    /* sp_rmsnorm / sp_rmsnorm_head / sp_rope_neox_freqs / sp_attn_head */
 #include "sp_engine/tokenizer.h"   /* sp_tokenizer_* — the parity-validated .sp-tokenizer blob lane (SP_G4_KAIROS) */
+#include "sp/xbar_episode.h"        /* G-XBAR-ORGANISM: serialize an audio-conditioned cache into a Ring-2 episode */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1239,6 +1240,88 @@ static int run_kai3_gate(void){
     return (tot>0 && pass==tot) ? 0 : 3;
 }
 
+/* ═══ SP_G4_KAI3_WRITE=<packet.bin> (G-XBAR-ORGANISM step 1: the EAR -> Ring-2 WRITE SEAM). ═══
+ * Inject a REAL audio-derived projector packet via the proven KAI-3 path (gemma4_kv_inject_seq inside
+ * the daemon turn frame), then SERIALIZE the resulting audio-conditioned resident cache into a standard
+ * Ring-2 episode ep_audio.{k,v,mf} — the same on-disk format SP_REPLAY / the curator digest. Proves the
+ * 12B's audio-pivoted KV state becomes a functional, curator-indexable memory. Out dir = SP_KAI3_WRITE_OUT. */
+static int run_kai3_write(void){
+    const char *spm=getenv("SP_GEMMA4_SPMODEL"); if(!spm) spm=SP_GEMMA4_SPMODEL_DEF;
+    const char *stk=getenv("SP_GEMMA4_SPTOK");   if(!stk) stk=SP_GEMMA4_SPTOK_DEF;
+    const char *pkt=getenv("SP_G4_KAI3_WRITE");  const char *out=getenv("SP_KAI3_WRITE_OUT");
+    if(!pkt||!out){ fprintf(stderr,"[kai3-wr] need SP_G4_KAI3_WRITE=<packet.bin> + SP_KAI3_WRITE_OUT=<epdir>\n"); return 2; }
+    sp_model *handle=NULL;
+    if(sp_model_load(spm,stk,&handle)!=SP_OK||!handle){ fprintf(stderr,"[kai3-wr] load FAIL\n"); return 2; }
+    qwen3_model *m=sp_model_to_gemma4(handle); if(!m){ fprintf(stderr,"[kai3-wr] to_gemma4 FAIL\n"); return 2; }
+    sp_tokenizer *tk=sp_tokenizer_load_tokfile(stk); if(!tk){ fprintf(stderr,"[kai3-wr] tok FAIL\n"); return 2; }
+    const qwen3_config *c=&m->cfg;
+    const int E=(int)c->n_embd, PH=258881;
+    const int NL=(int)c->n_layers, period=(int)c->g4_swa_period?(int)c->g4_swa_period:6;
+    const int kvfs=(int)c->g4_n_kv_from_start?(int)c->g4_n_kv_from_start:NL;
+    const int g_nkv=(int)c->n_head_kv,g_hd=(int)c->head_dim,s_nkv=(int)c->g4_nkv_swa,s_hd=(int)c->g4_hd_swa,nh=(int)c->n_head;
+    const char *SYS=
+        "<start_of_turn>user\nYou are a background kernel daemon. Each tick you receive one environment event "
+        "that carries a salience score. Reply with EXACTLY one of:\nNO_OP\n<ACTION>short imperative</ACTION>\n"
+        "<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n";
+    const char *UOPEN="<start_of_turn>user\n", *UCLOSE="<end_of_turn>\n<start_of_turn>model\n";
+    int32_t sysb[4096],uob[64],ucb[64];
+    long sn=sp_tokenizer_encode(tk,SYS,strlen(SYS),1,sysb,4096);
+    long uon=sp_tokenizer_encode(tk,UOPEN,strlen(UOPEN),1,uob,64);
+    long ucn=sp_tokenizer_encode(tk,UCLOSE,strlen(UCLOSE),0,ucb,64);
+    int k=0; float *vecs=NULL;
+    if(kai2_read_packet(pkt,E,&k,&vecs)!=0){ fprintf(stderr,"[kai3-wr] packet read FAIL %s\n",pkt); return 2; }
+    int Pmax=2048; sp_g4_kv *s=gemma4_kv_open(m,Pmax);
+    if(!s){ fprintf(stderr,"[kai3-wr] kv_open FAIL: %s\n",sp_last_error()); free(vecs); return 2; }
+    if(gemma4_kv_prefill(s,sysb,(int)sn)){ fprintf(stderr,"[kai3-wr] sys FAIL\n"); return 2; }
+    gemma4_kv_commit(s);
+    if(gemma4_kv_prefill(s,uob,(int)uon)||gemma4_kv_inject_seq(s,vecs,k,PH)||gemma4_kv_prefill(s,ucb,(int)ucn)){
+        fprintf(stderr,"[kai3-wr] inject flow FAIL: %s\n",sp_last_error()); return 2; }
+    int npos=gemma4_kv_pos(s);
+    fprintf(stderr,"[kai3-wr] audio packet injected (k=%d frames); conditioned cache npos=%d\n",k,npos);
+    fprintf(stderr,"[kai3-wr] cfg: E=%d NL=%d period=%d kvfs=%d  global(nkv=%d hd=%d ->%d)  swa(nkv=%d hd=%d ->%d)\n",
+            E,NL,period,kvfs,g_nkv,g_hd,g_nkv*g_hd,s_nkv,s_hd,s_nkv*s_hd);
+    /* snapshot the conditioned cache (per-layer width = class kvd) */
+    float **hK=(float**)calloc(NL,sizeof(float*)),**hV=(float**)calloc(NL,sizeof(float*));
+    for(int L=0;L<kvfs&&L<NL;L++){ int gl=((L%period)==period-1); int kvd=(gl?g_nkv:s_nkv)*(gl?g_hd:s_hd);
+        size_t nb=(size_t)Pmax*kvd*sizeof(float); hK[L]=(float*)malloc(nb); hV[L]=(float*)malloc(nb); }
+    gemma4_kv_snapshot(s,hK,hV);
+    /* CANONICAL 12B episode = UNIFORM kvd=512 per layer (matches RECALL_WRITE / _c2_ep_wiki, which the curator
+     * reads as [NL,P,512] and SP_REPLAY injects at 512/layer). Build a uniform-512 manifest + copy the first
+     * EP_KVD floats of each layer's snapshot row (globals are exactly 512; any wider class is clamped to the
+     * canonical global width — the curator's sig uses GLOBAL owners only, and SP_REPLAY round-trips at 512). */
+    const int EP_KVD=512;
+    sp_xbar_layer_geom *geom=(sp_xbar_layer_geom*)calloc(NL,sizeof(sp_xbar_layer_geom));
+    for(int L=0;L<NL;L++){ int gl=((L%period)==period-1);
+        geom[L].cls=(uint8_t)(gl?SP_XBAR_CLASS_GLOBAL:SP_XBAR_CLASS_SWA);
+        geom[L].nh=nh; geom[L].nkv=1; geom[L].hd=EP_KVD;       /* uniform 512 (12B canonical) */
+        geom[L].window=(gl?-1:1024); geom[L].rope_base=(gl?1e6f:1e4f);
+        geom[L].has_freq_factors=(uint8_t)(gl?1:0); geom[L].vless=(uint8_t)(gl?1:0); }
+    sp_xbar_manifest mf; memset(&mf,0,sizeof(mf));
+    uint8_t sha[SP_XBAR_SHA_LEN]; memset(sha,0,sizeof(sha));
+    if(sp_xbar_manifest_build(&mf,NL,npos,period,kvfs,32,SP_ARM_PROJ_SEED,sha,geom)!=0){
+        fprintf(stderr,"[kai3-wr] manifest_build FAIL: %s\n",sp_last_error()); return 2; }
+    /* lay the filled prefix [0,npos) of each OWNER layer (first EP_KVD floats/pos) into the uniform store */
+    size_t sb=(size_t)mf.store_bytes; uint8_t *sk=(uint8_t*)calloc(1,sb),*sv=(uint8_t*)calloc(1,sb);
+    for(int L=0;L<kvfs&&L<NL;L++){ int gl=((L%period)==period-1); int nat=(gl?g_nkv:s_nkv)*(gl?g_hd:s_hd);
+        int cp=(nat<EP_KVD?nat:EP_KVD); size_t off=(size_t)mf.layers[L].off;
+        for(int p=0;p<npos;p++){
+            memcpy(sk+off+(size_t)p*EP_KVD*4, hK[L]+(size_t)p*nat, (size_t)cp*4);
+            memcpy(sv+off+(size_t)p*EP_KVD*4, hV[L]+(size_t)p*nat, (size_t)cp*4); } }
+    char wp[1024]; FILE *wf;
+    size_t msz=sp_xbar_manifest_serial_size(&mf); uint8_t *mb=(uint8_t*)malloc(msz);
+    sp_xbar_manifest_serialize(&mf,mb,msz);
+    snprintf(wp,sizeof wp,"%s/ep.mf",out); wf=fopen(wp,"wb"); if(wf){fwrite(mb,1,msz,wf);fclose(wf);}
+    snprintf(wp,sizeof wp,"%s/ep.k",out);  wf=fopen(wp,"wb"); if(wf){fwrite(sk,1,sb,wf);fclose(wf);}
+    snprintf(wp,sizeof wp,"%s/ep.v",out);  wf=fopen(wp,"wb"); if(wf){fwrite(sv,1,sb,wf);fclose(wf);}
+    fprintf(stderr,"[kai3-wr] WROTE ep_audio: manifest %zu B + K/V store %.2f MiB (NL=%d P=%d) -> %s\n",
+            msz,(double)sb/1048576.0,NL,npos,out);
+    fprintf(stderr,"[kai3-wr] G-XBAR-ORGANISM write-seam: ep_audio serialized from audio-conditioned cache [%s]\n",(sb>0&&npos>0)?"GREEN":"RED");
+    free(mb);free(sk);free(sv);free(geom);sp_xbar_manifest_free(&mf);
+    for(int L=0;L<kvfs&&L<NL;L++){free(hK[L]);free(hV[L]);} free(hK);free(hV);free(vecs);
+    gemma4_kv_close(s); sp_tokenizer_free(tk); sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+    return (sb>0&&npos>0)?0:3;
+}
+
 /* ═══ SP_G4_KV_WRAP=1 (KAI-1c G-1b-WRAP-NULL): wrap-aware ring rewind gate. ═══
  * Small Wring (SP_G4_KV_RING_W) forces wraps cheaply. Prefill past W multiple times
  * (≥3 wraps), commit (retain the action). Snapshot the W-slot SWA rings. Idle tick
@@ -2079,6 +2162,7 @@ int main(void) {
     if (getenv("SP_G4_KAI2_PACKET")) return run_kai2_packet_gate(); /* KAI-2: G-KAIROS-2 trained-packet pivot+selectivity gate */
     if (getenv("SP_G4_INJ_SEQ")) return run_inject_seq_null(); /* KAI-3 §7.2: G-KAIROS-3-NULL sequence-wrapper null floor */
     if (getenv("SP_G4_TOK_DUMP_IN")) return run_tok_dump();     /* KAI-3 §7.3: real gemma tokenizer id dump (local, no cloud) */
+    if (getenv("SP_G4_KAI3_WRITE")) return run_kai3_write();    /* G-XBAR-ORGANISM step 1: EAR audio cache -> Ring-2 episode write seam */
     if (getenv("SP_G4_KAI3")) return run_kai3_gate();           /* KAI-3 §7.3: G-KAIROS-3 projected-frame pivot gate */
     if (getenv("SP_G4_KV_TELEMETRY")) return run_kv_telemetry(); /* KAI-1b §5.4: O(actions)->O(1) receipt */
     if (getenv("SP_G4_KV_RING_TEL")) return run_kv_ring_telemetry(); /* KAI-1c #219: journaled-ring D2D tax */

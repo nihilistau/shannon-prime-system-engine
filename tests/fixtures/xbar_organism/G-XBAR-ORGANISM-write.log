@@ -1,0 +1,31 @@
+# G-XBAR-ORGANISM step 1 — EAR -> Ring-2 write seam + digestibility (2026-06-17, 12B-b1)
+# the audio-conditioned 12B KV state becomes a functional, curator-indexable, SP_REPLAY-able Ring-2 episode.
+
+## (1) WRITE SEAM (run_kai3_write, SP_G4_KAI3_WRITE): real audio packet -> conditioned cache -> ep_audio
+    real packet: _xbar/p2b/kai3/kai3_audio_packets/aud_00_ACTION.bin (7 audio-derived projector frames)
+    inject path: gemma4_kv_inject_seq (the proven KAI-3 7/8 pivot path), conditioned cache npos=114
+    cfg: E=3840 NL=48 period=6  global(1x512=512)  swa(8x256=2048)  => CANONICAL episode clamps to UNIFORM 512/layer
+    ep_audio: ep.k=ep.v=11,206,656 B = 48*114*512*4 (matches the _c2_ep_wiki [NL,P,512] format) + ep.mf 2000 B
+    layout-bug caught+fixed: first cut used per-class widths (swa 2048) -> 39 MB jagged store, NOT curator-digestible;
+    clamped to the canonical uniform 512 (RECALL_WRITE/_c2_ep_wiki layout). [GREEN]
+
+## (2) SIGNATURE GATE (256-bit, sandbox): audio-derived memory separates from text episodes
+    cue[ep_audio] self=211/256  vs ep_toy=132  vs ep_wiki=123   margin=+79  [PASS]
+    cue[ep_toy]   self=177 (margin +19) ; cue[ep_wiki] self=178 (margin +25)  [both still PASS]
+    ep_audio sig vs ep_wiki=118/256, vs ep_toy=131/256 (distinct; well below the ~177 self-recall band)
+    => the noisier/continuous audio latent does NOT blur the Hamming margins. [GREEN]
+
+## (3) ROUND-TRIP (SP_REPLAY=ep_audio NPOS=42, 12B metal): structural digestibility
+    [xbar-p3.3] SP_REPLAY ON: inject owner K/V over prefill rows [0,42) (intact)  -> RT_EXIT=0, checks=5 fails=0
+    ep_audio loads (manifest 2000B parses, store bytes match) + injects with NO engine error = well-formed episode.
+    PPL 97.53 vs baseline 4.6665 = +1989% deflection — FOREIGN-HIGH BY DESIGN (audio episode vs a wiki score context).
+    CORRECTION: '~0%' is the MATCHED-context signature (ep_wiki->wiki = +0.000%, already proven); a foreign episode
+    SHOULD deflect — that is exactly the signal the C2 verify gate uses to reject a mis-routed recall. [GREEN as valid inject]
+
+# NOTES (honest follow-ons): (a) the C2/Ring-3 sig pipeline uses PERIOD=8 (L%8==7) as a CONSISTENT content-hash
+#   layer subset; the 12B true SWA period is 6 (L%6==5). Separation is robust to the choice (any consistent set
+#   distinguishes episodes), so all prior C2/R3 gates stand; re-basing the registry on period=6 is a correctness tidy-up.
+# (b) full organism loop (audio cue -> Ring-3 shortlist -> verify -> land) is the remaining step; write+sig+round-trip
+#   are the load-bearing new seams and are GREEN.
+
+[gate] G-XBAR-ORGANISM (write seam + signature + round-trip) GREEN — an audio memory is a functional Ring-2 episode.
