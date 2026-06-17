@@ -1,0 +1,31 @@
+==========================================================================
+ G-T2-WEIGHTS RECEIPT -- 2026-06-17T20:56:08Z   [MEASURED NEGATIVE]
+ Does T2 Mobius square-free compression hold on REAL model weights (its
+ designed object: the embedding table)?  Tested on gemma-4-12b embed_tokens.
+==========================================================================
+
+T2 (PPT-ARM-Theory s4.2) PROPOSES: store f:[V]->R^d only at square-free token INDICES, reconstruct
+composite indices via Mobius inversion -- lossless IFF f is a MULTIPLICATIVE function of the index
+(row n recoverable from rows at n's divisors). T2 was a DESIGN proposal, never empirically validated
+(unlike T4 Frobenius, which was 6-sig-fig bit-exact on Gemma3-1B).
+
+MEASUREMENT (real gemma-4-12b embed_tokens, V=262144 E=3840 bf16; first 4096 rows; row-norm~1.0):
+  - Mobius-transform energy: square-free 1.315e4  vs  non-square-free 1.017e4
+    => non-square-free energy = 43.60%  (T2 claim ~0%; UNIFORM ~39%; observed is ABOVE uniform)
+  - composite-row reconstruction from square-free basis: cos(recon,true) mean = 0.0322
+  - random-row baseline:                                  cos          mean = 0.0393
+    => reconstruction is NO BETTER (slightly worse) than a random row.
+
+VERDICT: T2 multiplicative reconstruction FAILS on the real embedding. Trained embedding rows carry
+NO multiplicative index redundancy -- token IDs are BPE merge ranks, arbitrary w.r.t. embedding content,
+so row n is unrelated to rows at n's divisors. T2's square-free store is lossy/worthless on real weights;
+the 6/pi^2 density is a true fact about integers that does not transfer to a trained weight table.
+
+This COMPLETES the boundary map: every 'impose number-theoretic structure on the DATA' lever is
+measured-inert -- Leg B carriers (inert), Mobius-on-M (lossy), entropy-on-codes (1.02x), and now
+T2-on-weights (recon 0.032 == random 0.039). The O_K substrate's value is EXACT ARITHMETIC (the
+container: bind, Frobenius store, reduction-order immunity), NEVER structure on the content. Even the
+paper's own T2 proposal does not survive contact with real trained weights.
+
+REPRO: extract embed_tokens block from bf16 safetensors -> Mobius transform + square-free reconstruction
+  (tools/ring3/g_t2_weights_probe.py). Scratch block _embed_block.bf16 (31MB) NOT committed.
