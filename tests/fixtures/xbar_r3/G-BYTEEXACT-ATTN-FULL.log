@@ -1,0 +1,20 @@
+G-BYTEEXACT-ATTN-FULL -- complete exact-integer decode attention vs float, dual-prime
+date: 2026-06-18 | probe tools/ring3/g_byteexact_attn_full.py | primes q1=1073738753 q2=1073732609
+chain: CKKS encode round(Delta*v) -> exact integer Q.K (dual-prime modular dot + Garner)
+       -> integer softmax (FB30 2^x poly) -> exact integer p.V (dual-prime) -> decode.
+
+CRT dual-prime dot == plain int dot: True
+W=   64 Delta=2^16: relerr 1.13e-05 | AV maxacc 2^46.2 vs M 2^60.0 -> dual-prime-safe True
+W= 1024 Delta=2^16: relerr 2.82e-05 | AV maxacc 2^46.7 vs M 2^60.0 -> dual-prime-safe True
+W= 4096 Delta=2^16: relerr 3.40e-05 | AV maxacc 2^47.1 vs M 2^60.0 -> dual-prime-safe True
+W=16384 Delta=2^14: relerr 1.57e-04 | AV maxacc 2^45.3 vs M 2^60.0 -> dual-prime-safe True
+order-immune (key-set permutation -> identical output): True
+
+VERDICT: GREEN. The full decode attention is exact-integer & cross-machine reproducible:
+ - CRT dual-prime dot == plain integer dot (the negacyclic coeff_{N-1}; no __int128);
+ - fidelity vs float 1.1e-5..1.6e-4 (Delta-tunable, matches PPT Delta>=2^10 ULP regime);
+ - KEY RANGE RESULT: softmax is a probability distribution => the p.V accumulator stays ~2^46
+   at EVERY context W up to 16384, far below M~2^60 => DUAL-PRIME IS SUFFICIENT end-to-end
+   (no 3rd prime needed; the naive worst-case 2^62 never occurs);
+ - reduction-order immune: key-set permutation -> byte-identical output.
+This is the validated design for the CUDA k_attn_decode_*_bx kernels (#262).
