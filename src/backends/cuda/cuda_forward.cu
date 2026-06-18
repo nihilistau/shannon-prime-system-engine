@@ -3781,6 +3781,16 @@ struct sp_g4_kv {
      * graph_mode: -1 = undecided, 0 = disabled (stay per-step), 1 = armed. */
     int graph_mode, graph_ready;
     cudaGraph_t gcap; cudaGraphExec_t gexec;
+    /* CONTRACT-CHAT-FULLSTACK B1 — per-session byte-exact "auditable mode".
+     * bx_on mirrors the device __constant__ d_bx_flag on the host so g4_kv_step
+     * can route the resident decode ATTENTION through the exact-integer kernel
+     * (k_attn_decode_win_bx) — the islands (RMSNorm/RoPE/GELU) already branch on
+     * d_bx_flag internally, but the decode attention used here
+     * (k_attn_decode_win_dyn) does not. Set per-request via gemma4_kv_byteexact_set
+     * under the resident-cache Mutex; default 0 = byte-identical null floor.
+     * When on, the graph path is declined (the bx attention takes a host ctx +
+     * ctx-sized i64 shared mem, not graph-capturable) — chat runs per-step. */
+    int bx_on;
 };
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
@@ -3903,7 +3913,10 @@ static int g4_kv_step_graph(sp_g4_kv *s) {
         static int want = -1;
         if (want < 0) { const char *e = getenv("SP_G4_KV_GRAPH"); want = (e && e[0]=='1') ? 1 : 0; }
         const size_t attn_shm = (size_t)s->Pmax * sizeof(float);
+        /* B1: byte-exact decode uses the host-ctx bx attention (k_attn_decode_win_bx,
+         * ctx-sized i64 shared mem) which is NOT graph-capturable; force per-step. */
         const int safe = want && s->ring_W == 0 && !s->inj_active && !s->cap_active
+                         && !s->bx_on
                          && attn_shm <= 48u*1024u && (!s->PL || s->dev_ple);
         s->graph_mode = safe ? 1 : 0;
         if (safe) fprintf(stderr, "    [g4-kv] GRAPH decode armed (SP_G4_KV_GRAPH=1; capturing one decode step)\n");
@@ -3911,8 +3924,11 @@ static int g4_kv_step_graph(sp_g4_kv *s) {
     if (s->graph_mode == 0) return g4_kv_step(s, /*do_head=*/1);
 
     /* Inject/capture cannot coexist with a replayed graph (they mutate dx via a
-     * host-sync seam). If a seam fires mid-session, drop to per-step for it. */
-    if (s->inj_active || s->cap_active) return g4_kv_step(s, /*do_head=*/1);
+     * host-sync seam). If a seam fires mid-session, drop to per-step for it.
+     * B1: byte-exact mode likewise routes the per-step bx attention (host ctx,
+     * not graph-bakeable), so a session that armed graph then turned bx on this
+     * request decodes per-step for the duration. */
+    if (s->inj_active || s->cap_active || s->bx_on) return g4_kv_step(s, /*do_head=*/1);
 
     if (!s->graph_ready) {
         if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
@@ -4037,6 +4053,14 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
                 const int wl = ctx - s0;
                 k_attn_decode_ring<<<nh, bd, (size_t)wl*sizeof(float), st>>>(
                     s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->ring_W, s->dao);
+            } else if (s->bx_on) {                    /* B1: byte-exact (auditable) decode attention.
+                * The exact-integer kernel takes a HOST ctx (= dpos_host+1) — this is the
+                * per-step (non-graph) path, so dpos_host is the live position. Shared mem
+                * is ctx*int64 (the dual-prime score lane). Windowing handled inside via win. */
+                const int ctx = s->dpos_host + 1;
+                int bdb = hd > ctx ? hd : ctx; if (bdb > 1024) bdb = 1024;
+                k_attn_decode_win_bx<<<nh, bdb, (size_t)ctx*sizeof(long long), st>>>(
+                    s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->dao);
             } else {
                 k_attn_decode_win_dyn<<<nh, bd, attn_shm, st>>>(
                     s->dq, Kuse, Vuse, dpos, kvd, hd, grp, 1.0f, win, s->dao);
@@ -4210,6 +4234,31 @@ extern "C" int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits
     s->dpos_host++;
     cudaError_t e = cudaStreamSynchronize(st);
     if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_decode_logits sync");
+    return 0;
+}
+
+/* CONTRACT-CHAT-FULLSTACK B1 — per-session byte-exact "auditable mode" toggle.
+ *
+ * Sets the device __constant__ d_bx_flag (the same flag the one-shot/forward path
+ * sets ONCE from SP_BYTEEXACT) so the resident-decode nonlinear islands
+ * (RMSNorm/RoPE/GELU/AltUp-gate, which all branch on d_bx_flag) run exact-integer,
+ * AND mirrors it on the host (s->bx_on) so g4_kv_step routes the decode ATTENTION
+ * through the exact-integer k_attn_decode_win_bx (the decode attention kernel
+ * k_attn_decode_win_dyn has no internal d_bx_flag branch; the islands do).
+ *
+ * Per-request callable: the chat path serializes on the resident-cache Mutex, so
+ * the daemon sets on=1 at request start and on=0 at request end. Default (never
+ * called / on=0) = byte-identical null floor — the Stage-A float path is untouched.
+ *
+ * The memcpy-to-symbol is synchronous (the cache's stream is idle between requests
+ * under the Mutex), so the flag is in place before the next decode launches.
+ * Returns 0 on success, -1 on a bad handle / CUDA error. */
+extern "C" int gemma4_kv_byteexact_set(sp_g4_kv *s, int on) {
+    if (!s) { sp_set_error("gemma4_kv_byteexact_set: NULL handle"); return -1; }
+    int bx = on ? 1 : 0;
+    cudaError_t e = cudaMemcpyToSymbol(d_bx_flag, &bx, sizeof(int), 0, cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_byteexact_set: d_bx_flag H2D");
+    s->bx_on = bx;
     return 0;
 }
 

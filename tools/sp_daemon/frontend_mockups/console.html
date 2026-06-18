@@ -277,6 +277,13 @@
           <label>top_k <input type="number" id="s-topk" min="0" max="200" step="1" value="40"></label>
           <label>rep <input type="number" id="s-rep" min="1" max="2" step="0.05" value="1.1"></label>
           <label>seed <input type="text" id="s-seed" placeholder="rand" style="width:54px"></label>
+          <!-- CONTRACT-CHAT-FULLSTACK B1: byte-exact "auditable mode". Decodes
+               through the exact-integer islands + dual-prime CRT-NTT attention
+               (run-to-run bit-identical). Pair with temp=0 for the determinism
+               claim. Off = the Stage-A float path (null floor). -->
+          <label title="byte-exact: exact-integer / dual-prime decode (run-to-run bit-identical). Pair with temp=0.">
+            <input type="checkbox" id="s-byteexact"> auditable
+          </label>
         </div>
         <div class="right">
           <button class="toolbtn" id="rewind-toggle" title="Scrub the response timeline">
@@ -590,6 +597,8 @@
     const r = num('s-rep');  if (r !== undefined) out.repetition_penalty = r;
     const seedRaw = ($('s-seed').value || '').trim();
     if (seedRaw !== '') { const sd = parseInt(seedRaw, 10); if (Number.isFinite(sd)) out.seed = sd; }
+    // B1: byte-exact "auditable mode" — top-level (not a SamplingParam).
+    if ($('s-byteexact') && $('s-byteexact').checked) out.byteexact = true;
     return out;
   }
 

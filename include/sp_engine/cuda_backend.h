@@ -99,6 +99,14 @@ int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
 typedef struct sp_g4_kv sp_g4_kv;
 int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
 
+/* CONTRACT-CHAT-FULLSTACK B1: per-session byte-exact "auditable mode" toggle on
+ * the resident KV-decode cache. on!=0 sets the device d_bx_flag (exact-integer
+ * islands) AND routes the resident-decode attention through k_attn_decode_win_bx
+ * (the dual-prime CRT-NTT exact-integer dot); on==0 restores the float Stage-A
+ * path (byte-identical null floor). Callable per request under the cache Mutex
+ * (the chat path sets on=1 at request start, on=0 at end). 0 on success. */
+int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

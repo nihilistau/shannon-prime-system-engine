@@ -131,6 +131,8 @@ extern void  gemma4_kv_close(sp_g4_kv *s);
  * in cuda_forward.cu, declared in sp_engine/cuda_backend.h). Forward K/V at the
  * live dpos, D2H the post-head full-vocab logits row [n_vocab], advance dpos. */
 extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
+/* CONTRACT-CHAT-FULLSTACK B1 — per-session byte-exact "auditable mode" setter. */
+extern int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
 
 /* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
  * gemma4_kv_open). pmax = max resident position budget. Requires the model to
@@ -180,6 +182,17 @@ int sp_daemon_cuda_kvdecode_position(const void *handle) {
 void sp_daemon_cuda_kvdecode_close(void *handle) {
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (s) gemma4_kv_close(s);
+}
+
+/* byteexact(handle, on): CONTRACT-CHAT-FULLSTACK B1 — toggle per-session
+ * byte-exact "auditable mode" on the resident KV-decode cache. on!=0 routes the
+ * islands+attention through the exact-integer (dual-prime CRT-NTT) substrate;
+ * on==0 restores the float Stage-A path (byte-identical null floor). The chat
+ * path holds the cache Mutex, sets on=1 at request start, on=0 at end. 0 ok. */
+int sp_daemon_cuda_kvdecode_byteexact(void *handle, int on) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s) { sp_set_error("cuda kvdecode byteexact: NULL handle"); return -1; }
+    return gemma4_kv_byteexact_set(s, on);
 }
 
 /* ── Engine-kernel shim over math-core forward_dispatch ────────────────────

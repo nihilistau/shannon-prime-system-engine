@@ -183,6 +183,14 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     #[serde(default)]
     pub stop: Vec<String>,
+    // CONTRACT-CHAT-FULLSTACK B1 — byte-exact "auditable mode". When true, this
+    // turn decodes through the exact-integer islands + dual-prime CRT-NTT
+    // attention on the resident cache (run-to-run bit-identical, the AUDITABILITY
+    // axis). Pair with temperature:0 for the determinism claim. Default false =
+    // the Stage-A float path, byte-identical null floor. Only honored on the 12B
+    // kvdecode (resident-cache) chat path.
+    #[serde(default)]
+    pub byteexact: bool,
     // CONTRACT-CHAT-FULLSTACK A2 — sampling knobs (L2 owns sampling over the
     // full-vocab logits row). Flattened so the request body carries them at the
     // top level: {"prompt":"...","temperature":0.7,"top_p":0.95,...}. Defaults
@@ -288,6 +296,8 @@ pub async fn v1_chat(
     let vocab_size = state.vocab_size;
     let app = state.clone();
     let max_tokens = req.max_tokens;
+    // B1: byte-exact "auditable mode" for this turn (resident-cache chat path only).
+    let byteexact = req.byteexact;
     // A2: build the per-request sampler from the (flattened) ChatRequest knobs.
     let sampling = req.sampling.clone();
     // A2: token ids the sampler must never emit (the <image|> placeholder
@@ -340,7 +350,7 @@ pub async fn v1_chat(
             run_kvdecode_chat(
                 &app, chat_id, &tokens, max_tokens, vocab_size,
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
-                &mut sampler,
+                &mut sampler, byteexact,
             );
             return;
         }
@@ -458,6 +468,7 @@ fn run_kvdecode_chat(
     cancel_child: &Arc<AtomicI32>,
     sessions: &crate::sessions::Sessions,
     sampler: &mut crate::sampler::Sampler,
+    byteexact: bool,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -482,6 +493,29 @@ fn run_kvdecode_chat(
         }
     };
     let handle = guard.0;
+
+    // B1: byte-exact "auditable mode" for this turn. Set under the cache Mutex so
+    // the whole decode runs on the exact-integer substrate, then reset to the
+    // float null floor on EVERY exit path (RAII guard) — a request that did not
+    // ask for it must see the byte-identical Stage-A path. SAFETY: handle live;
+    // we hold the cache Mutex (no concurrent decode).
+    struct ByteExactGuard(*mut std::ffi::c_void);
+    impl Drop for ByteExactGuard {
+        fn drop(&mut self) {
+            // Reset to float; ignore errors (best-effort cleanup at turn end).
+            let _ = unsafe { kv::set_byteexact(self.0, false) };
+        }
+    }
+    let _bx_guard = if byteexact {
+        if let Err(e) = unsafe { kv::set_byteexact(handle, true) } {
+            send_err(format!("kvdecode set_byteexact(on): {e}"));
+            sessions.remove(chat_id);
+            return;
+        }
+        Some(ByteExactGuard(handle))
+    } else {
+        None
+    };
 
     // Reset the resident cache to dpos=0 (O(1) rewind) so each request is clean.
     // SAFETY: handle is a live sp_g4_kv* owned by AppState; we hold its Mutex.

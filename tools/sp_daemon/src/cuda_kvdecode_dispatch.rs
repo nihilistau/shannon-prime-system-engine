@@ -92,6 +92,10 @@ unsafe extern "C" {
 
     /// `gemma4_kv_close(s)`. Frees the resident cache. NULL-safe.
     fn sp_daemon_cuda_kvdecode_close(handle: *mut c_void);
+
+    /// CONTRACT-CHAT-FULLSTACK B1 — `gemma4_kv_byteexact_set(s, on)`. Toggles
+    /// per-session byte-exact "auditable mode" on the resident cache. 0 on success.
+    fn sp_daemon_cuda_kvdecode_byteexact(handle: *mut c_void, on: c_int) -> c_int;
 }
 
 /// Open a session-resident KV-decode cache on the CUDA backend.
@@ -167,6 +171,24 @@ pub unsafe fn rewind(handle: *mut c_void, n: i32) -> Result<(), String> {
     }
     // SAFETY: handle live per caller.
     let rc = unsafe { sp_daemon_cuda_kvdecode_rewind(handle, n) };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B1 — toggle byte-exact ("auditable") mode on the
+/// resident cache. `on=true` routes the islands+attention through the
+/// exact-integer dual-prime CRT-NTT substrate (run-to-run bit-identical);
+/// `on=false` restores the float Stage-A path (byte-identical null floor).
+/// The caller MUST hold the cache Mutex (the chat path sets it on at request
+/// start, off at request end).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn set_byteexact(handle: *mut c_void, on: bool) -> Result<(), String> {
+    if handle.is_null() {
+        return Err("kvdecode set_byteexact: NULL handle".to_string());
+    }
+    // SAFETY: handle live per caller; glue forwards to gemma4_kv_byteexact_set.
+    let rc = unsafe { sp_daemon_cuda_kvdecode_byteexact(handle, if on { 1 } else { 0 }) };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
 

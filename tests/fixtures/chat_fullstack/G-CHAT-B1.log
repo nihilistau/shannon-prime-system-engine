@@ -1,0 +1,29 @@
+G-CHAT-B1 — byte-exact ("auditable mode") toggle on /v1/chat
+CONTRACT-CHAT-FULLSTACK §3 B1 ; engine HEAD pre-commit 91b4177 ; daemon :3000 (run_console env)
+date: 2026-06-18
+
+INVESTIGATION:
+  - Resident decode g4_kv_step honors d_bx_flag for ALL 4 islands (RMSNorm/RoPE/GELU/
+    AltUp-gate) automatically — they are the SAME kernels the one-shot forward gates.
+  - GAP: the resident-decode ATTENTION (k_attn_decode_win_dyn / k_attn_decode_ring)
+    had NO d_bx_flag branch; only the one-shot/forward path routed to the exact-integer
+    k_attn_decode_win_bx. B1 therefore = (a) a runtime flag setter + (b) wire bx attention
+    into g4_kv_step behind the flag (the islands were already covered).
+  - d_bx_flag was env-at-init only (read once from SP_BYTEEXACT in the forward path);
+    added gemma4_kv_byteexact_set() for per-request runtime toggle under the cache Mutex.
+
+GATE G-CHAT-B1 (as measured, temp=0):
+  OFF leg (null floor) — new build byteexact=false == Stage-A reference, byte-identical:
+    P1 "The capital of France is" /24  OFF=126d6322a18e2171...68b0  MATCH=True
+    P2 "Write a haiku about winter."/32  OFF=debf151dc8651429...0356  MATCH=True
+    P3 "2+2="                       /8   OFF=743471d39ff792ba...c407  MATCH=True
+  ON leg (determinism) — byteexact=true, run-to-run bit-identical:
+    "The capital of France is" /24  A=ddaa1b93e9a9a65c...f76e  B=ddaa1b93e9a9a65c...f76e  IDENTICAL=True
+    "List three colors:"       /20  A=e57c12bc07cee11e...3777  B=e57c12bc07cee11e...3777  IDENTICAL=True
+  Parity — ON (ddaa1b93) != OFF (126d6322), consistent w/ the gated int-vs-float deflection
+    (G-BYTEEXACT-FORWARD-12B OFF 4.6665 / ON 4.6569 @ n=42). ON output coherent
+    ("...a city of art, culture, and history... Paris"), no <image|> attractor.
+  Flag-leak — OFF AFTER ON == OFF reference (126d6322) MATCH=True (RAII reset works).
+  G-WIRE-CUDA-DECODE-GEMMA4 re-run: TOKEN STREAM IDENTICAL 32/32, VRAM delta A-vs-B = 0 MiB. GREEN.
+
+VERDICT: G-CHAT-B1 GREEN.
