@@ -93,6 +93,70 @@ pub struct Episode {
     pub npos: i32,
     pub topic: String,
     pub sig: [u64; 4],
+    /// B3-v2: the episode's stored GLOBAL-owner K (from ep.k), packed
+    /// `[n_global][npos][HD]` row-major, global layers ascending, ONLY the real
+    /// prompt positions [0,npos). Empty if ep.k was unavailable at load. This is
+    /// the memory the live query is scored against by q·K attention relevance.
+    pub gk: Vec<f32>,
+    pub gk_ng: usize,
+}
+
+// gemma4-12b global attention head geometry (g_nkv=1, g_nh=16, g_hd=512 ⇒ g_kvd=HD).
+pub const G_NH: usize = 16;
+
+/// Per-episode q·K attention-relevance reductions, the B3-v2 selector. `q` is the
+/// live query's last-token global-layer query, packed `[n_global][G_NH*HD]`
+/// (read_global_q layout). `gk` is the episode's stored global-K `[n_global][npos][HD]`.
+/// For each global layer and each of G_NH query heads (GQA: all share the 1 KV head),
+/// the attention pre-softmax score at position p is `q_head · K[p]`. We summarise the
+/// `[layer, head, pos]` score tensor two ways:
+///   - `max`  = the single strongest q·K over all (layer, head, pos) — the peak match.
+///   - `topm` = the mean of the top-`m` scores (per the whole tensor) — a robust
+///              "the query attends to several of these positions" relevance.
+/// Both are returned (the gate reports both); the daemon ranks on `topm`. Scores are
+/// scaled by 1/sqrt(HD) (the attention temperature) so they read in the usual logit
+/// range. Returns (max, topm). A layer/geometry mismatch yields (NEG_INFINITY, _).
+pub fn qk_relevance(q: &[f32], gk: &[f32], gk_ng: usize, npos: usize, m: usize) -> (f32, f32) {
+    if gk.is_empty() || gk_ng == 0 || npos == 0 { return (f32::NEG_INFINITY, f32::NEG_INFINITY); }
+    let qd = G_NH * HD;
+    let n_global_q = q.len() / qd;
+    let ng = n_global_q.min(gk_ng);
+    if ng == 0 { return (f32::NEG_INFINITY, f32::NEG_INFINITY); }
+    let scale = 1.0f64 / (HD as f64).sqrt();
+    let mut best = f64::NEG_INFINITY;
+    // Collect the top-m scores in a tiny ascending min-heap (m is small).
+    let mut top: Vec<f64> = Vec::with_capacity(m + 1);
+    for l in 0..ng {
+        let qbase = l * qd;
+        let kbase_l = l * npos * HD;
+        for p in 0..npos {
+            let kbase = kbase_l + p * HD;
+            for h in 0..G_NH {
+                let qh = qbase + h * HD;
+                let mut dot = 0.0f64;
+                for d in 0..HD {
+                    dot += (q[qh + d] as f64) * (gk[kbase + d] as f64);
+                }
+                dot *= scale;
+                if dot > best { best = dot; }
+                // maintain top-m
+                if top.len() < m {
+                    top.push(dot);
+                    if top.len() == m { top.sort_by(|a, b| a.partial_cmp(b).unwrap()); }
+                } else if dot > top[0] {
+                    top[0] = dot;
+                    // re-sift the smallest to the front (m tiny ⇒ a sort is fine)
+                    top.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                }
+            }
+        }
+    }
+    let topm = if top.is_empty() {
+        best
+    } else {
+        top.iter().sum::<f64>() / (top.len() as f64)
+    };
+    (best as f32, topm as f32)
 }
 
 /// Bit-agreement = R_BITS - HammingDistance (the discrete_resolve.py `agree`).
@@ -156,15 +220,51 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
             Some(s) => s,
             None => continue,
         };
+        // B3-v2: load the episode's stored global-owner K (ep.k) for the q·K selector.
+        let (gk, gk_ng) = load_episode_global_k(dir, npos).unwrap_or((Vec::new(), 0));
         out.push(Episode {
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
             dir: dir.to_string(),
             npos,
             topic: v.get("topic").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             sig,
+            gk,
+            gk_ng,
         });
     }
     Ok(out)
+}
+
+/// B3-v2: read `<dir>/ep.k` and extract the GLOBAL-owner K rows `[0,npos)`, packed
+/// `[n_global][npos][HD]` row-major (global layers ascending), matching the
+/// `read_global_q`/`gemma4_kv_read_global_k` layout so a live query and the stored
+/// memory are directly comparable. ep.k is raw little-endian f32 `[NL][P][HD]` (the
+/// curator's `loadK`: P = filesize / (NL*HD)). Returns (packed_global_K, n_global).
+fn load_episode_global_k(dir: &str, npos: i32) -> Option<(Vec<f32>, usize)> {
+    let path = Path::new(dir).join("ep.k");
+    let bytes = std::fs::read(&path).ok()?;
+    if bytes.len() % 4 != 0 { return None; }
+    let n_f32 = bytes.len() / 4;
+    if n_f32 % (NL * HD) != 0 && n_f32 < NL * HD { return None; }
+    let p_total = n_f32 / (NL * HD);            // floor: capture allocates Pmax slots
+    if p_total == 0 { return None; }
+    let npos = (npos as usize).min(p_total);
+    // global layer indices (L % PERIOD == PERIOD-1).
+    let globals: Vec<usize> = (0..NL).filter(|l| l % PERIOD == PERIOD - 1).collect();
+    let ng = globals.len();
+    let mut out = vec![0.0f32; ng * npos * HD];
+    for (gi, &l) in globals.iter().enumerate() {
+        for p in 0..npos {
+            // source f32 index of K[l, p, 0] in the [NL][P][HD] flat layout.
+            let src0 = (l * p_total + p) * HD;
+            let dst0 = (gi * npos + p) * HD;
+            for d in 0..HD {
+                let b = (src0 + d) * 4;
+                out[dst0 + d] = f32::from_le_bytes([bytes[b], bytes[b + 1], bytes[b + 2], bytes[b + 3]]);
+            }
+        }
+    }
+    Some((out, ng))
 }
 
 /// Match a query sig against the registry. Returns (best_episode_index,

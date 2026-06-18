@@ -716,67 +716,72 @@ fn run_kvdecode_chat(
     // leg needs the below-TAU case to be visible). dpos here == head.len() (the
     // prompt positions); the chosen episode is injected at [dpos,dpos+npos) just
     // like B2, so the last prompt token + every generated token attend over it.
+    // B3-v2: the q·K ATTENTION-RELEVANCE selector replaces the v1 centroid-Hamming
+    // sig (which did not separate question→passage: right episode argmax only 1/5,
+    // episodes mutually agree ~200/256). v2 scores each episode by the model's NATIVE
+    // attention relevance — q·K, where q is THIS query's last-token global-layer query
+    // (gemma4_kv_read_global_q, the SAME resident path the decode runs on) and K is the
+    // episode's stored global-K (ep.k). Ranks on the top-m-mean relevance; fires the
+    // argmax iff it clears SP_B3_TAU_QK (a relevance threshold set from the MEASURED
+    // separation — no guessing). Score reported either way (the foreign-reject leg
+    // needs the below-TAU case visible). `recalled` holds (name, topm*1000 as u32).
     let mut recalled: Option<(String, u32)> = None;
     if auto_recall && replay_dir.is_none() {
         if let Some(registry) = app.recall_registry.as_ref() {
             let npos_q = unsafe { kv::position(handle) }; // = head.len() after prefill
             if npos_q > 0 {
                 use sp_daemon::recall;
-                // gemma4-12b: 8 global layers (period-6 over 48), g_kvd=512.
+                // q·K relevance top-m (a few strongest matched positions). Tunable via env.
+                let topm: usize = std::env::var("SP_B3_QK_TOPM").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(8);
+                // The relevance threshold on the top-m-mean; default +inf so a first
+                // telemetry run (env unset) NEVER fires — we read the matrix, then set
+                // SP_B3_TAU_QK from the measured target/foreign gap.
+                let tau_qk: f32 = std::env::var("SP_B3_TAU_QK").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY);
+                // Read the live query's last-token global-layer Q (one non-committing
+                // forward of the last prompt token; the cache is rolled back after).
                 let n_global = recall::NL / recall::PERIOD;
-                let mut buf = vec![0.0f32; n_global * (npos_q as usize) * recall::HD];
-                match unsafe { kv::read_global_k(handle, &mut buf, npos_q) } {
-                    Ok(ng) => {
-                        let ng = ng as usize;
-                        // B3 DIAG (env-gated): dump the raw global-K buffer read from
-                        // the resident cache so it can be diffed against the ep.k the
-                        // registry was built from (the representation-parity check).
-                        if std::env::var("SP_B3_DUMP_QK").is_ok() {
-                            if let Ok(p) = std::env::var("SP_B3_DUMP_QK") {
-                                let bytes: &[u8] = unsafe {
-                                    std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len() * 4)
-                                };
-                                let _ = std::fs::write(&p, bytes);
-                                tracing::info!("B3 DIAG: dumped global-K [{}x{}x512] -> {} ({} f32)", ng, npos_q, p, buf.len());
-                            }
+                let mut qbuf = vec![0.0f32; n_global * recall::G_NH * recall::HD];
+                match unsafe { kv::read_global_q(handle, last[0], &mut qbuf) } {
+                    Ok(_ng) => {
+                        // Score every episode (max + top-m-mean), log the full matrix.
+                        let mut best: Option<(usize, f32)> = None;
+                        let mut rows: Vec<String> = Vec::with_capacity(registry.len());
+                        for (i, ep) in registry.iter().enumerate() {
+                            let np = (ep.npos as usize).min(
+                                if ep.gk_ng > 0 { ep.gk.len() / (ep.gk_ng * recall::HD) } else { 0 });
+                            let (mx, tm) = recall::qk_relevance(&qbuf, &ep.gk, ep.gk_ng, np, topm);
+                            rows.push(format!("{}(max={:.3},topm={:.3})", ep.name, mx, tm));
+                            let key = tm;
+                            match best { Some((_, b)) if key <= b => {}, _ => best = Some((i, key)) }
                         }
-                        let sig = app.recall_proj.signature(&buf, ng, npos_q as usize);
-                        // Log the FULL per-episode agreement vector so the gate can
-                        // read the separation (target vs foreign) directly, not just
-                        // the argmax — the honest measurement the B3 verdict needs.
-                        {
-                            let scores: Vec<String> = registry.iter()
-                                .map(|e| format!("{}={}", e.name, recall::agree(&sig, &e.sig)))
-                                .collect();
-                            tracing::info!("B3 recall scores (npos_q={}): [{}]", npos_q, scores.join(" "));
-                        }
-                        if let Some((idx, score)) = recall::best_match(&sig, registry) {
+                        tracing::info!("B3-v2 q·K relevance (npos_q={} topm={}): [{}]", npos_q, topm, rows.join(" "));
+                        if let Some((idx, score)) = best {
                             let ep = &registry[idx];
-                            let fire = score >= recall::TAU_BITS;
+                            let fire = score >= tau_qk && ep.npos > 0 && !ep.gk.is_empty();
                             tracing::info!(
-                                "B3 recall: query sig vs registry — best='{}' (topic='{}') agree={}/{} TAU={} ⇒ {}",
-                                ep.name, ep.topic, score, recall::R_BITS, recall::TAU_BITS,
-                                if fire { "FIRE (auto-replay)" } else { "REJECT (foreign; no replay)" }
+                                "B3-v2 recall: best='{}' (topic='{}') topm={:.3} TAU={:.3} ⇒ {}",
+                                ep.name, ep.topic, score, tau_qk,
+                                if fire { "FIRE (auto-replay)" } else { "REJECT (below TAU; no replay)" }
                             );
-                            if fire && ep.npos > 0 {
+                            if fire {
                                 // SAFETY: handle live; we hold the cache Mutex.
                                 if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
-                                    // A replay failure must not corrupt the turn —
-                                    // log and proceed with the un-recalled answer.
-                                    tracing::warn!("B3 recall: auto-replay({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
+                                    tracing::warn!("B3-v2 recall: auto-replay({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
                                 } else {
-                                    recalled = Some((ep.name.clone(), score));
+                                    recalled = Some((ep.name.clone(), (score * 1000.0) as u32));
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("B3 recall: read_global_k failed: {e} — proceeding without recall");
+                        tracing::warn!("B3-v2 recall: read_global_q failed: {e} — proceeding without recall");
                     }
                 }
             }
         } else {
-            tracing::info!("B3 recall: auto_recall set but no registry loaded (SP_RECALL_REGISTRY) — no-op");
+            tracing::info!("B3-v2 recall: auto_recall set but no registry loaded (SP_RECALL_REGISTRY) — no-op");
         }
     }
     // Surface the recall decision on the SSE stream as a structured event so the

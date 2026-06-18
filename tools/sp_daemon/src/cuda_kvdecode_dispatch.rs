@@ -146,6 +146,18 @@ unsafe extern "C" {
         out: *mut f32,
         npos: c_int,
     ) -> c_int;
+
+    /// CONTRACT-CHAT-FULLSTACK B3-v2 (q·K AUTONOMOUS RECALL) —
+    /// `gemma4_kv_read_global_q(s, token, out)`. Runs one non-committing forward of
+    /// `token` at the live dpos and reads the last-token GLOBAL-layer query (post-RoPE)
+    /// into `out` (packed `[n_global][g_nh*g_hd]` row-major). dpos is rolled back; the
+    /// cache is unchanged for the caller's subsequent replay + decode. Returns the
+    /// number of global layers written (>0) on success, -1 on error.
+    fn sp_daemon_cuda_kvdecode_read_global_q(
+        handle: *mut c_void,
+        token: i32,
+        out: *mut f32,
+    ) -> c_int;
 }
 
 /// Open a session-resident KV-decode cache on the CUDA backend.
@@ -342,6 +354,24 @@ pub unsafe fn read_global_k(handle: *const c_void, out: &mut [f32], npos: i32) -
     }
     // SAFETY: handle live per caller; out slice gives the packed buffer ptr.
     let n = unsafe { sp_daemon_cuda_kvdecode_read_global_k(handle, out.as_mut_ptr(), npos) };
+    if n > 0 { Ok(n) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B3-v2 (q·K AUTONOMOUS RECALL) — read the live query's
+/// last-token GLOBAL-layer query for the attention-relevance selector. Runs one
+/// non-committing forward of `token` at the live dpos; `out` must hold
+/// `n_global * g_nh * g_hd` f32 (gemma4-12b: 8 globals, g_nh*g_hd = 16*512 = 8192).
+/// Returns the number of global layers written (>0). The cache is unchanged.
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`]; `out` valid for the buffer size
+/// above; the caller MUST hold the cache Mutex (no concurrent decode).
+pub unsafe fn read_global_q(handle: *mut c_void, token: i32, out: &mut [f32]) -> Result<i32, String> {
+    if handle.is_null() || out.is_empty() {
+        return Err("kvdecode read_global_q: NULL handle / empty out".to_string());
+    }
+    // SAFETY: handle live per caller; out slice gives the packed buffer ptr.
+    let n = unsafe { sp_daemon_cuda_kvdecode_read_global_q(handle, token, out.as_mut_ptr()) };
     if n > 0 { Ok(n) } else { Err(last_error()) }
 }
 

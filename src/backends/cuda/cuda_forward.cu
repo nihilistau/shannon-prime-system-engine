@@ -3870,6 +3870,15 @@ struct sp_g4_kv {
      * cap_active ⇒ next step D2H its post-embed dx into cap_host; inj_active ⇒ next step
      * overrides dx with dinj (E floats). One-shot flags, cleared after the step consumes them. */
     float *dinj; float *cap_host; int inj_active, cap_active;
+    /* CONTRACT-CHAT-FULLSTACK B3-v2 — AUTONOMOUS RECALL by q·K attention relevance.
+     * When qcap_active, g4_kv_step D2H-copies, per GLOBAL owner layer (period-6,
+     * ascending), this step's last-token post-RoPE query dq (g_nh*g_hd floats) into
+     * qcap_host, packed [n_global][g_nh*g_hd] row-major. One-shot flag, cleared by the
+     * step. This is the SAME resident decode path the daemon then scores against the
+     * episode registry's stored global-K (ep.k) — the model's native attention
+     * relevance ("does this query attend to this memory?"), replacing the centroid-
+     * Hamming selector that failed B3-v1. Off by default = byte-untouched null floor. */
+    float *qcap_host; int qcap_active, qcap_gi;
     /* CONTRACT-CHAT-FULLSTACK A1 — CUDA-graph fast decode. The decode GENERATE
      * step is topology-static (every position-dependent kernel reads the DEVICE
      * dpos pointer, exactly as the one-shot graph decode in gemma4_decode_cuda),
@@ -4137,6 +4146,14 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         k_rmsnorm_head<<<nh, 256, 0, st>>>(s->dq, g_w.q_norm[L], nh, hd, nh*hd, eps);
         if (ffac) k_rope_freqs_dyn<<<nh, hd/2, 0, st>>>(s->dq, nh, hd, rbase, ffac, dpos);
         else      k_rope_dyn<<<nh, hd/2, 0, st>>>(s->dq, nh, hd, nh*hd, rbase, dpos);
+        /* B3-v2: capture the last-token post-RoPE query on each GLOBAL owner layer
+         * for the daemon's q·K attention-relevance recall (one-shot, read-only D2H). */
+        if (s->qcap_active && global && s->qcap_host) {
+            float *dst = s->qcap_host + (size_t)s->qcap_gi * (g_nh * g_hd);
+            cudaMemcpyAsync(dst, s->dq, (size_t)(g_nh * g_hd) * sizeof(float),
+                            cudaMemcpyDeviceToHost, st);
+            s->qcap_gi++;
+        }
         float *Kuse, *Vuse;
         if (L < kvfs) {
             KMMD(&g_w.Wk[L], s->dnx, s->dk);
@@ -4222,6 +4239,7 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         k_argmax_at<<<1, 256, 0, st>>>(s->dlog, V, dseq, dpos);   /* writes dseq[*dpos+1] */
     }
     k_incr_pos<<<1, 1, 0, st>>>(dpos);
+    s->qcap_active = 0;   /* B3-v2: one-shot query capture consumed this step */
     (void)c;
     #undef KMMD
     return 0;
@@ -4697,8 +4715,70 @@ extern "C" int gemma4_kv_read_global_k(const sp_g4_kv *s, float *out, int npos) 
     return gi;
 }
 
+/* CONTRACT-CHAT-FULLSTACK B3-v2 — read the live query's last-token GLOBAL-layer Q.
+ *
+ * The B3-v1 selector (a position-meaned global-K centroid → 256-bit LSH → Hamming)
+ * did not separate a short QUESTION from its answer PASSAGE (right episode argmax
+ * only 1/5; episodes mutually agree ~200/256 = structural common-mode). v2 selects
+ * by the model's NATIVE attention relevance instead: score each registry episode by
+ * q·K, where q is THIS query's last-token query on the global owners and K is the
+ * episode's stored global-K (ep.k). That is literally what attention computes —
+ * "does this query attend to this memory?" — and the project already proved q·K
+ * retrieves the right content (§3q LSH router, C-c NIAH).
+ *
+ * This verb runs ONE non-committing forward of `token` at the live dpos through the
+ * SAME resident g4_kv_step the chat decode uses (so the query's representation is on
+ * the identical path — the parity rule the v1 writeup established), capturing the
+ * post-RoPE last-token query on each global owner layer into `out`, packed
+ * [n_global][g_nh*g_hd] row-major (global layers ascending). dpos is then ROLLED
+ * BACK so the cache state is unchanged for the caller's subsequent replay + real
+ * decode_step(last): the K/V this step wrote at slot dpos for `token` is byte-
+ * identical to what decode_step(last) rewrites at the same position. Returns the
+ * number of global layers written (>0) on success, -1 on error.
+ *
+ * RING SAFETY: the verb reads only the GLOBAL owners' Q (globals are full-cache,
+ * slot==pos). The peek step DOES write the SWA owners' ring slot pos%Wring (and a
+ * journal pre-save entry) at the live dpos; after rollback the real decode_step at
+ * the SAME dpos overwrites the SAME ring slot + journal slot identically. The journal
+ * is REWIND-ONLY (forward chat never commits/rewinds mid-turn — the B2 ring-fix), so
+ * the transient double-save is never read. Off the recall path = dead code (the cache
+ * is byte-untouched; null floor). */
+extern "C" int gemma4_kv_read_global_q(sp_g4_kv *s, int32_t token, float *out) {
+    if (!s || !out) { sp_set_error("gemma4_kv_read_global_q: bad args"); return -1; }
+    if (s->dpos_host + 1 >= s->Pmax) { sp_set_error("gemma4_kv_read_global_q: exceeds Pmax"); return -1; }
+    cudaStream_t st = g_w.stream;
+    const int n_global = s->NL / s->period;       /* period-6 over 48 ⇒ 8 globals */
+    const int qd_g = s->g_nh * s->g_hd;
+    if (!s->qcap_host) {
+        if (cudaMallocHost(&s->qcap_host, (size_t)n_global * qd_g * sizeof(float)) != cudaSuccess) {
+            s->qcap_host = NULL; sp_set_error("gemma4_kv_read_global_q: pinned host alloc"); return -1;
+        }
+    }
+    /* write the input token at the live device position (the step embeds dseq[*dpos]). */
+    if (cudaMemcpyAsync(s->dseq + s->dpos_host, &token, sizeof(int),
+                        cudaMemcpyHostToDevice, st) != cudaSuccess) {
+        sp_set_error("gemma4_kv_read_global_q: token H2D"); return -1; }
+    /* save the ring-journal counters so the peek's (rewind-only) journal bookkeeping
+     * is fully reverted — the real decode_step then runs as if the peek never happened. */
+    const int save_commit = s->commit_pos, save_jcur = s->jcur;
+    /* arm the one-shot global-Q capture and run a no-head step on the per-step path. */
+    s->qcap_active = 1; s->qcap_gi = 0;
+    if (g4_kv_step(s, /*do_head=*/0)) { s->qcap_active = 0; return -1; }
+    s->commit_pos = save_commit; s->jcur = save_jcur;
+    /* roll the device position back to dpos_host (the host counter was NOT advanced),
+     * so the next replay/decode sees the cache exactly as before this peek. */
+    if (cudaMemcpy(s->dpos, &s->dpos_host, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("gemma4_kv_read_global_q: dpos restore H2D"); return -1; }
+    cudaError_t e = cudaStreamSynchronize(st);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_read_global_q sync");
+    const int gi = s->qcap_gi;
+    memcpy(out, s->qcap_host, (size_t)gi * qd_g * sizeof(float));
+    return gi;
+}
+
 extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (!s) return;
+    if (s->qcap_host) cudaFreeHost(s->qcap_host);   /* B3-v2 query-capture pinned buf */
     if (s->dseq) cudaFree(s->dseq); if (s->dpos) cudaFree(s->dpos);
     float *ptrs[] = {s->dx,s->dnx,s->dq,s->dk,s->dv,s->dao,s->dap,s->dg,s->dup,s->ddn,s->dscr,
                      s->dlog,s->dipl,s->dple,s->dpg,s->dpp,s->dsx};
