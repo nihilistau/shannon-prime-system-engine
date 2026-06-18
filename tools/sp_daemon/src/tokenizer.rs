@@ -349,27 +349,83 @@ impl SptbTokenizer {
     /// `<end_of_turn>`, which BPE-splits into several pieces), so EOS-by-id
     /// cannot catch it — the stop-string path on `TokenDecodeBuffer` does.
     /// `<eos>` (id 1) stays covered by `eos_ids`.
+    ///
+    /// CONTRACT-CHAT-FULLSTACK A2-polish: this artifact ALSO has no
+    /// `<end_of_turn>` token at all (its turn markers are `<|turn>`/`<turn|>`,
+    /// caught id-side by `turn_stop_ids`). Belt-and-braces, we add structural
+    /// stop-strings that catch the model running INTO the next turn — a fresh
+    /// role prefix after a blank line (the chat template emits
+    /// `<start_of_turn>model\n…`; an over-running model tends to start a new
+    /// `Question:`/`User:`/`<start_of_turn>` block). Kept CONSERVATIVE (only
+    /// patterns that begin a *new* turn, never mid-answer punctuation) so a
+    /// genuine answer is not truncated.
     pub fn default_stops(&self) -> Vec<String> {
         match self.arch_id {
-            ARCH_GEMMA3 | ARCH_GEMMA4 => vec!["<end_of_turn>".to_string()],
+            ARCH_GEMMA3 | ARCH_GEMMA4 => vec![
+                "<end_of_turn>".to_string(),
+                "<start_of_turn>".to_string(),
+                "<|turn>".to_string(),
+                "<turn|>".to_string(),
+                "\n\nQuestion:".to_string(),
+                "\nUser:".to_string(),
+                "\n\nUser".to_string(),
+                "\nQuestion:".to_string(),
+            ],
             _ => Vec::new(),
         }
     }
 
-    /// CONTRACT-CHAT-FULLSTACK A2 — token ids the text-chat sampler must never
-    /// emit. The gemma4-12b artifact carries an image-placeholder control token
-    /// that decodes to the literal bytes `<image|>`; it has an abnormally high
-    /// LM-head logit and is the `<image|>` decode-loop attractor the contract
-    /// flags. It is never a valid TEXT output, so we mask its logit to -inf in
-    /// the sampler (standard suppress-tokens / bad-words practice). Computed
-    /// from `id_to_bytes` so it stays correct regardless of the token's id.
-    /// Returns every id whose decoded bytes contain an image-placeholder marker.
+    /// CONTRACT-CHAT-FULLSTACK A2-polish — token ids that terminate the turn,
+    /// treated as EOS-equivalent for this arch. This gemma4-12b-b1 artifact has
+    /// NO `<end_of_turn>` token; its turn markers are the single tokens
+    /// `<|turn>` (id 105) and `<turn|>` (id 106). When the model emits one we
+    /// stop the turn cleanly (before the marker ever decodes into the stream),
+    /// the same way `eos_ids` stops on `<eos>`. Computed id-agnostically from
+    /// `id_to_bytes` so it survives id shifts across artifacts.
+    pub fn turn_stop_ids(&self) -> Vec<i32> {
+        match self.arch_id {
+            ARCH_GEMMA3 | ARCH_GEMMA4 => {
+                let mut out = Vec::new();
+                for (id, bytes) in self.id_to_bytes.iter().enumerate() {
+                    if bytes == b"<|turn>" || bytes == b"<turn|>" {
+                        out.push(id as i32);
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// CONTRACT-CHAT-FULLSTACK A2-polish — every control / placeholder token id
+    /// the text-chat sampler must never emit, derived ID-AGNOSTICALLY from the
+    /// decoded vocab bytes so it is robust to id shifts across artifacts.
+    ///
+    /// This gemma4-12b-b1 artifact's control markers fall in two clusters
+    /// (`<|tool>`/`<|turn>`/`<turn|>`/`<|think|>`/`<|channel>`… at ids 46–106,
+    /// and `<|image>`/`<image|>`/`<audio|>`/`<|video|>`… at ids 255 999–258 884).
+    /// They all share the discriminating pattern: the decoded bytes **start with
+    /// `<`, end with `>`, AND contain a pipe `|`**. That pattern catches every
+    /// pipe-wrapped control marker (19 ids on this artifact) while excluding
+    /// legitimate HTML-style text tokens (`<div>`, `<html>` — no pipe) and code
+    /// fragments (`|<`, `|</` — don't start with `<`). It is verified to have
+    /// ZERO false positives on the b1 vocab.
+    ///
+    /// In addition we suppress the named structural specials that are never
+    /// valid TEXT output — `<pad>`, `<bos>`, `<unk>`, `<mask>`, and the
+    /// `<unusedN>` reserve — matched by EXACT decoded bytes (not the broad
+    /// `<…>` rule, which would wrongly catch `<div>`-style text). `<eos>` is
+    /// deliberately left OUT here (it is the legitimate end-of-sequence, handled
+    /// by `eos_ids`; suppressing it would prevent clean stopping).
+    ///
+    /// Masking is to `-inf` in the sampler (standard suppress-tokens / bad-words
+    /// practice). Applied on BOTH the sampled and the greedy (temp=0) served
+    /// path so greedy is usable too; a `raw_logits` request opts OUT to recover
+    /// the un-suppressed null-floor reference (the B1 determinism leg).
     pub fn suppress_token_ids(&self) -> Vec<i32> {
         let mut out = Vec::new();
         for (id, bytes) in self.id_to_bytes.iter().enumerate() {
-            // Match the placeholder marker bytes. `<image|>` (this artifact) and
-            // the canonical gemma `<image_soft_token>` are both caught.
-            if contains_subslice(bytes, b"<image") {
+            if is_suppressed_control(bytes) {
                 out.push(id as i32);
             }
         }
@@ -388,11 +444,96 @@ impl SptbTokenizer {
 }
 
 /// A2 helper: true if `hay` contains `needle` as a contiguous subslice.
+#[allow(dead_code)]
 fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > hay.len() {
         return needle.is_empty();
     }
     hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// A2-polish helper: true if `bytes` is a `<unusedN>` reserve token (the
+/// gemma reserved-id block), matched structurally (`<unused` … `>`) so the
+/// whole reserve range is suppressed regardless of count. These are never
+/// valid text output.
+fn is_unused_reserve(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"<unused") && bytes.last() == Some(&b'>')
+}
+
+/// A2-polish — the single per-token classifier for `suppress_token_ids`,
+/// extracted so the rule is unit-testable without a loaded vocab. A token's
+/// decoded bytes are a suppressed control/placeholder marker iff:
+///   (1) PIPE-WRAPPED control marker: starts `<`, ends `>`, contains `|`
+///       (catches `<|turn>`/`<turn|>`/`<image|>`/`<audio|>`/`<|video|>`/
+///        `<|tool>`/`<|think|>`/`<|channel>`… — every pipe-marked control id),
+///       while EXCLUDING legit HTML-ish text (`<div>`/`<html>` — no pipe) and
+///       code fragments (`|<`, `|</` — don't start with `<`); OR
+///   (2) a NAMED structural special never valid as text (`<pad>`/`<bos>`/
+///       `<unk>`/`<mask>` or the `<unusedN>` reserve), matched exactly.
+/// `<eos>` is intentionally NOT here (legit end-of-sequence; handled by eos_ids).
+fn is_suppressed_control(bytes: &[u8]) -> bool {
+    let pipe_control = bytes.first() == Some(&b'<')
+        && bytes.last() == Some(&b'>')
+        && bytes.contains(&b'|');
+    let named_special =
+        matches!(bytes, b"<pad>" | b"<bos>" | b"<unk>" | b"<mask>") || is_unused_reserve(bytes);
+    pipe_control || named_special
+}
+
+#[cfg(test)]
+mod a2_polish_tests {
+    use super::*;
+
+    #[test]
+    fn suppresses_pipe_control_markers() {
+        // The actual gemma4-12b-b1 control markers (verified by vocab scan).
+        for t in [
+            b"<|turn>".as_slice(),
+            b"<turn|>",
+            b"<image|>",
+            b"<audio|>",
+            b"<|image>",
+            b"<|audio>",
+            b"<|image|>",
+            b"<|video|>",
+            b"<|tool>",
+            b"<tool|>",
+            b"<|think|>",
+            b"<|channel>",
+            b"<channel|>",
+        ] {
+            assert!(is_suppressed_control(t), "should suppress {:?}", String::from_utf8_lossy(t));
+        }
+    }
+
+    #[test]
+    fn suppresses_named_specials_and_reserve() {
+        for t in [b"<pad>".as_slice(), b"<bos>", b"<unk>", b"<mask>", b"<unused0>", b"<unused255>"] {
+            assert!(is_suppressed_control(t), "should suppress {:?}", String::from_utf8_lossy(t));
+        }
+    }
+
+    #[test]
+    fn does_not_suppress_text_or_eos() {
+        // <eos> is legit end-of-sequence (eos_ids owns it); never suppress it.
+        // HTML-ish text tokens (no pipe) and code fragments (don't start '<')
+        // must survive — zero false positives.
+        for t in [
+            b"<eos>".as_slice(),
+            b"<div>",
+            b"<html>",
+            b"<br>",
+            b"|<",
+            b"|</",
+            b">|</",
+            b"turn",
+            b" image",
+            b"hello",
+            b"",
+        ] {
+            assert!(!is_suppressed_control(t), "must NOT suppress {:?}", String::from_utf8_lossy(t));
+        }
+    }
 }
 
 // ── Chat templates ─────────────────────────────────────────────────────────

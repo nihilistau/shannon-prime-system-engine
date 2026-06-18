@@ -6,12 +6,15 @@
 //! repetition+frequency penalty over the generated history, with a seedable,
 //! deterministic RNG.
 //!
-//! NULL FLOOR / DETERMINISM CONTRACT (gate G-CHAT-A2):
-//!   `temperature == 0.0` ⇒ pure argmax, byte-for-byte identical to the prior
-//!   hardcoded `fn argmax`. No penalty, no top-k/p, no RNG draw — the exact
-//!   same `max_by partial_cmp` tie-break (first index wins). This preserves the
-//!   determinism the greedy path had and keeps the speedup-vs-numerics split in
-//!   A1 honest (temp=0 is the fixed reference both A1 legs compare against).
+//! NULL FLOOR / DETERMINISM CONTRACT (gate G-CHAT-A2 / A2-polish):
+//!   `temperature == 0.0` ⇒ pure argmax (no penalty, no top-k/p, no RNG draw —
+//!   the same `max_by partial_cmp` tie-break). A2-polish: control-token
+//!   suppression is now applied on the greedy path too, so the DEFAULT served
+//!   greedy chat is clean. The byte-for-byte-identical-to-old-`fn argmax` null
+//!   floor is recovered by constructing the sampler with an EMPTY suppress set
+//!   (ChatRequest.raw_logits=true) — with no ids to mask, temp=0 is exactly the
+//!   prior hardcoded argmax. So: default greedy = clean; raw_logits greedy =
+//!   the determinism reference both A1 legs / the B1 determinism leg compare to.
 //!
 //! Given a seed, sampling is fully reproducible: same logits + same history +
 //! same seed ⇒ same token. The RNG is a small SplitMix64 (no external dep).
@@ -102,10 +105,13 @@ pub struct Sampler {
     rng: Rng,
     /// Generated token ids so far this turn, for the repetition penalty.
     history: Vec<i32>,
-    /// Token ids whose logit is forced to -inf before sampling (e.g. the
-    /// `<image|>` placeholder control token — the decode-loop attractor). Only
-    /// applied on the SAMPLED path; the temp=0 greedy null floor is left exactly
-    /// equal to the old argmax (the G-CHAT-A2 determinism leg).
+    /// Token ids whose logit is forced to -inf before sampling — the full
+    /// control/placeholder set (`<image|>`/`<audio|>`/`<|turn>`/`<turn|>`/… and
+    /// the named structural specials), derived id-agnostically by the tokenizer
+    /// (`suppress_token_ids`). A2-polish: applied on BOTH the sampled and the
+    /// greedy (temp==0) path so the default served chat is clean everywhere. The
+    /// byte-exact/determinism null floor recovers the un-suppressed reference by
+    /// constructing the sampler with this set EMPTY (ChatRequest.raw_logits=true).
     suppress: Vec<i32>,
 }
 
@@ -153,19 +159,28 @@ impl Sampler {
             return 0;
         }
 
-        // ── temp == 0: strict argmax null floor (matches the old fn argmax) ──
-        // NOTE: suppression is deliberately NOT applied here — the greedy path
-        // stays byte-identical to the prior hardcoded argmax (determinism gate).
-        if self.is_greedy() {
-            return argmax(logits);
-        }
-
-        // ── suppress placeholder/control tokens (the <image|> loop attractor) ──
+        // ── suppress placeholder/control tokens (the <image|>/<audio|>/<|turn>
+        // loop attractors) ──
+        // CONTRACT-CHAT-FULLSTACK A2-polish: suppression is now applied on the
+        // greedy (temp==0) path TOO, so the DEFAULT served chat is clean at
+        // every temperature incl. greedy. The byte-exact / determinism null
+        // floor recovers the un-suppressed reference by constructing the
+        // sampler with an EMPTY suppress set (ChatRequest.raw_logits=true) — so
+        // here, an empty `suppress` is the pass-through that reproduces the old
+        // hardcoded argmax bit-for-bit.
         for &id in &self.suppress {
             let idx = id as usize;
             if idx < logits.len() {
                 logits[idx] = f32::NEG_INFINITY;
             }
+        }
+
+        // ── temp == 0: strict argmax null floor ──
+        // With an empty suppress set this is byte-identical to the prior
+        // hardcoded `fn argmax` (the raw_logits determinism leg). With the
+        // default suppress set it is the clean greedy path.
+        if self.is_greedy() {
+            return argmax(logits);
         }
 
         // ── repetition / frequency penalty over generated history ──
@@ -346,6 +361,33 @@ mod tests {
         let mut logits = vec![0.1, 9.0, 3.0, 2.0];
         // top_k=1 collapses the candidate set to the single max ⇒ deterministic.
         assert_eq!(s.sample(&mut logits), 1);
+    }
+
+    #[test]
+    fn suppress_applies_on_greedy_path() {
+        // A2-polish: control-token suppression must fire even at temp=0 so the
+        // default greedy chat is clean. Token 1 has the max logit but is in the
+        // suppress set ⇒ greedy must pick the next-best UNsuppressed token (3).
+        let mut s = Sampler::with_suppress(
+            SamplingParams { temperature: 0.0, ..Default::default() },
+            vec![1],
+        );
+        let mut logits = vec![0.1, 9.0, -2.0, 4.9, 5.0];
+        // index 1 (9.0) suppressed ⇒ index 4 (5.0) wins.
+        assert_eq!(s.sample(&mut logits), 4);
+    }
+
+    #[test]
+    fn raw_logits_empty_suppress_is_old_argmax() {
+        // The null-floor opt-out: with an EMPTY suppress set (raw_logits=true),
+        // temp=0 reproduces the prior hardcoded argmax bit-for-bit even when a
+        // control token is the max — no masking happens.
+        let mut s = Sampler::with_suppress(
+            SamplingParams { temperature: 0.0, ..Default::default() },
+            Vec::new(),
+        );
+        let mut logits = vec![0.1, 9.0, -2.0, 4.9, 5.0];
+        assert_eq!(s.sample(&mut logits), 1, "empty suppress ⇒ raw argmax");
     }
 
     #[test]

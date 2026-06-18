@@ -202,6 +202,17 @@ pub struct ChatRequest {
     pub replay: Option<String>,
     #[serde(default)]
     pub replay_npos: i32,
+    // CONTRACT-CHAT-FULLSTACK A2-polish — null-floor opt-out. Default false =
+    // the DEFAULT served chat, with full control-token suppression
+    // (`<image|>`/`<audio|>`/`<|turn>`/… masked to -inf) so output is CLEAN at
+    // every temperature incl. greedy. When true, suppression is SKIPPED (the
+    // sampler is built with an empty suppress set), so the raw, un-suppressed
+    // logits drive selection — this reproduces the prior greedy output
+    // bit-for-bit and is the reference the byte-exact / B1 determinism leg
+    // compares against (pair with temperature:0 + byteexact:true). Use only for
+    // the auditability/determinism null floor; not for normal chat.
+    #[serde(default)]
+    pub raw_logits: bool,
     // CONTRACT-CHAT-FULLSTACK A2 — sampling knobs (L2 owns sampling over the
     // full-vocab logits row). Flattened so the request body carries them at the
     // top level: {"prompt":"...","temperature":0.7,"top_p":0.95,...}. Defaults
@@ -314,10 +325,18 @@ pub async fn v1_chat(
     let replay_npos = req.replay_npos;
     // A2: build the per-request sampler from the (flattened) ChatRequest knobs.
     let sampling = req.sampling.clone();
-    // A2: token ids the sampler must never emit (the <image|> placeholder
-    // attractor) — masked to -inf on the sampled path only (greedy stays the
-    // exact old argmax). Computed once from the tokenizer's id_to_bytes.
-    let suppress_ids = state.tokenizer.suppress_token_ids();
+    // A2-polish: token ids the sampler must never emit — the full control /
+    // placeholder set (`<image|>`/`<audio|>`/`<|turn>`/`<turn|>`/… + structural
+    // specials), masked to -inf on BOTH the sampled and the greedy path so the
+    // default served chat is clean everywhere. Computed id-agnostically from the
+    // tokenizer's id_to_bytes. When `raw_logits` is set, the suppress set is
+    // EMPTY ⇒ the raw, un-suppressed logits drive selection (the null-floor /
+    // determinism reference — reproduces the prior greedy output bit-for-bit).
+    let suppress_ids = if req.raw_logits {
+        Vec::new()
+    } else {
+        state.tokenizer.suppress_token_ids()
+    };
     // Issue #115: when the client supplies no stop strings, fall back to the
     // arch's chat-format terminator (gemma's `<end_of_turn>`) so the console
     // stream ends at the turn boundary instead of running to max_tokens.
@@ -383,9 +402,15 @@ pub async fn v1_chat(
         let mut next_token = sampler.sample(&mut logits);
         sampler.observe(next_token);
 
+        // A2-polish: this arch's turn boundary is the `<|turn>`/`<turn|>` token
+        // (no `<end_of_turn>` token exists), so treat those ids as EOS-equivalent.
+        let turn_stop_ids = tokenizer.turn_stop_ids();
         'decode: for _ in 0..max_tokens {
-            // EOS check before emitting.
-            if !tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token) {
+            // EOS / turn-stop check before emitting (stop cleanly at the turn
+            // boundary — the marker never reaches the stream).
+            if (!tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token))
+                || turn_stop_ids.contains(&next_token)
+            {
                 break 'decode;
             }
 
@@ -582,11 +607,18 @@ fn run_kvdecode_chat(
     }
 
     let tokenizer = app.tokenizer.clone();
+    // A2-polish: this arch has no `<end_of_turn>` token; its turn boundary is
+    // the `<|turn>`/`<turn|>` token. Treat those ids as EOS-equivalent so the
+    // resident-cache 12B chat stops cleanly at the turn (the marker never decodes
+    // into the stream). Belt-and-braces with default_stops()'s stop-strings.
+    let turn_stop_ids = tokenizer.turn_stop_ids();
     let mut next_token = sampler.sample(logits);
     sampler.observe(next_token);
 
     'decode: for _ in 0..max_tokens {
-        if !tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token) {
+        if (!tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token))
+            || turn_stop_ids.contains(&next_token)
+        {
             break 'decode;
         }
 

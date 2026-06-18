@@ -1,0 +1,89 @@
+G-CHAT-A2-POLISH — coherence gate (measured, not a SHA). 2026-06-19.
+Engine: tools/sp_daemon {routes.rs, sampler.rs, tokenizer.rs}. Daemon: gemma4-12b-b1, run_console env
+(SP_DAEMON_BACKEND=cuda, SP_DAEMON_KVDECODE=1, SP_CUDA_DECODE_INT8=1), ring DISARMED. Real 12B, :3000.
+
+WHAT WAS BUILT
+  (1) Full control-token suppression, id-agnostic. tokenizer.rs suppress_token_ids() now matches
+      every pipe-wrapped control marker (decoded bytes start '<', end '>', contain '|') — 19 ids on
+      the b1 vocab: <|turn> <turn|> <image|> <audio|> <|image> <|audio> <|image|> <|audio|> <|video|>
+      <|tool> <tool|> <|tool_call> <tool_call|> <|tool_response> <tool_response|> <|"|> <|think|>
+      <|channel> <channel|> — plus named structural specials <pad> <bos> <unk> <mask> and the
+      <unusedN> reserve (exact match). <eos> deliberately excluded (eos_ids owns it). ZERO false
+      positives on the b1 vocab (<div>/<html> survive: no pipe; |< |</ survive: don't start '<').
+      Applied on BOTH the sampled and the greedy (temp=0) path so greedy is clean too.
+  (2) raw_logits opt-out. ChatRequest.raw_logits (default false). true => sampler built with EMPTY
+      suppress set => raw un-suppressed logits drive selection = the byte-exact/B1 determinism null
+      floor. Default false => clean suppressed chat.
+  (3) Turn-stop heuristic. This artifact has NO <end_of_turn> token; turn markers are <|turn>(105)/
+      <turn|>(106). tokenizer.turn_stop_ids() returns those ids (id-agnostic); both decode loops treat
+      them as EOS-equivalent (stop before the marker reaches the stream). default_stops() also extended
+      with structural new-turn stop-strings (<start_of_turn>, <|turn>, <turn|>, "\n\nQuestion:",
+      "\nUser:", "\n\nUser", "\nQuestion:") as a conservative belt-and-braces backstop.
+
+UNIT TESTS (cargo test --release --features wire_cuda_backend, bin sp-daemon): 12 passed; 0 failed.
+  new: sampler::suppress_applies_on_greedy_path, sampler::raw_logits_empty_suppress_is_old_argmax,
+       tokenizer::a2_polish_tests::{suppresses_pipe_control_markers, suppresses_named_specials_and_reserve,
+       does_not_suppress_text_or_eos}.
+
+COHERENCE GATE (6 fixed prompts via /v1/chat messages path = chat template applied):
+
+-- temp=0 (greedy, suppression ON) --
+=== [temp=0 greedy] What is the capital of France?
+Paris
+
+=== [temp=0 greedy] Explain in one sentence what a prime number is.
+A prime number is a positive integer that is only divisible by 1 and itself.
+
+=== [temp=0 greedy] What is 2+2?
+4
+
+=== [temp=0 greedy] Name three colors.
+Red, blue, and green.
+
+=== [temp=0 greedy] Who wrote Hamlet?
+William Shakespeare
+
+=== [temp=0 greedy] Translate 'hello' to French.
+Bonjour.
+
+
+
+-- temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345 --
+=== [temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345] What is the capital of France?
+The capital of France is Paris.
+
+=== [temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345] Explain in one sentence what a prime number is.
+A prime number is a positive integer that is divisible only by 1 and itself.
+
+=== [temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345] What is 2+2?
+4
+
+=== [temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345] Name three colors.
+Blue, red and green.
+
+=== [temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345] Who wrote Hamlet?
+Hamlet was written by William Shakespeare.
+
+=== [temp=0.7 top_p=0.95 rep_pen=1.1 seed=12345] Translate 'hello' to French.
+Salut!
+
+
+
+VERDICT per prompt: every completion COHERENT + CORRECT, ZERO control-token artifacts
+(<image|>/<audio|>/<|turn>/<turn|> none present), each TERMINATED ON ITS OWN at the turn boundary
+(no run into "Question:"/another turn/max_tokens). Transcript scan: artifact-or-runon-present = False
+for both legs.
+
+DETERMINISM / NULL FLOOR (real 12B, temp=0):
+  * Greedy chat path reproducible: A==B (identical output, two runs, same prompt).
+  * raw_logits=true on raw prompt "What is the capital of France?" reproduces the PRIOR un-suppressed
+    <image|> decode-loop, BIT-IDENTICAL run-to-run (sha F8-F2-C1-97...). This IS the null-floor
+    reference the B1/byte-exact determinism leg compares against — recovered exactly.
+  * Same raw prompt, DEFAULT (suppression ON): clean text, control-token artifact present = False.
+    => suppression is precisely what removes the loop; the null floor is intact behind raw_logits.
+
+NO CLOSED GATE REGRESSED: only the suppression set + raw_logits flag + turn-stop changed; the resident
+decode numerics (G-WIRE-CUDA-DECODE-GEMMA4), the byteexact path (B1), and the greedy null floor (via
+raw_logits) are untouched. B2 SWA ring stays DISARMED in run_console.bat (RED).
+
+G-CHAT-A2-POLISH: GREEN.
