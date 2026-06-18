@@ -1,0 +1,108 @@
+G-CHAT-B2-RING — XBAR SWA ring on the resident chat decode, COHERENCE-GATED GREEN
+================================================================================
+date: 2026-06-19  host: RTX 2060 12GB (SM pinned 1605; mem clock unlockable)
+engine HEAD (pre-fix): 398232b   model: gemma4-12b-b1.sp-model (OK_Q4B, INT8 tied head)
+contract: CONTRACT-CHAT-FULLSTACK §3-B2 / §5 (re-sequenced: ring + coherence gate)
+
+OBJECTIVE: fix + COHERENCE-gate the XBAR SWA ring on the served resident /v1/chat
+decode (the O(1)-context VRAM win). Gate on REAL TEXT, not a determinism SHA (the
+original B2 false-green: a hash passes bit-identical garbage). Leave DISARMED if not
+fully green.
+
+ROOT CAUSE (the real soup, beyond the two diagnosed lifecycle bugs)
+-------------------------------------------------------------------
+The prior B2 "ring = soup" was the FLOAT ring attention kernel (k_attn_decode_ring,
+acc += q[i]*k[i]) losing S1's build-determinism on the 40/48 SWA layers. S1 made
+BYTE-EXACT integer decode the DEFAULT chat path precisely because FP-codegen reorders
+near-tied logits across rebuilds, flipping a thin rank-2 margin coherent<->garbage.
+But in g4_kv_step the ring branch took PRECEDENCE over the byte-exact (bx_on) branch,
+so arming the ring silently dropped 40/48 layers back onto non-deterministic float
+attention -> rank-2+ reorder -> soup. The attention MATH was correct (slot=(s0+j)%Wring
+matches the proven one-shot G-P3-R2.b-2a); the bug was that the ring bypassed byte-exact.
+
+THE FIXES (engine-only; null floor untouched)
+---------------------------------------------
+1. NEW k_attn_decode_ring_bx (cuda_forward.cu): k_attn_decode_win_bx (exact-integer
+   dual-prime dot + FB30 softmax, reduction-order-immune / build-independent) with the
+   ring slot remap (s0+j)%Wring. g4_kv_step dispatches it when (ring_W>0 && !global &&
+   bx_on) so the 40 SWA layers stay byte-exact when the ring is armed. (ring && !bx_on
+   still uses the float ring; bx_on is the chat default per S1.)
+2. Journal-overflow auto-advance (cuda_forward.cu g4_kv_step, once per step before the
+   layer loop): when (dpos_host - commit_pos) >= Jmax, set commit_pos = dpos_host -
+   (Jmax-1). Chat never calls gemma4_kv_commit, so commit_pos stayed 0 and g4_kv_step
+   hard-failed (return -1) past ~Jmax(=64) positions -> decode died. Dropping rewind
+   history older than Jmax is safe for forward chat (it never rewinds mid-turn); the
+   curator/#222 rewind callers DO commit, so this never trips for them.
+3. Per-request reset via gemma4_kv_reset, NOT gemma4_kv_rewind(pos) (routes.rs
+   run_kvdecode_chat + new glue sp_daemon_cuda_kvdecode_reset + dispatch kv::reset).
+   rewind(pos) replays the SWA-owner undo-journal in reverse and reads jK/jV[L]+j*kvd
+   for j up to pos-1 -> OOB past the flat Jmax*kvd journal once pos>Jmax. reset() just
+   zeroes dpos/commit_pos/jcur; stale ring slots are never read (next turn rewrites
+   them in position order). Equivalent to rewind on the non-ring full-cache path.
+Files: src/backends/cuda/cuda_forward.cu, tools/sp_daemon/c_backend_cuda/
+sp_daemon_cuda_glue.c, tools/sp_daemon/src/cuda_kvdecode_dispatch.rs,
+tools/sp_daemon/src/routes.rs. (No math-core/submodule change; sp_l1.h untouched —
+the byte-exact-ring kernel + journal fix are backend-internal, reset is glue-internal.)
+
+BUILD: build-host-cuda-backend.bat (CUDA lib, nvcc sm_75) OK; cargo build --release
+--features wire_cuda_backend --target-dir target-wirecuda (daemon + gate) OK.
+
+=== GATE G-CHAT-B2-RING (3 legs, coherence-mandatory) ===
+
+LEG 1 — COHERENCE (ring ARMED, SP_DAEMON_KVDECODE_RING_W=1024, Pmax=20000, temp=0):
+  [paris]       "Paris. ..."               (COHERENT, correct)
+  [math]        "4"                          (COHERENT, correct)
+  [shakespeare] "William Shakespeare. ..."  (COHERENT, correct)
+  PAST-64: "Write a short paragraph about the ocean." max_tokens=160 ->
+    "The ocean is a vast and mysterious body of water that covers over 70% of the
+     Earth's surface. It is home to a diverse range of marine life... It is important
+     that we take action to protect and preserve this vital resource for future
+     generations." (786 chars / ~160 tokens, COHERENT, completed — NO death past 64)
+  Daemon log: ZERO 'Jmax/exceeds/reset/rewind/invalid/error' lines during all runs.
+  => LEG 1 GREEN. (Trailing prompt-echo repetition = the OK_Q4B QAT-b1 turn-discipline
+     ceiling, bounded by max_tokens; the documented S1 honest negative, not a bug.)
+
+LEG 2 — NULL PARITY (coherent both sides; read the text, not just SHA), temp=0:
+  prompt "Name three primary colors." max_tokens=40, byte-exact default ON.
+  ring-OFF (full-cache):  LEN=171 SHA256=105EF1ED6D5F9578AA076FA3EFFF063BA8EBD09074BE3C92530F141FD6C83D8E
+  ring-ON  (W=1024):      LEN=171 SHA256=105EF1ED6D5F9578AA076FA3EFFF063BA8EBD09074BE3C92530F141FD6C83D8E
+    text (both): "Red, blue, and yellow. Red and blue make purple. Red and yellow make
+                  orange. Blue and yellow make green. Red, blue, and yellow are the
+                  primary colors. ..."  (COHERENT both sides)
+  Also token-identical ring-OFF vs ring-ON on the leg-1 factual set:
+    paris       A2ADE62CA3D87156471DA1AB968B4125CBE375355B03EF14709064646588B4E0 (== both)
+    math        7DE1555DF0C2700329E815B93B32C571C3EA54DC967B89E81AB73B9972B72D1D (== both)
+    shakespeare 0C11A364814E187D5418A61EB1237D9ACBEE468528F042E2A10AC542B541E328 (== both)
+  => LEG 2 GREEN. ring-ON == ring-OFF byte-identical AND coherent on both sides
+     (the byte-exact ring kernel makes the SWA layers bit-identical to the byte-exact
+     full-cache path for in-window contexts).
+
+LEG 3 — O(1) VRAM (ring ARMED, SM pinned 1605; prompt_tokens ladder, decode active):
+  ctx ~6k positions:  peak VRAM ~11952 MiB
+  ctx ~12k positions: peak VRAM ~11947-11974 MiB (the ~+10-20 MiB = transient
+                      decode-step scratch buffers, NOT KV growth)
+  delta across a 2x context doubling (6k->12k): ~10-20 MiB (tens of MiB, NOT GiB).
+  A full O(N) cache would add ~2-3 GiB over 40 SWA layers (kvd=2048) for 6k->12k.
+  => LEG 3 GREEN. The W=1024 SWA ring caps the dominant KV term constant.
+  CAVEAT (per contract): the 8 global layers stay FULL-CACHE on the resident chat path
+  (the slab/LSH global recall is the named follow-on); they're pre-allocated to Pmax at
+  open, so VRAM is flat at runtime regardless. Absolute ~11.9 GiB floor = the 9.4 GiB
+  resident model + Pmax=20000 global alloc (harness artifact, same as P3 C-b.2).
+
+NO CLOSED GATE REGRESSED:
+  G-WIRE-CUDA-DECODE-GEMMA4 (rebuilt gate bin vs new lib): GREEN, 32/32 == oracle,
+    leg A == leg B (first 8 = 258882×8), VRAM delta A-vs-B = 0 MiB. The ring-OFF /
+    no-env null-floor decode path is byte-untouched (journal guard + ring_bx kernel
+    only fire when ring_W>0; reset only on the chat reset path).
+  S1/B5 coherence intact: ring-OFF rebuild answers Paris/4/Shakespeare coherently
+    (same SHAs as ring-ON) — the post-fix build reproduces the coherent baseline (the
+    build-fragility the B2-RING-DEBUG receipt hit is gone because byte-exact integer
+    decode is the default + now also covers the SWA ring).
+
+VERDICT: ALL 3 LEGS GREEN. Ring RE-ARMED in run_console.bat
+(SP_DAEMON_KVDECODE_RING_W=1024 / _PMAX=20000). A COHERENT ring-ON daemon serves :3000.
+
+Receipts (this dir): _b2ringfix_cudabuild.log, _b2ringfix_daemonbuild.log,
+_b2ringfix_daemon_off.log, _b2ringfix_daemon_on.log, _b2ringfix_gatebuild.log,
+_b2ringfix_wiredecode_gate.log. Harnesses: tools/sp_daemon/_b2ringfix_chat.ps1,
+_b2ringfix_ladder.ps1, _b2ringfix_launch_{off,on}.bat.

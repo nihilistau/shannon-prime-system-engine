@@ -125,6 +125,7 @@ typedef struct sp_g4_kv sp_g4_kv;
 extern sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
 extern int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
 extern int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
+extern int   gemma4_kv_reset(sp_g4_kv *s);
 extern int   gemma4_kv_pos(const sp_g4_kv *s);
 extern void  gemma4_kv_close(sp_g4_kv *s);
 /* WIRE-CUDA-DECODE-GEMMA4 §3.1.A — additive logits-returning step (now defined
@@ -177,6 +178,19 @@ int sp_daemon_cuda_kvdecode_rewind(void *handle, int n) {
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || n < 0) { sp_set_error("cuda kvdecode rewind: bad args"); return -1; }
     return gemma4_kv_rewind(s, n);
+}
+
+/* reset(handle): CONTRACT-CHAT-FULLSTACK B2 RING-FIX — clean per-request reset
+ * to dpos=0 WITHOUT journal replay. gemma4_kv_rewind(pos) replays the SWA-owner
+ * undo-journal in reverse and reads jK/jV[L]+j*kvd for j up to pos-1, which is
+ * OUT OF BOUNDS past the flat Jmax*kvd journal once pos>Jmax (the diagnosed B2
+ * ring-reset bug). gemma4_kv_reset just zeroes the counters (dpos/commit_pos/
+ * jcur); stale ring slots are never read because the next turn writes them
+ * fresh in position order. The chat path resets each request via this. 0 ok. */
+int sp_daemon_cuda_kvdecode_reset(void *handle) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s) { sp_set_error("cuda kvdecode reset: NULL handle"); return -1; }
+    return gemma4_kv_reset(s);
 }
 
 /* position(handle): current dpos, -1 on NULL. */

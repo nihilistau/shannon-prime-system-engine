@@ -621,12 +621,20 @@ fn run_kvdecode_chat(
         None
     };
 
-    // Reset the resident cache to dpos=0 (O(1) rewind) so each request is clean.
+    // Reset the resident cache to dpos=0 so each request is clean.
+    // CONTRACT-CHAT-FULLSTACK B2 RING-FIX: use gemma4_kv_reset (counter reset, NO
+    // journal replay) instead of rewind(pos). On the SWA ring path rewind(pos)
+    // replays the undo-journal in reverse and reads jK/jV[L]+j*kvd for j up to
+    // pos-1 — OUT OF BOUNDS past the flat Jmax*kvd journal once pos>Jmax (the
+    // diagnosed B2 ring-reset bug). reset() zeroes dpos/commit_pos/jcur; stale
+    // ring slots are never read because the next turn rewrites them in position
+    // order. Equivalent to rewind(pos) on the non-ring full-cache path (slot==pos,
+    // writes to [0,dpos) on the next turn), so no behavior change there.
     // SAFETY: handle is a live sp_g4_kv* owned by AppState; we hold its Mutex.
     let pos = unsafe { kv::position(handle) };
     if pos > 0 {
-        if let Err(e) = unsafe { kv::rewind(handle, pos) } {
-            send_err(format!("kvdecode rewind: {e}"));
+        if let Err(e) = unsafe { kv::reset(handle) } {
+            send_err(format!("kvdecode reset: {e}"));
             sessions.remove(chat_id);
             return;
         }

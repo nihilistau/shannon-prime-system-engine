@@ -33,13 +33,19 @@ set "SP_DAEMON_KVDECODE=1"
 set "SP_CUDA_DECODE_INT8=1"
 
 REM CONTRACT-CHAT-FULLSTACK B2: the XBAR SWA ring on the resident chat decode is
-REM DISARMED — it is RED. Armed, k_attn_decode_ring on this path produces incoherent
-REM token-soup (the B2 null-parity SHA was a FALSE green: a determinism gate cannot
-REM tell coherent output from garbage, so it passed bit-identical garbage). Full-cache
-REM (ring unset) decode is COHERENT. Re-arm only after the ring is debugged AND a
-REM coherence gate (not just a determinism SHA) passes. See CONTRACT-CHAT-FULLSTACK §5.
-REM   set "SP_DAEMON_KVDECODE_RING_W=1024"
-REM   set "SP_DAEMON_KVDECODE_PMAX=20000"
+REM ARMED — RE-ARMED GREEN (G-CHAT-B2-RING, 2026-06-19) after the diagnosed lifecycle
+REM bugs were fixed: (1) a BYTE-EXACT ring attention kernel (k_attn_decode_ring_bx)
+REM keeps the 40 SWA layers on the build-deterministic exact-integer substrate when the
+REM ring is armed (the prior soup was the FLOAT ring kernel losing S1's FP-reorder
+REM immunity on 40/48 layers); (2) the SWA-owner undo-journal auto-advances commit_pos
+REM on overflow so chat decodes past ~64 tokens (chat never commits); (3) per-request
+REM reset uses gemma4_kv_reset (no journal replay) instead of rewind(pos) (which read
+REM the journal OOB past Jmax). 3-leg COHERENCE gate GREEN: ring-ON answers Paris/4/
+REM Shakespeare coherently + decodes past 64 tokens; ring-ON == ring-OFF token-identical
+REM (SHA-matched, coherent both sides); VRAM flat ~10-20 MiB across a 6k->12k context
+REM doubling (O(1) SWA ring; globals full-cache caveat). See CONTRACT-CHAT-FULLSTACK §5.
+set "SP_DAEMON_KVDECODE_RING_W=1024"
+set "SP_DAEMON_KVDECODE_PMAX=20000"
 
 REM CWD must be tools\sp_daemon so the static ServeDir("frontend_mockups") resolves.
 cd /d "%ENGINE%tools\sp_daemon"

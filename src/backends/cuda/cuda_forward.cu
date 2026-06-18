@@ -629,6 +629,71 @@ __global__ void k_attn_decode_ring(const float *q, const float *Kc, const float 
     }
 }
 
+/* CONTRACT-CHAT-FULLSTACK B2 RING-FIX: BYTE-EXACT windowed decode attention over a
+ * RING cache of `Wring` slots. This is k_attn_decode_win_bx (exact-integer dual-prime
+ * dot + FB30 softmax — build-independent, reduction-order-immune) with the ring slot
+ * remap (s0+j)%Wring from k_attn_decode_ring. It lets the 40 SWA layers stay on the
+ * byte-exact substrate when the ring is armed AND byte-exact ("auditable") is on — so
+ * the served chat keeps S1's build-determinism (the FP-reorder fragility that flips
+ * coherent<->garbage across rebuilds is what byte-exact removes; the float ring kernel
+ * would re-introduce it on 40/48 layers and break coherence). Shared = wl*int64
+ * (scores -> softmax weights), wl = in-window length. One block per query head. */
+__global__ void k_attn_decode_ring_bx(const float *q, const float *Kc, const float *Vc,
+                                      int ctx, int KVD, int HD, int group, float ascale,
+                                      int win, int Wring, float *ao) {
+    (void)ascale;                                          /* gemma4 scaling=1.0 (folded) */
+    extern __shared__ long long shlr[];                    /* [wl]: D_j then e_j */
+    int h = blockIdx.x, kvh = h / group;
+    int pos = ctx - 1;
+    int s0 = (win >= 0 && pos - win + 1 > 0) ? pos - win + 1 : 0;
+    int wl = ctx - s0;                                     /* in-window length, <= Wring */
+    const float *qh = q + (size_t)h * HD;
+    const float DSC = (float)(1 << BX_DSH);
+    for (int j = threadIdx.x; j < wl; j += blockDim.x) {
+        int slot = (s0 + j) % Wring;                       /* position s0+j -> ring slot */
+        const float *kh = Kc + (size_t)slot * KVD + (size_t)kvh * HD;
+        long long a1 = 0, a2 = 0;
+        for (int i = 0; i < HD; i++) {
+            long long ea = (long long)llrintf(qh[i] * DSC);
+            long long eb = (long long)llrintf(kh[i] * DSC);
+            long long p = ea * eb;
+            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+        }
+        shlr[j] = bx_garner(a1, a2);                       /* exact Delta^2 * <q,k_{s0+j}> */
+    }
+    __syncthreads();
+    __shared__ long long g_Sr;
+    if (threadIdx.x == 0) {
+        long long mxz = ((shlr[0] << BX_ZB) >> (2 * BX_DSH));
+        for (int j = 1; j < wl; j++) {
+            long long z = (shlr[j] << BX_ZB) >> (2 * BX_DSH);
+            if (z > mxz) mxz = z;
+        }
+        long long S = 0;
+        for (int j = 0; j < wl; j++) {
+            long long z = (shlr[j] << BX_ZB) >> (2 * BX_DSH);
+            long long e = bx_exp_fixed((z - mxz) << (BX_FB - BX_ZB));
+            shlr[j] = e; S += e;
+        }
+        g_Sr = S;
+    }
+    __syncthreads();
+    long long S = g_Sr;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        long long a1 = 0, a2 = 0;
+        for (int j = 0; j < wl; j++) {
+            int slot = (s0 + j) % Wring;
+            long long ev = (long long)llrintf(Vc[(size_t)slot * KVD + (size_t)kvh * HD + i] * DSC);
+            long long p = shlr[j] * ev;
+            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+        }
+        long long num = bx_garner(a1, a2);
+        ao[(size_t)h * HD + i] = (float)((double)num / ((double)S * (double)(1 << BX_DSH)));
+    }
+}
+
 /* XBAR P3.2-b-2b Phase 2: gated GLOBAL attention over a sparse RECALL SET.
  * Block h attends only the mh[h] positions listed in ri[h*ristr + j] (host-selected
  * per query head by sp_arm_select_geom, H2D'd) — reading Kc/Vc at those absolute
@@ -4039,6 +4104,25 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
                                         1.0f / sqrtf((float)E), sqrtf((float)PL),
                                         1.0f / sqrtf(2.0f), eps);
     }
+    /* CONTRACT-CHAT-FULLSTACK B2 RING-FIX: SWA-owner undo-journal overflow.
+     * The journal index for this step is j = dpos_host - commit_pos; the journal
+     * is a flat [Jmax] buffer, so it can only hold Jmax uncommitted ticks. Chat
+     * NEVER calls gemma4_kv_commit (forward decode never rewinds mid-turn), so
+     * commit_pos would stay 0 and g4_kv_step hard-failed (return -1) once a turn
+     * passed ~Jmax positions -> decode silently died past ~64 tokens (the
+     * diagnosed B2 ring bug). Fix: when the journal would overflow, auto-advance
+     * commit_pos so the journal slides to cover only the most-recent (Jmax-1)
+     * ticks. Dropping rewind history older than that is SAFE for forward chat
+     * (it never rewinds past the live turn); the curator/#222 rewind callers DO
+     * call gemma4_kv_commit, so their j stays bounded and this never trips for
+     * them. Done ONCE per step (before the layer loop) so every owner layer in
+     * this step writes the SAME journal slot j. */
+    if (s->ring_W > 0 && s->jK && s->Jmax > 0) {
+        if ((size_t)(s->dpos_host - s->commit_pos) >= (size_t)s->Jmax) {
+            s->commit_pos = s->dpos_host - (s->Jmax - 1);
+            if (s->jcur > s->Jmax - 1) s->jcur = s->Jmax - 1;
+        }
+    }
     for (int L = 0; L < NL; L++) {
         const int global = ((L % period) == period - 1);
         const int nh = global ? g_nh : s_nh, nkv = global ? g_nkv : s_nkv;
@@ -4085,8 +4169,16 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
                 const int ctx = s->dpos_host + 1;
                 const int s0 = (win >= 0 && ctx - win > 0) ? ctx - win : 0;
                 const int wl = ctx - s0;
-                k_attn_decode_ring<<<nh, bd, (size_t)wl*sizeof(float), st>>>(
-                    s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->ring_W, s->dao);
+                if (s->bx_on) {                       /* B2 RING-FIX: byte-exact ring (build-deterministic;
+                    * keeps S1's FP-reorder immunity on the 40 SWA layers when the ring is armed). Shared
+                    * = wl*int64; widen the block to cover the window like the non-ring bx path. */
+                    int bdb = hd > wl ? hd : wl; if (bdb > 1024) bdb = 1024;
+                    k_attn_decode_ring_bx<<<nh, bdb, (size_t)wl*sizeof(long long), st>>>(
+                        s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->ring_W, s->dao);
+                } else {
+                    k_attn_decode_ring<<<nh, bd, (size_t)wl*sizeof(float), st>>>(
+                        s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->ring_W, s->dao);
+                }
             } else if (s->bx_on) {                    /* B1: byte-exact (auditable) decode attention.
                 * The exact-integer kernel takes a HOST ctx (= dpos_host+1) — this is the
                 * per-step (non-graph) path, so dpos_host is the live position. Shared mem

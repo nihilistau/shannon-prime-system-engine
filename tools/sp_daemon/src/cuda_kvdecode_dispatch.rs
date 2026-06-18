@@ -87,6 +87,11 @@ unsafe extern "C" {
     /// `gemma4_kv_rewind(s, n)`. O(1) cold-evict (`dpos -= n`). 0 on success.
     fn sp_daemon_cuda_kvdecode_rewind(handle: *mut c_void, n: c_int) -> c_int;
 
+    /// CONTRACT-CHAT-FULLSTACK B2 RING-FIX — `gemma4_kv_reset(s)`. Clean reset to
+    /// dpos=0 WITHOUT replaying the SWA-owner undo-journal (which `rewind(pos)`
+    /// does and reads OOB past `Jmax` on the ring path once `pos>Jmax`). 0 on success.
+    fn sp_daemon_cuda_kvdecode_reset(handle: *mut c_void) -> c_int;
+
     /// `gemma4_kv_pos(s)`. Current dpos, or -1 on NULL.
     fn sp_daemon_cuda_kvdecode_position(handle: *const c_void) -> c_int;
 
@@ -204,6 +209,24 @@ pub unsafe fn rewind(handle: *mut c_void, n: i32) -> Result<(), String> {
     }
     // SAFETY: handle live per caller.
     let rc = unsafe { sp_daemon_cuda_kvdecode_rewind(handle, n) };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B2 RING-FIX — clean per-request reset to dpos=0 without
+/// journal replay. Use INSTEAD of `rewind(pos)` at chat-request start: `rewind`
+/// replays the SWA-owner undo-journal and reads it OOB past `Jmax` once `pos>Jmax`
+/// on the ring path; `reset` just zeroes the counters (stale ring slots are never
+/// read — the next turn overwrites them in position order). The caller MUST hold
+/// the cache Mutex.
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn reset(handle: *mut c_void) -> Result<(), String> {
+    if handle.is_null() {
+        return Err("kvdecode reset: NULL handle".to_string());
+    }
+    // SAFETY: handle live per caller.
+    let rc = unsafe { sp_daemon_cuda_kvdecode_reset(handle) };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
 
