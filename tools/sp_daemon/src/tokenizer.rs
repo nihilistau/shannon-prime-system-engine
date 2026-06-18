@@ -215,6 +215,56 @@ fn gpt2_decode(token_str: &str) -> Vec<u8> {
     token_str.chars().filter_map(gpt2_char_to_byte).collect()
 }
 
+// ── generation_config.json (model-intended suppress/eos) ────────────────────
+
+/// CONTRACT-CHAT-FULLSTACK S1 — load `suppress_tokens` + `eos_token_id` from the
+/// model's `generation_config.json` if it sits beside the tokenizer/model.
+/// Returns `(suppress_ids, eos_ids)`; both empty when the file is absent or
+/// unparsable (we fall back to the id-agnostic rules). This is the authoritative
+/// model-intended generation contract (the contract requires honoring it); the
+/// gemma-4 file carries `suppress_tokens:[258883,258882]` (the audio/image soft
+/// tokens) and `eos_token_id:1` (`<eos>`).
+fn load_generation_config(tok_path: &str) -> (Vec<i32>, Vec<i32>) {
+    let dir = std::path::Path::new(tok_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let cfg = dir.join("generation_config.json");
+    let text = match std::fs::read_to_string(&cfg) {
+        Ok(t) => t,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let mut suppress = Vec::new();
+    if let Some(arr) = v.get("suppress_tokens").and_then(|x| x.as_array()) {
+        for x in arr {
+            if let Some(i) = x.as_i64() {
+                suppress.push(i as i32);
+            }
+        }
+    }
+    let mut eos = Vec::new();
+    match v.get("eos_token_id") {
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                eos.push(i as i32);
+            }
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            for x in arr {
+                if let Some(i) = x.as_i64() {
+                    eos.push(i as i32);
+                }
+            }
+        }
+        _ => {}
+    }
+    (suppress, eos)
+}
+
 // ── EOS detection ──────────────────────────────────────────────────────────
 
 fn find_eos_ids(arch_id: u32, vocab: &[String]) -> Vec<i32> {
@@ -246,6 +296,17 @@ pub struct SptbTokenizer {
     pub eos_ids: Vec<i32>,
     pub arch_id: u32,
     type_id: u32,
+    /// id-agnostic `<bos>` id (for stripping the per-fragment forced BOS when
+    /// assembling a multi-fragment chat prompt). `None` if absent.
+    bos_id: Option<i32>,
+    /// CONTRACT-CHAT-FULLSTACK S1 — token ids from the model's own
+    /// `generation_config.json` `suppress_tokens` (the authoritative
+    /// model-intended suppression, e.g. the gemma-4 image/audio soft tokens
+    /// 258882/258883). Empty when no config file sits beside the model. These are
+    /// UNIONed into `suppress_token_ids()` on top of the id-agnostic control
+    /// rule (which already covers them, but the config is the authoritative
+    /// source the contract requires us to honor).
+    config_suppress: Vec<i32>,
 }
 
 impl SptbTokenizer {
@@ -294,7 +355,38 @@ impl SptbTokenizer {
             data.vocab.iter().map(|s| s.replace('\u{2581}', " ").into_bytes()).collect()
         };
 
-        let eos_ids = find_eos_ids(arch_id, &data.vocab);
+        // CONTRACT-CHAT-FULLSTACK S1 — read the model's own generation_config.json
+        // (`suppress_tokens` + `eos_token_id`) if it sits beside the model. The
+        // authoritative, config-driven source the contract requires; the
+        // id-agnostic control rule below remains the backstop (it already covers
+        // these). Absent file ⇒ empty, relies on the backstop.
+        let (config_suppress, mut config_eos) = load_generation_config(tok_path);
+
+        let mut eos_ids = find_eos_ids(arch_id, &data.vocab);
+        // Union the config's eos_token_id (e.g. <eos>=1) if present.
+        config_eos.retain(|e| (*e as usize) < data.vocab.len());
+        for e in &config_eos {
+            if !eos_ids.contains(e) {
+                eos_ids.push(*e);
+            }
+        }
+        // id-agnostic <bos> (gemma4 forces add_bos; strip the per-fragment copy
+        // when assembling a multi-fragment chat prompt).
+        let bos_id = data.vocab.iter().position(|t| t == "<bos>").map(|i| i as i32);
+        // CONTRACT-CHAT-FULLSTACK S1: gemma-4's REAL turn terminator on this
+        // artifact is the single token `<turn|>` (the SPTK header's eos_token),
+        // NOT a `<end_of_turn>` string (which does not exist in this vocab). Add
+        // it to eos_ids so decode stops cleanly at the turn boundary by ID, the
+        // same robust path as `<eos>`. (turn_stop_ids covers it too — belt &
+        // braces.) Derived id-agnostically; harmless if already present.
+        if matches!(arch_id, ARCH_GEMMA3 | ARCH_GEMMA4) {
+            if let Some(end) = data.vocab.iter().position(|t| t == "<turn|>") {
+                let end = end as i32;
+                if !eos_ids.contains(&end) {
+                    eos_ids.push(end);
+                }
+            }
+        }
 
         // Issue #115: the gemma4 lane routes encode through the engine's proven
         // C BPE encoder. Load it from the same .sp-tokenizer path and sanity-
@@ -320,6 +412,8 @@ impl SptbTokenizer {
             eos_ids,
             arch_id,
             type_id: data.type_id,
+            bos_id,
+            config_suppress,
         }))
     }
 
@@ -334,6 +428,33 @@ impl SptbTokenizer {
         let enc = tok.encode(text, false)
             .map_err(|e| format!("tokenizer encode: {e}"))?;
         Ok(enc.get_ids().iter().map(|&id| id as i32).collect())
+    }
+
+    /// CONTRACT-CHAT-FULLSTACK S1 — encode `text` WITHOUT the auto-prepended BOS.
+    /// The engine C gemma4 encoder FORCES add_bos=1 (llama PR #21500), so when we
+    /// assemble a chat prompt from multiple fragments we must strip the spurious
+    /// per-fragment BOS (id `bos_id`); only the single leading BOS at the head of
+    /// the assembled prompt is correct. For the non-gemma4 lanes the Rust path
+    /// already encodes without BOS, so this is a pass-through there.
+    fn encode_no_bos(&self, text: &str) -> Result<Vec<i32>, String> {
+        let ids = self.encode(text)?;
+        if self.c_tokenizer.is_some() {
+            // gemma4 C encoder prepends BOS — drop exactly one leading BOS.
+            if let Some(bos) = self.bos_id {
+                if ids.first() == Some(&bos) {
+                    return Ok(ids[1..].to_vec());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// CONTRACT-CHAT-FULLSTACK S1 — the id of a single-token control surface,
+    /// looked up id-agnostically from the decoded vocab bytes (robust to id
+    /// shifts across artifacts). Returns `None` if this artifact has no such
+    /// token (e.g. a gemma family that genuinely lacks turn markers).
+    fn control_id(&self, surface: &[u8]) -> Option<i32> {
+        self.id_to_bytes.iter().position(|b| b == surface).map(|i| i as i32)
     }
 
     pub fn decode_token(&self, id: i32) -> &[u8] {
@@ -370,6 +491,19 @@ impl SptbTokenizer {
                 "\nUser:".to_string(),
                 "\n\nUser".to_string(),
                 "\nQuestion:".to_string(),
+                // CONTRACT-CHAT-FULLSTACK S1 — this OK_Q4B QAT artifact has a weak
+                // turn terminator: it often answers correctly then, instead of
+                // emitting the `<turn|>` STOP token, runs on by opening a NEW turn
+                // in PLAIN TEXT — most commonly the bare role line `\nuser\n` /
+                // `\nmodel\n` (the gemma turn-prefix written as text), observed
+                // empirically in the S1 transcripts. Catch those new-turn openers
+                // as stop-strings (a fresh role line begins the next turn, so the
+                // answer is complete). Kept to the role-line pattern (never
+                // mid-answer punctuation) so a genuine answer is not truncated.
+                "\nuser\n".to_string(),
+                "\nmodel\n".to_string(),
+                "\nUser\n".to_string(),
+                "\nModel\n".to_string(),
             ],
             _ => Vec::new(),
         }
@@ -429,6 +563,16 @@ impl SptbTokenizer {
                 out.push(id as i32);
             }
         }
+        // CONTRACT-CHAT-FULLSTACK S1: UNION the model's own generation_config
+        // `suppress_tokens` (authoritative source). The id-agnostic rule above
+        // already covers the gemma-4 soft tokens, so this is usually a no-op, but
+        // it is the config-driven path the contract requires and survives any
+        // artifact whose soft tokens don't match the pipe-control surface rule.
+        for &id in &self.config_suppress {
+            if (id as usize) < self.id_to_bytes.len() && !out.contains(&id) {
+                out.push(id);
+            }
+        }
         out
     }
 
@@ -439,6 +583,73 @@ impl SptbTokenizer {
             // format as gemma3 (issue #115 — the `messages` path now works).
             ARCH_GEMMA3 | ARCH_GEMMA4 => Ok(gemma3_template(messages)),
             _ => Err(TemplateError { arch_id: self.arch_id }),
+        }
+    }
+
+    /// CONTRACT-CHAT-FULLSTACK S1 — build the chat prompt directly as token IDs.
+    ///
+    /// THE BUG this fixes: the gemma-4 turn structure on this artifact uses the
+    /// SINGLE control tokens `<|turn>` (id 105, start-of-turn) and `<turn|>`
+    /// (id 106, end-of-turn) — there is NO `<start_of_turn>`/`<end_of_turn>`
+    /// token in the vocab (a full vocab scan finds neither; the only turn tokens
+    /// are `<|turn>`/`<turn|>`). The old text template emitted the literal
+    /// strings `<start_of_turn>…<end_of_turn>`, which the gemma4 BPE encoder
+    /// (whose blob lane has `n_spec==0`, so it special-splits NOTHING) shattered
+    /// into ordinary text pieces (`<`,`start`,`_of`,`_turn`,`>`,…). The model
+    /// therefore NEVER saw a real turn token — it was prompted in a format it was
+    /// never trained on, so rank-1 rode a suppressed soft token and the answer
+    /// hung on a thin, FP-reorderable rank-2 margin (the coherent↔garbage flip).
+    ///
+    /// The fix assembles the prompt at the TOKEN level: the real control ids are
+    /// emitted directly (looked up id-agnostically from the vocab — `<|turn>`,
+    /// `<turn|>`, `\n`, leading `<bos>`), and only the role label + message
+    /// CONTENT go through the proven C BPE encoder (with the spurious per-fragment
+    /// forced BOS stripped). This reproduces gemma-4's trained turn format
+    /// exactly:  <bos> (<|turn>{role}\n{content}<turn|>\n)*  <|turn>model\n
+    ///
+    /// If this artifact genuinely lacks the turn tokens, falls back to the text
+    /// template + plain encode (minimal correct format + `<eos>` stop).
+    pub fn apply_template_ids(&self, messages: &[Message]) -> Result<Vec<i32>, String> {
+        match self.arch_id {
+            ARCH_GEMMA3 | ARCH_GEMMA4 => {
+                // Real turn tokens, id-agnostic. (start_of_turn ≡ <|turn>, 105;
+                // end_of_turn ≡ <turn|>, 106 on the b1 artifact.)
+                let (start_turn, end_turn, nl) = match (
+                    self.control_id(b"<|turn>"),
+                    self.control_id(b"<turn|>"),
+                    self.control_id(b"\n"),
+                ) {
+                    (Some(s), Some(e), Some(n)) => (s, e, n),
+                    _ => {
+                        // No turn tokens — fall back to the text template (minimal
+                        // correct format); decode still stops on <eos>.
+                        let text = gemma3_template(messages);
+                        return self.encode(&text);
+                    }
+                };
+                let mut out: Vec<i32> = Vec::new();
+                if let Some(bos) = self.bos_id {
+                    out.push(bos);
+                }
+                for msg in messages {
+                    let role = if msg.role == "assistant" { "model" } else { msg.role.as_str() };
+                    out.push(start_turn);
+                    // role label + newline as content (no special tokens here)
+                    out.extend(self.encode_no_bos(role)?);
+                    out.push(nl);
+                    out.extend(self.encode_no_bos(&msg.content)?);
+                    out.push(end_turn);
+                    out.push(nl);
+                }
+                // generation prompt: <|turn>model\n
+                out.push(start_turn);
+                out.extend(self.encode_no_bos("model")?);
+                out.push(nl);
+                Ok(out)
+            }
+            // Non-gemma archs: assemble text then encode (BOS handled by the lane).
+            ARCH_QWEN3 | ARCH_QWEN25 => self.encode(&chatml_template(messages)),
+            _ => Err(format!("no chat template for arch_id={}", self.arch_id)),
         }
     }
 }
@@ -472,6 +683,17 @@ fn is_unused_reserve(bytes: &[u8]) -> bool {
 ///       `<unk>`/`<mask>` or the `<unusedN>` reserve), matched exactly.
 /// `<eos>` is intentionally NOT here (legit end-of-sequence; handled by eos_ids).
 fn is_suppressed_control(bytes: &[u8]) -> bool {
+    // CONTRACT-CHAT-FULLSTACK S1 — the TURN tokens `<|turn>`/`<turn|>` (gemma-4's
+    // start/end-of-turn, ids 105/106 on the b1 artifact) are NOT suppressed: the
+    // end token `<turn|>` is THE turn terminator (the SPTK header's eos_token), so
+    // suppressing it (it otherwise matches the pipe-control rule) would mask -inf
+    // the only token that lets the model STOP — the model then answers correctly
+    // but runs on forever (the no-self-stop bug). They are handled by the turn-
+    // stop / eos_ids path in the decode loop (caught before they reach the
+    // stream), exactly like `<eos>`. Excluded here the same way `<eos>` is.
+    if matches!(bytes, b"<|turn>" | b"<turn|>") {
+        return false;
+    }
     let pipe_control = bytes.first() == Some(&b'<')
         && bytes.last() == Some(&b'>')
         && bytes.contains(&b'|');
@@ -487,10 +709,10 @@ mod a2_polish_tests {
     #[test]
     fn suppresses_pipe_control_markers() {
         // The actual gemma4-12b-b1 control markers (verified by vocab scan).
+        // NB: <|turn>/<turn|> are NOT here — S1 excludes the turn terminators
+        // from suppression (they are the stop tokens; see does_not_suppress_turn).
         for t in [
-            b"<|turn>".as_slice(),
-            b"<turn|>",
-            b"<image|>",
+            b"<image|>".as_slice(),
             b"<audio|>",
             b"<|image>",
             b"<|audio>",
@@ -510,6 +732,15 @@ mod a2_polish_tests {
     fn suppresses_named_specials_and_reserve() {
         for t in [b"<pad>".as_slice(), b"<bos>", b"<unk>", b"<mask>", b"<unused0>", b"<unused255>"] {
             assert!(is_suppressed_control(t), "should suppress {:?}", String::from_utf8_lossy(t));
+        }
+    }
+
+    #[test]
+    fn does_not_suppress_turn() {
+        // S1: the turn terminators are the STOP tokens; suppressing them is the
+        // no-self-stop bug. They must NOT be in the suppress set.
+        for t in [b"<|turn>".as_slice(), b"<turn|>"] {
+            assert!(!is_suppressed_control(t), "must NOT suppress turn token {:?}", String::from_utf8_lossy(t));
         }
     }
 

@@ -1,0 +1,122 @@
+================================================================================
+G-CHAT-S1 — CONTRACT-CHAT-FULLSTACK Stage S1
+Coherent, reproducible /v1/chat from the real Gemma-4-12B using the model's OWN
+turn format. Fixes the "gemma3 template on a gemma4 model" bug.
+Date: 2026-06-19   Engine: tools/sp_daemon (L2)   Model: gemma4-12b-b1.sp-model
+Gate-on-TEXT (not a determinism SHA — the B2 false-green lesson).
+================================================================================
+
+--------------------------------------------------------------------------------
+1. ROOT-CAUSE / TOKENIZER FINDING (read from the artifact, not guessed)
+--------------------------------------------------------------------------------
+Authoritative source = the .sp-tokenizer the daemon actually loads
+(D:\F\shannon-prime-repos\models\gemma4-12b-b1.sp-tokenizer), parsed directly:
+  SPTK header: ver 0.1, type_id=4 (GEMMA4_BPE), vocab=262144,
+               bos=2  eos=106  pad=0  unk=3   (NB: header eos = 106 = <turn|>)
+  SPTB blob:   nv=262144  n_merges=514906
+
+  ids 0..4 : 0 <pad>  1 <eos>  2 <bos>  3 <unk>  4 <mask>
+  REAL turn tokens (full-vocab scan for start_of/end_of/turn):
+      105  '<|turn>'   = start-of-turn   (gemma's <start_of_turn> equivalent)
+      106  '<turn|>'   = end-of-turn     (gemma's <end_of_turn> equivalent) = EOS
+  There is NO '<start_of_turn>' and NO '<end_of_turn>' token anywhere in the vocab.
+  multimodal soft tokens: 258882 '<image|>'  258883 '<audio|>'  (= generation_config suppress_tokens)
+  role words are ordinary text tokens: 'user'=2364, 'model'=4368, '\n'=107.
+
+BUG #1 (the operator's flag) — gemma3 template on a gemma4 model:
+  gemma3_template() emitted the LITERAL strings "<start_of_turn>…<end_of_turn>".
+  Those are not tokens here, and the gemma4 BPE blob lane has n_spec==0
+  (src/tokenizer/gemma4_bpe.c:295 — sp_g4_encode special-splits NOTHING on the
+  blob lane), so the literal strings shatter into ordinary text pieces
+  (<, start, _of, _turn, >, …). The model was prompted in a format it was NEVER
+  trained on -> rank-1 rode a suppressed soft token -> answer hung on a thin,
+  FP-reorderable rank-2 margin (the coherent("Paris")<->garbage("cakes") flip).
+
+BUG #2 (found while fixing #1) — the STOP token was being suppressed:
+  <turn|>=106 is the end-of-turn / EOS token, but it matches the id-agnostic
+  pipe-control suppress rule (<…|…>) -> it was masked to -inf in the sampler ->
+  the model could NEVER emit it -> it answers correctly then runs on forever.
+
+--------------------------------------------------------------------------------
+2. FIX (gemma4-correct, config-driven, L2-only — no .cu / no sp_l1 / no submodule)
+--------------------------------------------------------------------------------
+tools/sp_daemon/src/tokenizer.rs:
+  * apply_template_ids(): build the chat prompt directly at the TOKEN level using
+    the REAL control ids (id-agnostic lookup): <bos> then per message
+    <|turn>{role}\n{content}<turn|>\n , ending with the generation prompt
+    <|turn>model\n . Only role label + content go through the proven C BPE
+    encoder; the per-fragment forced BOS is stripped (encode_no_bos). Falls back
+    to a minimal text template + <eos> if an artifact genuinely lacks turn tokens.
+  * is_suppressed_control(): EXCLUDE <|turn>/<turn|> from suppression (they are
+    the stop tokens, handled by turn_stop_ids/eos_ids — same treatment as <eos>).
+  * eos_ids: add the real end-of-turn id <turn|> id-agnostically (decode stops by ID).
+  * load_generation_config(): if generation_config.json sits beside the model,
+    UNION its suppress_tokens + eos_token_id (the authoritative model contract);
+    the id-agnostic rule stays the backstop (already covers 258882/258883).
+tools/sp_daemon/src/routes.rs:
+  * /v1/chat `messages` path now calls apply_template_ids (token-level prompt).
+  * byteexact is now Option<bool>, DEFAULT ON for chat decode: the exact-integer
+    islands + dual-prime CRT-NTT attention are run-to-run bit-identical AND
+    build-independent (integer arithmetic) -> removes the FP-codegen reorder
+    fragility. raw_logits:true or explicit byteexact:false opts out to the float path.
+
+Verified prompt token ids ("What is the capital of France?"), from the daemon log:
+  n=16  [2, 105, 2364, 107, 3689, 563, 506, 5279, 529, 7001, 236881, 106, 107, 105, 4368, 107]
+  = <bos> <|turn> user \n <...content...> <turn|> \n <|turn> model \n   (CORRECT gemma-4 turn format)
+
+lib unit tests: 57 passed; 0 failed (incl. updated suppress/turn classifiers).
+
+--------------------------------------------------------------------------------
+3. GATE — measured emitted TEXT (byte-exact default decode path)
+--------------------------------------------------------------------------------
+BUILD 1, temp=0 (greedy, byteexact default):
+[1] Q: What is the capital of France?            A: Paris.                          [coherent/correct, clean stop]
+[2] Q: What is 2+2?                              A: 4                                [coherent/correct, clean stop]
+[3] Q: Who wrote the play Hamlet?                A: William Shakespeare wrote the play Hamlet. <then runs on with same-turn follow-up questions>   [correct, no self-stop]
+[4] Q: What color is the sky on a clear day?     A: The sky is blue on a clear day. [coherent/correct, clean stop]
+[5] Q: Name the largest planet in our solar system. A: Jupiter. <then runs on, verbose-but-correct facts>   [correct, no self-stop]
+[6] Q: How do you say hello in Spanish?          A: In Spanish, you say "Hola" to say hello.   [coherent/correct, clean stop]
+
+BUILD 2 (daemon rebuilt from same source), temp=0:
+  IDENTICAL to BUILD 1 byte-for-byte (Compare-Object: no differences).
+  => REPRODUCIBLE ACROSS BUILDS. byte-exact integer decode is build-independent
+     (the FP-reorder coherent<->garbage flip is gone by construction).
+
+temp=0.7 (do_sample, the model's generation_config operating point): every answer
+  is correct first ("The capital of France is Paris.", "2+2=4", "...William
+  Shakespeare.", "...blue...", "...Jupiter...", "...Hola..."), but the OK_Q4B QAT
+  artifact wanders/run-ons MORE under sampling than at greedy. Greedy+byte-exact
+  is the cleaner, deterministic served default for this artifact.
+
+--------------------------------------------------------------------------------
+4. VERDICT — PARTIAL GREEN (honest)
+--------------------------------------------------------------------------------
+GREEN on the operator's stated mission:
+  * COHERENT + CORRECT on all 6 prompts (was garbage before — Paris/4/Shakespeare/
+    blue/Jupiter/Hola). The "gemma3-template-on-gemma4" bug is FIXED end-to-end,
+    proven by the verified prompt token ids using the real <|turn>/<turn|> tokens.
+  * REPRODUCIBLE: byte-identical output across two builds (byte-exact default).
+  * ZERO control-token artifacts in the stream.
+  * Found + fixed a second bug: the EOS token <turn|> was being suppressed.
+  * byte-exact IS the default chat decode path (deterministic, build-stable).
+
+NOT fully green on clean self-stop:
+  * 4/6 prompts self-stop cleanly at the turn boundary (emit <turn|>=106, now
+    that it is no longer suppressed); 2/6 (#3 Hamlet, #5 Jupiter) answer
+    CORRECTLY then run on (verbose, same-turn) at greedy.
+  * Diagnosis: this is the OK_Q4B QAT b1 artifact's instruction-following/
+    turn-discipline ceiling, NOT a template or suppression bug (the contract
+    already documents this artifact's weak turn terminator). It cannot be closed
+    by stop-strings without risking truncation of legitimate answers. Honest
+    negative kept attached rather than hacked behind a green.
+
+No closed gate regressed: G-WIRE-CUDA-DECODE-GEMMA4 path untouched (the kvdecode
+ABI / .cu unchanged); A2-polish suppression intact (multimodal soft tokens still
+masked); B2 SWA ring stays DISARMED (not re-armed).
+
+Repro:
+  build : _s1_daemonbuild.bat   (cargo build --release --features wire_cuda_backend
+          --target-dir target-wirecuda --bin sp-daemon ; env-cuda + LIBCLANG_PATH)
+  serve : _s1_launch.bat  (SP_DAEMON_BACKEND=cuda KVDECODE=1 CUDA_DECODE_INT8=1, :3000)
+  gate  : powershell -File _s1_run.ps1 <temp> [seed]   (curl SSE -> concatenated text)
+================================================================================

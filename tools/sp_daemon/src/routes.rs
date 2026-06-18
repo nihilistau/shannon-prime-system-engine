@@ -183,14 +183,16 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     #[serde(default)]
     pub stop: Vec<String>,
-    // CONTRACT-CHAT-FULLSTACK B1 — byte-exact "auditable mode". When true, this
-    // turn decodes through the exact-integer islands + dual-prime CRT-NTT
-    // attention on the resident cache (run-to-run bit-identical, the AUDITABILITY
-    // axis). Pair with temperature:0 for the determinism claim. Default false =
-    // the Stage-A float path, byte-identical null floor. Only honored on the 12B
-    // kvdecode (resident-cache) chat path.
+    // CONTRACT-CHAT-FULLSTACK B1/S1 — byte-exact "auditable mode". The turn
+    // decodes through the exact-integer islands + dual-prime CRT-NTT attention on
+    // the resident cache (run-to-run bit-identical AND build-independent, the
+    // AUDITABILITY axis + the FP-reorder-immunity fix). S1 makes this the
+    // DEFAULT chat decode path: `None` (field absent) ⇒ ON. Set `false`
+    // explicitly to opt out to the Stage-A float path; `raw_logits:true` also
+    // forces it off (the float determinism/null-floor reference). Only honored on
+    // the 12B kvdecode (resident-cache) chat path.
     #[serde(default)]
-    pub byteexact: bool,
+    pub byteexact: Option<bool>,
     // CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — XBAR episode REPLAY into this turn. When
     // set to an episode directory (holding ep.mf/ep.k/ep.v), the resident cache
     // replays that stored episode's owner K/V at [dpos,dpos+replay_npos) right after
@@ -269,28 +271,37 @@ pub async fn v1_chat(
         }
     } else {
         let messages = req.messages.unwrap();
-        let text = match tokenizer.apply_template(&messages) {
-            Ok(t) => t,
-            Err(te) => {
+        // CONTRACT-CHAT-FULLSTACK S1: build the prompt at the TOKEN level so the
+        // gemma-4 turn structure uses its REAL control tokens (`<|turn>`=105 /
+        // `<turn|>`=106), not the literal `<start_of_turn>`/`<end_of_turn>`
+        // strings that the encoder shatters into ordinary text (the
+        // "gemma3-template-on-a-gemma4-model" bug). apply_template_ids emits the
+        // control ids directly and routes only the role/content through the C BPE
+        // encoder (per-fragment forced BOS stripped).
+        match tokenizer.apply_template_ids(&messages) {
+            Ok(ids) => ids,
+            Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "error": "chat_template_unavailable",
-                        "arch_id": te.arch_id,
+                        "detail": e,
                         "hint": "use prompt or prompt_tokens"
                     })),
                 )
                     .into_response();
             }
-        };
-        match tokenizer.encode(&text) {
-            Ok(ids) => ids,
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
-                    .into_response();
-            }
         }
     };
+
+    // CONTRACT-CHAT-FULLSTACK S1 debug: log the head of the assembled prompt
+    // token ids so the turn-token structure (<|turn>=105 … <turn|>=106) is
+    // verifiable in the daemon log.
+    {
+        let head: Vec<i32> = tokens.iter().take(12).copied().collect();
+        let tail: Vec<i32> = tokens.iter().rev().take(6).rev().copied().collect();
+        tracing::info!("S1 prompt ids: n={} head={:?} tail={:?}", tokens.len(), head, tail);
+    }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
@@ -318,8 +329,20 @@ pub async fn v1_chat(
     let vocab_size = state.vocab_size;
     let app = state.clone();
     let max_tokens = req.max_tokens;
-    // B1: byte-exact "auditable mode" for this turn (resident-cache chat path only).
-    let byteexact = req.byteexact;
+    // B1 / S1: byte-exact "auditable mode" for this turn (resident-cache chat
+    // path only). CONTRACT-CHAT-FULLSTACK S1 makes byte-exact the DEFAULT chat
+    // decode path: the exact-integer islands + dual-prime CRT-NTT attention are
+    // run-to-run bit-identical AND build-independent (integer arithmetic), which
+    // removes the FP-codegen reorder fragility that flipped a thin rank-2 margin
+    // coherent↔garbage across rebuilds from the same HEAD. `raw_logits` (the
+    // null-floor / determinism reference opt-out) forces it OFF to recover the
+    // Stage-A float path bit-for-bit; an explicit `byteexact:false` also opts out.
+    let byteexact = if req.raw_logits {
+        false
+    } else {
+        // Default ON (field absent ⇒ None ⇒ true); explicit `byteexact:false` opts out.
+        req.byteexact.unwrap_or(true)
+    };
     // B2 (§6d-b): per-turn XBAR episode replay (None = no recall = null floor).
     let replay_dir = req.replay.clone();
     let replay_npos = req.replay_npos;
