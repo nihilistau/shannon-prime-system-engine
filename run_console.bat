@@ -32,6 +32,16 @@ REM gemma4_kv_open build the tied head.
 set "SP_DAEMON_KVDECODE=1"
 set "SP_CUDA_DECODE_INT8=1"
 
+REM CONTRACT-CHAT-FULLSTACK B2 (§6d-a): arm the XBAR SWA W-slot ring on the resident
+REM cache. SWA-owner layers shrink to a Wring=min(W,P)-slot ring (O(1)-context KV for
+REM the dominant 40 SWA layers) + an undo-journal; the decode attends in position
+REM order via k_attn_decode_ring = byte-identical to the full-window decode (the proven
+REM KAI-1c null floor). Globals stay full-cache (the global slab/LSH recall is a
+REM resident-path follow-on). Unset = the full-cache B1 path. PMAX raises the context
+REM budget the ring makes affordable.
+set "SP_DAEMON_KVDECODE_RING_W=1024"
+set "SP_DAEMON_KVDECODE_PMAX=20000"
+
 REM CWD must be tools\sp_daemon so the static ServeDir("frontend_mockups") resolves.
 cd /d "%ENGINE%tools\sp_daemon"
 

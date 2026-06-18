@@ -107,6 +107,16 @@ int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
  * (the chat path sets on=1 at request start, on=0 at end). 0 on success. */
 int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
 
+/* CONTRACT-CHAT-FULLSTACK B2 (§6d-b): replay a stored episode's owner K/V directly
+ * into the resident KV-decode cache at [dpos, dpos+npos) and advance dpos — the
+ * persistent-ABI SP_REPLAY recall (C2 #222), rolling a prior memory into the live
+ * turn. zero!=0 injects a ZEROED (corrupted) episode = the reject control. Reject
+ * is the O(1) gemma4_kv_rewind(npos) inverse (ring-aware journal under SWA-ring).
+ * `epdir` holds ep.mf/ep.k/ep.v (the xbar episode serialization). 0 on success;
+ * null floor decode paths stay byte-untouched (callable only when a turn names an
+ * episode). */
+int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

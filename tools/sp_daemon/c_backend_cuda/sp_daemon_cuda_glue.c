@@ -133,6 +133,8 @@ extern void  gemma4_kv_close(sp_g4_kv *s);
 extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
 /* CONTRACT-CHAT-FULLSTACK B1 — per-session byte-exact "auditable mode" setter. */
 extern int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
+/* CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — episode replay into the live turn. */
+extern int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero);
 
 /* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
  * gemma4_kv_open). pmax = max resident position budget. Requires the model to
@@ -193,6 +195,17 @@ int sp_daemon_cuda_kvdecode_byteexact(void *handle, int on) {
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s) { sp_set_error("cuda kvdecode byteexact: NULL handle"); return -1; }
     return gemma4_kv_byteexact_set(s, on);
+}
+
+/* replay(handle, epdir, npos, zero): CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — recall a
+ * stored episode's owner K/V into the resident cache at [dpos,dpos+npos) and advance
+ * dpos (SP_REPLAY into a live turn). zero!=0 = the zeroed reject control. The chat
+ * path holds the cache Mutex and calls this before decode when the turn names an
+ * episode; reject = gemma4_kv_rewind(npos). 0 ok. */
+int sp_daemon_cuda_kvdecode_replay(void *handle, const char *epdir, int npos, int zero) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !epdir || npos <= 0) { sp_set_error("cuda kvdecode replay: bad args"); return -1; }
+    return gemma4_kv_replay(s, epdir, npos, zero);
 }
 
 /* ── Engine-kernel shim over math-core forward_dispatch ────────────────────

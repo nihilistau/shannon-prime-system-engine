@@ -598,6 +598,25 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4096);
+            // CONTRACT-CHAT-FULLSTACK B2 (§6d-a): the SWA W-slot RING is selected at
+            // gemma4_kv_open time (allocation-shaped: SWA owners shrink to a Wring-slot
+            // ring + undo-journal ⇒ O(1)-context KV; globals stay full-cache on the
+            // resident path until the slab/LSH port lands). gemma4_kv_open reads
+            // SP_G4_KV_RING_W / SP_G4_KV_JMAX; surface them as daemon knobs so the ring
+            // is a startup config (default unset = the full-cache B1 null floor).
+            if let Ok(w) = std::env::var("SP_DAEMON_KVDECODE_RING_W") {
+                if !w.trim().is_empty() {
+                    // SAFETY: single-threaded startup, before any decode thread spawns.
+                    unsafe { std::env::set_var("SP_G4_KV_RING_W", w.trim()); }
+                    info!("WIRE-CUDA-DECODE B2: SWA-ring mode armed at open (SP_G4_KV_RING_W={})", w.trim());
+                }
+            }
+            if let Ok(j) = std::env::var("SP_DAEMON_KVDECODE_JMAX") {
+                if !j.trim().is_empty() {
+                    // SAFETY: single-threaded startup.
+                    unsafe { std::env::set_var("SP_G4_KV_JMAX", j.trim()); }
+                }
+            }
             // SAFETY: we own `session` exclusively here; no concurrent decode.
             match unsafe {
                 sp_daemon::cuda_kvdecode_dispatch::register_with_session(session_raw, qm, pmax)

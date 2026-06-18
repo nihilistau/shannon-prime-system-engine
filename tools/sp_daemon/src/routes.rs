@@ -191,6 +191,17 @@ pub struct ChatRequest {
     // kvdecode (resident-cache) chat path.
     #[serde(default)]
     pub byteexact: bool,
+    // CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — XBAR episode REPLAY into this turn. When
+    // set to an episode directory (holding ep.mf/ep.k/ep.v), the resident cache
+    // replays that stored episode's owner K/V at [dpos,dpos+replay_npos) right after
+    // the prompt prefill and before decode, so a prior memory rolls into the live
+    // turn (SP_REPLAY recall, C2 #222). Default None = the B1/Stage-A path untouched
+    // (byte-identical null floor). Only honored on the 12B kvdecode (resident-cache)
+    // chat path. `replay_npos` bounds how many positions to recall (0 = unset → skip).
+    #[serde(default)]
+    pub replay: Option<String>,
+    #[serde(default)]
+    pub replay_npos: i32,
     // CONTRACT-CHAT-FULLSTACK A2 — sampling knobs (L2 owns sampling over the
     // full-vocab logits row). Flattened so the request body carries them at the
     // top level: {"prompt":"...","temperature":0.7,"top_p":0.95,...}. Defaults
@@ -298,6 +309,9 @@ pub async fn v1_chat(
     let max_tokens = req.max_tokens;
     // B1: byte-exact "auditable mode" for this turn (resident-cache chat path only).
     let byteexact = req.byteexact;
+    // B2 (§6d-b): per-turn XBAR episode replay (None = no recall = null floor).
+    let replay_dir = req.replay.clone();
+    let replay_npos = req.replay_npos;
     // A2: build the per-request sampler from the (flattened) ChatRequest knobs.
     let sampling = req.sampling.clone();
     // A2: token ids the sampler must never emit (the <image|> placeholder
@@ -350,7 +364,7 @@ pub async fn v1_chat(
             run_kvdecode_chat(
                 &app, chat_id, &tokens, max_tokens, vocab_size,
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
-                &mut sampler, byteexact,
+                &mut sampler, byteexact, replay_dir, replay_npos,
             );
             return;
         }
@@ -469,6 +483,8 @@ fn run_kvdecode_chat(
     sessions: &crate::sessions::Sessions,
     sampler: &mut crate::sampler::Sampler,
     byteexact: bool,
+    replay_dir: Option<String>,
+    replay_npos: i32,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -537,6 +553,21 @@ fn run_kvdecode_chat(
             send_err(format!("kvdecode prefill: {e}"));
             sessions.remove(chat_id);
             return;
+        }
+    }
+    // B2 (§6d-b): XBAR episode REPLAY into the live turn. Recall a stored episode's
+    // owner K/V into the cache at [dpos,dpos+npos) right after the prompt prefill,
+    // so the last prompt token + every generated token attend across the recalled
+    // memory (SP_REPLAY, C2 #222). Done under the cache Mutex; reject = rewind. A
+    // turn that names no episode skips this entirely (byte-identical null floor).
+    if let Some(ref dir) = replay_dir {
+        if !dir.is_empty() && replay_npos > 0 {
+            // SAFETY: handle live; we hold the cache Mutex (no concurrent decode).
+            if let Err(e) = unsafe { kv::replay(handle, dir, replay_npos, false) } {
+                send_err(format!("kvdecode replay({dir}, {replay_npos}): {e}"));
+                sessions.remove(chat_id);
+                return;
+            }
         }
     }
     if logits.len() != vocab_size {

@@ -96,6 +96,18 @@ unsafe extern "C" {
     /// CONTRACT-CHAT-FULLSTACK B1 — `gemma4_kv_byteexact_set(s, on)`. Toggles
     /// per-session byte-exact "auditable mode" on the resident cache. 0 on success.
     fn sp_daemon_cuda_kvdecode_byteexact(handle: *mut c_void, on: c_int) -> c_int;
+
+    /// CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — `gemma4_kv_replay(s, epdir, npos, zero)`.
+    /// Recall a stored episode's owner K/V into the resident cache at
+    /// `[dpos, dpos+npos)` and advance dpos (SP_REPLAY into the live turn). `epdir`
+    /// is a NUL-terminated path holding ep.mf/ep.k/ep.v; `zero!=0` = zeroed reject
+    /// control. 0 on success.
+    fn sp_daemon_cuda_kvdecode_replay(
+        handle: *mut c_void,
+        epdir: *const std::os::raw::c_char,
+        npos: c_int,
+        zero: c_int,
+    ) -> c_int;
 }
 
 /// Open a session-resident KV-decode cache on the CUDA backend.
@@ -189,6 +201,30 @@ pub unsafe fn set_byteexact(handle: *mut c_void, on: bool) -> Result<(), String>
     }
     // SAFETY: handle live per caller; glue forwards to gemma4_kv_byteexact_set.
     let rc = unsafe { sp_daemon_cuda_kvdecode_byteexact(handle, if on { 1 } else { 0 }) };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — replay a stored episode into the resident
+/// cache at `[dpos, dpos+npos)` (SP_REPLAY recall into the live turn). `epdir`
+/// holds ep.mf/ep.k/ep.v; `zero=true` injects the zeroed reject control. On reject
+/// the caller undoes it with `rewind(handle, npos)`. The caller MUST hold the
+/// cache Mutex (the chat path replays before decode under the Mutex).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn replay(handle: *mut c_void, epdir: &str, npos: i32, zero: bool) -> Result<(), String> {
+    if handle.is_null() || npos <= 0 {
+        return Err("kvdecode replay: NULL handle or non-positive npos".to_string());
+    }
+    let c_epdir = match std::ffi::CString::new(epdir) {
+        Ok(s) => s,
+        Err(_) => return Err("kvdecode replay: epdir has interior NUL".to_string()),
+    };
+    // SAFETY: handle live per caller; c_epdir owns the NUL-terminated buffer for
+    // the duration of the call; glue forwards to gemma4_kv_replay.
+    let rc = unsafe {
+        sp_daemon_cuda_kvdecode_replay(handle, c_epdir.as_ptr(), npos, if zero { 1 } else { 0 })
+    };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
 
