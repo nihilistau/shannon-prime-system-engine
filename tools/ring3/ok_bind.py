@@ -51,8 +51,21 @@ def unbind(M,addr):     # est = M (x) addr*   (negacyclic correlation, native)
     M=np.asarray(M); addr=np.asarray(addr); D=addr.shape[0]; out=np.zeros(D,dtype=np.int64); o=0
     for N in _blocks(D): out[o:o+N]=_negmul(M[o:o+N],_involute(addr[o:o+N],N),N); o+=N
     return out
-def carrier(seed,D): return (np.random.default_rng(int(seed)%(2**63)).integers(0,2,D)*2-1).astype(np.int64)
-def idvec(seed,D):   return (np.random.default_rng((int(seed)^0xABCDEF)%(2**63)).integers(0,2,D)*2-1).astype(np.int64)
+# Canonical ±1 generator = splitmix64 (THE generator shared bit-for-bit with the
+# native-C core/ring3 sp_r3_carrier/sp_r3_idvec). Replaces the prior numpy PCG64
+# draw so the C gate T_RING3_NATIVE leg (a) is exact end-to-end. smix matches
+# g_r3_nightshift.smix; carrier seeds by `seed`, idvec by `seed ^ 0xABCDEF`.
+_MASK64=(1<<64)-1
+def _smix_pm1(seed,n):
+    s=int(seed)&_MASK64; out=np.empty(n,dtype=np.int64)
+    for i in range(n):
+        s=(s+0x9E3779B97F4A7C15)&_MASK64; z=s
+        z=((z^(z>>30))*0xBF58476D1CE4E5B9)&_MASK64
+        z=((z^(z>>27))*0x94D049BB133111EB)&_MASK64
+        z=z^(z>>31); out[i]=1 if (z&1) else -1
+    return out
+def carrier(seed,D): return _smix_pm1(int(seed)&_MASK64, D)
+def idvec(seed,D):   return _smix_pm1((int(seed)^0xABCDEF)&_MASK64, D)
 def cos(a,b):
     a=np.asarray(a,dtype=np.float64); b=np.asarray(b,dtype=np.float64)
     return float(a@b/(np.linalg.norm(a)*np.linalg.norm(b)+1e-12))
