@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""B3-v3 dataset builder — mine (query global-Q, episode global-K, label) pairs from
+the substrate. NO external corpus: episode-K comes from each episode's ep.k; query-Q
+comes from the daemon's SP_B3_QDUMP seam (POST each query, the daemon writes the exact
+last-token global-Q that qk_relevance scores).
+
+Granularity matches the runtime selector recall.rs::qk_relevance:
+  query  Q_i : [ng, G_NH, HD]   (global layers x query heads x head_dim)
+  episode K_e: [ng, npos_e, HD] (global layers x prompt positions x head_dim)
+score is reduced over (layer, head, pos). W_c projects each HD-vector to r dims.
+
+Outputs b3_data.npz: Q (list, ragged ok -> object array), labels, and per-episode K.
+
+Two modes:
+  --live   : start from a running daemon (SP_B3_QDUMP set), POST the query set, collect.
+  --offline: just assemble from an existing dump dir of q_<...>.bin + the registry.
+"""
+import os, sys, json, glob, struct, argparse
+import numpy as np
+
+NL, PERIOD, HD, G_NH = 48, 6, 512, 16
+GLOBALS = [l for l in range(NL) if l % PERIOD == PERIOD - 1]   # {5,11,...,47}
+NG = len(GLOBALS)
+
+# ---- default query set: paraphrases/sub-questions per episode (positives) + foreign.
+# Edit/extend freely; more paraphrases per episode = a better-conditioned W_c. Keep the
+# label = the episode `name` it should retrieve, or "__foreign__" for the reject class.
+DEFAULT_QUERIES = {
+    "ep_wiki": [
+        "Who is Robert Boulter?", "What is Robert Boulter known for?",
+        "Tell me about the actor Robert Boulter.", "What role did Robert Boulter play on The Bill?",
+        "Which play did Robert Boulter star in at the Royal Court?",
+        "Is Robert Boulter a film and television actor?",
+    ],
+    "ep_homarus": [
+        "What is Homarus gammarus?", "Tell me about the European lobster.",
+        "What is the common lobster?", "Describe the European lobster's habitat.",
+        "What does Homarus gammarus look like?", "Is the European lobster edible?",
+    ],
+    "ep_headlam": [
+        "Who was Frank Headlam?", "Tell me about the RAAF officer Frank Headlam.",
+        "What was Frank Headlam's rank in the Australian Air Force?",
+        "What did Air Vice Marshal Headlam do?", "When did Frank Headlam serve?",
+        "Was Frank Headlam an Australian commander?",
+    ],
+    "__foreign__": [
+        "What is the capital of France?", "How do I bake sourdough bread?",
+        "Explain how a transformer neural network works.", "What is the boiling point of water?",
+        "Who wrote Pride and Prejudice?", "How do I change a flat tyre?",
+        "What is the speed of light?", "Recommend a good pasta recipe.",
+    ],
+}
+
+
+def load_episode_global_k(epdir, npos):
+    """ep.k = raw <f4 [NL][P][HD]; extract [NG][npos][HD] over global layers. Mirrors
+    recall.rs::load_episode_global_k / curator loadK."""
+    raw = np.fromfile(os.path.join(epdir, "ep.k"), dtype="<f4")
+    p_total = raw.size // (NL * HD)
+    raw = raw[: NL * p_total * HD].reshape(NL, p_total, HD)
+    npos = min(npos, p_total)
+    return np.ascontiguousarray(raw[GLOBALS, :npos, :]).astype(np.float32), npos  # [NG,npos,HD]
+
+
+def read_qdump(path):
+    """q_<...>.bin = u32 n_global, u32 qd(=G_NH*HD), then n_global*qd f32. -> [ng,G_NH,HD]."""
+    with open(path, "rb") as f:
+        ng, qd = struct.unpack("<2I", f.read(8))
+        q = np.frombuffer(f.read(ng * qd * 4), np.float32).copy()
+    assert qd == G_NH * HD, f"qd {qd} != {G_NH*HD}"
+    return q.reshape(ng, G_NH, HD)
+
+
+def load_registry(eng):
+    reg = os.path.join(eng, "tests", "fixtures", "chat_fullstack", "recall_registry.jsonl")
+    eps = []
+    for line in open(reg):
+        line = line.strip()
+        if not line:
+            continue
+        r = json.loads(line)
+        eps.append(r)
+    return eps
+
+
+def post_queries(base, qdir, queryset):
+    """Live mode: POST every query (auto_recall:true) so the daemon dumps its global-Q
+    into qdir (the daemon must be running with SP_B3_QDUMP=<qdir>). Returns the mapping
+    sanitized-name -> (query_text, label)."""
+    import urllib.request
+    os.makedirs(qdir, exist_ok=True)
+    name_map = {}
+    for label, qs in queryset.items():
+        for q in qs:
+            body = json.dumps({"messages": [{"role": "user", "content": q}],
+                               "max_tokens": 4, "temperature": 0, "auto_recall": True}).encode()
+            req = urllib.request.Request(base + "/v1/chat", data=body,
+                                         headers={"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=60).read()
+            except Exception as e:
+                print(f"[ds] POST failed for {q!r}: {e}", flush=True)
+            safe = "".join(c if c.isalnum() else "_" for c in q)[:48]
+            name_map["q_" + safe] = (q, label)
+    return name_map
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--eng", default=os.environ.get("SP_ENGINE_DIR",
+                    r"D:\F\shannon-prime-repos\shannon-prime-system-engine"))
+    ap.add_argument("--qdir", default=None, help="dir of q_*.bin dumps (SP_B3_QDUMP target)")
+    ap.add_argument("--live", action="store_true", help="POST the query set to a running daemon first")
+    ap.add_argument("--base", default="http://127.0.0.1:3000")
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+    eng = args.eng
+    qdir = args.qdir or os.path.join(eng, "_b3_wc", "qdump")
+    out = args.out or os.path.join(eng, "_b3_wc", "b3_data.npz")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+
+    eps = load_registry(eng)
+    name_to_idx = {e["name"]: i for i, e in enumerate(eps)}
+    K_list = []
+    for e in eps:
+        K, npos = load_episode_global_k(e["dir"], int(e["npos"]))
+        K_list.append(K)
+        print(f"[ds] episode {e['name']}: K {K.shape} (npos={npos})", flush=True)
+
+    name_map = {}
+    if args.live:
+        print(f"[ds] LIVE: POST {sum(len(v) for v in DEFAULT_QUERIES.values())} queries -> {qdir}", flush=True)
+        name_map = post_queries(args.base, qdir, DEFAULT_QUERIES)
+    else:
+        # offline: reconstruct the label mapping from the query text -> sanitized name.
+        for label, qs in DEFAULT_QUERIES.items():
+            for q in qs:
+                safe = "q_" + "".join(c if c.isalnum() else "_" for c in q)[:48]
+                name_map[safe] = (q, label)
+
+    Q, lab, txt = [], [], []
+    for f in sorted(glob.glob(os.path.join(qdir, "q_*.bin"))):
+        key = os.path.splitext(os.path.basename(f))[0]
+        if key not in name_map:
+            continue
+        qtext, label = name_map[key]
+        Q.append(read_qdump(f))
+        lab.append(name_to_idx.get(label, -1))     # -1 = foreign
+        txt.append(qtext)
+    print(f"[ds] collected {len(Q)} query-Q vectors "
+          f"({sum(1 for l in lab if l>=0)} positive / {sum(1 for l in lab if l<0)} foreign)", flush=True)
+    if not Q:
+        print("[ds] NO query dumps found. Run --live with a daemon started with "
+              "SP_B3_QDUMP=<qdir> (and the routes.rs patch applied + built).", flush=True)
+        sys.exit(2)
+
+    np.savez(out,
+             Q=np.array(Q, dtype=object),
+             labels=np.array(lab, np.int64),
+             texts=np.array(txt, dtype=object),
+             K=np.array(K_list, dtype=object),
+             ep_names=np.array([e["name"] for e in eps], dtype=object),
+             ep_npos=np.array([int(e["npos"]) for e in eps], np.int64))
+    print(f"[ds] wrote {out}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
