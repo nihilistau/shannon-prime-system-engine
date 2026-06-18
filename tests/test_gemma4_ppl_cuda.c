@@ -74,7 +74,46 @@ static long read_tokens(const char *path, int32_t **out) {
     return n;
 }
 
+/* B3-v4 query-deflection: SP_DELTALL_MANIFEST=<file> — each line "<score_from> <tokfile>".
+ * Loads the 12B ONCE, then teacher-force scores each sequence's tokens at positions
+ * [score_from, n) and prints "DELTALL <tokfile> nll=<sum> n=<count>". score_from = the
+ * query's first index in [prefix..query], so nll = LL(query | prefix). The harness then
+ * forms dLL = LL(query|E) - LL(query|0). One model load for the whole matrix. */
+static void run_deltall(const char *manifest) {
+    const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
+    const char *spt = getenv("SP_GEMMA4_SPTOK");   if (!spt) spt = SP_GEMMA4_SPTOK_DEF;
+    if (sp_cuda_device_count() < 1) { fprintf(stderr, "    no CUDA device — SKIP\n"); return; }
+    sp_model *handle = NULL;
+    SP_CHECK(sp_model_load(spm, spt, &handle) == SP_OK && handle, "sp_model_load (12B deltall)");
+    if (!handle) return;
+    qwen3_model *m = sp_model_to_gemma4(handle);
+    SP_CHECK(m != NULL, "sp_model_to_gemma4 (deltall)");
+    if (!m) { sp_model_unload(handle); return; }
+    _putenv("SP_CUDA_DECODE_INT8=1");
+    FILE *mf = fopen(manifest, "r");
+    if (!mf) { fprintf(stderr, "    DELTALL manifest open fail: %s\n", manifest); }
+    else {
+        char line[1024];
+        while (fgets(line, sizeof line, mf)) {
+            int sfrom; char tf[960];
+            if (sscanf(line, "%d %959s", &sfrom, tf) != 2) continue;
+            int32_t *seq = NULL; long ns = read_tokens(tf, &seq);
+            if (ns <= 0 || !seq) { fprintf(stderr, "    DELTALL skip %s\n", tf); if (seq) free(seq); continue; }
+            char se[40]; snprintf(se, sizeof se, "SP_G4_SCORE=%d", sfrom); _putenv(se);
+            int dn = gemma4_decode_cuda(m, seq, (int)ns, 0, -1);
+            double cn = 0.0; long cc = 0; if (dn >= 0) gemma4_score_result(&cn, &cc);
+            fprintf(stdout, "DELTALL %s nll=%.6f n=%ld\n", tf, cn, cc); fflush(stdout);
+            free(seq);
+        }
+        fclose(mf);
+    }
+    _putenv("SP_G4_SCORE="); _putenv("SP_CUDA_DECODE_INT8=");
+    sp_cuda_model_release(m); qwen3_free(m); sp_model_unload(handle);
+}
+
 static void M_GEMMA4_CUDA_PPL(void) {
+    const char *deltall = getenv("SP_DELTALL_MANIFEST");
+    if (deltall) { run_deltall(deltall); return; }
     const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
     const char *spt = getenv("SP_GEMMA4_SPTOK");   if (!spt) spt = SP_GEMMA4_SPTOK_DEF;
     const char *tokpath = getenv("SP_PPL_TOKENS");
