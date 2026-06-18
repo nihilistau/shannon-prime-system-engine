@@ -88,12 +88,220 @@ __global__ void k_embed_scale(const float *embd, const int *toks, int n_tok, int
         x[(size_t)t * E + i] = embd[(size_t)toks[t] * E + i] * scale;
 }
 
+/* ===================== BYTE-EXACT substrate (SP_BYTEEXACT) =====================
+ * Dual-prime modular constants + the exact-integer device helpers shared by the
+ * byte-exact attention (k_attn_decode_win_bx, below) AND the nonlinear islands
+ * (RMSNorm/GELU/RoPE/softcap branches in the k_rmsnorm, k_gelu_mul, k_rope, k_softcap
+ * kernels). Hoisted above the first island kernel so every consumer sees the defs.
+ * Frozen Proth primes q1/q2 + Garner CRT (no __int128; products < q^2 ~ 2^60 fit
+ * int64); FB30 fixed-point for exp/tanh; CORDIC for cos/sin; integer isqrt for 1/sqrt.
+ * Gated by d_bx_flag (set once at gemma4 decode entry from SP_BYTEEXACT, BEFORE graph
+ * capture); d_bx_flag==0 => the float path runs unchanged (byte-identical null floor).
+ * Validated offline on REAL 12B activations: RMS 3.84e-5 / GELU 8.18e-7 / RoPE 9.62e-6
+ * (G-BYTEEXACT-ISLANDS-CUDA) + attention G-BYTEEXACT-ATTN-NTT/-FULL. */
+#define BX_Q1     1073738753LL
+#define BX_Q2     1073732609LL
+#define BX_INVQ1  894602413LL          /* Q1^{-1} mod Q2 */
+#define BX_FB     30
+#define BX_ONE    (1LL << BX_FB)
+#define BX_LOG2E  1549082005LL         /* round(log2(e) * 2^30) */
+#define BX_DSH    16                   /* Delta = 2^16 */
+#define BX_ZB     14                   /* softmax logit grid Z = 2^14 */
+__device__ __constant__ long long BX_EXPC[7] =
+    {1073741824LL,744261118LL,257941248LL,59597083LL,10327387LL,1431680LL,165394LL};
+
+__device__ __forceinline__ long long bx_garner(long long r1, long long r2) {
+    const long long M = BX_Q1 * BX_Q2;                 /* ~2^60, < 2^63 */
+    long long t = ((r2 - r1) % BX_Q2 + BX_Q2) % BX_Q2;
+    t = (t * BX_INVQ1) % BX_Q2;                        /* t<Q2; product<Q2^2~2^60 */
+    long long x = r1 + BX_Q1 * t;                      /* < M */
+    return (x > M / 2) ? x - M : x;                    /* centered exact integer */
+}
+__device__ __forceinline__ long long bx_exp2_frac(long long r) {
+    long long acc = BX_EXPC[6];
+    for (int k = 5; k >= 0; k--) acc = ((acc * r) >> BX_FB) + BX_EXPC[k];  /* <2^61 */
+    return acc;
+}
+/* e^d, d<=0 (FB30 fixed) -> FB30 fixed. The d*LOG2E product can exceed int64 for
+ * far-from-max keys, so use __umul64hi for the 128-bit product (no __int128). */
+__device__ __forceinline__ long long bx_exp_fixed(long long d) {
+    if (d >= 0) return BX_ONE;
+    unsigned long long ad = (unsigned long long)(-d);
+    unsigned long long lo = ad * (unsigned long long)BX_LOG2E;
+    unsigned long long hi = __umul64hi(ad, (unsigned long long)BX_LOG2E);
+    long long g = (long long)((hi << (64 - BX_FB)) | (lo >> BX_FB));   /* g = -d*log2e >= 0 */
+    long long n = g >> BX_FB;
+    if (n >= 32) return 0;                              /* underflow -> 0 */
+    long long r = g - (n << BX_FB);
+    return r ? (bx_exp2_frac(BX_ONE - r) >> (n + 1)) : (BX_ONE >> n);
+}
+
+/* ===================== BYTE-EXACT nonlinear islands (SP_BYTEEXACT) =====================
+ * Exact-integer device ports of the float forward's RMSNorm / GELU-tanh / RoPE / softcap,
+ * matching the crate scalar references (tools/sp_dsp_smoke/src/sp_islands_q_ref.rs) bit-for-bit
+ * in their integer arithmetic. Every reduction is exact integer (long long) => reduction-order-
+ * immune (cross-machine reproducible). Every transcendental is a deterministic integer function:
+ *   1/sqrt via integer isqrt; cos/sin via rotation-mode CORDIC; exp/tanh via the FB30 2^x poly.
+ * NVCC has NO __int128: wide products use __umul64hi; the RMS isqrt numerator n<<72 uses the
+ * validated 64-bit split (SH=50: num=(n<<50)/sumsq; val=num<<22; inv=isqrt_u64(val); ~1e-5).
+ * Gated by d_bx_flag (set once at gemma4 decode entry from SP_BYTEEXACT, BEFORE graph capture);
+ * d_bx_flag==0 => the float path runs unchanged (byte-identical null floor). Validated offline on
+ * REAL 12B activations: RMS 3.84e-5 / GELU 8.18e-7 / RoPE 9.62e-6 (G-BYTEEXACT-ISLANDS-CUDA). */
+__device__ __constant__ int d_bx_flag = 0;
+
+/* RMSNorm fixed-point layout (frozen, == the ref): Q=16 / IB=20 / Qw=16. */
+#define BX_RMS_Q   16
+#define BX_RMS_IB  20
+#define BX_RMS_QW  16
+#define BX_RMS_SH  50          /* the 64-bit-split shift (num=(n<<SH)/sumsq); SH=50 -> val=num<<22 ~ n<<72 */
+
+/* floor(sqrt(v)) over u64 — exact integer isqrt (the 64-bit twin of the ref isqrt_u128). */
+__device__ __forceinline__ unsigned long long bx_isqrt_u64(unsigned long long v) {
+    if (v == 0ULL) return 0ULL;
+    unsigned long long x = 0ULL;
+    unsigned long long b = 1ULL << 62;
+    while (b > v) b >>= 2;
+    while (b != 0ULL) {
+        if (v >= x + b) { v -= x + b; x = (x >> 1) + b; }
+        else            { x >>= 1; }
+        b >>= 2;
+    }
+    return x;
+}
+
+/* Island 1 — exact-integer RMSNorm scale. Given the integer sum-of-squares `sumsq`
+ * (= Sum (round(x_i*2^Q))^2, accumulated exactly => order-immune) and the row length n,
+ * returns inv = isqrt((n<<72)/sumsq) (the FB-shifted reciprocal sqrt) via the 64-bit split.
+ * out[i] = (round(x_i*2^Q) * inv * w_q) / 2^52, where w_q = round(w_i*2^Qw) or 2^Qw. */
+__device__ __forceinline__ long long bx_rms_inv(long long sumsq, int n) {
+    if (sumsq <= 0) return 0;
+    unsigned long long num = ((unsigned long long)n << BX_RMS_SH) / (unsigned long long)sumsq;
+    unsigned long long val = num << 22;                       /* ~ (n<<72)/sumsq */
+    return (long long)bx_isqrt_u64(val);
+}
+/* encode a float as round(v * 2^shift) (the ref `enc`). */
+__device__ __forceinline__ long long bx_enc(float v, int shift) {
+    return (long long)llrintf(v * (float)(1ULL << shift));
+}
+
+/* tanh(t) FB30-fixed via the shared exp primitive (the ref tanh_fixed). */
+__device__ __forceinline__ long long bx_tanh_fixed(long long t) {
+    long long s = (t >= 0) ? 1 : -1;
+    long long a = (t >= 0) ? t : -t;
+    long long e2 = bx_exp_fixed(-(2 * a));
+    long long num = (2 * e2) << BX_FB;                        /* 2*e2 <= 2^31, <<30 -> <2^62 */
+    return s * (BX_ONE - num / (BX_ONE + e2));
+}
+
+/* Island 2 — exact-integer GELU-tanh: 0.5 x (1 + tanh(sqrt(2/pi)(x + 0.044715 x^3))).
+ * FB30 cubic+tanh; X*X exceeds int64 so use __umul64hi for the 128-bit product (ref uses i128). */
+#define BX_GK  856722024LL        /* round(sqrt(2/pi) * 2^30) */
+#define BX_GA  48012366LL         /* round(0.044715  * 2^30) */
+#define BX_GELU_Z 16              /* ref ZB */
+/* signed (a*b)>>FB for |a|,|b| up to ~2^34 (the GELU cubic intermediates) using __umul64hi. */
+__device__ __forceinline__ long long bx_mulshift_fb(long long a, long long b) {
+    long long sa = (a < 0) ? -1 : 1, sb = (b < 0) ? -1 : 1;
+    unsigned long long ua = (unsigned long long)(a < 0 ? -a : a);
+    unsigned long long ub = (unsigned long long)(b < 0 ? -b : b);
+    unsigned long long lo = ua * ub;
+    unsigned long long hi = __umul64hi(ua, ub);
+    unsigned long long r  = (hi << (64 - BX_FB)) | (lo >> BX_FB);
+    return (sa * sb) * (long long)r;
+}
+__device__ __forceinline__ float bx_gelu(float xv) {
+    long long xq    = bx_enc(xv, BX_GELU_Z);
+    long long big_x = (xq << BX_FB) >> BX_GELU_Z;             /* i64; ~2^34 */
+    long long x2 = bx_mulshift_fb(big_x, big_x);
+    long long x3 = bx_mulshift_fb(x2, big_x);
+    long long inner = bx_mulshift_fb(BX_GK, big_x + bx_mulshift_fb(BX_GA, x3));
+    long long t = bx_tanh_fixed(inner);
+    long long g = bx_mulshift_fb(big_x >> 1, BX_ONE + t);
+    return (float)((double)g / (double)BX_ONE);
+}
+
+/* Island 4 — RoPE via deterministic rotation-mode CORDIC (the ref cordic_cossin). */
+#define BX_CORDIC_N 30
+__device__ __constant__ long long BX_ATAN_FB30[BX_CORDIC_N] = {
+    843314857LL,497837829LL,263043837LL,133525159LL,67021687LL,33543516LL,16775851LL,8388437LL,
+    4194283LL,2097149LL,1048576LL,524288LL,262144LL,131072LL,65536LL,32768LL,16384LL,8192LL,4096LL,
+    2048LL,1024LL,512LL,256LL,128LL,64LL,32LL,16LL,8LL,4LL,2LL};
+#define BX_CORDIC_K 652032874LL   /* round( prod 1/sqrt(1+2^-2k) * 2^30 ) */
+#define BX_PI_FB    3373259426LL
+#define BX_HALFPI_FB 1686629713LL
+#define BX_TWOPI_FB 6746518852LL
+/* (cos,sin) in FB30-fixed for FB30-fixed radians theta (reduce to [-pi/2,pi/2] then CORDIC). */
+__device__ __forceinline__ void bx_cordic_cossin(long long theta, long long *co, long long *si) {
+    long long z = theta % BX_TWOPI_FB;
+    if (z > BX_PI_FB) z -= BX_TWOPI_FB; else if (z < -BX_PI_FB) z += BX_TWOPI_FB;
+    int neg = 0;
+    if (z > BX_HALFPI_FB) { z -= BX_PI_FB; neg = 1; }
+    else if (z < -BX_HALFPI_FB) { z += BX_PI_FB; neg = 1; }
+    long long x = BX_CORDIC_K, y = 0;
+    for (int k = 0; k < BX_CORDIC_N; k++) {
+        long long xs = x >> k, ys = y >> k;
+        if (z >= 0) { x -= ys; y += xs; z -= BX_ATAN_FB30[k]; }
+        else        { x += ys; y -= xs; z += BX_ATAN_FB30[k]; }
+    }
+    *co = neg ? -x : x;
+    *si = neg ? -y : y;
+}
+/* one RoPE pair rotated integer-exact (ref rope_q_ref body, Q=16). `theta` is the FB30-fixed
+ * angle pos*freq already reduced mod 2pi; a,b the pair (v[i], v[i+half]). */
+#define BX_ROPE_Q 16
+__device__ __forceinline__ void bx_rope_pair(float *va, float *vb, long long theta) {
+    long long c, s; bx_cordic_cossin(theta, &c, &s);
+    long long a = (long long)llrint((double)(*va) * (double)(1u << BX_ROPE_Q));
+    long long b = (long long)llrint((double)(*vb) * (double)(1u << BX_ROPE_Q));
+    long long oa = (a * c - b * s) >> BX_FB;
+    long long ob = (a * s + b * c) >> BX_FB;
+    *va = (float)((double)oa / (double)(1u << BX_ROPE_Q));
+    *vb = (float)((double)ob / (double)(1u << BX_ROPE_Q));
+}
+/* the FB30-fixed angle pos*freq reduced into [0,2pi): freq baked from the float freq the float
+ * kernel would use (powf(rbase,-2i/d)[/ff]); pos*freq computed in fixed-point then reduced. The
+ * ref takes a baked freq_fix table; here freq is recomputed from the same float inputs the float
+ * kernel uses (deterministic: the encode round() is the only nonexact step, ~1e-5 fidelity). */
+__device__ __forceinline__ long long bx_rope_theta(float freq, long long pos) {
+    long long freq_fix = (long long)llrint((double)freq * (double)BX_ONE);  /* FB30, <= 2^30 */
+    /* pos < 2^20 (context) and freq_fix <= 2^30 => product < 2^50, fits int64 (no __int128). */
+    long long th = (pos * freq_fix) % BX_TWOPI_FB;
+    return th;
+}
+
 /* out[row] = rmsnorm(x[row]) * w over n elems. One block/row; sum_sq in f64
  * (matches CPU). scale = 1/sqrtf((float)(sum_sq/n) + eps). */
+/* device byte-exact RMSNorm core (shared by all three k_rmsnorm* kernels). Integer
+ * sum-of-squares (order-immune) + bx_rms_inv; out[i] = (enc(x_i,Q)*inv*w_q)/2^52. */
+__device__ __forceinline__ void bx_rmsnorm_core(const float *xr, float *outr,
+                                                const float *w_or_null, int n) {
+    __shared__ long long shi[256];
+    long long s = 0;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        long long xi = bx_enc(xr[i], BX_RMS_Q); s += xi * xi;
+    }
+    shi[threadIdx.x] = s;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) shi[threadIdx.x] += shi[threadIdx.x + o];
+        __syncthreads();
+    }
+    long long inv = bx_rms_inv(shi[0], n);
+    const double denom = (double)(1ULL << (BX_RMS_Q + BX_RMS_IB + BX_RMS_QW));  /* 2^52 */
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        long long xi = bx_enc(xr[i], BX_RMS_Q);
+        long long wq = w_or_null ? bx_enc(w_or_null[i], BX_RMS_QW) : (1LL << BX_RMS_QW);
+        /* xi*inv*wq is the ref's i128 product / 2^52 -> f32; the dropped low bits are far
+         * below f32 precision, so the double accumulation rounds to the identical f32. */
+        double yv = (double)xi * (double)inv * (double)wq;
+        outr[i] = (float)(yv / denom);
+    }
+}
+
 __global__ void k_rmsnorm(const float *x, const float *w, int n, float eps, float *out) {
     int row = blockIdx.x;
     const float *xr = x + (size_t)row * n;
     float *outr = out + (size_t)row * n;
+    if (d_bx_flag) { bx_rmsnorm_core(xr, outr, w, n); return; }
     __shared__ double sh[256];
     double s = 0.0;
     for (int i = threadIdx.x; i < n; i += blockDim.x) { double v = xr[i]; s += v * v; }
@@ -113,6 +321,7 @@ __global__ void k_rmsnorm_head(float *base, const float *w, int n_heads, int d,
                                int rowstride, float eps) {
     int b = blockIdx.x, t = b / n_heads, h = b % n_heads;
     float *v = base + (size_t)t * rowstride + (size_t)h * d;
+    if (d_bx_flag) { bx_rmsnorm_core(v, v, w, d); return; }
     __shared__ double sh[256];
     double s = 0.0;
     for (int i = threadIdx.x; i < d; i += blockDim.x) { double x = v[i]; s += x * x; }
@@ -134,6 +343,7 @@ __global__ void k_rmsnorm_head_noweight(float *base, int n_heads, int d,
                                         int rowstride, float eps) {
     int b = blockIdx.x, t = b / n_heads, h = b % n_heads;
     float *v = base + (size_t)t * rowstride + (size_t)h * d;
+    if (d_bx_flag) { bx_rmsnorm_core(v, v, NULL, d); return; }
     __shared__ double sh[256];
     double s = 0.0;
     for (int i = threadIdx.x; i < d; i += blockDim.x) { double x = v[i]; s += x * x; }
@@ -157,6 +367,7 @@ __global__ void k_rope_freqs(float *base, int n_heads, int d, int rowstride,
     if (i < half) {
         float *v = base + (size_t)t * rowstride + (size_t)h * d;
         float freq = powf(rbase, -2.0f * (float)i / (float)d) / ff[i];
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)t)); return; }
         float th = (float)t * freq, c = cosf(th), s = sinf(th);
         float a = v[i], bb = v[i + half];
         v[i] = a * c - bb * s;
@@ -203,6 +414,7 @@ __global__ void k_altup_gate(float *pg, const float *ipl, int L, int NL, int PL,
     if (idx >= n_tok * PL) return;
     int t = idx / PL, i = idx - t * PL;
     float v = pg[idx];
+    if (d_bx_flag) { pg[idx] = bx_gelu(v) * ipl[((size_t)t * NL + L) * PL + i]; return; }
     const float k = 0.7978845608028654f;
     float th = tanhf(k * (v + 0.044715f * v * v * v));
     pg[idx] = 0.5f * v * (1.0f + th) * ipl[((size_t)t * NL + L) * PL + i];
@@ -223,6 +435,7 @@ __global__ void k_rope_freqs_at(float *base, int n_heads, int d, float rbase,
     if (i < half) {
         float *v = base + (size_t)h * d;
         float freq = powf(rbase, -2.0f * (float)i / (float)d) / ff[i];
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)p0)); return; }
         float th = (float)p0 * freq, c = cosf(th), s = sinf(th);
         float a = v[i], bb = v[i + half];
         v[i] = a * c - bb * s;
@@ -269,51 +482,13 @@ __global__ void k_attn_decode_win(const float *q, const float *Kc, const float *
 }
 
 /* ===================== BYTE-EXACT attention (SP_BYTEEXACT) =====================
- * Exact-integer decode attention via dual-prime modular arithmetic -- the PPT
- * negacyclic substitution: <q,k> = coeff_{N-1} of the negacyclic conv, which for a
- * single coefficient IS the plain dot Sum q_i k_i, computed mod the two frozen Proth
- * primes + Garner CRT (no __int128; products < q^2 ~ 2^60 fit int64). Q.K and p.V are
- * exact integer dots; softmax is the FB30 2^x integer island. Cross-machine reproducible
- * by construction (integer => reduction-order-immune). Validated offline:
- * G-BYTEEXACT-ATTN-NTT + G-BYTEEXACT-ATTN-FULL (tools/ring3/g_byteexact_attn_*.py).
- * Delta = 2^16 CKKS scale (relerr ~2e-5; the p.V accumulator stays ~2^46 << 2^60 at
- * every context, so dual-prime is sufficient -- the worst-case never occurs). */
-#define BX_Q1     1073738753LL
-#define BX_Q2     1073732609LL
-#define BX_INVQ1  894602413LL          /* Q1^{-1} mod Q2 */
-#define BX_FB     30
-#define BX_ONE    (1LL << BX_FB)
-#define BX_LOG2E  1549082005LL         /* round(log2(e) * 2^30) */
-#define BX_DSH    16                   /* Delta = 2^16 */
-#define BX_ZB     14                   /* softmax logit grid Z = 2^14 */
-__device__ __constant__ long long BX_EXPC[7] =
-    {1073741824LL,744261118LL,257941248LL,59597083LL,10327387LL,1431680LL,165394LL};
-
-__device__ __forceinline__ long long bx_garner(long long r1, long long r2) {
-    const long long M = BX_Q1 * BX_Q2;                 /* ~2^60, < 2^63 */
-    long long t = ((r2 - r1) % BX_Q2 + BX_Q2) % BX_Q2;
-    t = (t * BX_INVQ1) % BX_Q2;                        /* t<Q2; product<Q2^2~2^60 */
-    long long x = r1 + BX_Q1 * t;                      /* < M */
-    return (x > M / 2) ? x - M : x;                    /* centered exact integer */
-}
-__device__ __forceinline__ long long bx_exp2_frac(long long r) {
-    long long acc = BX_EXPC[6];
-    for (int k = 5; k >= 0; k--) acc = ((acc * r) >> BX_FB) + BX_EXPC[k];  /* <2^61 */
-    return acc;
-}
-/* e^d, d<=0 (FB30 fixed) -> FB30 fixed. The d*LOG2E product can exceed int64 for
- * far-from-max keys, so use __umul64hi for the 128-bit product (no __int128). */
-__device__ __forceinline__ long long bx_exp_fixed(long long d) {
-    if (d >= 0) return BX_ONE;
-    unsigned long long ad = (unsigned long long)(-d);
-    unsigned long long lo = ad * (unsigned long long)BX_LOG2E;
-    unsigned long long hi = __umul64hi(ad, (unsigned long long)BX_LOG2E);
-    long long g = (long long)((hi << (64 - BX_FB)) | (lo >> BX_FB));   /* g = -d*log2e >= 0 */
-    long long n = g >> BX_FB;
-    if (n >= 32) return 0;                              /* underflow -> 0 */
-    long long r = g - (n << BX_FB);
-    return r ? (bx_exp2_frac(BX_ONE - r) >> (n + 1)) : (BX_ONE >> n);
-}
+ * Exact-integer decode attention via dual-prime modular arithmetic -- the PPT negacyclic
+ * substitution: <q,k> = the plain dot Sum q_i k_i computed mod the frozen Proth primes +
+ * Garner CRT (the BX_* constants / bx_garner / bx_exp_fixed helpers are hoisted above, in
+ * the BYTE-EXACT substrate block). Q.K and p.V are exact integer dots; softmax is the FB30
+ * 2^x integer island. Cross-machine reproducible by construction (reduction-order-immune).
+ * Validated offline: G-BYTEEXACT-ATTN-NTT + G-BYTEEXACT-ATTN-FULL. Delta = 2^16 CKKS scale
+ * (relerr ~2e-5; the p.V accumulator stays ~2^46 << 2^60 at every context). */
 
 /* Drop-in for k_attn_decode_win (ascale folded; gemma4 scaling=1.0). Shared = ctx*int64
  * (scores, reused as softmax weights). One block per query head. */
@@ -566,7 +741,16 @@ __global__ void k_proj_RT(const float *in, const float *R, int nb, int hd, int r
  * Gemma2; the oracle runs attention at scale 1.0, uncapped). */
 __global__ void k_softcap(float *z, size_t n, float cap) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) z[i] = tanhf(z[i] / cap) * cap;
+    if (i >= n) return;
+    if (d_bx_flag) {
+        /* exact-integer tanh via the FB30 shared primitive (the softcap of the LM-head logits).
+         * encode z/cap to FB30, bx_tanh_fixed, decode * cap. */
+        long long t = (long long)llrint((double)(z[i] / cap) * (double)BX_ONE);
+        long long th = bx_tanh_fixed(t);
+        z[i] = (float)((double)th / (double)BX_ONE) * cap;
+        return;
+    }
+    z[i] = tanhf(z[i] / cap) * cap;
 }
 
 /* NEOX RoPE on each (token,head) vector at position p=t; blockDim=d/2. */
@@ -575,6 +759,7 @@ __global__ void k_rope(float *base, int n_heads, int d, int rowstride, float rba
     if (i < half) {
         float *v = base + (size_t)t * rowstride + (size_t)h * d;
         float freq = powf(rbase, -2.0f * (float)i / (float)d);
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)t)); return; }
         float th = (float)t * freq, c = cosf(th), s = sinf(th);
         float a = v[i], bb = v[i + half];
         v[i] = a * c - bb * s;
@@ -707,6 +892,7 @@ __global__ void k_rope_at(float *base, int n_heads, int d, int rowstride,
     if (i < half) {
         float *v = base + (size_t)t * rowstride + (size_t)h * d;
         float freq = powf(rbase, -2.0f * (float)i / (float)d);
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)(t + p0))); return; }
         float th = (float)(t + p0) * freq, c = cosf(th), s = sinf(th);
         float a = v[i], bb = v[i + half];
         v[i] = a * c - bb * s;
@@ -752,6 +938,7 @@ __global__ void k_gelu_mul(float *g, const float *up, size_t n) {
     size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float x = g[idx];
+        if (d_bx_flag) { g[idx] = bx_gelu(x) * up[idx]; return; }
         const float k = 0.7978845608028654f;
         float th = tanhf(k * (x + 0.044715f * x * x * x));
         g[idx] = 0.5f * x * (1.0f + th) * up[idx];
@@ -1839,6 +2026,7 @@ __global__ void k_rope_freqs_dyn(float *base, int n_heads, int d, float rbase,
     if (i < half) {
         float *v = base + (size_t)h * d;
         float freq = powf(rbase, -2.0f * (float)i / (float)d) / ff[i];
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)(*dpos))); (void)n_heads; return; }
         float th = (float)(*dpos) * freq, c = cosf(th), s = sinf(th);
         float a = v[i], bb = v[i + half];
         v[i] = a * c - bb * s;
@@ -2128,6 +2316,13 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
     if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return -1; }
     cublasHandle_t cb = g_w.cublas;
     cudaStream_t st = g_w.stream;
+    /* SP_BYTEEXACT: route the nonlinear islands (RMSNorm/GELU/RoPE/softcap) through the
+     * exact-integer device branches (d_bx_flag). Set ONCE here, BEFORE any kernel launch
+     * or graph capture, so the captured graph bakes the chosen path. Default off = the
+     * byte-identical null floor. Cached to dodge the getenv per call. */
+    { static int bx = -1; if (bx < 0) bx = (getenv("SP_BYTEEXACT") != NULL) ? 1 : 0;
+      cudaMemcpyToSymbolAsync(d_bx_flag, &bx, sizeof(int), 0, cudaMemcpyHostToDevice, st);
+      cudaStreamSynchronize(st); }
     int FFmax = (int)c->n_ff;
     for (int L = 0; L < NL; L++) if (g_w.Wgate[L].out > FFmax) FFmax = g_w.Wgate[L].out;
     const sp_arena_tensor *plt = (PL && m->arena) ? sp_arena_find(m->arena, "per_layer_token_embd.weight") : NULL;
@@ -4441,6 +4636,7 @@ __global__ void k_rope_dyn(float *base, int n_heads, int d, int rowstride,
     if (i < half) {
         float *v = base + (size_t)h * d;          /* t=0 → rowstride term vanishes */
         float freq = powf(rbase, -2.0f * (float)i / (float)d);
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)(*dpos))); return; }
         float th = (float)(*dpos) * freq, c = cosf(th), s = sinf(th);
         float a = v[i], bb = v[i + half];
         v[i] = a * c - bb * s;

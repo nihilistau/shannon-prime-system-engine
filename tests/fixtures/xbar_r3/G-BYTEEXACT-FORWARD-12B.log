@@ -1,0 +1,61 @@
+G-BYTEEXACT-FORWARD-12B -- the nonlinear islands (RMSNorm / GELU / RoPE / softcap) wired into
+the gemma4 CUDA decode as exact-integer fixed-point, on-12B gate.
+date: 2026-06-18 | build-cuda-vs22 (VS18 BuildTools + CUDA 13.2, sm_75 RTX 2060) | model gemma4-12b-b1.sp-model
+
+WHAT: the float nonlinear islands of the gemma4 CUDA forward now have exact-integer device
+branches matching the crate scalar references (tools/sp_dsp_smoke/src/sp_islands_q_ref.rs)
+bit-for-bit in their integer arithmetic, gated by a __constant__ int d_bx_flag set once at
+gemma4_decode_cuda entry from SP_BYTEEXACT (cudaMemcpyToSymbol, BEFORE graph capture). Each
+island kernel: `if (d_bx_flag) { ...integer... return; }` in front of the unchanged float body.
+
+  ISLANDS converted (src/backends/cuda/cuda_forward.cu):
+   - RMSNorm   k_rmsnorm / k_rmsnorm_head / k_rmsnorm_head_noweight -> bx_rmsnorm_core
+              (int64 sum-of-squares reduction = reduction-order-immune; bx_rms_inv = the
+               64-bit isqrt split SH=50 [num=(n<<50)/sumsq; val=num<<22; inv=bx_isqrt_u64(val)];
+               Q16/IB20/Qw16, out / 2^52). bx_isqrt_u64 added.
+   - GELU      k_gelu_mul + the AltUp gate k_altup_gate -> bx_gelu (FB30 cubic+tanh; bx_mulshift_fb
+               = __umul64hi-based signed (a*b)>>FB for X*X / X*X*X; tanh via the shared bx_exp_fixed).
+   - RoPE      k_rope / k_rope_at / k_rope_freqs / k_rope_freqs_at / k_rope_dyn / k_rope_freqs_dyn
+               -> bx_cordic_cossin (rotation-mode CORDIC, ref atan table + K constant) via
+               bx_rope_pair (Q16 rotate); freq recomputed from the same float rbase/ff inputs the
+               float kernel uses, encoded to FB30 (bx_rope_theta; pos*freq_fix < 2^50, no __int128).
+   - softcap   k_softcap (LM-head logits) -> integer tanh via bx_tanh_fixed.
+
+  DEVICE ARITHMETIC (NVCC has no __int128): __umul64hi for the GELU cubic and the exp d*LOG2E;
+  the 64-bit isqrt split for the RMS numerator n<<72. All reductions are exact integer ->
+  reduction-order-immune (the cross-machine bit-identity proxy). The dual-prime BX_* constants +
+  bx_garner / bx_exp_fixed (already landed for the integer attention) are reused; the whole
+  byte-exact substrate block was hoisted above the first island kernel so every consumer sees it.
+
+  Default off (d_bx_flag==0) = the float path runs unchanged = byte-identical null floor; the
+  one-shot gemma4_decode_cuda behaviour is untouched when SP_BYTEEXACT is unset.
+
+  Builds on the already-landed integer ATTENTION (k_attn_decode_win_bx, G-BYTEEXACT-ATTN-12B).
+  Island fidelity pre-proved on REAL 12B activations: G-BYTEEXACT-ISLANDS-CUDA
+  (RMS 3.84e-5 / GELU 8.18e-7 / RoPE 9.62e-6, thr 1e-4).
+
+GATE (test_gemma4_ppl_cuda, NCTX=84, CHUNKS=1, n_scored=42; SP_CUDA_DECODE_INT8 dp4a head):
+  LEG A  SP_BYTEEXACT unset : SP PPL = 4.6665   [M_GEMMA4_CUDA_PPL] PASS  -- == baseline (NULL FLOOR EXACT)
+  LEG B  SP_BYTEEXACT=1     : SP PPL = 4.6569   [M_GEMMA4_CUDA_PPL] PASS  -- full integer islands, parity (-0.21%)
+  DETERMINISM (SP_BYTEEXACT=1, run twice):  4.6569 == 4.6569  -- run-to-run BIT-IDENTICAL
+        (integer reductions are order-immune; the cross-machine two-GPU bit-identity check is external/future)
+
+VERDICT: GREEN. With SP_BYTEEXACT=1 the gemma4 decode runs RMSNorm / GELU / RoPE / softcap (and
+attention) as exact-integer fixed-point on the real Gemma-4-12B and is PPL-parity with the float
+baseline (-0.21% on n=42 is within small-N deflection noise -- see feedback_small_n_deflection_illusion;
+note it is TIGHTER than the attention-only -1.28% / 4.6069, consistent with the islands' ~1e-5..1e-7
+fidelity). Default-off is byte-identical (4.6665 == baseline). The forward is now reduction-order-immune
+end to end on the discrete container.
+
+REPRODUCE:
+  build:  _bx_islands_build.bat  (cmake --build build-cuda-vs22 --target test_gemma4_ppl_cuda)
+  LEG A:  _bx_islands_legA.bat   (SP_BYTEEXACT unset)
+  LEG B:  _bx_islands_legB.bat   (SP_BYTEEXACT=1, twice for determinism)
+  env: SP_GEMMA4_SPMODEL=gemma4-12b-b1.sp-model, SP_PPL_TOKENS=wiki.tiny.g4tokens.txt, NCTX=84 CHUNKS=1
+
+SCOPE / NEXT: (1) larger-N PPL to tighten the parity band to a real number (n=42 deflection ~+/-1.5%);
+(2) a true two-GPU / CPU-vs-GPU logit-bit-identical run (the order-immunity here is the proxy);
+(3) OK_Q4B fixed-point GEMV scale for the LINEAR algebra is the remaining float surface toward a
+full cross-machine logit-bit-identical forward; (4) the kv-twin gemma4_kv_* paths use the same kernels
+so they inherit the branches, but were not separately PPL-gated here.
+Pre-registered: lattice papers/CONTRACT-BYTEEXACT-forward.md §5.2.
