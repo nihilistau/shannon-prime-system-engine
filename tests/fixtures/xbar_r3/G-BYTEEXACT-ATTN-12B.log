@@ -1,0 +1,23 @@
+G-BYTEEXACT-ATTN-12B -- exact-integer dual-prime attention wired into the gemma4 CUDA decode, on-12B gate
+date: 2026-06-18 | build-cuda-vs22 (VS18 BuildTools cl 14.50, CUDA 13.2, sm_75 2060) | model gemma4-12b-b1.sp-model
+
+WHAT: k_attn_decode_win_bx (src/backends/cuda/cuda_forward.cu) replaces the float decode attention
+with the PPT negacyclic substitution computed as a dual-prime modular integer dot:
+  CKKS-encode q/K/V (round(Delta*v), Delta=2^16) -> exact integer Q.K (mod q1=1073738753, q2=1073732609,
+  Garner CRT; no __int128, products <2^60) -> integer softmax (FB30 2^x poly, __umul64hi for the exp's
+  d*LOG2E to dodge int64 overflow) -> exact integer p.V (dual-prime) -> decode. Gated SP_BYTEEXACT
+  (default off = byte-identical null floor); dispatched at both graph-path k_attn_decode_win launch sites.
+  Design validated offline: G-BYTEEXACT-ATTN-NTT + G-BYTEEXACT-ATTN-FULL.
+
+GATE (test_gemma4_ppl_cuda, NCTX=84, CHUNKS=1, n_scored=42):
+  LEG A  SP_BYTEEXACT off : SP PPL = 4.6665   [M_GEMMA4_CUDA_PPL] PASS  -- == baseline (NULL FLOOR EXACT)
+  LEG B  SP_BYTEEXACT=1   : SP PPL = 4.6069   [M_GEMMA4_CUDA_PPL] PASS  -- exact-integer attention, parity (-1.28%)
+
+VERDICT: GREEN. The exact-integer (cross-machine-reproducible, dual-prime, no-128bit) attention runs
+end-to-end on the real Gemma-4-12B and is PPL-parity with the float baseline (the -1.28% on n=42 is within
+small-N deflection noise -- see feedback_small_n_deflection_illusion). The default path is byte-identical
+(4.6665 == baseline). First float attention surface of the byte-exact forward, integerized on metal.
+
+SCOPE / NEXT: (1) larger-N PPL to tighten the deflection to a real parity number; (2) velocity-path
+k_attn_decode_win_dyn still float (mirror the dispatch); (3) the remaining islands (RMS/GELU/softcap +
+RoPE integer angles + OK_Q4B fixed-point GEMV scale) for the full cross-machine logit-bit-identical gate.

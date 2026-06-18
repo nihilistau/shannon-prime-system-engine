@@ -268,6 +268,114 @@ __global__ void k_attn_decode_win(const float *q, const float *Kc, const float *
     }
 }
 
+/* ===================== BYTE-EXACT attention (SP_BYTEEXACT) =====================
+ * Exact-integer decode attention via dual-prime modular arithmetic -- the PPT
+ * negacyclic substitution: <q,k> = coeff_{N-1} of the negacyclic conv, which for a
+ * single coefficient IS the plain dot Sum q_i k_i, computed mod the two frozen Proth
+ * primes + Garner CRT (no __int128; products < q^2 ~ 2^60 fit int64). Q.K and p.V are
+ * exact integer dots; softmax is the FB30 2^x integer island. Cross-machine reproducible
+ * by construction (integer => reduction-order-immune). Validated offline:
+ * G-BYTEEXACT-ATTN-NTT + G-BYTEEXACT-ATTN-FULL (tools/ring3/g_byteexact_attn_*.py).
+ * Delta = 2^16 CKKS scale (relerr ~2e-5; the p.V accumulator stays ~2^46 << 2^60 at
+ * every context, so dual-prime is sufficient -- the worst-case never occurs). */
+#define BX_Q1     1073738753LL
+#define BX_Q2     1073732609LL
+#define BX_INVQ1  894602413LL          /* Q1^{-1} mod Q2 */
+#define BX_FB     30
+#define BX_ONE    (1LL << BX_FB)
+#define BX_LOG2E  1549082005LL         /* round(log2(e) * 2^30) */
+#define BX_DSH    16                   /* Delta = 2^16 */
+#define BX_ZB     14                   /* softmax logit grid Z = 2^14 */
+__device__ __constant__ long long BX_EXPC[7] =
+    {1073741824LL,744261118LL,257941248LL,59597083LL,10327387LL,1431680LL,165394LL};
+
+__device__ __forceinline__ long long bx_garner(long long r1, long long r2) {
+    const long long M = BX_Q1 * BX_Q2;                 /* ~2^60, < 2^63 */
+    long long t = ((r2 - r1) % BX_Q2 + BX_Q2) % BX_Q2;
+    t = (t * BX_INVQ1) % BX_Q2;                        /* t<Q2; product<Q2^2~2^60 */
+    long long x = r1 + BX_Q1 * t;                      /* < M */
+    return (x > M / 2) ? x - M : x;                    /* centered exact integer */
+}
+__device__ __forceinline__ long long bx_exp2_frac(long long r) {
+    long long acc = BX_EXPC[6];
+    for (int k = 5; k >= 0; k--) acc = ((acc * r) >> BX_FB) + BX_EXPC[k];  /* <2^61 */
+    return acc;
+}
+/* e^d, d<=0 (FB30 fixed) -> FB30 fixed. The d*LOG2E product can exceed int64 for
+ * far-from-max keys, so use __umul64hi for the 128-bit product (no __int128). */
+__device__ __forceinline__ long long bx_exp_fixed(long long d) {
+    if (d >= 0) return BX_ONE;
+    unsigned long long ad = (unsigned long long)(-d);
+    unsigned long long lo = ad * (unsigned long long)BX_LOG2E;
+    unsigned long long hi = __umul64hi(ad, (unsigned long long)BX_LOG2E);
+    long long g = (long long)((hi << (64 - BX_FB)) | (lo >> BX_FB));   /* g = -d*log2e >= 0 */
+    long long n = g >> BX_FB;
+    if (n >= 32) return 0;                              /* underflow -> 0 */
+    long long r = g - (n << BX_FB);
+    return r ? (bx_exp2_frac(BX_ONE - r) >> (n + 1)) : (BX_ONE >> n);
+}
+
+/* Drop-in for k_attn_decode_win (ascale folded; gemma4 scaling=1.0). Shared = ctx*int64
+ * (scores, reused as softmax weights). One block per query head. */
+__global__ void k_attn_decode_win_bx(const float *q, const float *Kc, const float *Vc,
+                                     int ctx, int KVD, int HD, int group, float ascale,
+                                     int win, float *ao) {
+    extern __shared__ long long shl[];                 /* [ctx]: D_s then e_s */
+    int h = blockIdx.x, kvh = h / group;
+    int pos = ctx - 1;
+    int s0 = (win >= 0 && pos - win + 1 > 0) ? pos - win + 1 : 0;
+    const float *qh = q + (size_t)h * HD;
+    const float DSC = (float)(1 << BX_DSH);
+    for (int s = s0 + threadIdx.x; s < ctx; s += blockDim.x) {
+        const float *kh = Kc + (size_t)s * KVD + (size_t)kvh * HD;
+        long long a1 = 0, a2 = 0;
+        for (int i = 0; i < HD; i++) {
+            long long ea = (long long)llrintf(qh[i] * DSC);
+            long long eb = (long long)llrintf(kh[i] * DSC);
+            long long p = ea * eb;                     /* ~2^36 < 2^63 */
+            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+        }
+        shl[s] = bx_garner(a1, a2);                    /* exact Delta^2 * <q,k_s> */
+    }
+    __syncthreads();
+    __shared__ long long g_S;
+    if (threadIdx.x == 0) {
+        long long mxz = ((shl[s0] << BX_ZB) >> (2 * BX_DSH));   /* score on Z grid */
+        for (int s = s0 + 1; s < ctx; s++) {
+            long long z = (shl[s] << BX_ZB) >> (2 * BX_DSH);
+            if (z > mxz) mxz = z;
+        }
+        long long S = 0;
+        for (int s = s0; s < ctx; s++) {
+            long long z = (shl[s] << BX_ZB) >> (2 * BX_DSH);
+            long long e = bx_exp_fixed((z - mxz) << (BX_FB - BX_ZB));  /* exp((z-mx)/Z) */
+            shl[s] = e; S += e;
+        }
+        g_S = S;
+    }
+    __syncthreads();
+    long long S = g_S;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        long long a1 = 0, a2 = 0;
+        for (int s = s0; s < ctx; s++) {
+            long long ev = (long long)llrintf(Vc[(size_t)s * KVD + (size_t)kvh * HD + i] * DSC);
+            long long p = shl[s] * ev;                 /* ~2^48 < 2^63 */
+            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+        }
+        long long num = bx_garner(a1, a2);             /* exact Sum e_s * enc(v_s,i) */
+        ao[(size_t)h * HD + i] = (float)((double)num / ((double)S * (double)(1 << BX_DSH)));
+    }
+}
+/* SP_BYTEEXACT: route decode attention through the exact-integer kernel (default off =
+ * byte-identical null floor). Cached once. */
+static int sp_byteexact_attn(void) {
+    static int v = -1;
+    if (v < 0) v = (getenv("SP_BYTEEXACT") != NULL) ? 1 : 0;
+    return v;
+}
+
 /* XBAR P3.2-b-2a: windowed decode attention over a RING cache of `Wring` slots.
  * The cache holds the most-recent positions: absolute position p lives at slot
  * p % Wring. We iterate the in-window positions [s0, ctx) in POSITION ORDER —
@@ -2534,8 +2642,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                     }
                     {   const int ctx = pos + 1;
                         int bd = hd > ctx ? hd : ctx; if (bd > 1024) bd = 1024;
-                        k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
-                            dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao); }
+                        if (sp_byteexact_attn())
+                            k_attn_decode_win_bx<<<nh, bd, (size_t)ctx*sizeof(long long), st>>>(
+                                dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao);
+                        else
+                            k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
+                                dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao); }
                     MMD(&g_w.Wo[L], dao, dap);
                     k_rmsnorm<<<1, 256, 0, st>>>(dap, g_w.post_attn[L], E, eps, dnx);
                     k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(dx, dnx, (size_t)E);
@@ -2979,8 +3091,12 @@ extern "C" int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
                         dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, Wring, dao);
                 } else {
                     int bd = hd > ctx ? hd : ctx; if (bd > 1024) bd = 1024;
-                    k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
-                        dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao);
+                    if (sp_byteexact_attn())
+                        k_attn_decode_win_bx<<<nh, bd, (size_t)ctx*sizeof(long long), st>>>(
+                            dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao);
+                    else
+                        k_attn_decode_win<<<nh, bd, (size_t)ctx*sizeof(float), st>>>(
+                            dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, dao);
                 } }
             { static int _attn_diag = 0; cudaError_t _ae = cudaPeekAtLastError();   /* XBAR diag: name the failing attention launch (print-once) */
               if (_ae != cudaSuccess && !_attn_diag) { _attn_diag = 1;
