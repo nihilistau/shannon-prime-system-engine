@@ -78,10 +78,16 @@ int sp_daemon_cuda_forward(void *handle,
     switch (qm->cfg.arch) {
         case SP_ARCH_GEMMA3:
             return gemma3_forward_cuda(qm, tokens, n_tok, logits);
+        case SP_ARCH_GEMMA4:
+            /* byte-exact bridge step 1 (CONTRACT-BYTEEXACT §8): route the real
+             * Gemma-4-12B forward through the universal crate's register_forward_backend
+             * hook. Same prefill-only contract + signature as gemma3_forward_cuda;
+             * entry exported in cuda_backend.h:77. Needs the wire_cuda build to gate. */
+            return gemma4_forward_cuda(qm, tokens, n_tok, logits);
         case SP_ARCH_QWEN3:
             return qwen3_forward_cuda(qm, tokens, n_tok, logits);
         default:
-            sp_set_error("cuda: unsupported arch (only SP_ARCH_GEMMA3 / SP_ARCH_QWEN3)");
+            sp_set_error("cuda: unsupported arch (only SP_ARCH_GEMMA3 / SP_ARCH_GEMMA4 / SP_ARCH_QWEN3)");
             return -1;
     }
 }
