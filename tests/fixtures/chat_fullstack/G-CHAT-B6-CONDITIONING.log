@@ -1,0 +1,156 @@
+================================================================================
+G-CHAT-B6-CONDITIONING  —  THESIS-DECIDER: does an injected latent CONDITION
+the model's text response (A/B content difference), or is it ignored/hallucinated?
+================================================================================
+Date:        2026-06-19
+Daemon:      sp-daemon (run_console.bat), :3000, wire_cuda, ring-armed, byteexact default
+Model:       gemma4-12b-b1.sp-model (real Gemma-4-12B, OK_Q4B) resident on RTX 2060
+Gate def:    PASS = the with-injection response coherently reflects the injected
+             content AND the no-injection response does not (difference caused by
+             the injection). FAIL/honest-negative = identical / ignored / soup.
+Harness:     tests/fixtures/chat_fullstack/_b6_chat.ps1 (parses /v1/chat SSE deltas
+             into a clean transcript). Bodies = _b6_*.json built from the fixtures.
+Sampling:    temperature:0 (greedy), byteexact default ON. All transcripts verbatim.
+
+================================================================================
+TEST A — AUDIO conditioning (the voice method)
+================================================================================
+Asset:   tests/fixtures/kai3_s01/eval_*.bin  (KAI2 fmt: 'KAI2'|u32 k|u32 hidden=3840|
+         k*E f32) — the G-KAIROS-3 8/8 projector OUTPUT frames, label in filename
+         (NO_OP vs ACTION). Fed via ChatRequest.inject_frames (Vec<Vec<f32>>, each
+         inner = one E=3840 frame), inject_ph=258881 (gemma-4 audio placeholder).
+Channel: routes.rs run_kvdecode_chat -> kv::inject_frames -> gemma4_kv_inject_seq.
+
+--- A.1  bare `prompt` path (no turn template) ---
+PROMPT: "What did you just hear? Answer in one short sentence."
+  BASELINE (no frames): prompt-echo loop ("What did you just hear?..." x6). Degenerate.
+  WITH ACTION (eval_01, k=12): prompt + injected multilingual garbage tokens
+     ("...one short sentence墅 இலங்க سوچName menghubungi kalbuh அதிசய går...").
+  -> A != B (injection IS seen) but bare-prompt path loops; not a fair test.
+
+--- A.2  `messages` path (proper gemma4 turn template) — the FAIR test ---
+USER: "You just received an audio event. In one short sentence, describe what you
+       heard or what action it calls for."
+  BASELINE (no frames):
+     "The audio event is a notification sound, indicating that a new message has
+      been received. The action it calls for is to open the messaging app and
+      check the new message."
+     [ = pure HALLUCINATION; told there is an event, given no audio, invents one ]
+  WITH eval_01 ACTION (k=12):  "I heard a loud explosion."   [DETERMINISTIC on rerun]
+  WITH eval_00 NO_OP  (k=28):  ""  (len=0, genuinely empty)  [DETERMINISTIC]
+
+--- A.3  full 8-packet sweep (messages path, same user turn) ---
+  eval_00 NO_OP  : ""  (empty)
+  eval_01 ACTION : "I heard a loud explosion."
+  eval_02 NO_OP  : prompt-echo loop
+  eval_03 ACTION : prompt-echo loop
+  eval_04 NO_OP  : prompt-echo loop
+  eval_05 NO_OP  : ""  (empty)
+  eval_06 ACTION : prompt-echo + code-mock soup ("...thenReturn(\"...\");")
+  eval_07 ACTION : "The audio event is a notification that a new message has been
+                    received. { \"audio_event\": \"notification\", ... }"
+
+TEST A VERDICT:  PARTIAL / IGNORED-to-PERTURBING (NOT a clean conditioning win).
+  - The frames DO perturb the latent state: every arm differs from the no-frames
+    baseline and from each other (A != B confirmed, deterministic at temp=0).
+  - But there is NO consistent, decodable mapping from audio content -> coherent
+    text. 1/8 ACTION packets gave a crisp salient sentence ("loud explosion");
+    the rest collapse to prompt-echo, empty, or code/JSON soup. NO_OP is sometimes
+    empty (arguably "no action") and sometimes echo.
+  - HONEST ROOT CAUSE (representation/scope gap): the KAI-3 projector was trained
+    to drive a BINARY NO_OP/ACTION salience decision INSIDE its specific SYS-prompt
+    soak scaffold (run_kai3_gate in test_gemma4_cuda.c: a long "background kernel
+    daemon ... salience >= 0.5 => <ACTION>" system turn). The 8/8 G-KAIROS-3 result
+    lives in THAT scaffold. Fed through an arbitrary /v1/chat user turn, the frames
+    condition the state but do not yield a describable audio percept — the projector
+    never learned a content channel, only a decision channel. This is the honest
+    finding: audio-as-residual-frames is REAL signal but NOT yet coherent
+    cross-modal description on the generic chat path.
+
+================================================================================
+TEST B — MEMORY conditioning (episodic recall)
+================================================================================
+Asset:   _c2_ep_wiki/ (ep.mf XBAREP01 + ep.k/ep.v, 28.9MB each = stored owner K/V).
+         CONTENT = the K/V capture of the first 84 tokens of wiki.tiny.raw, i.e. the
+         opening of the wikitext-2 "Robert Boulter" article (English film/TV/theatre
+         actor; guest role on The Bill in 2000; play "Herons" by Simon Stephens,
+         Royal Court Theatre 2001; ...). Stored as K/V, NOT residual frames, so it
+         goes through the `replay` channel (gemma4_kv_replay), NOT inject_frames.
+Channel: routes.rs run_kvdecode_chat -> kv::replay(dir, npos=84, false).
+
+--- B.1  scaffolded question ---
+USER: "Based on the document you just read, who is Robert Boulter and what role did
+       he have on the TV series The Bill?"
+  BASELINE (no replay):
+     "Robert Boulter is a British actor who played the role of Detective Sergeant
+      Bob Cryer on the TV series The Bill. He was known for his portrayal of the
+      character and was a part of the show for several years."
+     [ = HALLUCINATION. The real Boulter had a GUEST role in 2000; "Bob Cryer" was
+       a different actor. The model confidently invents wrong facts. ]
+  WITH REPLAY (_c2_ep_wiki, npos=84):
+     "Robert Boulter is an English film , television and theatre actor . He had a
+      guest @-@ starring role on the television series The Bill in 2000 . This was
+      followed by a starring role in the play Herons written by Simon Stephens ,
+      which was performed in 2001 at the Royal Court Theatre . He had a guest role
+      in the television series The Bill in 2000 . This was followed by a starring
+      role in the play Herons ... " [loops; 84-pos episode has no continuation]
+     [ DETERMINISTIC: rerun byte-identical. Reproduces the episode's ACTUAL text
+       VERBATIM incl. the wikitext "@-@" artifact and the exact facts. ]
+
+--- B.2  open-ended question ---
+USER: "Tell me everything you know about Robert Boulter."
+  BASELINE (no replay):
+     "Robert Boulter is a British actor and comedian, best known for his work in the
+      television series \"The Thick of It\" and \"Veep\". He was born on May 27,
+      1971, in London ... stand-up comedy ... The Comedy Store ..."
+     [ = WILD HALLUCINATION, entirely fabricated. ]
+  WITH REPLAY:
+     "Robert Boulter is an English film , television and theatre actor . He had a
+      guest @-@ starring role on the television series The Bill in 2000 . This was
+      followed by a starring role in the play Herons written by Simon Stephens ,
+      which was performed in 2001 at the Royal Court Theatre ..." [matches B.1]
+
+TEST B VERDICT:  CONDITIONS THE RESPONSE — PROMISING (clean win).
+  - The replayed K/V episode demonstrably conditions the answer: without replay the
+    model hallucinates DIFFERENT wrong facts each prompt ("Bob Cryer" / "comedian,
+    Veep, born 1971"); WITH replay it recalls the episode's GROUND-TRUTH content
+    verbatim (guest role 2000, Herons / Simon Stephens / Royal Court 2001), incl.
+    the source-text "@-@" artifact that proves it is the stored episode, not model
+    priors. Deterministic at temp=0. A != B and the difference is caused by, and
+    faithful to, the injected memory.
+  - SCOPE / honest caveat: this is verbatim RECALL of a short (84-pos) episode that
+    then loops (no episode continuation). It proves the K/V-replay memory channel
+    conditions generation with the recalled content — which is exactly the B-test
+    gate, and a genuinely new result vs the prior SP_REPLAY gates (those proved
+    well-formed + foreign-episode-rejected, NOT on-topic conditioning).
+
+================================================================================
+OVERALL HONEST CALL (the operator's question: promising or hallucination?)
+================================================================================
+TEST A (audio-as-residual-frames via inject_frames): IGNORED/PERTURBING, NOT yet a
+  coherent content channel. Real signal, deterministic, A!=B — but no reliable
+  audio->text decoding on the generic chat path. Gap is the PROJECTOR's training
+  objective (binary salience decision in a fixed scaffold), NOT the injection wiring.
+  -> Audio conditioning is NOT yet real as a describable channel.
+
+TEST B (episodic memory via replay/gemma4_kv_replay): CONDITIONS THE RESPONSE,
+  PROMISING. Clean, deterministic, verbatim, fact-faithful recall that overrides a
+  confident hallucination. This is the real new B6 result and it stands.
+
+IMPLICATION FOR DEEPER TIERS:
+  - B-style episodic memory (K/V replay) is worth building on -> B3 ARM / B4
+    NIGHTSHIFT have a real conditioning substrate underneath them.
+  - A-style audio/cross-modal residual injection needs a CONTENT projector (trained
+    to map audio -> describable latent), not just a salience-decision projector,
+    before it can claim cross-modal conditioning on the chat path.
+
+REPRO (PowerShell, daemon up on :3000):
+  cd tests/fixtures/chat_fullstack
+  # Test A (build bodies via the python in this session, or reuse _b6_all_*.json):
+  .\_b6_chat.ps1 -BodyPath _b6_audioB_none.json     # baseline hallucination
+  .\_b6_chat.ps1 -BodyPath _b6_all_eval_01_ACTION.json   # "I heard a loud explosion."
+  .\_b6_chat.ps1 -BodyPath _b6_all_eval_00_NO_OP.json    # empty
+  # Test B:
+  .\_b6_chat.ps1 -BodyPath _b6_memB_none.json        # hallucinated Bob Cryer
+  .\_b6_chat.ps1 -BodyPath _b6_memB_replay.json      # verbatim episode recall
+================================================================================
