@@ -1,0 +1,37 @@
+G-BYTEEXACT-ISLANDS-CUDA  receipt
+date: 2026-06-18   host: Windows / RTX 2060 (sm_75)   engine HEAD: 92b93d2
+model: D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model (+ .sp-tokenizer)
+
+================ VERDICT: GREEN (0 islands over threshold) ================
+
+Per-island relerr (thr 1e-4):
+  RMSNorm  rows=16  E=3840    relerr=3.843e-5  -> GREEN
+  GELU     rows=16  ff=15360  relerr=8.181e-7  -> GREEN
+  RoPE     rows=256 hd=256    relerr=9.618e-6  -> GREEN
+  softmax  gated offline (G-ISLANDS-Q-REF max|dp| 1.3e-6 < 1e-5); prefill-dump SKIP
+
+--- BUILD (rebuild driver w/ dump seam) ---
+cmd: call vcvars64.bat (VS18 BuildTools, cl 14.50) ^&^& cd build-cuda-vs22 ^&^& ninja test_gemma4_cuda
+[3/4] Linking CUDA static library src\sp_engine_cuda.lib
+[4/4] Linking CUDA executable tests\test_gemma4_cuda.exe
+BUILD_EXIT=0
+
+--- DUMP (real 12B prefill, layer 24, n_tok=16) ---
+env: SP_G4_BX_DUMP=1 SP_BYTEEXACT_DUMP=tests\fixtures\xbar_r3\bx_islands_12b.bin
+     SP_GEMMA4_SPMODEL/SPTOK=gemma4-12b-b1  SP_PPL_TOKENS=tests\fixtures\ppl\wiki.tiny.g4tokens.txt
+cmd: build-cuda-vs22\tests\test_gemma4_cuda.exe
+[g4-bx] prefill n_tok=16 NL=48 E=3840 (dump -> tests\fixtures\xbar_r3\bx_islands_12b.bin, layer last)
+    [bx-dump] island dump -> tests\fixtures\xbar_r3\bx_islands_12b.bin (layer 24, n_tok 16)
+[g4-bx] probe rc=0 (islands dumped); 
+DUMP_EXIT=0
+  bx_islands_12b.bin = 3980488 bytes
+--- COMPARE (crate bx_islands_compare, host x86 exact-integer refs) ---
+cmd: cd tools\sp_dsp_smoke ^&^& cargo run --release --bin bx_islands_compare -- <abs>\bx_islands_12b.bin
+[bx-cmp] dump bx_islands_12b.bin : n_tok=16 E=3840 layer=24
+[bx-cmp] parsed 10 island records
+[bx-cmp] RMSNorm  rows=16 E=3840 relerr=3.843e-5 thr=1e-4 -> GREEN
+[bx-cmp] GELU     rows=16 ff=15360 relerr=8.181e-7 thr=1e-4 -> GREEN
+[bx-cmp] RoPE     rows=256 hd=256 ff=1.0 base=10000 relerr=9.618e-6 thr=1e-4 -> GREEN
+[bx-cmp] softmax  gated offline (G-ISLANDS-Q-REF max|?p| 1.3e-6 < 1e-5); prefill-dump SKIP
+[bx-cmp] G-BYTEEXACT-ISLANDS-CUDA: GREEN (0 island(s) over threshold)
+CARGO_EXIT=0
