@@ -74,6 +74,14 @@ path = "src/sp_barrett_dual_smoke.rs"
 name = "sp_matmul_q_ref_test"
 path = "src/sp_matmul_q_ref_test.rs"
 
+# Byte-exact NONLINEAR islands — host-runnable scalar reference + gate for the
+# three fp32-island replacements (RMSNorm / softmax / GELU-tanh) as exact-integer
+# fixed-point. The crate's universal definition the C/CUDA/HVX backends gate
+# against (companion to sp_matmul_q_ref for the linear algebra). Host x86, no DSP.
+[[bin]]
+name = "sp_islands_q_ref_test"
+path = "src/sp_islands_q_ref_test.rs"
+
 # §3-HX Sprint K v0.beta Stage 2.5c Stage 2 — on-device HVX mod_q matmul
 # correctness + Garner CRT bit-exact smoke.
 [[bin]]
