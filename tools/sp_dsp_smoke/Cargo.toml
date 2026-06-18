@@ -82,6 +82,14 @@ path = "src/sp_matmul_q_ref_test.rs"
 name = "sp_islands_q_ref_test"
 path = "src/sp_islands_q_ref_test.rs"
 
+# G-BYTEEXACT-ISLANDS-CUDA host comparator — reads the gemma4 CUDA prefill island
+# dump (SP_BYTEEXACT_DUMP, cuda_forward.cu) and gates the float-island outputs
+# against the crate's exact-integer *_q_ref on REAL 12B activations (contract
+# CONTRACT-BYTEEXACT-forward §5.1). Host x86, no DSP. arg = the dump.bin path.
+[[bin]]
+name = "bx_islands_compare"
+path = "src/bx_islands_compare.rs"
+
 # §3-HX Sprint K v0.beta Stage 2.5c Stage 2 — on-device HVX mod_q matmul
 # correctness + Garner CRT bit-exact smoke.
 [[bin]]

@@ -1449,6 +1449,18 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
     float *hple = NULL;
     float **Kst=NULL, **Vst=NULL;     /* per-OWNER device K/V (shared-KV reuse) */
     int rc = 1;
+    /* G-BYTEEXACT-ISLANDS-CUDA dump seam (additive, default-off = byte-inert):
+     * SP_BYTEEXACT_DUMP=path writes the INPUT+OUTPUT of the float islands
+     * (RMSNorm / GELU-tanh / RoPE) for ONE chosen layer (SP_BYTEEXACT_LAYER,
+     * default = last layer) on the prefill forward, so the host comparator can
+     * re-run the SAME inputs through the crate's exact-integer *_q_ref and gate
+     * the per-island fidelity (contract CONTRACT-BYTEEXACT-forward §5.1). The
+     * file is self-describing: a magic header then per-island {tag,len} records.
+     * Pure observation — no kernel behaviour changes; default-off path untouched. */
+    const char *bx_dump_path = getenv("SP_BYTEEXACT_DUMP");
+    FILE *bx_dump_f = NULL;
+    int   bx_layer = -1; { const char *e = getenv("SP_BYTEEXACT_LAYER"); if (e) bx_layer = atoi(e); }
+    float *bx_h = NULL;               /* host staging for D2H of the island buffers */
     Kst = (float **)calloc((size_t)NL, sizeof(float *));
     Vst = (float **)calloc((size_t)NL, sizeof(float *));
     if (!Kst || !Vst) { sp_set_error("g4 probe: host OOM"); goto done; }
@@ -1466,6 +1478,27 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
     }
     if (full) G4A(dlog, (size_t)n_tok*V);
     #undef G4A
+
+    /* G-BYTEEXACT-ISLANDS-CUDA: open the dump file + host staging once n_layers is
+     * finalized (so the default layer = last layer is valid). bx_layer<0 => last. */
+    if (bx_dump_path) {
+        /* default to a MID layer (not the last): under attn_only=1 the loop breaks at
+         * L==n_layers-1 right after the attention residual, BEFORE the FFN RMSNorm/GELU
+         * captures — so the chosen layer must be < n_layers-1 to dump all three islands. */
+        if (bx_layer < 0 || bx_layer >= n_layers - 1) bx_layer = (n_layers > 1) ? n_layers / 2 : 0;
+        bx_dump_f = fopen(bx_dump_path, "wb");
+        if (!bx_dump_f) { sp_set_error("bx_dump: open"); goto done; }
+        size_t bx_hmax = (size_t)n_tok * (QDmax > E ? QDmax : E);
+        if ((size_t)n_tok * FFmax > bx_hmax) bx_hmax = (size_t)n_tok * FFmax;
+        bx_h = (float *)malloc(bx_hmax * sizeof(float));
+        if (!bx_h) { sp_set_error("bx_dump: host OOM"); goto done; }
+        /* file header: magic 'BXI1', version, n_tok, E, chosen layer, period */
+        int32_t fh[8] = { 0x31495842 /*'BXI1'*/, 1, n_tok, E, bx_layer, period,
+                          (int)c->g4_swa_period, 0 };
+        fwrite(fh, sizeof(int32_t), 8, bx_dump_f);
+        fprintf(stderr, "    [bx-dump] island dump -> %s (layer %d, n_tok %d)\n",
+                bx_dump_path, bx_layer, n_tok);
+    }
 
     if (cudaMemcpyAsync(dtoks, tokens, (size_t)n_tok*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("g4 upload tokens"); goto done;
@@ -1515,6 +1548,20 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
                                               1.0f / sqrtf(2.0f), eps);
     }
 
+    /* G-BYTEEXACT-ISLANDS-CUDA: dump one device buffer as a self-describing record.
+     * tag: 4-byte ASCII island/role ('RMSi'/'RMSw'/'RMSo'/'GELi'/'GELu'/'GELo'/
+     * 'ROPi'/'ROPo'); rows = n_tok (or n_head_rows), width = per-row floats. Syncs
+     * the stream first (capture is post-kernel). Only invoked under bx_dump_f. */
+    #define BX_REC(tagstr, dptr, rows, width) do { \
+        cudaError_t _e = cudaStreamSynchronize(st); \
+        if (_e != cudaSuccess) { fail_cuda(_e, "bx_dump sync"); goto done; } \
+        size_t _n = (size_t)(rows) * (size_t)(width); \
+        cudaMemcpy(bx_h, (dptr), _n * sizeof(float), cudaMemcpyDeviceToHost); \
+        int32_t _rh[4]; memcpy(_rh, (tagstr), 4); _rh[1] = (int)(rows); _rh[2] = (int)(width); _rh[3] = 0; \
+        fwrite(_rh, sizeof(int32_t), 4, bx_dump_f); \
+        fwrite(bx_h, sizeof(float), _n, bx_dump_f); \
+    } while (0)
+
     for (int L = 0; L < n_layers; L++) {
         const int global = ((L % period) == period - 1);
         const int nh  = global ? g_nh  : s_nh;
@@ -1537,8 +1584,24 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
         }
         if (gemm_w_lift(cb, st, &g_w.Wq[L], dnx, dq, n_tok, dscr)) goto done;
         k_rmsnorm_head<<<n_tok*nh, 256, 0, st>>>(dq, g_w.q_norm[L], nh, hd, qd, eps);
+        /* G-BYTEEXACT-ISLANDS-CUDA: RoPE input = post-q-norm q [n_tok*nh rows x hd];
+         * width carries hd, rope base + freq-factor mode recorded in the rope-out tag. */
+        if (bx_dump_f && L == bx_layer) {
+            BX_REC("ROPi", dq, n_tok*nh, hd);
+            /* RoPE metadata: rbase as a float record [1x1], then the freq-factor table
+             * (ffac, length hd/2) if proportional, else a single -1.0 sentinel. NEOX
+             * layout; the comparator builds freq_fix[i] = base^(-2i/d)/ff[i]. */
+            { float rb = rbase;
+              int32_t _rh[4]; memcpy(_rh, "ROPb", 4); _rh[1]=1; _rh[2]=1; _rh[3]=0;
+              fwrite(_rh, sizeof(int32_t), 4, bx_dump_f); fwrite(&rb, sizeof(float), 1, bx_dump_f); }
+            if (ffac) { BX_REC("ROPf", ffac, 1, hd/2); }
+            else { int32_t _rh[4]; memcpy(_rh, "ROPf", 4); _rh[1]=1; _rh[2]=1; _rh[3]=0;
+                   float none = -1.0f; fwrite(_rh, sizeof(int32_t), 4, bx_dump_f);
+                   fwrite(&none, sizeof(float), 1, bx_dump_f); }
+        }
         if (ffac) k_rope_freqs<<<n_tok*nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase, ffac);
         else      k_rope<<<n_tok*nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase);
+        if (bx_dump_f && L == bx_layer) BX_REC("ROPo", dq, n_tok*nh, hd);
         if (attn_only == 3 && L == n_layers - 1) {            /* ── bisect: q post norm+rope [n_tok*qd] ── */
             if (cudaMemcpyAsync(out_x, dq, (size_t)n_tok*qd*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
                 sp_set_error("g4 dl q"); goto done; }
@@ -1594,11 +1657,21 @@ extern "C" int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens,
 
         /* ── FFN (GeGLU, per-layer elastic width) + post_ffw residual ── */
         const int ffL = g_w.Wgate[L].out;
+        /* G-BYTEEXACT-ISLANDS-CUDA: RMSNorm island = ffn_norm (clean E-wide weighted).
+         * Capture input x, the weight vector, and the output nx (post k_rmsnorm). */
+        if (bx_dump_f && L == bx_layer) BX_REC("RMSi", dx, n_tok, E);
+        if (bx_dump_f && L == bx_layer) BX_REC("RMSw", g_w.ffn_norm[L], 1, E);
         k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+        if (bx_dump_f && L == bx_layer) BX_REC("RMSo", dnx, n_tok, E);
         if (gemm_w_lift(cb, st, &g_w.Wgate[L], dnx, dg, n_tok, dscr)) goto done;
         if (gemm_w_lift(cb, st, &g_w.Wup[L], dnx, dup, n_tok, dscr)) goto done;
+        /* GELU-tanh island: capture pre-gelu gate g, the up tensor, and the post-gelu
+         * product (g <- 0.5 g (1+tanh(k(g+0.044715 g^3))) * up). */
+        if (bx_dump_f && L == bx_layer) BX_REC("GELi", dg, n_tok, ffL);
+        if (bx_dump_f && L == bx_layer) BX_REC("GELu", dup, n_tok, ffL);
         {   size_t nFF = (size_t)n_tok * ffL;
             k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
+        if (bx_dump_f && L == bx_layer) BX_REC("GELo", dg, n_tok, ffL);
         if (gemm_w_lift(cb, st, &g_w.Wdown[L], dg, ddn, n_tok, dscr)) goto done;
         k_rmsnorm<<<n_tok, 256, 0, st>>>(ddn, g_w.post_ffw[L], E, eps, dnx);
         k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dnx, nE);
@@ -1650,6 +1723,9 @@ done:
     if (dg) cudaFree(dg); if (dup) cudaFree(dup); if (ddn) cudaFree(ddn); if (dscr) cudaFree(dscr);
     if (dipl) cudaFree(dipl); if (dple) cudaFree(dple); if (dpg) cudaFree(dpg);
     if (dpp) cudaFree(dpp); if (dlog) cudaFree(dlog); free(hple);
+    if (bx_dump_f) fclose(bx_dump_f);   /* G-BYTEEXACT-ISLANDS-CUDA dump */
+    if (bx_h) free(bx_h);
+    #undef BX_REC
     if (Kst) { for (int L = 0; L < NL; L++) if (Kst[L]) cudaFree(Kst[L]); free(Kst); }
     if (Vst) { for (int L = 0; L < NL; L++) if (Vst[L]) cudaFree(Vst[L]); free(Vst); }
     return rc;

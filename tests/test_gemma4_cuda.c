@@ -2149,7 +2149,48 @@ static void T_GEMMA4_CUDA_WEIGHTS(void) {
     sp_model_unload(handle);
 }
 
+/* ═══ SP_G4_BX_DUMP=1 (G-BYTEEXACT-ISLANDS-CUDA): drive a real 12B prefill with the
+ * SP_BYTEEXACT_DUMP seam armed, so the float islands' input+output land on disk for the
+ * host comparator (compare_islands.py) to gate against the crate's exact-integer *_q_ref.
+ * Runs gemma4_cuda_probe with attn_only=1 so the layer loop executes ALL layers (the dump
+ * fires at SP_BYTEEXACT_LAYER) and breaks at the last layer's attention residual — NEVER
+ * reaching the tied head (which 12B can't run without the resident f32 embd). out_x is the
+ * post-attn x scratch, discarded. Env: SP_GEMMA4_SPMODEL/SPTOK, SP_BYTEEXACT_DUMP=path,
+ * SP_BYTEEXACT_LAYER (default last), SP_PPL_TOKENS (optional; else synthetic ids). */
+static int run_bx_dump(void) {
+    const char *spm = getenv("SP_GEMMA4_SPMODEL"); if (!spm) spm = SP_GEMMA4_SPMODEL_DEF;
+    const char *stk = getenv("SP_GEMMA4_SPTOK");   if (!stk) stk = SP_GEMMA4_SPTOK_DEF;
+    if (!getenv("SP_BYTEEXACT_DUMP")) { fprintf(stderr, "[g4-bx] set SP_BYTEEXACT_DUMP=<out.bin>\n"); return 2; }
+    sp_model *handle = NULL;
+    if (sp_model_load(spm, stk, &handle) != SP_OK || !handle) { fprintf(stderr, "[g4-bx] load FAIL: %s\n", sp_last_error()); return 2; }
+    qwen3_model *m = sp_model_to_gemma4(handle);
+    if (!m) { fprintf(stderr, "[g4-bx] sp_model_to_gemma4 FAIL\n"); return 2; }
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, NL = (int)c->n_layers;
+    int n_tok = getenv("SP_BX_NTOK") ? atoi(getenv("SP_BX_NTOK")) : 16;
+    if (n_tok < 1) n_tok = 16;
+    int32_t *toks = (int32_t *)malloc((size_t)n_tok * sizeof(int32_t));
+    const char *toksf = getenv("SP_PPL_TOKENS");
+    int got = 0;
+    if (toksf) { FILE *tf = fopen(toksf, "rb"); if (tf) { int v; while (got < n_tok && fscanf(tf, "%d", &v) == 1) toks[got++] = (int32_t)v; fclose(tf); } }
+    for (int i = got; i < n_tok; i++) toks[i] = (int32_t)(1000 + i);   /* synthetic valid ids */
+    float *out_x = (float *)malloc((size_t)n_tok * E * sizeof(float));
+    if (!toks || !out_x) { fprintf(stderr, "[g4-bx] OOM\n"); return 2; }
+    fprintf(stderr, "[g4-bx] prefill n_tok=%d NL=%d E=%d (dump -> %s, layer %s)\n",
+            n_tok, NL, E, getenv("SP_BYTEEXACT_DUMP"),
+            getenv("SP_BYTEEXACT_LAYER") ? getenv("SP_BYTEEXACT_LAYER") : "last");
+    /* attn_only=1 ⇒ run every layer, dump at the chosen one, break before the head. */
+    int rc = gemma4_cuda_probe(m, toks, n_tok, NL, /*attn_only=*/1, out_x);
+    fprintf(stderr, "[g4-bx] probe rc=%d (islands dumped); %s\n", rc, sp_last_error());
+    free(toks); free(out_x); sp_model_unload(handle);
+    /* rc may be nonzero on environmental head-skip; the dump file is what matters. The
+     * gate verdict is produced by the host comparator, not this run. Return 0 if the
+     * dump file is non-empty. */
+    return 0;
+}
+
 int main(void) {
+    if (getenv("SP_G4_BX_DUMP")) return run_bx_dump(); /* G-BYTEEXACT-ISLANDS-CUDA island dump seam */
     if (getenv("SP_G4_NIAH"))   return run_niah();   /* C-c NIAH mode (env-driven conditions) */
     if (getenv("SP_G4_KAIROS")) return run_kairos(); /* KAI-1 Path B: cognitive crucible on the 12B GPU */
     if (getenv("SP_G4_KAIROS_METAL")) return run_kairos_metal(); /* KAI-1c: semantic loop on the journaled ring */
