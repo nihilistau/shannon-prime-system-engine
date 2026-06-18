@@ -150,3 +150,83 @@ pub fn gelu_q_ref(x: &[f32]) -> Vec<f32> {
         })
         .collect()
 }
+
+// ---- Island 4 — RoPE via deterministic fixed-point CORDIC (no libm sin/cos) ----
+// The fp32 RoPE bridge's sinf/cosf are machine-dependent; replace with rotation-mode
+// CORDIC (integer shift-add over a fixed atan table) => bit-identical cos/sin across any
+// ALU. The per-pair frequency table is a MODEL CONSTANT (base^(-2i/d), baked once at
+// transcode as fixed-point — deterministic by being stored, not recomputed); rope_q_ref
+// takes it as input so the function itself is fully integer/deterministic. NEOX layout.
+const CORDIC_N: usize = 30;
+const ATAN_FB30: [i64; CORDIC_N] = [
+    843314857, 497837829, 263043837, 133525159, 67021687, 33543516, 16775851, 8388437,
+    4194283, 2097149, 1048576, 524288, 262144, 131072, 65536, 32768, 16384, 8192, 4096,
+    2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2,
+];
+const CORDIC_K: i64 = 652_032_874; // round( prod 1/sqrt(1+2^-2k) * 2^30 )
+const PI_FB: i64 = 3_373_259_426;
+const HALFPI_FB: i64 = 1_686_629_713;
+const TWOPI_FB: i64 = 6_746_518_852;
+
+/// (cos θ, sin θ) in FB-fixed for θ in FB-fixed radians. Reduces to [−π/2, π/2] then CORDIC.
+pub fn cordic_cossin(theta: i64) -> (i64, i64) {
+    // reduce mod 2π into (−π, π]
+    let mut z = theta % TWOPI_FB;
+    if z > PI_FB {
+        z -= TWOPI_FB;
+    } else if z < -PI_FB {
+        z += TWOPI_FB;
+    }
+    // fold the two far quadrants into [−π/2, π/2] (cos/sin both negate under +π)
+    let mut neg = false;
+    if z > HALFPI_FB {
+        z -= PI_FB;
+        neg = true;
+    } else if z < -HALFPI_FB {
+        z += PI_FB;
+        neg = true;
+    }
+    let mut x = CORDIC_K;
+    let mut y = 0i64;
+    for k in 0..CORDIC_N {
+        let xs = x >> k;
+        let ys = y >> k;
+        if z >= 0 {
+            x -= ys;
+            y += xs;
+            z -= ATAN_FB30[k];
+        } else {
+            x += ys;
+            y -= xs;
+            z += ATAN_FB30[k];
+        }
+    }
+    if neg {
+        (-x, -y)
+    } else {
+        (x, y)
+    }
+}
+
+/// NEOX RoPE at position `pos`, integer-exact: out[i] = a·cos−b·sin, out[i+half] = a·sin+b·cos,
+/// where (cos,sin)=CORDIC(pos·freq_fix[i]). `freq_fix` is the length-(d/2) fixed-point freq table
+/// (FB-fixed; the model constant base^(-2i/d) / ff[i]). Rotation done in fixed-point (Q=16) so the
+/// whole op is integer/deterministic.
+pub fn rope_q_ref(v: &[f32], pos: i64, freq_fix: &[i64]) -> Vec<f32> {
+    const Q: u32 = 16;
+    let d = v.len();
+    let half = d / 2;
+    let mut out = vec![0.0f32; d];
+    let inv = (1u64 << Q) as f64;
+    for i in 0..half {
+        let theta = ((pos as i128) * (freq_fix[i] as i128) % (TWOPI_FB as i128)) as i64;
+        let (c, s) = cordic_cossin(theta);
+        let a = (v[i] as f64 * inv).round() as i128;
+        let b = (v[i + half] as f64 * inv).round() as i128;
+        let oa = ((a * c as i128) - (b * s as i128)) >> FB;
+        let ob = ((a * s as i128) + (b * c as i128)) >> FB;
+        out[i] = (oa as f64 / inv) as f32;
+        out[i + half] = (ob as f64 / inv) as f32;
+    }
+    out
+}

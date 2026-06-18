@@ -1,19 +1,17 @@
-G-ISLANDS-Q-REF ? byte-exact nonlinear islands added to the universal crate (sp_dsp_smoke), host-gated
+G-ISLANDS-Q-REF ? byte-exact nonlinear islands in the universal crate (sp_dsp_smoke), host-gated. 4 islands.
 date: 2026-06-18 | cargo run --bin sp_islands_q_ref_test (host x86, no DSP)
 
-The three fp32 nonlinear islands (PPT-ARM-System ?8: RMSNorm / softmax / GELU-tanh) as exact-integer
-fixed-point scalar references ? the crate's UNIVERSAL definition the C/CUDA/HVX backends gate against
-(companion to sp_matmul_q_ref for the linear algebra, which was already in-crate + bit-exact-gated).
-tools/sp_dsp_smoke/src/sp_islands_q_ref.rs (rmsnorm_q_ref / softmax_q_ref / gelu_q_ref; FB=30, i128
-intermediates, isqrt; the same recipe validated in core/exact_islands C + the Python prototypes).
+The fp32 nonlinear islands as exact-integer fixed-point scalar references ? the crate's UNIVERSAL
+definition the C/CUDA/HVX backends gate against (companion to sp_matmul_q_ref for the linear algebra).
+tools/sp_dsp_smoke/src/sp_islands_q_ref.rs: rmsnorm/softmax/gelu_q_ref (FB30, i128, isqrt) + rope_q_ref
+(deterministic fixed-point CORDIC cos/sin ? no libm ? + integer rotation; freq table = model constant).
 
 [T_ISLANDS_RMSNORM] fidelity relerr = 5.796e-6   reduction-order-immune = true
 [T_ISLANDS_SOFTMAX] fidelity max|dp| = 1.299e-6   reduction-order-immune = true
 [T_ISLANDS_GELU]    fidelity relerr = 2.802e-6   deterministic = true
+[T_ISLANDS_ROPE]    CORDIC cos/sin max abs err = 8.584e-9 | full RoPE relerr = 9.197e-6 | deterministic = true
 ---- fails = 0 ----  VERDICT GREEN
 
-Course-correction (operator 2026-06-18): byte-exact LINEAR algebra already lives bit-exact-gated in
-this crate; the islands are the genuinely-new nonlinear piece and now live here too. The hand-rolled
-CUDA RMS kernels were reverted (wrong layer); the CUDA backend bridges via the existing
-sp_session_register_forward_backend hook (see CONTRACT-BYTEEXACT ?8 bridge plan). RoPE integer ref
-is the one remaining island.
+All four islands closed. Linear algebra was already in-crate (sp_matmul_q_ref/Barrett/Garner/NTT,
+bit-exact-gated). The CUDA backend bridges via the existing register_forward_backend hook
+(SP_ARCH_GEMMA4 glue case added). Next = wire islands into a CUDA exactness gate + the wire_cuda 12B gate.

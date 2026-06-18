@@ -10,7 +10,7 @@
 //! T_ISLANDS_RMSNORM / T_ISLANDS_SOFTMAX / T_ISLANDS_GELU. Exit 0 iff all pass.
 
 mod sp_islands_q_ref;
-use sp_islands_q_ref::{gelu_q_ref, rmsnorm_q_ref, softmax_q_ref};
+use sp_islands_q_ref::{cordic_cossin, gelu_q_ref, rmsnorm_q_ref, rope_q_ref, softmax_q_ref};
 
 // deterministic LCG in [-rng, rng] (no external crate)
 struct Lcg(u64);
@@ -126,9 +126,63 @@ fn main() {
         }
     }
 
+    // ---------- Island 4: RoPE (CORDIC) ----------
+    {
+        const FB: i64 = 30;
+        let one = (1i64 << FB) as f64;
+        // CORDIC cos/sin accuracy vs float over a sweep
+        let mut max_trig = 0.0f64;
+        for j in -180..=180 {
+            let th = j as f64 * std::f64::consts::PI / 180.0;
+            let (c, s) = cordic_cossin((th * one).round() as i64);
+            let dc = (c as f64 / one - th.cos()).abs();
+            let ds = (s as f64 / one - th.sin()).abs();
+            max_trig = max_trig.max(dc).max(ds);
+        }
+        eprintln!("[T_ISLANDS_ROPE] CORDIC cos/sin max abs err = {:.3e}", max_trig);
+        if !(max_trig < 1e-6) {
+            fails += 1;
+            eprintln!("  FAIL: CORDIC trig err >= 1e-6");
+        }
+        // full NEOX RoPE vs float reference
+        let d = 256usize;
+        let half = d / 2;
+        let base = 10000.0f64;
+        let pos = 137i64;
+        let mut g = Lcg(13);
+        let v: Vec<f32> = (0..d).map(|_| g.dev(2.0) as f32).collect();
+        let freq_fix: Vec<i64> = (0..half)
+            .map(|i| (base.powf(-2.0 * i as f64 / d as f64) * one).round() as i64)
+            .collect();
+        let mut vf = vec![0.0f64; d];
+        for i in 0..half {
+            let freq = base.powf(-2.0 * i as f64 / d as f64);
+            let th = pos as f64 * freq;
+            let (c, s) = (th.cos(), th.sin());
+            let a = v[i] as f64;
+            let b = v[i + half] as f64;
+            vf[i] = a * c - b * s;
+            vf[i + half] = a * s + b * c;
+        }
+        let vi: Vec<f64> = rope_q_ref(&v, pos, &freq_fix).iter().map(|&x| x as f64).collect();
+        let re = relerr(&vi, &vf);
+        eprintln!("[T_ISLANDS_ROPE] full RoPE fidelity relerr = {:.3e}", re);
+        if !(re < 1e-4) {
+            fails += 1;
+            eprintln!("  FAIL: RoPE relerr >= 1e-4");
+        }
+        let vi2 = rope_q_ref(&v, pos, &freq_fix);
+        let vi1 = rope_q_ref(&v, pos, &freq_fix);
+        let det_ok = (0..d).all(|i| vi1[i] == vi2[i]);
+        eprintln!("[T_ISLANDS_ROPE] deterministic = {}", det_ok);
+        if !det_ok {
+            fails += 1;
+        }
+    }
+
     eprintln!("---- sp_islands_q_ref_test: fails = {} ----", fails);
     if fails == 0 {
-        eprintln!("VERDICT: GREEN — the three nonlinear islands are exact-integer, fidelity-correct, and reduction-order-immune.");
+        eprintln!("VERDICT: GREEN — the four nonlinear islands (RMSNorm/softmax/GELU/RoPE) are exact-integer, fidelity-correct, and reduction-order-immune/deterministic.");
         std::process::exit(0);
     } else {
         std::process::exit(1);
