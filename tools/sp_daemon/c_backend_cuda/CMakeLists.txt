@@ -55,9 +55,20 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # ── The static library the daemon links ──
+#
+# WIRE-CUDA-GEMMA4: cuda_forward.cu's gemma4_decode_cuda (the XBAR P3 decode
+# harness) references the math-core XBAR episode-manifest serializer
+# (sp_xbar_manifest_serial_size / _serialize / _deserialize / _free from
+# lib/shannon-prime-system/core/xbar/xbar_episode.c). That TU is a standalone,
+# self-contained C file (includes only sp/xbar_episode.h + libc — no model, no
+# other module deps) and is NOT carried by any math-core build-cpu module, so the
+# daemon's build.rs MODULES loop never links it. Compile it directly into this
+# daemon-specific backend lib (the established home for engine-side glue) so the
+# 4 sp_xbar_manifest_* symbols resolve at the daemon's binary link step.
 add_library(sp_cuda_daemon_backend STATIC
     ${ENGINE_ROOT}/src/backends/cuda/cuda_backend.cu
     ${ENGINE_ROOT}/src/backends/cuda/cuda_forward.cu
+    ${ENGINE_ROOT}/lib/shannon-prime-system/core/xbar/xbar_episode.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sp_daemon_cuda_glue.c
 )
 

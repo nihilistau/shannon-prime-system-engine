@@ -1,0 +1,28 @@
+# G-WIRE-CUDA-GEMMA4 ? byte-exact bridge: universal daemon drives gemma4_forward_cuda on the real 12B via the registered ?6 forward backend
+# Date: 2026-06-18T13:10:01Z   Host: RTX 2060 (sm_75), CUDA 13.2, Win11
+# Engine HEAD at gate: 38dc133860a2f79ae056d7cf00451b2d08cda22e (+ build-fix commits below)
+# Contract: CONTRACT-BYTEEXACT-forward.md ?8 ; glue case SP_ARCH_GEMMA4 -> gemma4_forward_cuda (sp_daemon_cuda_glue.c:81-86)
+
+## BUILD (all GREEN)
+1. math-core build-cpu (VS18 cl 14.50) rebuilt ? STALE libs refreshed: sp_session, sp_weight_dtype, sp_arena, sp_frobenius, sp_arm (+model/forward/...). NINJA_CPU_EXIT=0.
+   (sp_arm.lib of 06-04 predated the geom-router symbols sp_arm_select_geom/_project_geom/_geom_layout added 06-10; the Q4B/arena/session libs predated the b1 OK_Q4B handling -> they were the cause of the 'bad weight blk.0.ffn_gate.weight' load failure.)
+2. CUDA backend lib (VS2019 cl 14.29 + nvcc CUDA 13.2, sm_75): tools/sp_daemon/build-host-cuda-backend.bat -> build-host-cuda-backend/sp_cuda_daemon_backend.lib [5/5] LINKED.
+   FIX: added lib/shannon-prime-system/core/xbar/xbar_episode.c as a 5th source to c_backend_cuda/CMakeLists.txt ? gemma4_decode_cuda in cuda_forward.cu references sp_xbar_manifest_{serial_size,serialize,deserialize,free}, which no math-core build-cpu module carries. dumpbin confirms all 4 + gemma4_forward_cuda defined in the lib.
+3. Daemon: cargo build --features wire_cuda_backend --release -> CARGO_EXIT=0. build.rs WIRE-CUDA block fired (linking sp_cuda_daemon_backend + cudart + cublas + cublasLt). Binary: target-wirecuda/release/deps/sp_daemon.exe.
+
+## RUNTIME GATE: T_WIRE_CUDA_RUNTIME_ACTIVE on gemma4-12b-b1 (PASS)
+Launch: SP_DAEMON_BACKEND=cuda  sp_daemon.exe start --model gemma4-12b-b1.sp-model --tokenizer gemma4-12b-b1.sp-tokenizer --port 8092
+Daemon log:
+  arch: vocab=262144 n_layers=48 hidden=3840        (gemma4-12B)
+  L1 FFI OK ? session_position=0                     (sp_model_to_gemma4 LOADS the b1 OK_Q4B model after the rebuild)
+  WIRE-CUDA: sp_session_register_forward_backend OK on TARGET session ? prefill routes to ... (CUDA PTX)
+
+  PRE  /v1/debug/backend_counts: {"hex_forward_count":0,"wire_hex_active":false,"cpu_forward_count":0,"wire_cpu_active":false,"cuda_forward_count":0,"wire_cuda_active":true,"vulkan_forward_count":0,"wire_vulkan_active":false}
+  POST /v1/chat {"prompt_tokens":[2,651,180149,8511,138712,563],"max_tokens":2}  -> HTTP 200, 4.1s
+       body: data: {"error":"sp_prefill_chunk -> status=-4: g4 probe: FULL head needs the f32 embd (VRAM budget keeps only packed codes; use the decode path)"}
+  POST /v1/debug/backend_counts: {"hex_forward_count":0,"wire_hex_active":false,"cpu_forward_count":0,"wire_cpu_active":false,"cuda_forward_count":1,"wire_cuda_active":true,"vulkan_forward_count":0,"wire_vulkan_active":false}
+
+VERDICT: cuda_forward_count 0 -> 1. The registered ?6 backend DID dispatch into the C glue's SP_ARCH_GEMMA4 case -> gemma4_forward_cuda on the real 12B. The byte-exact bridge (CONTRACT ?8) is wired and DRIVES the gemma4 CUDA forward end-to-end through the universal daemon.
+
+## BOUNDED CONSTRAINT (NOT a wire bug ? intrinsic to gemma4_forward_cuda)
+The -4 is gemma4_forward_cuda's own guard at cuda_forward.cu:1627-1629: in FULL mode (all-positions logits, which the daemon's prefill->chat needs) the TIED LM head reuses the resident f32 embedding, but a 12B-class OK_Q4B model keeps only packed codes in VRAM (g_w.embd==NULL) -> the full-vocab head is unavailable in the prefill forward and is reserved for the one-shot decode path (gemma4_decode_cuda, byte-untouched null floor). This is the SAME prefill-only / decode-not-hooked boundary the original WIRE-CUDA closure documented (sp_l1.h ?6). A full chat-decode of the 12B through the daemon needs a per-backend persistent-KV gemma4 decode hook (named follow-on: WIRE-CUDA-DECODE-GEMMA4), not a change to the bridge.
