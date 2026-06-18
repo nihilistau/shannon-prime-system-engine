@@ -28,3 +28,23 @@ r=32 kq=10  reduction = max + top-8 mean (recall.rs)
   ep_wiki=+1.000 ep_homarus=+0.348 ep_headlam=+0.546   FOREIGN(reject)
 
 [exp] min_target=2.27e+17  max_foreign=1.648e+17  => SEPARATES (GREEN)
+
+--------------------------------------------------------------------------------
+ HELD-OUT FALSIFICATION (b3_holdout.py) — train on 17 queries, gate on 9 UNSEEN
+--------------------------------------------------------------------------------
+ split: train=17 (12 pos / 5 foreign)  test=9 (6 pos / 3 foreign)
+ HELD-OUT integer relevance (queries the optimizer NEVER saw):
+   6/6 positives: RIGHT episode is argmax (ep_wiki x2, ep_homarus x2, ep_headlam x2) -> RANKING GENERALIZES
+   min_target=1.209e17  max_foreign=1.361e17  => NO held-out separation (RED)
+ VERDICT: the contrastive W_c learns RELEVANCE RANKING that generalizes (the right
+ episode tops the list for unseen phrasings — neither the centroid nor raw q.K could
+ do this), but the absolute-magnitude FOREIGN-REJECT threshold OVERFITS from 5 training
+ negatives (a held-out foreign outscores the weakest held-out positive). In-sample
+ gate#1 GREEN was real for the MECHANISM + the O_K-integer exactness, but the open-world
+ reject does not generalize at N=3 episodes / 5 foreign.
+ => DO NOT deploy the hot path on this W_c. Next levers: (1) far more negative/foreign
+ diversity to learn a general reject boundary; (2) decouple reject from the learned
+ magnitude — use the ranking for SHORTLIST + a retrieve-and-verify reject (Ring-3 gist
+ shortlist -> Ring-2/C2 #222 exact verify), the two-stage design already in the contract.
+ Honest-negative #3, but the most informative: RANKING is learnable+generalizes; the
+ THRESHOLD/reject is the unsolved part.
