@@ -1,0 +1,66 @@
+G-CHAT-B5 — the single latent entry point (CONTRACT-CHAT-FULLSTACK B5)
+=====================================================================
+Date: 2026-06-19
+Engine HEAD (pre-commit): 58b6c2d (S1)
+Daemon: sp-daemon.exe (wire_cuda), :3000, gemma4-12b-b1.sp-model, resident kvdecode (Pmax=4096)
+Model: arch=gemma4 vocab=262144 n_layers=48 hidden(E)=3840  embed_scale=sqrt(E)=sqrt(3840)
+
+GOAL: prove + wire the SINGLE LATENT ENTRY SEAM — text, audio, memory all enter
+gemma-4-12B through ONE residual seam (gemma4_kv_inject*), the model minting K/V
+natively (RoPE/variance correct by construction).
+
+RECIPE CONFIRMED (file:line):
+  - embed_scale = sqrtf((float)E)  [cuda_forward.cu: s->embscale=sqrtf((float)s->E), k_embed_scale_at: embd[tok*E+i]*scale]
+  - inject seam: g4_kv_step embeds dseq[dpos] then OVERRIDES dx<-dinj when inj_active (cuda_forward.cu ~3986)
+  - PLE caveat: PLE gathers from dseq[dpos] (the step token), so for bit-identical
+    parity the inject step token MUST be the real id (not the audio placeholder 258881),
+    so PLE matches prefill.
+
+IMPLEMENTATION (additive, null-floor):
+  ENGINE (cuda_forward.cu):
+    + k_embed_scale_one / k_embed_packed_one  (gather embd[id]*scale into a target buffer; f32 + packed)
+    + gemma4_kv_inject_tokens(s, toks, n): per id, stage embd[id]*sqrt(E) into s->dinj device-side
+      (same arithmetic as the stock embed-at step), arm inject_active, step the REAL id
+      => residual entering layer 0 is BIT-IDENTICAL to gemma4_kv_prefill(&id,1) by construction.
+    (gemma4_kv_inject_seq already existed = the generic residual-frame channel.)
+  HEADER: include/sp_engine/cuda_backend.h  (gemma4_kv_inject_tokens + gemma4_kv_inject_seq declared)
+  L1 ABI (sp_l1.h §6e, append-only, BOTH submodule + standalone): single-entry seam registered FIRST
+    (backend-internal kvdecode knobs, not new frozen sp_session verbs).
+  GLUE (sp_daemon_cuda_glue.c): sp_daemon_cuda_kvdecode_inject_tokens / _inject_frames
+  RUST (cuda_kvdecode_dispatch.rs): inject_tokens() / inject_frames() safe wrappers
+  DAEMON (routes.rs): ChatRequest.single_entry:Option<bool> (default None=prefill null floor),
+    inject_frames:Option<Vec<Vec<f32>>> + inject_ph (default 258881); run_kvdecode_chat routes
+    prompt head via inject_tokens when single_entry, injects frames via inject_seq before decode.
+  CONSOLE (console.html): "single-entry" checkbox -> single_entry:true.
+
+GATE G-CHAT-B5 (real 12B, temp=0, byteexact default):
+  PARITY (prefill == single_entry), 6 S1 factual prompts:
+    "capital of France"        prefill sha=10de47bd48f8cf30  single sha=10de47bd48f8cf30  BIT-IDENTICAL  ("Paris.")
+    "2 + 2"                    prefill sha=7de1555df0c27003  single sha=7de1555df0c27003  BIT-IDENTICAL  ("4")
+    "wrote Romeo and Juliet"   prefill sha=dd0aa6f28d99fd72  single sha=dd0aa6f28d99fd72  BIT-IDENTICAL  ("William Shakespeare ...")
+    "color of the sky"         prefill sha=937c6cfa4d3e4f7b  single sha=937c6cfa4d3e4f7b  BIT-IDENTICAL  ("The sky is blue ...")
+    "largest planet"           prefill sha=8d28545f7e813f4d  single sha=8d28545f7e813f4d  BIT-IDENTICAL  ("Jupiter ...")
+    "translate hello -> Spanish" prefill sha=3e1e252aa419b7a7 single sha=3e1e252aa419b7a7 BIT-IDENTICAL ("Hola.")
+    => PARITY: 6/6 BIT-IDENTICAL (text-via-inject_seq == text-via-prefill). The embed-residual
+       matches prefill's internal embed exactly => the IDEAL outcome, not merely coherence-equal.
+
+  COHERENCE: all 6 answered correctly + coherent (read, not just SHA'd). 2/6 run on after the
+    correct answer (Shakespeare, hello) = the known b1 QAT turn-discipline ceiling, IDENTICAL in
+    both paths (not a B5 defect).
+
+  DETERMINISM: single_entry run-to-run BIT-IDENTICAL ("The capital of Japan is Tokyo." A==B), byteexact default.
+
+  CHANNEL (inject_frames): E=3840 frame accepted + digested (no error, model continues);
+    ragged/empty frames rejected cleanly ("ragged/empty frames (each must be E floats)").
+    The generic channel is the seam AUDIO (EAR/KAI-3) + MEMORY (decoded episode residuals) feed.
+
+  NO REGRESSION: decode_step / gemma4_kv_decode_logits / g4_kv_step BYTE-UNTOUCHED (B5 = additive
+    symbols only) => G-WIRE-CUDA-DECODE-GEMMA4 oracle path unaffected; the prefill leg above
+    re-proves S1 coherence intact; single_entry default OFF = prefill null floor.
+
+VERDICT: G-CHAT-B5 GREEN. The operator's single-entry-point architecture is proven on the metal:
+  text, audio, and memory all enter the 12B through ONE residual seam (gemma4_kv_inject*), and
+  text-via-seam == text-via-prefill BIT-IDENTICAL (6/6). The model mints K/V natively.
+  HONEST: parity measured at temp=0 (greedy); the inject_frames digestion smoke used a synthetic
+  constant frame (real audio/memory residual wiring is the follow-on); memory recall keeps the
+  §6d-b replay seam (K/V hot-swap) alongside the inject channel per the §6 directive.
