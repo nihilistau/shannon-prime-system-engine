@@ -1,6 +1,7 @@
 //! SPTB tokenizer adapter — parses the .sp-tokenizer blob and wraps it in the
 //! `tokenizers` crate for prompt encoding / token decoding.
 
+use std::ffi::{c_char, c_int, CString};
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -12,10 +13,109 @@ use crate::session::SpModel;
 
 const TYPE_BPE_LLAMA3: u32 = 1;
 const TYPE_BPE_GPT2: u32 = 2;
+// Issue #115: GEMMA4_BPE on-disk family tag (sp_tok_type_id::SP_TOK_GEMMA4_BPE).
+// The Rust `tokenizers` crate cannot drive the 514k-merge U+2581-piece gemma4
+// BPE, so this lane routes encode through the engine's PROVEN C encoder
+// (T_G4_TOK_PARITY: byte-for-byte vs the llama oracle).
+const TYPE_GEMMA4_BPE: u32 = 4;
 
 const ARCH_QWEN3: u32 = 2;
 const ARCH_GEMMA3: u32 = 3;
 const ARCH_QWEN25: u32 = 6;
+const ARCH_GEMMA4: u32 = 7;
+
+// ── Engine C tokenizer FFI (issue #115) ──────────────────────────────────────
+// The proven gemma4 BPE encoder, compiled from src/tokenizer/{tokenizer,
+// gemma4_bpe}.c by build.rs (cc) and linked into the daemon. We FFI the small
+// load/encode/free surface (bindgen'd from sp_engine/tokenizer.h into
+// crate::ffi_l1) rather than reimplementing the encoder in Rust.
+use crate::ffi::{
+    sp_tokenizer, sp_tokenizer_encode, sp_tokenizer_free, sp_tokenizer_load_tokfile,
+    sp_tokenizer_vocab_size,
+};
+
+/// RAII wrapper around the engine C `sp_tokenizer` (gemma4 lane).
+///
+/// SAFETY / Send+Sync: after `sp_tokenizer_load_tokfile` returns, the handle is
+/// READ-ONLY — `sp_tokenizer_encode` only reads the loaded vocab/merge tables
+/// (no internal mutation, no shared global state) and the engine builds no
+/// thread-local caches. The daemon shares one handle across rayon/tokio
+/// blocking threads via Arc<AppState>, so concurrent `encode` calls are sound.
+/// The handle is freed exactly once on Drop.
+struct CTokenizer {
+    handle: *mut sp_tokenizer,
+}
+
+impl CTokenizer {
+    /// Load a .sp-tokenizer through the engine's blob loader. The loader
+    /// dispatches on the on-disk family tag; for gemma4 it builds the
+    /// 514k-merge BPE tables.
+    fn load(path: &str) -> Result<Self, String> {
+        let c_path = CString::new(path)
+            .map_err(|_| format!("tokenizer path has interior NUL: {path}"))?;
+        // SAFETY: c_path outlives the call; the loader copies what it needs.
+        let handle = unsafe { sp_tokenizer_load_tokfile(c_path.as_ptr()) };
+        if handle.is_null() {
+            return Err(format!(
+                "sp_tokenizer_load_tokfile failed for {path} (see daemon stderr for the engine diagnostic)"
+            ));
+        }
+        Ok(CTokenizer { handle })
+    }
+
+    fn vocab_size(&self) -> u32 {
+        // SAFETY: handle is a valid, non-null sp_tokenizer for self's lifetime.
+        unsafe { sp_tokenizer_vocab_size(self.handle) }
+    }
+
+    /// Encode UTF-8 text to token IDs via the proven gemma4 BPE (parse_special=1
+    /// so chat-template control surfaces like <start_of_turn> emit as single
+    /// IDs). BOS is auto-prepended by the engine (gemma4 forces add_bos=1).
+    fn encode(&self, text: &str) -> Result<Vec<i32>, String> {
+        // First call sizes the output; the engine returns the full count even
+        // when it exceeds the buffer, so we grow-and-retry on truncation.
+        let mut cap: usize = text.len() + 16;
+        loop {
+            let mut out = vec![0i32; cap];
+            // SAFETY: text ptr/len describe a valid UTF-8 slice; out has `cap`
+            // i32 slots; handle is a valid read-only sp_tokenizer.
+            let n = unsafe {
+                sp_tokenizer_encode(
+                    self.handle,
+                    text.as_ptr() as *const c_char,
+                    text.len(),
+                    /*parse_special=*/ 1,
+                    out.as_mut_ptr(),
+                    cap as c_int,
+                )
+            };
+            if n < 0 {
+                return Err("sp_tokenizer_encode returned -1".to_string());
+            }
+            let n = n as usize;
+            if n <= cap {
+                out.truncate(n);
+                return Ok(out);
+            }
+            // Truncated — the return value is the true count; resize and retry.
+            cap = n;
+        }
+    }
+}
+
+impl Drop for CTokenizer {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            // SAFETY: handle was produced by sp_tokenizer_load_tokfile and is
+            // freed exactly once (Drop runs once; handle nulled implicitly).
+            unsafe { sp_tokenizer_free(self.handle) };
+        }
+    }
+}
+
+// SAFETY: see CTokenizer doc — the handle is read-only after load.
+unsafe impl Send for CTokenizer {}
+unsafe impl Sync for CTokenizer {}
 
 // ── Message / TemplateError ────────────────────────────────────────────────
 
@@ -120,7 +220,10 @@ fn gpt2_decode(token_str: &str) -> Vec<u8> {
 fn find_eos_ids(arch_id: u32, vocab: &[String]) -> Vec<i32> {
     let names: &[&str] = match arch_id {
         ARCH_QWEN3 | ARCH_QWEN25 => &["<|im_end|>", "<|endoftext|>"],
-        ARCH_GEMMA3 => &["<eos>", "<end_of_turn>"],
+        // gemma4 (arch_id=7) shares gemma3's turn markers. The live daemon
+        // logged eos_ids=[] for arch_id=7, so decode never stopped on EOS —
+        // issue #115 fixes that here.
+        ARCH_GEMMA3 | ARCH_GEMMA4 => &["<eos>", "<end_of_turn>"],
         _ => &[],
     };
     vocab.iter().enumerate()
@@ -134,6 +237,11 @@ fn find_eos_ids(arch_id: u32, vocab: &[String]) -> Vec<i32> {
 
 pub struct SptbTokenizer {
     inner: Option<Tokenizer>,
+    /// Issue #115: the engine C gemma4 BPE encoder, loaded from the same
+    /// .sp-tokenizer path. `Some` only for the GEMMA4_BPE lane (type_id=4);
+    /// `encode` prefers it when present. Decode stays on the Rust id_to_bytes
+    /// path (the ▁→space mapping already decodes gemma4 correctly).
+    c_tokenizer: Option<CTokenizer>,
     id_to_bytes: Vec<Vec<u8>>,
     pub eos_ids: Vec<i32>,
     pub arch_id: u32,
@@ -141,11 +249,16 @@ pub struct SptbTokenizer {
 }
 
 impl SptbTokenizer {
-    pub fn build(model: &SpModel, arch_id: u32) -> Result<Arc<Self>, String> {
+    /// `tok_path` is the .sp-tokenizer file the daemon was started with
+    /// (--tokenizer / SP_TOKENIZER_PATH). For the gemma4 lane (type_id=4) it is
+    /// re-opened through the engine's proven C encoder; for the BPE/SPM lanes it
+    /// is unused (the Rust `tokenizers`/id_to_bytes paths handle them).
+    pub fn build(model: &SpModel, arch_id: u32, tok_path: &str) -> Result<Arc<Self>, String> {
         let blob = model.tokenizer_blob()?;
         let data = parse_sptb(blob)?;
 
         let is_bpe = data.type_id == TYPE_BPE_GPT2 || data.type_id == TYPE_BPE_LLAMA3;
+        let is_gemma4 = data.type_id == TYPE_GEMMA4_BPE;
 
         let inner = if is_bpe {
             let vocab_map: AHashMap<String, u32> = data.vocab.iter().enumerate()
@@ -183,8 +296,26 @@ impl SptbTokenizer {
 
         let eos_ids = find_eos_ids(arch_id, &data.vocab);
 
+        // Issue #115: the gemma4 lane routes encode through the engine's proven
+        // C BPE encoder. Load it from the same .sp-tokenizer path and sanity-
+        // check the vocab size against the parsed blob (catches a path mismatch).
+        let c_tokenizer = if is_gemma4 {
+            let c = CTokenizer::load(tok_path)?;
+            let cvs = c.vocab_size() as usize;
+            if cvs != data.vocab.len() {
+                return Err(format!(
+                    "gemma4 C tokenizer vocab {cvs} != blob vocab {} (path mismatch?: {tok_path})",
+                    data.vocab.len()
+                ));
+            }
+            Some(c)
+        } else {
+            None
+        };
+
         Ok(Arc::new(SptbTokenizer {
             inner,
+            c_tokenizer,
             id_to_bytes,
             eos_ids,
             arch_id,
@@ -193,6 +324,11 @@ impl SptbTokenizer {
     }
 
     pub fn encode(&self, text: &str) -> Result<Vec<i32>, String> {
+        // Issue #115: gemma4 uses the engine C encoder (the Rust `tokenizers`
+        // crate cannot drive the 514k-merge U+2581-piece BPE).
+        if let Some(c) = self.c_tokenizer.as_ref() {
+            return c.encode(text);
+        }
         let tok = self.inner.as_ref()
             .ok_or_else(|| format!("encode not supported for tokenizer type_id={}", self.type_id))?;
         let enc = tok.encode(text, false)
@@ -207,10 +343,25 @@ impl SptbTokenizer {
         }
     }
 
+    /// Default stop strings for this arch's chat format, used when the request
+    /// supplies none. Issue #115: this gemma4 artifact's vocab has no
+    /// `<end_of_turn>` *token* (the turn terminator is the literal text
+    /// `<end_of_turn>`, which BPE-splits into several pieces), so EOS-by-id
+    /// cannot catch it — the stop-string path on `TokenDecodeBuffer` does.
+    /// `<eos>` (id 1) stays covered by `eos_ids`.
+    pub fn default_stops(&self) -> Vec<String> {
+        match self.arch_id {
+            ARCH_GEMMA3 | ARCH_GEMMA4 => vec!["<end_of_turn>".to_string()],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn apply_template(&self, messages: &[Message]) -> Result<String, TemplateError> {
         match self.arch_id {
             ARCH_QWEN3 | ARCH_QWEN25 => Ok(chatml_template(messages)),
-            ARCH_GEMMA3 => Ok(gemma3_template(messages)),
+            // gemma4 (arch_id=7) uses the identical <start_of_turn>…<end_of_turn>
+            // format as gemma3 (issue #115 — the `messages` path now works).
+            ARCH_GEMMA3 | ARCH_GEMMA4 => Ok(gemma3_template(messages)),
             _ => Err(TemplateError { arch_id: self.arch_id }),
         }
     }

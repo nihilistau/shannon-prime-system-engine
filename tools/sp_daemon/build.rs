@@ -58,6 +58,20 @@ fn main() {
     // OUT_DIR.
     // Requires libclang. On Windows set:
     //   LIBCLANG_PATH=C:\Program Files\LLVM\bin
+    // Issue #115: the engine's C tokenizer (sp_engine/tokenizer.h) is the
+    // PROVEN gemma4 514k-merge BPE encoder (T_G4_TOK_PARITY: byte-for-byte vs
+    // the llama oracle). The daemon FFIs to it for gemma4 (.sp-tokenizer
+    // type_id=4) rather than reimplementing it in Rust. The engine include tree
+    // is at {engine}/include; override with SP_ENGINE_INCLUDE.
+    let engine_include_dir = env::var("SP_ENGINE_INCLUDE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| engine_root.join("include"));
+    let tok_src_dir = engine_root.join("src/tokenizer");
+    println!("cargo:rerun-if-env-changed=SP_ENGINE_INCLUDE");
+    println!("cargo:rerun-if-changed={}", engine_include_dir.join("sp_engine/tokenizer.h").display());
+    println!("cargo:rerun-if-changed={}", tok_src_dir.join("tokenizer.c").display());
+    println!("cargo:rerun-if-changed={}", tok_src_dir.join("gemma4_bpe.c").display());
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let wrapper_path = out_dir.join("sp_bindgen_wrapper.h");
     std::fs::write(
@@ -65,12 +79,15 @@ fn main() {
         "/* Auto-generated bindgen wrapper. */\n\
          #include \"sp/sp_l1.h\"\n#include \"sp/arm.h\"\n\
          /* M.5 (routing): KSTE encoder + Tier-0/Tier-1 dominance API. */\n\
-         #include \"sp/kste.h\"\n",
+         #include \"sp/kste.h\"\n\
+         /* Issue #115: the engine C gemma4 BPE tokenizer ABI. */\n\
+         #include \"sp_engine/tokenizer.h\"\n",
     ).expect("could not write sp_bindgen_wrapper.h");
 
     let bindings = bindgen::Builder::default()
         .header(wrapper_path.to_string_lossy())
         .clang_arg(format!("-I{}", include_dir.display()))
+        .clang_arg(format!("-I{}", engine_include_dir.display()))
         .allowlist_function("sp_.*")
         .allowlist_type("sp_.*")
         .allowlist_var("SP_.*")
@@ -81,6 +98,27 @@ fn main() {
     bindings
         .write_to_file(out_dir.join("sp_bindings.rs"))
         .expect("could not write sp_bindings.rs");
+
+    // ── Issue #115: compile the engine C gemma4 BPE tokenizer ──────────────
+    // Two TUs implement the proven encoder:
+    //   src/tokenizer/tokenizer.c   — loaders + family dispatch + GPT2/SPM lanes
+    //   src/tokenizer/gemma4_bpe.c  — the GEMMA4_BPE lane (514k-merge, #115)
+    // tokenizer.c's GGUF-lane references (gguf_open/find_kv/get_str/get_u64/
+    // kv_str_array/close) resolve from the math-core `sp_gguf` archive ALREADY
+    // linked by the MODULES loop below (identical C ABI; the engine and
+    // math-core gguf.h are the same surface). sp_tokenizer_load_tokfile — the
+    // path the daemon calls — reads the .sp-tokenizer file directly and pulls
+    // no gguf symbols. sp_tok_header / SP_TOK_* are header-only (sp_model.h).
+    // The static lib is linked into the daemon so routes/tokenizer.rs can FFI
+    // sp_tokenizer_{load_tokfile,encode,decode,free,vocab_size}.
+    cc::Build::new()
+        .file(tok_src_dir.join("tokenizer.c"))
+        .file(tok_src_dir.join("gemma4_bpe.c"))
+        .include(&engine_include_dir)        // sp_engine/{tokenizer,gguf,sp_model}.h
+        .include(&tok_src_dir)               // tokenizer_internal.h + unicode_ranges.h
+        .define("_CRT_SECURE_NO_WARNINGS", None)
+        .warnings(false)
+        .compile("sp_engine_tokenizer");
 
     // ── Link ───────────────────────────────────────────────────────────────
     // Phase 2-L3.FG: aarch64-android now links the cross-compiled math-core

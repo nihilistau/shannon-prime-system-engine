@@ -281,7 +281,14 @@ pub async fn v1_chat(
     let vocab_size = state.vocab_size;
     let app = state.clone();
     let max_tokens = req.max_tokens;
-    let stop_strings = req.stop;
+    // Issue #115: when the client supplies no stop strings, fall back to the
+    // arch's chat-format terminator (gemma's `<end_of_turn>`) so the console
+    // stream ends at the turn boundary instead of running to max_tokens.
+    let stop_strings = if req.stop.is_empty() {
+        state.tokenizer.default_stops()
+    } else {
+        req.stop
+    };
 
     // Signal the mining loop to back off for the duration of this request.
     state.inference_active.store(true, Ordering::Relaxed);
@@ -298,6 +305,29 @@ pub async fn v1_chat(
         let _g = _guard; // keep guard alive for the duration of the blocking closure
         let mut logits = vec![0.0f32; vocab_size];
         let mut dec_buf = TokenDecodeBuffer::new(stop_strings);
+
+        // Issue #115 (12B chat path): when the CUDA persistent-KV decode backend
+        // is registered (SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1 +
+        // SP_CUDA_DECODE_INT8=1), the 12B's full-vocab head is only materializable
+        // through the resident cache — sp_prefill_chunk's §6 forward bridge trips
+        // "g4 probe: FULL head needs the f32 embd". Drive the single resident
+        // cache directly here (serialized by its Mutex; reset per request via
+        // rewind). The session-clone + prefill_chunk/decode_step path stays the
+        // fallback for models whose head fits the prefill bridge (Qwen3 etc.).
+        #[cfg(feature = "wire_cuda_backend")]
+        let kvdecode = app.cuda_kvdecode_handle.is_some();
+        #[cfg(not(feature = "wire_cuda_backend"))]
+        let kvdecode = false;
+
+        if kvdecode {
+            // Drop the unused clone — the resident cache, not the clone, holds KV.
+            drop(child);
+            run_kvdecode_chat(
+                &app, chat_id, &tokens, max_tokens, vocab_size,
+                &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
+            );
+            return;
+        }
 
         if !tokens.is_empty() {
             if let Err(e) = child.prefill_chunk(&tokens, &mut logits) {
@@ -382,6 +412,155 @@ pub async fn v1_chat(
         Sse::new(ReceiverStream::new(rx))
             .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive")),
     )
+}
+
+/// Issue #115 — 12B chat over the resident CUDA persistent-KV decode cache.
+///
+/// The 12B's tied full-vocab head cannot be materialized by the §6 prefill
+/// bridge, so prompt ingest + token decode run on the single session-resident
+/// `gemma4_kv_*` cache (the G-WIRE-CUDA-DECODE-GEMMA4 path). The cache is global
+/// + stateful (one `dpos`), so we serialize on its Mutex and `rewind` to 0 at
+/// the start of each request. The prefill head's argmax for the FIRST generated
+/// token is obtained by prefilling `tokens[..n-1]` then `decode_step(tokens[n-1])`
+/// (which returns that token's next-position logits) — no separate seq-peek
+/// needed. Emit / EOS / stop-string handling mirrors the fallback decode loop.
+#[cfg(feature = "wire_cuda_backend")]
+#[allow(clippy::too_many_arguments)]
+fn run_kvdecode_chat(
+    app: &Arc<AppState>,
+    chat_id: u64,
+    tokens: &[i32],
+    max_tokens: u32,
+    vocab_size: usize,
+    logits: &mut [f32],
+    dec_buf: &mut TokenDecodeBuffer,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    cancel_child: &Arc<AtomicI32>,
+    sessions: &crate::sessions::Sessions,
+) {
+    use sp_daemon::cuda_kvdecode_dispatch as kv;
+
+    let send_err = |msg: String| {
+        let _ = tx.blocking_send(Ok(Event::default().data(format!("{{\"error\":\"{msg}\"}}"))));
+        let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
+    };
+
+    if tokens.is_empty() {
+        send_err("kvdecode: empty prompt after tokenization".into());
+        sessions.remove(chat_id);
+        return;
+    }
+
+    // Serialize on the resident cache for the whole request (one GPU cache).
+    let guard = match app.cuda_kvdecode_handle.as_ref() {
+        Some(m) => m.lock().unwrap(),
+        None => {
+            send_err("kvdecode: handle missing".into());
+            sessions.remove(chat_id);
+            return;
+        }
+    };
+    let handle = guard.0;
+
+    // Reset the resident cache to dpos=0 (O(1) rewind) so each request is clean.
+    // SAFETY: handle is a live sp_g4_kv* owned by AppState; we hold its Mutex.
+    let pos = unsafe { kv::position(handle) };
+    if pos > 0 {
+        if let Err(e) = unsafe { kv::rewind(handle, pos) } {
+            send_err(format!("kvdecode rewind: {e}"));
+            sessions.remove(chat_id);
+            return;
+        }
+    }
+
+    // Prefill prompt[..n-1] into the resident cache, then decode_step(last) to
+    // obtain the first generated token's logits. For a 1-token prompt, skip the
+    // prefill and decode_step the lone token directly.
+    let (head, last) = tokens.split_at(tokens.len() - 1);
+    if !head.is_empty() {
+        if let Err(e) = unsafe { kv::prefill(handle, head) } {
+            send_err(format!("kvdecode prefill: {e}"));
+            sessions.remove(chat_id);
+            return;
+        }
+    }
+    if logits.len() != vocab_size {
+        send_err("kvdecode: logits buffer size mismatch".into());
+        sessions.remove(chat_id);
+        return;
+    }
+    if let Err(e) = unsafe { kv::decode_step(handle, last[0], logits) } {
+        send_err(format!("kvdecode decode_step(prefill-tail): {e}"));
+        sessions.remove(chat_id);
+        return;
+    }
+
+    let tokenizer = app.tokenizer.clone();
+    let mut next_token = argmax(logits);
+
+    'decode: for _ in 0..max_tokens {
+        if !tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token) {
+            break 'decode;
+        }
+
+        let token_bytes = tokenizer.decode_token(next_token);
+        let stop_hit = match dec_buf.push(token_bytes) {
+            PushResult::Emit(bytes) => {
+                if !bytes.is_empty() {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                        .unwrap_or_default();
+                    if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
+                        cancel_child.store(1, Ordering::Relaxed);
+                        let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
+                        sessions.remove(chat_id);
+                        return;
+                    }
+                }
+                false
+            }
+            PushResult::Stopped(bytes) => {
+                if !bytes.is_empty() {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                        .unwrap_or_default();
+                    let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+                }
+                true
+            }
+        };
+
+        app.tokens_decoded.fetch_add(1, Ordering::Relaxed);
+
+        if stop_hit {
+            break 'decode;
+        }
+
+        // Feed the just-emitted token; get logits for the next position.
+        // SAFETY: handle live; logits is vocab_size f32 (checked above).
+        if let Err(_e) = unsafe { kv::decode_step(handle, next_token, logits) } {
+            break 'decode;
+        }
+        next_token = argmax(logits);
+    }
+
+    let flushed = dec_buf.flush();
+    if !flushed.is_empty() {
+        let text = String::from_utf8_lossy(&flushed).into_owned();
+        let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+            .unwrap_or_default();
+        let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+    }
+
+    let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;
+    if is_cancelled {
+        let _ = tx.blocking_send(Ok(Event::default().event("cancelled").data("{}")));
+        let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
+    } else {
+        let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+        let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "done" });
+    }
+    sessions.remove(chat_id);
 }
 
 fn argmax(logits: &[f32]) -> i32 {

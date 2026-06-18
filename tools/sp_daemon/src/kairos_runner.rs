@@ -233,7 +233,7 @@ pub fn run_kairos_alpha(
         "[kairos-alpha] model loaded: vocab={} n_layers={} hidden={}",
         vocab, arch.n_layers, arch.hidden_dim
     );
-    let tok = SptbTokenizer::build(&model, arch.arch_id)?;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
     let cancel = Arc::new(AtomicI32::new(0));
     let mut session = SpSession::create(&model, cancel)?;
     let mut logits = vec![0.0f32; vocab];

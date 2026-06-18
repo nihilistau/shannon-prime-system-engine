@@ -131,6 +131,10 @@ libloading = "0.8"
 
 [build-dependencies]
 bindgen = "0.70"
+# Issue #115: compile the engine's proven C gemma4 BPE tokenizer
+# (src/tokenizer/{tokenizer,gemma4_bpe}.c) and link it into the daemon so
+# tokenizer.rs can FFI sp_tokenizer_* instead of reimplementing the encoder.
+cc = "1"
 
 # ── Sprint WIRE-HEX / WIRE-CPU features ─────────────────────────────────────
 # `wire_hex_backend`: links libsp_hex_daemon_backend.a (built by

@@ -129,7 +129,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     let pos = session.position().expect("sp_session_position");
     info!("L1 FFI OK — session_position={pos}");
 
-    let tokenizer = crate::tokenizer::SptbTokenizer::build(&model, arch.arch_id)
+    let tokenizer = crate::tokenizer::SptbTokenizer::build(&model, arch.arch_id, tok_path)
         .expect("SptbTokenizer::build failed — check .sp-tokenizer blob");
     info!("tokenizer built: arch_id={} eos_ids={:?}", arch.arch_id, tokenizer.eos_ids);
 
@@ -159,7 +159,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         let m_cancel = Arc::new(AtomicI32::new(0));
         let ms = crate::session::SpSession::create(&mm, m_cancel)
             .expect("memo sp_session_create failed");
-        let mt = crate::tokenizer::SptbTokenizer::build(&mm, memo_arch.arch_id)
+        let mt = crate::tokenizer::SptbTokenizer::build(&mm, memo_arch.arch_id, memo_tok_path)
             .expect("memo SptbTokenizer::build failed — check Memory .sp-tokenizer blob");
         info!("memo tokenizer built: arch_id={} eos_ids={:?}", memo_arch.arch_id, mt.eos_ids);
         (

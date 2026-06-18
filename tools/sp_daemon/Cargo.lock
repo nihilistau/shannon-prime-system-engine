@@ -1872,6 +1872,7 @@ dependencies = [
  "ahash",
  "axum",
  "bindgen",
+ "cc",
  "clap",
  "dashmap",
  "ed25519-dalek",
