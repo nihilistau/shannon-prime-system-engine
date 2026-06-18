@@ -24,6 +24,14 @@ call "%ENGINE%scripts\env\env-cuda.bat" >nul 2>&1
 REM Route the L1 forward + kvdecode backends to the CUDA Gemma-4 path.
 set "SP_DAEMON_BACKEND=cuda"
 
+REM #115: the 12B's tied full-vocab head is only materializable through the
+REM resident persistent-KV decode cache (G-WIRE-CUDA-DECODE-GEMMA4). Without
+REM these, /v1/chat prefill trips "g4 probe: FULL head needs the f32 embd".
+REM KVDECODE=1 routes decode through gemma4_kv_decode_logits; INT8=1 lets
+REM gemma4_kv_open build the tied head.
+set "SP_DAEMON_KVDECODE=1"
+set "SP_CUDA_DECODE_INT8=1"
+
 REM CWD must be tools\sp_daemon so the static ServeDir("frontend_mockups") resolves.
 cd /d "%ENGINE%tools\sp_daemon"
 
