@@ -83,26 +83,40 @@ def load_registry(eng):
     return eps
 
 
-def post_queries(base, qdir, queryset):
+def post_queries(base, qdir):
     """Live mode: POST every query (auto_recall:true) so the daemon dumps its global-Q
-    into qdir (the daemon must be running with SP_B3_QDUMP=<qdir>). Returns the mapping
-    sanitized-name -> (query_text, label)."""
-    import urllib.request
+    into qdir as q_<chat_id>.bin (the daemon must run with SP_B3_QDUMP=<qdir>). The dump
+    filename is the chat_id, not the prompt, so we POST SEQUENTIALLY and pair each query
+    with the file that newly appeared. Writes qmap.json {file_basename: [query, label]}
+    and returns that map."""
+    import urllib.request, time, glob as _glob
     os.makedirs(qdir, exist_ok=True)
-    name_map = {}
-    for label, qs in queryset.items():
+    qmap = {}
+    for label, qs in DEFAULT_QUERIES.items():
         for q in qs:
+            before = set(os.path.basename(f) for f in _glob.glob(os.path.join(qdir, "q_*.bin")))
             body = json.dumps({"messages": [{"role": "user", "content": q}],
                                "max_tokens": 4, "temperature": 0, "auto_recall": True}).encode()
             req = urllib.request.Request(base + "/v1/chat", data=body,
                                          headers={"Content-Type": "application/json"})
             try:
-                urllib.request.urlopen(req, timeout=60).read()
+                urllib.request.urlopen(req, timeout=120).read()
             except Exception as e:
-                print(f"[ds] POST failed for {q!r}: {e}", flush=True)
-            safe = "".join(c if c.isalnum() else "_" for c in q)[:48]
-            name_map["q_" + safe] = (q, label)
-    return name_map
+                print(f"[ds] POST failed for {q!r}: {e}", flush=True); continue
+            new = None
+            for _ in range(20):  # poll up to ~2s for the dump to land
+                after = set(os.path.basename(f) for f in _glob.glob(os.path.join(qdir, "q_*.bin")))
+                diff = after - before
+                if diff:
+                    new = sorted(diff)[-1]; break
+                time.sleep(0.1)
+            if new is None:
+                print(f"[ds] WARN no new dump for {q!r}", flush=True); continue
+            qmap[new] = [q, label]
+            print(f"[ds] {label:12} {new}  <- {q[:42]}", flush=True)
+    with open(os.path.join(qdir, "qmap.json"), "w") as f:
+        json.dump(qmap, f, indent=0)
+    return qmap
 
 
 def main():
@@ -127,23 +141,22 @@ def main():
         K_list.append(K)
         print(f"[ds] episode {e['name']}: K {K.shape} (npos={npos})", flush=True)
 
-    name_map = {}
     if args.live:
         print(f"[ds] LIVE: POST {sum(len(v) for v in DEFAULT_QUERIES.values())} queries -> {qdir}", flush=True)
-        name_map = post_queries(args.base, qdir, DEFAULT_QUERIES)
+        qmap = post_queries(args.base, qdir)
     else:
-        # offline: reconstruct the label mapping from the query text -> sanitized name.
-        for label, qs in DEFAULT_QUERIES.items():
-            for q in qs:
-                safe = "q_" + "".join(c if c.isalnum() else "_" for c in q)[:48]
-                name_map[safe] = (q, label)
+        # offline: the qmap.json sidecar (written by a prior --live run) maps
+        # q_<chat_id>.bin -> [query, label].
+        qm = os.path.join(qdir, "qmap.json")
+        if not os.path.exists(qm):
+            print(f"[ds] no qmap.json in {qdir}; run --live first.", flush=True); sys.exit(2)
+        qmap = json.load(open(qm))
 
     Q, lab, txt = [], [], []
-    for f in sorted(glob.glob(os.path.join(qdir, "q_*.bin"))):
-        key = os.path.splitext(os.path.basename(f))[0]
-        if key not in name_map:
+    for base_name, (qtext, label) in qmap.items():
+        f = os.path.join(qdir, base_name)
+        if not os.path.exists(f):
             continue
-        qtext, label = name_map[key]
         Q.append(read_qdump(f))
         lab.append(name_to_idx.get(label, -1))     # -1 = foreign
         txt.append(qtext)
@@ -154,12 +167,17 @@ def main():
               "SP_B3_QDUMP=<qdir> (and the routes.rs patch applied + built).", flush=True)
         sys.exit(2)
 
+    def objarr(lst):
+        a = np.empty(len(lst), dtype=object)
+        for i, x in enumerate(lst):
+            a[i] = x
+        return a
     np.savez(out,
-             Q=np.array(Q, dtype=object),
+             Q=objarr(Q),
              labels=np.array(lab, np.int64),
-             texts=np.array(txt, dtype=object),
-             K=np.array(K_list, dtype=object),
-             ep_names=np.array([e["name"] for e in eps], dtype=object),
+             texts=objarr(txt),
+             K=objarr(K_list),
+             ep_names=objarr([e["name"] for e in eps]),
              ep_npos=np.array([int(e["npos"]) for e in eps], np.int64))
     print(f"[ds] wrote {out}", flush=True)
 

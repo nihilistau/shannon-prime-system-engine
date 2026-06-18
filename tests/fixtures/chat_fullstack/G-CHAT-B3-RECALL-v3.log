@@ -1,0 +1,30 @@
+G-CHAT-B3-RECALL-v3 gate#1 (integer scores)  W_c int16 scale 2^15  quant-err 1.526e-05
+r=32 kq=10  reduction = max + top-8 mean (recall.rs)
+  ep_wiki=+1.000 ep_homarus=+0.160 ep_headlam=+0.494   want=ep_wiki OK
+  ep_wiki=+1.000 ep_homarus=+0.174 ep_headlam=+0.324   want=ep_wiki OK
+  ep_wiki=+1.000 ep_homarus=+0.253 ep_headlam=+0.329   want=ep_wiki OK
+  ep_wiki=+1.000 ep_homarus=+0.239 ep_headlam=+0.699   want=ep_wiki OK
+  ep_wiki=+1.000 ep_homarus=+0.446 ep_headlam=+0.471   want=ep_wiki OK
+  ep_wiki=+1.000 ep_homarus=+0.249 ep_headlam=+0.422   want=ep_wiki OK
+  ep_wiki=+0.232 ep_homarus=+1.000 ep_headlam=+0.188   want=ep_homarus OK
+  ep_wiki=+0.209 ep_homarus=+1.000 ep_headlam=+0.128   want=ep_homarus OK
+  ep_wiki=+0.165 ep_homarus=+1.000 ep_headlam=+0.143   want=ep_homarus OK
+  ep_wiki=+0.141 ep_homarus=+1.000 ep_headlam=+0.139   want=ep_homarus OK
+  ep_wiki=+0.198 ep_homarus=+1.000 ep_headlam=+0.189   want=ep_homarus OK
+  ep_wiki=+0.219 ep_homarus=+1.000 ep_headlam=+0.194   want=ep_homarus OK
+  ep_wiki=+0.503 ep_homarus=+0.192 ep_headlam=+1.000   want=ep_headlam OK
+  ep_wiki=+0.400 ep_homarus=+0.213 ep_headlam=+1.000   want=ep_headlam OK
+  ep_wiki=+0.399 ep_homarus=+0.169 ep_headlam=+1.000   want=ep_headlam OK
+  ep_wiki=+0.448 ep_homarus=+0.175 ep_headlam=+1.000   want=ep_headlam OK
+  ep_wiki=+0.374 ep_homarus=+0.112 ep_headlam=+1.000   want=ep_headlam OK
+  ep_wiki=+0.457 ep_homarus=+0.201 ep_headlam=+1.000   want=ep_headlam OK
+  ep_wiki=+1.000 ep_homarus=+0.484 ep_headlam=+0.449   FOREIGN(reject)
+  ep_wiki=+0.763 ep_homarus=+0.475 ep_headlam=+1.000   FOREIGN(reject)
+  ep_wiki=+1.000 ep_homarus=+0.571 ep_headlam=+0.737   FOREIGN(reject)
+  ep_wiki=+1.000 ep_homarus=+0.652 ep_headlam=+0.760   FOREIGN(reject)
+  ep_wiki=+1.000 ep_homarus=+0.294 ep_headlam=+0.315   FOREIGN(reject)
+  ep_wiki=+1.000 ep_homarus=+0.622 ep_headlam=+0.905   FOREIGN(reject)
+  ep_wiki=+1.000 ep_homarus=+0.617 ep_headlam=+0.600   FOREIGN(reject)
+  ep_wiki=+1.000 ep_homarus=+0.348 ep_headlam=+0.546   FOREIGN(reject)
+
+[exp] min_target=2.27e+17  max_foreign=1.648e+17  => SEPARATES (GREEN)

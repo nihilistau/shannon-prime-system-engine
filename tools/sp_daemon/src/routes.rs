@@ -745,6 +745,20 @@ fn run_kvdecode_chat(
                 let mut qbuf = vec![0.0f32; n_global * recall::G_NH * recall::HD];
                 match unsafe { kv::read_global_q(handle, last[0], &mut qbuf) } {
                     Ok(_ng) => {
+                        // B3-v3 dataset: SP_B3_QDUMP=<dir> persists THIS turn's last-token
+                        // global-Q (the exact vector qk_relevance scores) so the offline
+                        // contrastive trainer mines (Q, episode-K) pairs from the substrate.
+                        // Additive; unset ⇒ no-op (null floor preserved). File q_<chat_id>.bin.
+                        if let Ok(dir) = std::env::var("SP_B3_QDUMP") {
+                            let qd = recall::G_NH * recall::HD;
+                            let mut buf = Vec::with_capacity(8 + qbuf.len() * 4);
+                            buf.extend_from_slice(&(n_global as u32).to_le_bytes());
+                            buf.extend_from_slice(&(qd as u32).to_le_bytes());
+                            for &x in &qbuf { buf.extend_from_slice(&x.to_le_bytes()); }
+                            let _ = std::fs::create_dir_all(&dir);
+                            let _ = std::fs::write(
+                                std::path::Path::new(&dir).join(format!("q_{chat_id}.bin")), buf);
+                        }
                         // Score every episode (max + top-m-mean), log the full matrix.
                         let mut best: Option<(usize, f32)> = None;
                         let mut rows: Vec<String> = Vec::with_capacity(registry.len());
