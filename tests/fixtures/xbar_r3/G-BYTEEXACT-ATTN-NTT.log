@@ -1,0 +1,26 @@
+G-BYTEEXACT-ATTN-NTT -- attention Q.K dot as exact-integer dual-prime negacyclic convolution
+date: 2026-06-18
+probe: tools/ring3/g_byteexact_attn_ntt.py | primes q1=1073738753 q2=1073732609 (M~2^60)
+grounding: PPT-ARM-Theory Sec13.1 (coeff_{N-1}(Q(x)K(x^-1))/Delta^2) + Sec3.5 Thm (Delta>=2^10 => KL=0 @ d_k<=N=256);
+           PPT-ARM-System Sec5/Sec6 (dual-prime CRT-NTT + Garner, bit-identical Linux GCC==Windows MSVC, no __int128)
+
+N=256 Delta=2^16 (head_dim, CKKS encode)
+(1)+(2) dual-prime negconv coeff[N-1] (Garner) = 11128679810
+        exact integer dot  Sum q_i k_i         = 11128679810
+  ALGEBRA + CRT match: True
+(3) no-128bit: max per-prime accumuland ~3.330e+12 < 2^63 (True)
+(4) fidelity: float dot 2.591043 vs integer-decoded 2.591098  relerr 2.12e-05
+(5) reduction-order-immune: 1 distinct integer dot over 5 orders (1=immune): True
+-- Delta(FB) fidelity sweep --
+  Delta=2^10: CRT==exact_dot True | relerr 2.19e-03 | max_accum 8.13e+08 (<2^63 True)
+  Delta=2^12: CRT==exact_dot True | relerr 3.23e-04 | max_accum 1.30e+10 (<2^63 True)
+  Delta=2^14: CRT==exact_dot True | relerr 5.94e-05 | max_accum 2.08e+11 (<2^63 True)
+  Delta=2^16: CRT==exact_dot True | relerr 2.12e-05 | max_accum 3.33e+12 (<2^63 True)
+  Delta=2^18: CRT==exact_dot True | relerr 1.76e-06 | max_accum 5.33e+13 (<2^63 True)
+VERDICT: GREEN
+
+VERDICT: GREEN. The float attention Q.K (and by symmetry p.V) dot product is replaced EXACTLY by the
+dual-prime negacyclic-convolution coefficient + Garner CRT: integer-exact at every Delta (cross-machine
+byte-identical by construction), <2^63 throughout (no 128-bit), float-fidelity Delta-tunable to ~1e-6.
+Independently re-verifies the canonical PPT attention-substitution claim on the frozen engine primes.
+NEXT: wire the proven sp_pr_mul negacyclic kernel into the gemma4 CUDA decode in place of float k_attn_decode_win.
