@@ -108,6 +108,27 @@ unsafe extern "C" {
         npos: c_int,
         zero: c_int,
     ) -> c_int;
+
+    /// CONTRACT-CHAT-FULLSTACK B5 (§6e) — `gemma4_kv_inject_tokens(s, toks, n)`.
+    /// TEXT through the single latent entry seam: per token, stage embd[id]*sqrt(E)
+    /// into the inject buffer and step the real id, so the residual is bit-identical
+    /// to prefill (the B5 parity proof). 0 on success.
+    fn sp_daemon_cuda_kvdecode_inject_tokens(
+        handle: *mut c_void,
+        toks: *const i32,
+        n: c_int,
+    ) -> c_int;
+
+    /// CONTRACT-CHAT-FULLSTACK B5 (§6e) — `gemma4_kv_inject_seq(s, embs, n_frames, ph)`.
+    /// The GENERIC residual-frame channel: inject `n_frames` raw E-float residual
+    /// vectors at consecutive positions, each minted at `ph_token`. The seam AUDIO
+    /// (EAR/KAI-3) and MEMORY (decoded episode residuals) feed through. 0 on success.
+    fn sp_daemon_cuda_kvdecode_inject_frames(
+        handle: *mut c_void,
+        embs: *const f32,
+        n_frames: c_int,
+        ph_token: c_int,
+    ) -> c_int;
 }
 
 /// Open a session-resident KV-decode cache on the CUDA backend.
@@ -224,6 +245,49 @@ pub unsafe fn replay(handle: *mut c_void, epdir: &str, npos: i32, zero: bool) ->
     // the duration of the call; glue forwards to gemma4_kv_replay.
     let rc = unsafe {
         sp_daemon_cuda_kvdecode_replay(handle, c_epdir.as_ptr(), npos, if zero { 1 } else { 0 })
+    };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B5 (§6e) — TEXT through the single latent entry seam.
+/// Per token id, the engine stages `embd[id]*sqrt(E)` into the inject buffer and steps
+/// the real id, so the residual entering layer 0 is bit-identical to `prefill(&id,1)`.
+/// This is the text SOURCE of the one residual seam (audio/memory enter the same way).
+/// The caller MUST hold the cache Mutex.
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`]; `tokens` valid for its length.
+pub unsafe fn inject_tokens(handle: *mut c_void, tokens: &[i32]) -> Result<(), String> {
+    if handle.is_null() || tokens.is_empty() {
+        return Err("kvdecode inject_tokens: NULL handle or empty tokens".to_string());
+    }
+    // SAFETY: handle live per caller; tokens slice gives ptr+len.
+    let rc = unsafe {
+        sp_daemon_cuda_kvdecode_inject_tokens(handle, tokens.as_ptr(), tokens.len() as c_int)
+    };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B5 (§6e) — the GENERIC residual-frame channel. Inject
+/// `frames.len()/E` raw E-float residual vectors at consecutive positions, each minted
+/// at `ph_token`. The seam AUDIO (EAR/KAI-3 projector) and MEMORY (decoded episode
+/// residuals) feed a turn through. `frames` is row-major `[n_frames][E]`. The caller
+/// MUST hold the cache Mutex and ensure `frames.len()` is a multiple of E (n_frames*E).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`]; `frames` valid for `n_frames*E`.
+pub unsafe fn inject_frames(
+    handle: *mut c_void,
+    frames: &[f32],
+    n_frames: i32,
+    ph_token: i32,
+) -> Result<(), String> {
+    if handle.is_null() || frames.is_empty() || n_frames <= 0 {
+        return Err("kvdecode inject_frames: NULL handle or empty frames".to_string());
+    }
+    // SAFETY: handle live per caller; frames slice gives the n_frames*E buffer.
+    let rc = unsafe {
+        sp_daemon_cuda_kvdecode_inject_frames(handle, frames.as_ptr(), n_frames, ph_token)
     };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }

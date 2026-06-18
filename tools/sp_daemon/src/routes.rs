@@ -215,6 +215,30 @@ pub struct ChatRequest {
     // the auditability/determinism null floor; not for normal chat.
     #[serde(default)]
     pub raw_logits: bool,
+    // CONTRACT-CHAT-FULLSTACK B5 — the SINGLE LATENT ENTRY POINT (CONTRACT §6).
+    // When set true, the prompt is ingested through the ONE residual seam
+    // (gemma4_kv_inject_tokens: per token, embd[id]*sqrt(E) staged into the inject
+    // override → the model mints K/V natively) INSTEAD of gemma4_kv_prefill(ids).
+    // The residual entering layer 0 is bit-identical to prefill by construction
+    // (same embed arithmetic + the real id as the step token so PLE matches), so
+    // output is bit-identical — this PROVES text, audio, and memory all enter
+    // through the one seam. Default None ⇒ the prefill path (untouched null floor);
+    // flip the daemon default by passing single_entry:true. Only honored on the
+    // 12B kvdecode (resident-cache) chat path.
+    #[serde(default)]
+    pub single_entry: Option<bool>,
+    // CONTRACT-CHAT-FULLSTACK B5 — the GENERIC residual-frame channel. Raw E-float
+    // residual vectors fed straight to gemma4_kv_inject_seq (the seam AUDIO/EAR and
+    // MEMORY-as-residual sources also use). Each inner Vec is one E-length frame;
+    // they are injected at consecutive positions right after the prompt prefill and
+    // before decode, each minted at `inject_ph` (default = the gemma-4 audio
+    // placeholder 258881). Use with `prompt`/`messages` (the text turn scaffold) so
+    // the model has context to digest the frames. Default None = no frames (null
+    // floor). Only honored on the 12B kvdecode (resident-cache) chat path.
+    #[serde(default)]
+    pub inject_frames: Option<Vec<Vec<f32>>>,
+    #[serde(default = "default_inject_ph")]
+    pub inject_ph: i32,
     // CONTRACT-CHAT-FULLSTACK A2 — sampling knobs (L2 owns sampling over the
     // full-vocab logits row). Flattened so the request body carries them at the
     // top level: {"prompt":"...","temperature":0.7,"top_p":0.95,...}. Defaults
@@ -226,6 +250,12 @@ pub struct ChatRequest {
 
 fn default_max_tokens() -> u32 {
     256
+}
+
+/// B5: default placeholder token for the generic inject_frames channel — the
+/// gemma-4 audio_token_id (the KAI-3 audio port's mint placeholder).
+fn default_inject_ph() -> i32 {
+    258881
 }
 
 #[derive(Serialize)]
@@ -346,6 +376,12 @@ pub async fn v1_chat(
     // B2 (§6d-b): per-turn XBAR episode replay (None = no recall = null floor).
     let replay_dir = req.replay.clone();
     let replay_npos = req.replay_npos;
+    // B5 (§6e): the single latent entry point. single_entry routes prompt ingest
+    // through gemma4_kv_inject_tokens (the residual seam) instead of prefill;
+    // inject_frames feeds raw residual frames (audio/memory) through the same seam.
+    let single_entry = req.single_entry.unwrap_or(false);
+    let inject_frames = req.inject_frames.clone();
+    let inject_ph = req.inject_ph;
     // A2: build the per-request sampler from the (flattened) ChatRequest knobs.
     let sampling = req.sampling.clone();
     // A2-polish: token ids the sampler must never emit — the full control /
@@ -407,6 +443,7 @@ pub async fn v1_chat(
                 &app, chat_id, &tokens, max_tokens, vocab_size,
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
                 &mut sampler, byteexact, replay_dir, replay_npos,
+                single_entry, inject_frames, inject_ph,
             );
             return;
         }
@@ -533,6 +570,9 @@ fn run_kvdecode_chat(
     byteexact: bool,
     replay_dir: Option<String>,
     replay_npos: i32,
+    single_entry: bool,
+    inject_frames: Option<Vec<Vec<f32>>>,
+    inject_ph: i32,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -595,12 +635,50 @@ fn run_kvdecode_chat(
     // Prefill prompt[..n-1] into the resident cache, then decode_step(last) to
     // obtain the first generated token's logits. For a 1-token prompt, skip the
     // prefill and decode_step the lone token directly.
+    //
+    // B5 (§6e) — the SINGLE LATENT ENTRY POINT. When single_entry is set, the
+    // prompt head is ingested through gemma4_kv_inject_tokens (the residual seam:
+    // per token, embd[id]*sqrt(E) staged into the inject override → the model mints
+    // K/V natively) instead of gemma4_kv_prefill(ids). The residual entering layer 0
+    // is bit-identical to prefill by construction, so this is the same ingest
+    // through the ONE seam audio + memory also use. The last token still goes
+    // through decode_step(last) below (it returns the first generation logits) — for
+    // single_entry we route the last token through inject_tokens too (its K/V is
+    // minted via the seam) and then decode_step(last) re-runs that position to fetch
+    // logits; bit-identical either way since the cache state at position p depends
+    // only on tokens[0..=p].
     let (head, last) = tokens.split_at(tokens.len() - 1);
     if !head.is_empty() {
-        if let Err(e) = unsafe { kv::prefill(handle, head) } {
-            send_err(format!("kvdecode prefill: {e}"));
+        let r = if single_entry {
+            unsafe { kv::inject_tokens(handle, head) }
+        } else {
+            unsafe { kv::prefill(handle, head) }
+        };
+        if let Err(e) = r {
+            send_err(format!("kvdecode {} head: {e}", if single_entry { "inject_tokens" } else { "prefill" }));
             sessions.remove(chat_id);
             return;
+        }
+    }
+    // B5 (§6e) — the GENERIC residual-frame channel. After the prompt scaffold is
+    // ingested, inject any raw residual frames (audio/memory source) at consecutive
+    // positions through the same seam (gemma4_kv_inject_seq via inject_frames). Each
+    // inner Vec is one E-length frame; a malformed (ragged) batch is rejected.
+    if let Some(frames) = inject_frames.as_ref() {
+        if !frames.is_empty() {
+            let e_dim = frames[0].len();
+            if e_dim == 0 || frames.iter().any(|f| f.len() != e_dim) {
+                send_err("kvdecode inject_frames: ragged/empty frames (each must be E floats)".into());
+                sessions.remove(chat_id);
+                return;
+            }
+            let n_frames = frames.len() as i32;
+            let flat: Vec<f32> = frames.iter().flatten().copied().collect();
+            if let Err(e) = unsafe { kv::inject_frames(handle, &flat, n_frames, inject_ph) } {
+                send_err(format!("kvdecode inject_frames(n={n_frames}, ph={inject_ph}): {e}"));
+                sessions.remove(chat_id);
+                return;
+            }
         }
     }
     // B2 (§6d-b): XBAR episode REPLAY into the live turn. Recall a stored episode's

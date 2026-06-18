@@ -135,6 +135,11 @@ extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
 extern int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
 /* CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — episode replay into the live turn. */
 extern int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero);
+/* CONTRACT-CHAT-FULLSTACK B5 (§6e) — the single latent entry seam.
+ *   inject_tokens: TEXT via the residual seam, bit-identical to prefill by construction.
+ *   inject_seq:    GENERIC residual-frame channel (audio/memory) at a placeholder. */
+extern int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n);
+extern int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token);
 
 /* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
  * gemma4_kv_open). pmax = max resident position budget. Requires the model to
@@ -206,6 +211,26 @@ int sp_daemon_cuda_kvdecode_replay(void *handle, const char *epdir, int npos, in
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || !epdir || npos <= 0) { sp_set_error("cuda kvdecode replay: bad args"); return -1; }
     return gemma4_kv_replay(s, epdir, npos, zero);
+}
+
+/* inject_tokens(handle, toks, n): CONTRACT-CHAT-FULLSTACK B5 (§6e) — TEXT through
+ * the single latent entry seam. Per token, stage embd[id]*sqrt(E) into the inject
+ * buffer and step the real id; the residual entering layer 0 is bit-identical to
+ * gemma4_kv_prefill(&id,1) (the B5 parity proof). 0 ok. */
+int sp_daemon_cuda_kvdecode_inject_tokens(void *handle, const int32_t *toks, int n) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !toks || n <= 0) { sp_set_error("cuda kvdecode inject_tokens: bad args"); return -1; }
+    return gemma4_kv_inject_tokens(s, toks, n);
+}
+
+/* inject_frames(handle, embs, n_frames, ph_token): CONTRACT-CHAT-FULLSTACK B5 (§6e) —
+ * the GENERIC residual-frame channel. Inject n_frames raw E-float residual vectors at
+ * n_frames consecutive positions, each minted at ph_token. This is the seam the AUDIO
+ * (EAR/KAI-3) and MEMORY (decoded episode residuals) sources feed through. 0 ok. */
+int sp_daemon_cuda_kvdecode_inject_frames(void *handle, const float *embs, int n_frames, int ph_token) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !embs || n_frames <= 0) { sp_set_error("cuda kvdecode inject_frames: bad args"); return -1; }
+    return gemma4_kv_inject_seq(s, embs, n_frames, ph_token);
 }
 
 /* ── Engine-kernel shim over math-core forward_dispatch ────────────────────

@@ -88,6 +88,40 @@ __global__ void k_embed_scale(const float *embd, const int *toks, int n_tok, int
         x[(size_t)t * E + i] = embd[(size_t)toks[t] * E + i] * scale;
 }
 
+/* CONTRACT-CHAT-FULLSTACK B5 — gather ONE token's post-embed residual (embd[tok]*scale)
+ * for the f32 embedding table into a target buffer `out[E]`. The single-position twin
+ * of k_embed_scale_at, but with a HOST-supplied literal `tok` (not dseq[*dpos]) and a
+ * caller buffer — so gemma4_kv_inject_tokens can stage embd[id]*sqrt(E) into s->dinj
+ * (the inject seam) with arithmetic BIT-IDENTICAL to the embed-at kernel the stock
+ * prefill step runs. grid = ceil(E/256). */
+__global__ void k_embed_scale_one(const float *embd, int tok, int E, float scale, float *out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < E) out[i] = embd[(size_t)tok * E + i] * scale;
+}
+
+/* CONTRACT-CHAT-FULLSTACK B5 — packed (OK_Q4B/Q8) twin of k_embed_scale_one. Mirrors
+ * k_embed_packed_at exactly (same dequant: inv = row_scale/qmax, true division) but with
+ * a HOST-supplied literal `tok` and a caller buffer. Bit-identical to the packed
+ * embed-at the stock prefill step runs for token `tok`. grid = ceil(E/256). */
+__global__ void k_embed_packed_one(const unsigned char *codes, const unsigned long long *row_off,
+                                   const float *row_scale, const unsigned char *row_prec,
+                                   int tok, int E, float scale, float *out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= E) return;
+    const unsigned char *rc = codes + row_off[tok];
+    int code; float inv;
+    if (row_prec[tok] == 8) {
+        code = (int)((const signed char *)rc)[i];
+        inv = row_scale[tok] / 127.0f;
+    } else {
+        unsigned char byte = rc[i >> 1];
+        int nib = (i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+        code = (nib ^ 8) - 8;
+        inv = row_scale[tok] / 7.0f;
+    }
+    out[i] = (float)code * inv * scale;
+}
+
 /* ===================== BYTE-EXACT substrate (SP_BYTEEXACT) =====================
  * Dual-prime modular constants + the exact-integer device helpers shared by the
  * byte-exact attention (k_attn_decode_win_bx, below) AND the nonlinear islands
@@ -4385,6 +4419,53 @@ extern "C" int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames
     for (int i = 0; i < n_frames; i++) {
         if (gemma4_kv_inject(s, embs + (size_t)i * s->E)) return -1;   /* sets error */
         if (gemma4_kv_prefill(s, &ph, 1)) return -1;                   /* consumes inj_active at live dpos */
+    }
+    return 0;
+}
+
+/* CONTRACT-CHAT-FULLSTACK B5 — TEXT through the single latent entry seam.
+ *
+ * The operator's single-entry-point architecture (CONTRACT §6): every modality
+ * enters the model through the ONE residual seam (gemma4_kv_inject* → the model
+ * mints K/V natively). This is the TEXT source of that seam: per token id, stage
+ * embd[id]*sqrt(E) DEVICE-SIDE into s->dinj (the same arithmetic k_embed_scale_at
+ * runs in a stock step — f32 table or packed OK_Q4B), arm the inject override, and
+ * step the SAME token id as the "placeholder" so the per-layer-embedding (PLE)
+ * stream gathers from the REAL id (not an audio placeholder).
+ *
+ * PARITY (the B5 proof): because (a) dinj holds embd[id]*sqrt(E) computed by the
+ * SAME kernel the stock embed-at step uses, so the dx override equals the value the
+ * step would have produced, and (b) the step token == id so PLE/dseq match, the
+ * residual entering layer 0 is BIT-IDENTICAL to gemma4_kv_prefill(&id,1). The whole
+ * decode downstream is therefore bit-identical — text-via-inject == text-via-prefill,
+ * by construction. The override path (inj_active → dx <- dinj in g4_kv_step) is
+ * genuinely exercised: this is the audio/memory entry, fed by the text projector.
+ *
+ * NULL floor: dead code unless called; gemma4_kv_prefill / decode stay byte-untouched.
+ * Returns 0 on success, -1 on any failure. */
+extern "C" int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n) {
+    if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_inject_tokens: bad args"); return -1; }
+    if (s->dpos_host + n > s->Pmax) { sp_set_error("gemma4_kv_inject_tokens: exceeds Pmax"); return -1; }
+    if (!s->dinj) { if (cudaMalloc(&s->dinj, (size_t)s->E*sizeof(float)) != cudaSuccess) {
+        sp_set_error("gemma4_kv_inject_tokens: dinj OOM"); return -1; } }
+    cudaStream_t st = g_w.stream;
+    const int E = s->E;
+    const float embscale = s->embscale;   /* sqrt(hidden_size), == prefill's embed_scale */
+    for (int i = 0; i < n; i++) {
+        const int32_t id = toks[i];
+        /* Stage embd[id]*sqrt(E) into dinj using the resident embedding source
+         * (f32 table or packed), arithmetic-identical to the stock embed-at step. */
+        if (g_w.embd) {
+            k_embed_scale_one<<<(unsigned)((E+255)/256), 256, 0, st>>>(g_w.embd, id, E, embscale, s->dinj);
+        } else {
+            k_embed_packed_one<<<(unsigned)((E+255)/256), 256, 0, st>>>(
+                g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
+                g_w.embd_packed.row_prec, id, E, embscale, s->dinj);
+        }
+        s->inj_active = 1;            /* g4_kv_step overrides dx <- dinj this position */
+        /* Step the REAL id (not a placeholder) so dseq[dpos]=id ⇒ PLE gathers from id,
+         * matching prefill exactly. gemma4_kv_prefill stores the H2D token + steps. */
+        if (gemma4_kv_prefill(s, &id, 1)) return -1;
     }
     return 0;
 }

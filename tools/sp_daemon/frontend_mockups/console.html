@@ -284,6 +284,14 @@
           <label title="byte-exact: exact-integer / dual-prime decode (run-to-run bit-identical). Pair with temp=0.">
             <input type="checkbox" id="s-byteexact"> auditable
           </label>
+          <!-- CONTRACT-CHAT-FULLSTACK B5: the SINGLE LATENT ENTRY POINT. Ingest the
+               prompt through the ONE residual seam (gemma4_kv_inject_tokens:
+               embd[id]*sqrt(E) → the model mints K/V natively) instead of prefill.
+               Bit-identical to prefill by construction — text, audio, and memory all
+               enter through this one seam. -->
+          <label title="single entry: ingest text through the one residual seam (inject_seq), the same seam audio + memory use. Bit-identical to prefill.">
+            <input type="checkbox" id="s-singleentry"> single-entry
+          </label>
         </div>
         <div class="right">
           <button class="toolbtn" id="rewind-toggle" title="Scrub the response timeline">
@@ -599,6 +607,9 @@
     if (seedRaw !== '') { const sd = parseInt(seedRaw, 10); if (Number.isFinite(sd)) out.seed = sd; }
     // B1: byte-exact "auditable mode" — top-level (not a SamplingParam).
     if ($('s-byteexact') && $('s-byteexact').checked) out.byteexact = true;
+    // B5: the single latent entry point — ingest text through the one residual
+    // seam (the same seam audio + memory enter through). Bit-identical to prefill.
+    if ($('s-singleentry') && $('s-singleentry').checked) out.single_entry = true;
     return out;
   }
 

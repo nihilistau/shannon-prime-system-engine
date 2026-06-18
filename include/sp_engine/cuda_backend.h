@@ -107,6 +107,25 @@ int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
  * (the chat path sets on=1 at request start, on=0 at end). 0 on success. */
 int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
 
+/* CONTRACT-CHAT-FULLSTACK B5: the SINGLE LATENT ENTRY POINT (CONTRACT §6).
+ *
+ * gemma4_kv_inject_tokens — TEXT through the residual seam. Per token id, stage
+ * embd[id]*sqrt(E) device-side into the inject buffer (the SAME arithmetic the
+ * stock embed-at step runs) and step the real id, so the residual entering layer 0
+ * is BIT-IDENTICAL to gemma4_kv_prefill(&id,1) — text-via-inject == text-via-prefill
+ * by construction. This is the text SOURCE of the one seam that audio (KAI-3) and
+ * memory also enter through; the override path is genuinely exercised.
+ *
+ * gemma4_kv_inject_seq — the GENERIC residual-frame channel (already in the engine;
+ * surfaced here for the daemon). Inject n_frames raw E-float residual vectors at
+ * n_frames consecutive positions, each minted at ph_token. This is the channel the
+ * AUDIO (EAR/KAI-3 projector) and MEMORY (decoded episode residuals) sources feed.
+ *
+ * Both are null-floor (dead code unless called); prefill/decode stay byte-untouched.
+ * 0 on success, -1 on failure. */
+int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n);
+int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token);
+
 /* CONTRACT-CHAT-FULLSTACK B2 (§6d-b): replay a stored episode's owner K/V directly
  * into the resident KV-decode cache at [dpos, dpos+npos) and advance dpos — the
  * persistent-ABI SP_REPLAY recall (C2 #222), rolling a prior memory into the live
