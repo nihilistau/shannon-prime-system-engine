@@ -587,6 +587,13 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         memo_vocab_size,
         // ledger-autowire: shared PoUW ledger handle (None when --pouw-ledger-path unset).
         ledger,
+        // Sprint WIRE-CUDA-DECODE-GEMMA4 — resident KV-decode cache. SCAFFOLD:
+        // None until the INTEGRATION step opens it at startup behind
+        // SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1 (addendum §5/§7.4) via
+        // cuda_kvdecode_dispatch::register_with_session, wrapped in
+        // CudaKvDecodeHandle. Field is feature-gated to match the AppState decl.
+        #[cfg(feature = "wire_cuda_backend")]
+        cuda_kvdecode_handle: None,
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]

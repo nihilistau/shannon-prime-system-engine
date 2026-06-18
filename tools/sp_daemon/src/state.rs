@@ -137,6 +137,18 @@ pub struct AppState {
     // HTTP response still returns receipts; nothing is persisted daemon-side).
     pub ledger: Option<Arc<Mutex<Ledger>>>,
 
+    /// Sprint WIRE-CUDA-DECODE-GEMMA4 — session-resident `sp_g4_kv*` KV-decode
+    /// cache (the persistent-KV decode path the prefill hook cannot serve; see
+    /// `WIRE-CUDA-DECODE-GEMMA4.md`). `Some` when the daemon was built with
+    /// `--features wire_cuda_backend` AND opened the cache at startup
+    /// (`SP_DAEMON_BACKEND=cuda` + `SP_DAEMON_KVDECODE=1`, the INTEGRATION step).
+    /// The inner pointer is an opaque device handle owned by the CUDA backend;
+    /// `CudaKvDecodeHandle` is the `Send + Sync` wrapper. `Mutex` serializes the
+    /// step calls (the resident cache is single-writer). Dropped before `model`
+    /// (declaration order) so the device cache frees while the model is alive.
+    #[cfg(feature = "wire_cuda_backend")]
+    pub cuda_kvdecode_handle: Option<Mutex<CudaKvDecodeHandle>>,
+
     // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the
     /// skel could not be admitted; `/v1/dsp/echo` then returns 501. Per-request
@@ -166,6 +178,32 @@ pub struct AppState {
     /// follow-on sprint, the registered backend is stored but never invoked.
     #[cfg(target_os = "android")]
     pub ntt_hex_backend: Option<Arc<sp_daemon::ntt_hex_dispatch::ComputeBackend>>,
+}
+
+/// Sprint WIRE-CUDA-DECODE-GEMMA4 — `Send + Sync` wrapper for the resident
+/// `sp_g4_kv*` KV-decode cache handle (an opaque CUDA device pointer, hence
+/// `!Send + !Sync`). axum's `State<Arc<AppState>>` requires `Send + Sync`.
+///
+/// Soundness: the handle is created on the startup thread by
+/// `cuda_kvdecode_dispatch::register_with_session` and every subsequent
+/// `decode_step` / `rewind` / `close` is serialized by the enclosing
+/// `Mutex<CudaKvDecodeHandle>` in `AppState` — only one thread ever holds the
+/// raw pointer at a time, and the CUDA backend's own stream (g_w.stream) is the
+/// single device queue. The pointer is never dereferenced in Rust; it only
+/// crosses the FFI boundary back into the glue, which owns the device state.
+#[cfg(feature = "wire_cuda_backend")]
+pub struct CudaKvDecodeHandle(pub *mut std::ffi::c_void);
+#[cfg(feature = "wire_cuda_backend")]
+unsafe impl Send for CudaKvDecodeHandle {}
+#[cfg(feature = "wire_cuda_backend")]
+unsafe impl Sync for CudaKvDecodeHandle {}
+#[cfg(feature = "wire_cuda_backend")]
+impl Drop for CudaKvDecodeHandle {
+    fn drop(&mut self) {
+        // SAFETY: the pointer is an sp_g4_kv* from register_with_session (or
+        // NULL); close is NULL-safe; not used after drop.
+        unsafe { sp_daemon::cuda_kvdecode_dispatch::release_for_model(self.0) };
+    }
 }
 
 /// §3-HX Sprint J.5 — `Send + Sync` wrapper for the DSP-resident model.

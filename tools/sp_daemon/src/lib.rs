@@ -44,6 +44,17 @@ pub mod hex_forward_dispatch;
 #[cfg(feature = "wire_cuda_backend")]
 pub mod cuda_forward_dispatch;
 
+// Sprint WIRE-CUDA-DECODE-GEMMA4 — persistent-KV DECODE backend dispatch, the
+// step-wise sibling of cuda_forward_dispatch (which is PREFILL-ONLY by the
+// sp_l1.h §6 contract). Routes the daemon's token-by-token sp_decode_step
+// through the engine's resident `gemma4_kv_*` cache (cuda_forward.cu) so a 12B
+// OK_Q4B model can decode with the tied full-vocab head materialized (the
+// prefill hook trips `g4 probe: FULL head needs the f32 embd`). Rides the SAME
+// `wire_cuda_backend` feature (the CUDA lib it links already carries the
+// gemma4_kv_* symbols). Design: tools/sp_daemon/WIRE-CUDA-DECODE-GEMMA4.md.
+#[cfg(feature = "wire_cuda_backend")]
+pub mod cuda_kvdecode_dispatch;
+
 // Sprint WIRE-VULKAN — host-side analog of hex_forward_dispatch for the
 // Vulkan compute backend. Routes sp_prefill_chunk through
 // gemma3_forward_vulkan / qwen3_forward_vulkan (the engine's host SPIR-V

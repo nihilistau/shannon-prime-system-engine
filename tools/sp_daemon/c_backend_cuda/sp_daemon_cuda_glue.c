@@ -100,6 +100,94 @@ void sp_daemon_cuda_release(const void *qm_opaque) {
     if (qm) sp_cuda_model_release(qm);
 }
 
+/* ── Sprint WIRE-CUDA-DECODE-GEMMA4: persistent-KV decode glue ──────────────
+ *
+ * The prefill dispatcher above (sp_daemon_cuda_forward) is PREFILL-ONLY: it
+ * re-runs the full forward over the accumulated history and, for a 12B OK_Q4B
+ * model, the tied full-vocab head is reserved for the DECODE path, so driving
+ * decode through it trips `g4 probe: FULL head needs the f32 embd`
+ * (cuda_forward.cu:1627). These six glue fns adapt the new
+ * sp_kvdecode_dispatch_fn table (WIRE-CUDA-DECODE-GEMMA4.md §2) onto the
+ * `gemma4_kv_*` C ABI already compiled into THIS lib from cuda_forward.cu
+ * (declared inline in tests/test_gemma4_cuda.c:65-79; defined extern "C" at
+ * cuda_forward.cu ~3478-3960). The opaque handle is an `sp_g4_kv*`.
+ *
+ * gemma4_kv_* is the engine null floor (byte-untouched). The ONLY additive
+ * engine symbol this glue needs is the logits-returning decode step (§3.1
+ * option A): gemma4_kv_decode_logits — NOT yet in cuda_forward.cu. Until it
+ * lands at INTEGRATION the `step` body below is a TODO(WIRE-CUDA-DECODE) stub
+ * that surfaces a clear error rather than silently arg-maxing.
+ *
+ * Forward-declared here (the glue stays free of the engine include path beyond
+ * cuda_backend.h; these match the test-file prototypes exactly). sp_g4_kv is
+ * opaque on this side — we only ever pass the pointer through. */
+typedef struct sp_g4_kv sp_g4_kv;
+extern sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
+extern int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
+extern int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
+extern int   gemma4_kv_pos(const sp_g4_kv *s);
+extern void  gemma4_kv_close(sp_g4_kv *s);
+/* TODO(WIRE-CUDA-DECODE): additive logits-returning step (addendum §3.1.A).
+ * Declared here so the glue compiles against the intended symbol; the engine
+ * definition is the INTEGRATION step. Until then `step` returns an error.
+ *   extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits); */
+
+/* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
+ * gemma4_kv_open). pmax = max resident position budget. Requires the model to
+ * be SP_ARCH_GEMMA4 and SP_CUDA_DECODE_INT8=1 in the env (tied head). */
+void *sp_daemon_cuda_kvdecode_open(const void *qm_opaque, int pmax) {
+    const qwen3_model *qm = (const qwen3_model *)qm_opaque;
+    if (!qm) { sp_set_error("cuda kvdecode open: NULL qwen3_model"); return 0; }
+    if (qm->cfg.arch != SP_ARCH_GEMMA4) {
+        sp_set_error("cuda kvdecode open: persistent-KV decode is SP_ARCH_GEMMA4 only");
+        return 0;
+    }
+    return (void *)gemma4_kv_open(qm, pmax);
+}
+
+/* prefill(handle, tokens, n): ingest history into the resident cache. 0 ok. */
+int sp_daemon_cuda_kvdecode_prefill(void *handle, const int32_t *tokens, int n_tok) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !tokens || n_tok <= 0) { sp_set_error("cuda kvdecode prefill: bad args"); return -1; }
+    return gemma4_kv_prefill(s, tokens, n_tok);
+}
+
+/* decode_step(handle, token, logits): forward ONE token at the live dpos, write
+ * the full-vocab logits row [n_vocab] for the NEXT position, advance dpos.
+ *
+ * TODO(WIRE-CUDA-DECODE): wire to the additive gemma4_kv_decode_logits once it
+ * exists in cuda_forward.cu (addendum §3.1 option A + §7 step 1):
+ *   return gemma4_kv_decode_logits(s, token, logits);
+ * Until then surface a clear, non-silent error (the gate stays RED, by design —
+ * no fake greedy path that would lose L2-side sampling). */
+int sp_daemon_cuda_kvdecode_step(void *handle, int32_t token, float *logits) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !logits) { sp_set_error("cuda kvdecode step: bad args"); return -1; }
+    (void)token;
+    sp_set_error("cuda kvdecode step: TODO(WIRE-CUDA-DECODE) — needs additive "
+                 "gemma4_kv_decode_logits (WIRE-CUDA-DECODE-GEMMA4.md §3.1.A/§7.1)");
+    return -1;
+}
+
+/* rewind(handle, n): O(1) cold-evict (dpos -= n). 0 ok. */
+int sp_daemon_cuda_kvdecode_rewind(void *handle, int n) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || n < 0) { sp_set_error("cuda kvdecode rewind: bad args"); return -1; }
+    return gemma4_kv_rewind(s, n);
+}
+
+/* position(handle): current dpos, -1 on NULL. */
+int sp_daemon_cuda_kvdecode_position(const void *handle) {
+    const sp_g4_kv *s = (const sp_g4_kv *)handle;
+    return gemma4_kv_pos(s);
+}
+
+/* close(handle): free the resident cache. NULL-safe. */
+void sp_daemon_cuda_kvdecode_close(void *handle) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (s) gemma4_kv_close(s);
+}
+
 /* ── Engine-kernel shim over math-core forward_dispatch ────────────────────
  *
  * cuda_forward.cu reaches for `sp_engine/kernels.h` entry points by unprefixed
