@@ -3771,9 +3771,170 @@ struct sp_g4_kv {
      * cap_active ⇒ next step D2H its post-embed dx into cap_host; inj_active ⇒ next step
      * overrides dx with dinj (E floats). One-shot flags, cleared after the step consumes them. */
     float *dinj; float *cap_host; int inj_active, cap_active;
+    /* CONTRACT-CHAT-FULLSTACK A1 — CUDA-graph fast decode. The decode GENERATE
+     * step is topology-static (every position-dependent kernel reads the DEVICE
+     * dpos pointer, exactly as the one-shot graph decode in gemma4_decode_cuda),
+     * so it can be captured ONCE and replayed per token — collapsing ~960 host
+     * kernel launches/token to a single cudaGraphLaunch. Off-by-default null
+     * floor: only armed when SP_G4_KV_GRAPH=1 AND the step is graph-safe (do_head,
+     * no inject/capture seam, no SWA-ring, attn_shm<=48KB, PLE device-ready).
+     * graph_mode: -1 = undecided, 0 = disabled (stay per-step), 1 = armed. */
+    int graph_mode, graph_ready;
+    cudaGraph_t gcap; cudaGraphExec_t gexec;
 };
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
+static int g4_kv_step(sp_g4_kv *s, int do_head);  /* A1: fwd for g4_kv_step_graph fallback */
+
+/* CONTRACT-CHAT-FULLSTACK A1 — the GRAPH-SAFE per-step kernel body (full cache,
+ * no inject/capture seam, no SWA-ring). This is the EXACT kernel sequence
+ * g4_kv_step launches on its full-cache, no-overlay path, factored out so it can
+ * be either (a) launched directly per token, or (b) recorded into a CUDA graph
+ * once and replayed. It contains NO host synchronization and NO host-conditional
+ * D2H — a hard requirement for stream capture. Every position-dependent kernel
+ * reads the DEVICE dpos pointer, so a graph captured at one position replays
+ * bit-identically at any later position (the same invariant gemma4_decode_cuda's
+ * one-shot graph relies on). do_head: run out_norm+tied head+softcap+argmax. */
+static int g4_kv_launch_full(sp_g4_kv *s, int do_head) {
+    const qwen3_model *m = s->m;
+    cublasHandle_t cb = g_w.cublas; cudaStream_t st = g_w.stream;
+    const int E=s->E, NL=s->NL, V=s->V, SW=s->SW, period=s->period, kvfs=s->kvfs;
+    const int PL=s->PL, NLPL=s->NLPL;
+    const int g_nh=s->g_nh,g_nkv=s->g_nkv,g_hd=s->g_hd,s_nh=s->s_nh,s_nkv=s->s_nkv,s_hd=s->s_hd;
+    const float eps=s->eps, embscale=s->embscale, softcap=s->softcap;
+    const float g_base=s->g_base, s_base=s->s_base;
+    const int use_int8=s->use_int8;
+    int *dpos=s->dpos, *dseq=s->dseq;
+    float **dKc=s->dKc, **dVc=s->dVc;
+    const size_t attn_shm = (size_t)s->Pmax * sizeof(float);
+    #define KMMD(W,X,Y) do { if (!(use_int8 && gemv_w_packed(st,(W),(X),(Y),s->dqx,s->dsx))) { \
+        if (gemm_w_lift(cb, st, (W), (X), (Y), 1, s->dscr)) return -1; } } while (0)
+    if (g_w.embd) { dim3 grid(1, (E + 255) / 256);
+        k_embed_scale_at<<<grid, 256, 0, st>>>(g_w.embd, dseq, dpos, E, embscale, s->dx); }
+    else k_embed_packed_at<<<(unsigned)((E+255)/256), 256, 0, st>>>(
+            g_w.embd_packed.codes, g_w.embd_packed.row_off, g_w.embd_packed.row_scale,
+            g_w.embd_packed.row_prec, dseq, dpos, E, embscale, s->dx);
+    if (PL) {
+        k_ple_gather_at<<<(unsigned)((NLPL+255)/256), 256, 0, st>>>(
+            g_w.pl_tok_embd.codes, g_w.pl_tok_embd.row_off, g_w.pl_tok_embd.row_scale,
+            g_w.pl_tok_embd.row_prec, dseq, dpos, NLPL, s->dple);
+        KMMD(&g_w.pl_model_proj, s->dx, s->dipl);
+        k_altup_ipl<<<NL, 256, 0, st>>>(s->dipl, s->dple, g_w.pl_proj_norm, PL,
+                                        1.0f / sqrtf((float)E), sqrtf((float)PL),
+                                        1.0f / sqrtf(2.0f), eps);
+    }
+    for (int L = 0; L < NL; L++) {
+        const int global = ((L % period) == period - 1);
+        const int nh = global ? g_nh : s_nh, nkv = global ? g_nkv : s_nkv;
+        const int hd = global ? g_hd : s_hd;
+        const int grp = nh / nkv, kvd = nkv * hd;
+        const float rbase = global ? g_base : s_base;
+        const float *ffac = global ? g_w.rope_freqs : NULL;
+        const int win = global ? -1 : SW;
+        const int ffL = g_w.Wgate[L].out;
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.attn_norm[L], E, eps, s->dnx);
+        KMMD(&g_w.Wq[L], s->dnx, s->dq);
+        k_rmsnorm_head<<<nh, 256, 0, st>>>(s->dq, g_w.q_norm[L], nh, hd, nh*hd, eps);
+        if (ffac) k_rope_freqs_dyn<<<nh, hd/2, 0, st>>>(s->dq, nh, hd, rbase, ffac, dpos);
+        else      k_rope_dyn<<<nh, hd/2, 0, st>>>(s->dq, nh, hd, nh*hd, rbase, dpos);
+        float *Kuse, *Vuse;
+        if (L < kvfs) {
+            KMMD(&g_w.Wk[L], s->dnx, s->dk);
+            if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { KMMD(&g_w.Wv[L], s->dnx, s->dv); }
+            else cudaMemcpyAsync(s->dv, s->dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            k_rmsnorm_head<<<nkv, 256, 0, st>>>(s->dk, g_w.k_norm[L], nkv, hd, kvd, eps);
+            if (ffac) k_rope_freqs_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, rbase, ffac, dpos);
+            else      k_rope_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, kvd, rbase, dpos);
+            k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(s->dv, nkv, hd, kvd, eps);
+            k_kv_store<<<(unsigned)((kvd+255)/256), 256, 0, st>>>(dKc[L], dVc[L], s->dk, s->dv, dpos, 0, kvd);
+            Kuse = dKc[L]; Vuse = dVc[L];
+        } else {
+            const int src = kvfs - (global ? 1 : 2);
+            Kuse = dKc[src]; Vuse = dVc[src];
+            if (!Kuse || !Vuse) { sp_set_error("g4_kv: sharer before owner"); return -1; }
+        }
+        {   int bd = hd > 256 ? hd : 256; if (bd > 1024) bd = 1024;
+            k_attn_decode_win_dyn<<<nh, bd, attn_shm, st>>>(
+                s->dq, Kuse, Vuse, dpos, kvd, hd, grp, 1.0f, win, s->dao); }
+        KMMD(&g_w.Wo[L], s->dao, s->dap);
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dap, g_w.post_attn[L], E, eps, s->dnx);
+        k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.ffn_norm[L], E, eps, s->dnx);
+        KMMD(&g_w.Wgate[L], s->dnx, s->dg);
+        KMMD(&g_w.Wup[L], s->dnx, s->dup);
+        k_gelu_mul<<<(unsigned)(((size_t)ffL+255)/256), 256, 0, st>>>(s->dg, s->dup, (size_t)ffL);
+        KMMD(&g_w.Wdown[L], s->dg, s->ddn);
+        k_rmsnorm<<<1, 256, 0, st>>>(s->ddn, g_w.post_ffw[L], E, eps, s->dnx);
+        k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        if (PL) {
+            KMMD(&g_w.Wplig[L], s->dx, s->dpg);
+            k_altup_gate<<<(unsigned)((PL+255)/256), 256, 0, st>>>(s->dpg, s->dipl, L, NL, PL, 1);
+            KMMD(&g_w.Wplproj[L], s->dpg, s->dpp);
+            k_rmsnorm<<<1, 256, 0, st>>>(s->dpp, g_w.pl_post_norm[L], E, eps, s->dnx);
+            k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        }
+        if (g_w.pl_out_scale && g_w.pl_out_scale[L])
+            k_scale_by_dev<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, (size_t)E, g_w.pl_out_scale[L]);
+    }
+    if (do_head) {
+        k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.out_norm, E, eps, s->dnx);
+        if (g_w.head.f32 || g_w.head.codes) { KMMD(&g_w.head, s->dnx, s->dlog); }
+        else if (use_int8 && g_w.embd_packed.codes &&
+                 gemv_w_packed(st, &g_w.embd_packed, s->dnx, s->dlog, s->dqx, s->dsx)) { }
+        else { if (gemm(cb, g_w.embd, s->dnx, s->dlog, 1, E, V)) return -1; }
+        if (softcap > 0.0f)
+            k_softcap<<<(unsigned)(((size_t)V+255)/256), 256, 0, st>>>(s->dlog, (size_t)V, softcap);
+        k_argmax_at<<<1, 256, 0, st>>>(s->dlog, V, dseq, dpos);
+    }
+    k_incr_pos<<<1, 1, 0, st>>>(dpos);
+    (void)m;
+    #undef KMMD
+    return 0;
+}
+
+/* A1 — graph-safe decode step. Decides ONCE whether this cache can run on a
+ * captured graph (SP_G4_KV_GRAPH=1, full-cache, no inject/capture seam,
+ * attn_shm<=48KB, PLE device-ready when PL). If armed: capture g4_kv_launch_full
+ * the first time, then replay the exec graph per call. If not armed, the caller
+ * stays on the per-step g4_kv_step. Returns 0/-1. do_head must be 1 (decode). */
+static int g4_kv_step_graph(sp_g4_kv *s) {
+    cudaStream_t st = g_w.stream;
+    if (s->graph_mode < 0) {
+        static int want = -1;
+        if (want < 0) { const char *e = getenv("SP_G4_KV_GRAPH"); want = (e && e[0]=='1') ? 1 : 0; }
+        const size_t attn_shm = (size_t)s->Pmax * sizeof(float);
+        const int safe = want && s->ring_W == 0 && !s->inj_active && !s->cap_active
+                         && attn_shm <= 48u*1024u && (!s->PL || s->dev_ple);
+        s->graph_mode = safe ? 1 : 0;
+        if (safe) fprintf(stderr, "    [g4-kv] GRAPH decode armed (SP_G4_KV_GRAPH=1; capturing one decode step)\n");
+    }
+    if (s->graph_mode == 0) return g4_kv_step(s, /*do_head=*/1);
+
+    /* Inject/capture cannot coexist with a replayed graph (they mutate dx via a
+     * host-sync seam). If a seam fires mid-session, drop to per-step for it. */
+    if (s->inj_active || s->cap_active) return g4_kv_step(s, /*do_head=*/1);
+
+    if (!s->graph_ready) {
+        if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+            sp_set_error("g4_kv graph begin capture"); return -1; }
+        if (g4_kv_launch_full(s, /*do_head=*/1)) {
+            cudaStreamEndCapture(st, &s->gcap); return -1; }
+        if (cudaStreamEndCapture(st, &s->gcap) != cudaSuccess) {
+            sp_set_error("g4_kv graph end capture"); return -1; }
+        if (cudaGraphInstantiate(&s->gexec, s->gcap, NULL, NULL, 0) != cudaSuccess) {
+            sp_set_error("g4_kv graph instantiate"); return -1; }
+        s->graph_ready = 1;
+        /* The capture itself executed one real step (capture mode records but
+         * does NOT run the kernels), so dpos has NOT advanced — launch once to
+         * make the first decode actually happen. */
+        if (cudaGraphLaunch(s->gexec, st) != cudaSuccess) {
+            sp_set_error("g4_kv graph first launch"); return -1; }
+        return 0;
+    }
+    if (cudaGraphLaunch(s->gexec, st) != cudaSuccess) {
+        sp_set_error("g4_kv graph launch"); return -1; }
+    return 0;
+}
 
 /* one resident-cache forward step at the live dpos. do_head: run out_norm+head+
  * argmax (writes dseq[dpos+1]) for a decode step; skip for a prefill ingest.
@@ -3959,6 +4120,8 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     if (s->ring_W < 0 || s->ring_W > Pmax) s->ring_W = 0;
     if (s->Jmax < 1) s->Jmax = 1;
     s->commit_pos = 0; s->jcur = 0; s->jK = NULL; s->jV = NULL;
+    /* A1: CUDA-graph decode state (lazily armed in g4_kv_step_graph). */
+    s->graph_mode = -1; s->graph_ready = 0; s->gcap = NULL; s->gexec = NULL;
     /* the JAGGED cache — owners only, per-layer width. */
     s->dKc=(float**)calloc((size_t)s->NL,sizeof(float*));
     s->dVc=(float**)calloc((size_t)s->NL,sizeof(float*));
@@ -4035,7 +4198,11 @@ extern "C" int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits
     if (cudaMemcpyAsync(s->dseq + s->dpos_host, &token, sizeof(int),
                         cudaMemcpyHostToDevice, st) != cudaSuccess) {
         sp_set_error("gemma4_kv_decode_logits: token H2D"); return -1; }
-    if (g4_kv_step(s, /*do_head=*/1)) return -1;
+    /* A1: route through the CUDA-graph fast step when SP_G4_KV_GRAPH=1 (and the
+     * cache is graph-safe). Off-by-default = the per-step g4_kv_step null floor.
+     * Bit-identical either way: the graph records the SAME kernel sequence with
+     * the SAME device-dpos reads. */
+    if (g4_kv_step_graph(s)) return -1;
     /* D2H the post-softcap full-vocab logits row for the NEXT position. */
     if (cudaMemcpyAsync(logits, s->dlog, (size_t)s->V * sizeof(float),
                         cudaMemcpyDeviceToHost, st) != cudaSuccess) {
@@ -4283,6 +4450,8 @@ extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (s->jK) { for (int L=0;L<s->NL;L++) if (s->jK[L]) cudaFree(s->jK[L]); free(s->jK); }   /* KAI-1c undo-journal */
     if (s->jV) { for (int L=0;L<s->NL;L++) if (s->jV[L]) cudaFree(s->jV[L]); free(s->jV); }
     if (s->dinj) cudaFree(s->dinj);   /* KAI-2 inject staging */
+    if (s->gexec) cudaGraphExecDestroy(s->gexec);   /* A1: graph decode teardown */
+    if (s->gcap)  cudaGraphDestroy(s->gcap);
     free(s);
 }
 

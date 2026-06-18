@@ -183,6 +183,13 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     #[serde(default)]
     pub stop: Vec<String>,
+    // CONTRACT-CHAT-FULLSTACK A2 — sampling knobs (L2 owns sampling over the
+    // full-vocab logits row). Flattened so the request body carries them at the
+    // top level: {"prompt":"...","temperature":0.7,"top_p":0.95,...}. Defaults
+    // are the contract's pre-registered values; `temperature:0` = greedy argmax
+    // (bit-identical to the prior hardcoded path, the G-CHAT-A2 determinism leg).
+    #[serde(flatten)]
+    pub sampling: crate::sampler::SamplingParams,
 }
 
 fn default_max_tokens() -> u32 {
@@ -281,6 +288,12 @@ pub async fn v1_chat(
     let vocab_size = state.vocab_size;
     let app = state.clone();
     let max_tokens = req.max_tokens;
+    // A2: build the per-request sampler from the (flattened) ChatRequest knobs.
+    let sampling = req.sampling.clone();
+    // A2: token ids the sampler must never emit (the <image|> placeholder
+    // attractor) — masked to -inf on the sampled path only (greedy stays the
+    // exact old argmax). Computed once from the tokenizer's id_to_bytes.
+    let suppress_ids = state.tokenizer.suppress_token_ids();
     // Issue #115: when the client supplies no stop strings, fall back to the
     // arch's chat-format terminator (gemma's `<end_of_turn>`) so the console
     // stream ends at the turn boundary instead of running to max_tokens.
@@ -305,6 +318,8 @@ pub async fn v1_chat(
         let _g = _guard; // keep guard alive for the duration of the blocking closure
         let mut logits = vec![0.0f32; vocab_size];
         let mut dec_buf = TokenDecodeBuffer::new(stop_strings);
+        // A2: the L2 sampler for this turn (temp=0 ⇒ strict argmax null floor).
+        let mut sampler = crate::sampler::Sampler::with_suppress(sampling, suppress_ids);
 
         // Issue #115 (12B chat path): when the CUDA persistent-KV decode backend
         // is registered (SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1 +
@@ -325,6 +340,7 @@ pub async fn v1_chat(
             run_kvdecode_chat(
                 &app, chat_id, &tokens, max_tokens, vocab_size,
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
+                &mut sampler,
             );
             return;
         }
@@ -340,7 +356,8 @@ pub async fn v1_chat(
             }
         }
 
-        let mut next_token = argmax(&logits);
+        let mut next_token = sampler.sample(&mut logits);
+        sampler.observe(next_token);
 
         'decode: for _ in 0..max_tokens {
             // EOS check before emitting.
@@ -383,7 +400,10 @@ pub async fn v1_chat(
             }
 
             match child.decode_step(next_token, &mut logits) {
-                Ok(()) => next_token = argmax(&logits),
+                Ok(()) => {
+                    next_token = sampler.sample(&mut logits);
+                    sampler.observe(next_token);
+                }
                 Err(_) => break 'decode,
             }
         }
@@ -437,6 +457,7 @@ fn run_kvdecode_chat(
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     cancel_child: &Arc<AtomicI32>,
     sessions: &crate::sessions::Sessions,
+    sampler: &mut crate::sampler::Sampler,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -496,7 +517,8 @@ fn run_kvdecode_chat(
     }
 
     let tokenizer = app.tokenizer.clone();
-    let mut next_token = argmax(logits);
+    let mut next_token = sampler.sample(logits);
+    sampler.observe(next_token);
 
     'decode: for _ in 0..max_tokens {
         if !tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token) {
@@ -541,7 +563,8 @@ fn run_kvdecode_chat(
         if let Err(_e) = unsafe { kv::decode_step(handle, next_token, logits) } {
             break 'decode;
         }
-        next_token = argmax(logits);
+        next_token = sampler.sample(logits);
+        sampler.observe(next_token);
     }
 
     let flushed = dec_buf.flush();
@@ -563,14 +586,8 @@ fn run_kvdecode_chat(
     sessions.remove(chat_id);
 }
 
-fn argmax(logits: &[f32]) -> i32 {
-    logits
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i as i32)
-        .unwrap_or(0)
-}
+// A2: `fn argmax` moved to `crate::sampler::argmax` (the temp=0 null floor);
+// both decode loops now go through `Sampler::sample`.
 
 // ── /v1/abort/{id} ────────────────────────────────────────────────────────
 

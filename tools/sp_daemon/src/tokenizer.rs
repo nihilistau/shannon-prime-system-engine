@@ -356,6 +356,26 @@ impl SptbTokenizer {
         }
     }
 
+    /// CONTRACT-CHAT-FULLSTACK A2 — token ids the text-chat sampler must never
+    /// emit. The gemma4-12b artifact carries an image-placeholder control token
+    /// that decodes to the literal bytes `<image|>`; it has an abnormally high
+    /// LM-head logit and is the `<image|>` decode-loop attractor the contract
+    /// flags. It is never a valid TEXT output, so we mask its logit to -inf in
+    /// the sampler (standard suppress-tokens / bad-words practice). Computed
+    /// from `id_to_bytes` so it stays correct regardless of the token's id.
+    /// Returns every id whose decoded bytes contain an image-placeholder marker.
+    pub fn suppress_token_ids(&self) -> Vec<i32> {
+        let mut out = Vec::new();
+        for (id, bytes) in self.id_to_bytes.iter().enumerate() {
+            // Match the placeholder marker bytes. `<image|>` (this artifact) and
+            // the canonical gemma `<image_soft_token>` are both caught.
+            if contains_subslice(bytes, b"<image") {
+                out.push(id as i32);
+            }
+        }
+        out
+    }
+
     pub fn apply_template(&self, messages: &[Message]) -> Result<String, TemplateError> {
         match self.arch_id {
             ARCH_QWEN3 | ARCH_QWEN25 => Ok(chatml_template(messages)),
@@ -365,6 +385,14 @@ impl SptbTokenizer {
             _ => Err(TemplateError { arch_id: self.arch_id }),
         }
     }
+}
+
+/// A2 helper: true if `hay` contains `needle` as a contiguous subslice.
+fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return needle.is_empty();
+    }
+    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 // ── Chat templates ─────────────────────────────────────────────────────────

@@ -19,6 +19,10 @@ mod kv_cache;
 mod ffi;
 mod mining;
 mod routes;
+// CONTRACT-CHAT-FULLSTACK A2: the L2 sampler (temperature / top-k / top-p /
+// repetition penalty / seeded RNG) over the full-vocab logits row. temp=0 =
+// strict argmax null floor (G-CHAT-A2 determinism leg).
+mod sampler;
 mod server;
 mod session;
 mod sessions;

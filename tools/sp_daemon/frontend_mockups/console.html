@@ -122,6 +122,11 @@
   .canvas-head .title { font-size: 11px; letter-spacing: 3px; color: var(--gold); font-weight: 600; }
   .canvas-head .sub { font-size: 9px; letter-spacing: 2px; color: var(--text-faint); }
   .canvas-head .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  /* A2 sampler controls */
+  .sampler-row { display: flex; align-items: center; gap: 10px; font-size: 9px; letter-spacing: 1px; color: var(--text-faint); }
+  .sampler-row label { display: flex; align-items: center; gap: 4px; text-transform: uppercase; }
+  .sampler-row input { width: 42px; background: rgba(8,9,13,0.8); border: 1px solid var(--rule); color: var(--gold); font-family: var(--font); font-size: 10px; padding: 2px 4px; border-radius: 2px; }
+  .sampler-row input:focus { outline: none; border-color: var(--gold); }
   .toolbtn { border: 1px solid var(--rule); background: transparent; color: var(--text-dim); font-family: var(--font); font-size: 10px; letter-spacing: 2px; padding: 6px 12px; cursor: pointer; border-radius: 2px; transition: all 0.15s; display: flex; align-items: center; gap: 6px; }
   .toolbtn:hover { color: var(--gold); border-color: var(--gold); background: rgba(212,161,74,0.08); }
   .toolbtn:active { transform: translateY(1px); }
@@ -263,6 +268,16 @@
       <div class="canvas-head">
         <span class="title">canvas</span>
         <span class="sub">/v1/chat · sse · text/event-stream</span>
+        <!-- CONTRACT-CHAT-FULLSTACK A2: L2 sampler controls. temp=0 ⇒ greedy
+             argmax (the deterministic null floor). These flow into the
+             /v1/chat POST body (flattened SamplingParams). -->
+        <div class="sampler-row" id="sampler-row" title="L2 sampler — temp 0 = greedy/deterministic">
+          <label>temp <input type="number" id="s-temp" min="0" max="2" step="0.05" value="0.7"></label>
+          <label>top_p <input type="number" id="s-topp" min="0" max="1" step="0.01" value="0.95"></label>
+          <label>top_k <input type="number" id="s-topk" min="0" max="200" step="1" value="40"></label>
+          <label>rep <input type="number" id="s-rep" min="1" max="2" step="0.05" value="1.1"></label>
+          <label>seed <input type="text" id="s-seed" placeholder="rand" style="width:54px"></label>
+        </div>
         <div class="right">
           <button class="toolbtn" id="rewind-toggle" title="Scrub the response timeline">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M5 1 L1 5 L5 9 L5 6 L9 6 L9 4 L5 4 Z"/></svg>
@@ -563,6 +578,21 @@
     return s + '<start_of_turn>model\n';
   }
 
+  /* A2: read the sampler controls into the /v1/chat body (flattened
+     SamplingParams). Blank/invalid fields are omitted so the server default
+     applies. temp=0 ⇒ greedy argmax (deterministic null floor). */
+  function samplerBody() {
+    const num = (id) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : undefined; };
+    const out = {};
+    const t = num('s-temp'); if (t !== undefined) out.temperature = t;
+    const p = num('s-topp'); if (p !== undefined) out.top_p = p;
+    const k = num('s-topk'); if (k !== undefined) out.top_k = Math.round(k);
+    const r = num('s-rep');  if (r !== undefined) out.repetition_penalty = r;
+    const seedRaw = ($('s-seed').value || '').trim();
+    if (seedRaw !== '') { const sd = parseInt(seedRaw, 10); if (Number.isFinite(sd)) out.seed = sd; }
+    return out;
+  }
+
   async function streamChat(bodyObj) {
     const resp = await fetch(`${DAEMON}/v1/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -623,8 +653,9 @@
     try {
       // Prefer multi-turn messages (server applies the chat template);
       // fall back to a client-side gemma prompt if no server template exists.
-      let res = await streamChat({ messages: history, max_tokens: 512 });
-      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 512 });
+      const s = samplerBody();
+      let res = await streamChat({ messages: history, max_tokens: 512, ...s });
+      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 512, ...s });
       const finalText = (res && res.text || '').trim();
       history.push({ role: 'assistant', content: finalText });
     } catch (err) {
