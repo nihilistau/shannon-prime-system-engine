@@ -204,6 +204,19 @@ pub struct ChatRequest {
     pub replay: Option<String>,
     #[serde(default)]
     pub replay_npos: i32,
+    // CONTRACT-CHAT-FULLSTACK B3 — AUTONOMOUS MEMORY RECALL. When true (and the
+    // daemon loaded an episode registry via SP_RECALL_REGISTRY), the daemon
+    // computes THIS turn's 256-bit C2 query signature from the resident cache's
+    // global-layer K (after the prompt prefill), Hamming-matches it against the
+    // registry, and — if the best match clears TAU_BITS — auto-replays that
+    // episode into the live turn BEFORE decode. No operator `replay` field
+    // needed: the model selects the relevant memory ON ITS OWN. Default
+    // None/false = OFF = the byte-untouched non-recall path (the null floor; the
+    // foreign-reject safety leg also runs only when this is on). An explicit
+    // `replay` still wins (operator override) and suppresses auto-recall. Only
+    // honored on the 12B kvdecode (resident-cache) chat path.
+    #[serde(default)]
+    pub auto_recall: Option<bool>,
     // CONTRACT-CHAT-FULLSTACK A2-polish — null-floor opt-out. Default false =
     // the DEFAULT served chat, with full control-token suppression
     // (`<image|>`/`<audio|>`/`<|turn>`/… masked to -inf) so output is CLEAN at
@@ -376,6 +389,9 @@ pub async fn v1_chat(
     // B2 (§6d-b): per-turn XBAR episode replay (None = no recall = null floor).
     let replay_dir = req.replay.clone();
     let replay_npos = req.replay_npos;
+    // B3: autonomous recall toggle (default OFF). Only meaningful when the daemon
+    // loaded a registry; an explicit `replay` overrides it (operator wins).
+    let auto_recall = req.auto_recall.unwrap_or(false);
     // B5 (§6e): the single latent entry point. single_entry routes prompt ingest
     // through gemma4_kv_inject_tokens (the residual seam) instead of prefill;
     // inject_frames feeds raw residual frames (audio/memory) through the same seam.
@@ -443,7 +459,7 @@ pub async fn v1_chat(
                 &app, chat_id, &tokens, max_tokens, vocab_size,
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
                 &mut sampler, byteexact, replay_dir, replay_npos,
-                single_entry, inject_frames, inject_ph,
+                single_entry, inject_frames, inject_ph, auto_recall,
             );
             return;
         }
@@ -573,6 +589,7 @@ fn run_kvdecode_chat(
     single_entry: bool,
     inject_frames: Option<Vec<Vec<f32>>>,
     inject_ph: i32,
+    auto_recall: bool,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -689,6 +706,90 @@ fn run_kvdecode_chat(
             }
         }
     }
+    // B3: AUTONOMOUS MEMORY RECALL. With auto_recall on, NO explicit `replay`,
+    // and a loaded registry: compute THIS turn's 256-bit C2 query signature from
+    // the resident cache's GLOBAL-layer K (now holding the prompt's prefilled
+    // positions), Hamming-match it against the registry, and auto-replay the best
+    // episode iff it clears TAU_BITS. This is the headline "it remembers on its
+    // own" path: the model self-selects the relevant memory with no operator
+    // intervention. The match score is ALWAYS logged (the foreign-reject safety
+    // leg needs the below-TAU case to be visible). dpos here == head.len() (the
+    // prompt positions); the chosen episode is injected at [dpos,dpos+npos) just
+    // like B2, so the last prompt token + every generated token attend over it.
+    let mut recalled: Option<(String, u32)> = None;
+    if auto_recall && replay_dir.is_none() {
+        if let Some(registry) = app.recall_registry.as_ref() {
+            let npos_q = unsafe { kv::position(handle) }; // = head.len() after prefill
+            if npos_q > 0 {
+                use sp_daemon::recall;
+                // gemma4-12b: 8 global layers (period-6 over 48), g_kvd=512.
+                let n_global = recall::NL / recall::PERIOD;
+                let mut buf = vec![0.0f32; n_global * (npos_q as usize) * recall::HD];
+                match unsafe { kv::read_global_k(handle, &mut buf, npos_q) } {
+                    Ok(ng) => {
+                        let ng = ng as usize;
+                        // B3 DIAG (env-gated): dump the raw global-K buffer read from
+                        // the resident cache so it can be diffed against the ep.k the
+                        // registry was built from (the representation-parity check).
+                        if std::env::var("SP_B3_DUMP_QK").is_ok() {
+                            if let Ok(p) = std::env::var("SP_B3_DUMP_QK") {
+                                let bytes: &[u8] = unsafe {
+                                    std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len() * 4)
+                                };
+                                let _ = std::fs::write(&p, bytes);
+                                tracing::info!("B3 DIAG: dumped global-K [{}x{}x512] -> {} ({} f32)", ng, npos_q, p, buf.len());
+                            }
+                        }
+                        let sig = app.recall_proj.signature(&buf, ng, npos_q as usize);
+                        // Log the FULL per-episode agreement vector so the gate can
+                        // read the separation (target vs foreign) directly, not just
+                        // the argmax — the honest measurement the B3 verdict needs.
+                        {
+                            let scores: Vec<String> = registry.iter()
+                                .map(|e| format!("{}={}", e.name, recall::agree(&sig, &e.sig)))
+                                .collect();
+                            tracing::info!("B3 recall scores (npos_q={}): [{}]", npos_q, scores.join(" "));
+                        }
+                        if let Some((idx, score)) = recall::best_match(&sig, registry) {
+                            let ep = &registry[idx];
+                            let fire = score >= recall::TAU_BITS;
+                            tracing::info!(
+                                "B3 recall: query sig vs registry — best='{}' (topic='{}') agree={}/{} TAU={} ⇒ {}",
+                                ep.name, ep.topic, score, recall::R_BITS, recall::TAU_BITS,
+                                if fire { "FIRE (auto-replay)" } else { "REJECT (foreign; no replay)" }
+                            );
+                            if fire && ep.npos > 0 {
+                                // SAFETY: handle live; we hold the cache Mutex.
+                                if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                    // A replay failure must not corrupt the turn —
+                                    // log and proceed with the un-recalled answer.
+                                    tracing::warn!("B3 recall: auto-replay({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
+                                } else {
+                                    recalled = Some((ep.name.clone(), score));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("B3 recall: read_global_k failed: {e} — proceeding without recall");
+                    }
+                }
+            }
+        } else {
+            tracing::info!("B3 recall: auto_recall set but no registry loaded (SP_RECALL_REGISTRY) — no-op");
+        }
+    }
+    // Surface the recall decision on the SSE stream as a structured event so the
+    // console can show a "recalled episode" indicator. Emitted before the answer
+    // tokens (a separate event name so it never appears in the text delta).
+    if let Some((ref name, score)) = recalled {
+        let payload = serde_json::json!({"recalled": name, "agree": score, "chat_id": chat_id});
+        let _ = tx.blocking_send(Ok(Event::default().event("recall").data(payload.to_string())));
+    } else if auto_recall && replay_dir.is_none() {
+        let payload = serde_json::json!({"recalled": serde_json::Value::Null, "chat_id": chat_id});
+        let _ = tx.blocking_send(Ok(Event::default().event("recall").data(payload.to_string())));
+    }
+
     // B2 (§6d-b): XBAR episode REPLAY into the live turn. Recall a stored episode's
     // owner K/V into the cache at [dpos,dpos+npos) right after the prompt prefill,
     // so the last prompt token + every generated token attend across the recalled

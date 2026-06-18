@@ -141,6 +141,10 @@ extern int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero);
  *   inject_seq:    GENERIC residual-frame channel (audio/memory) at a placeholder. */
 extern int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n);
 extern int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token);
+/* CONTRACT-CHAT-FULLSTACK B3 (AUTONOMOUS RECALL) — read global-owner K [0,npos)
+ * out of the resident cache for the daemon's C2 query-signature. Returns the
+ * number of global layers written, or -1. Cache byte-untouched (read-only D2H). */
+extern int gemma4_kv_read_global_k(const sp_g4_kv *s, float *out, int npos);
 
 /* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
  * gemma4_kv_open). pmax = max resident position budget. Requires the model to
@@ -245,6 +249,18 @@ int sp_daemon_cuda_kvdecode_inject_frames(void *handle, const float *embs, int n
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || !embs || n_frames <= 0) { sp_set_error("cuda kvdecode inject_frames: bad args"); return -1; }
     return gemma4_kv_inject_seq(s, embs, n_frames, ph_token);
+}
+
+/* read_global_k(handle, out, npos): CONTRACT-CHAT-FULLSTACK B3 (AUTONOMOUS RECALL)
+ * — read the GLOBAL-owner K rows [0,npos) out of the resident cache into `out`
+ * (packed [n_global][npos][g_kvd] row-major, global layers ascending), so the
+ * daemon can compute the live query's C2 256-bit signature and match it against
+ * the episode registry. Returns the number of global layers written (>0), or -1.
+ * The cache is byte-untouched (read-only D2H). */
+int sp_daemon_cuda_kvdecode_read_global_k(const void *handle, float *out, int npos) {
+    const sp_g4_kv *s = (const sp_g4_kv *)handle;
+    if (!s || !out || npos <= 0) { sp_set_error("cuda kvdecode read_global_k: bad args"); return -1; }
+    return gemma4_kv_read_global_k(s, out, npos);
 }
 
 /* ── Engine-kernel shim over math-core forward_dispatch ────────────────────

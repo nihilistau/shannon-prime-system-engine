@@ -4660,6 +4660,43 @@ extern "C" long gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV) {
     return bytes;
 }
 
+/* CONTRACT-CHAT-FULLSTACK B3 (AUTONOMOUS RECALL) — read the GLOBAL-owner K rows
+ * out of the resident cache for the daemon's C2 query-signature computation.
+ *
+ * The C2 256-bit LSH signature (tools/curator/discrete_resolve.py) is the
+ * sign of the ±1 projection (SP_ARM_PROJ_SEED) of the per-position GLOBAL-owner
+ * K, meaned over the global layers {period-1, 2*period-1, ...} (period-6 ⇒
+ * {5,11,...,47}) and the prefilled positions. The episode registry sigs were
+ * built off the on-disk ep.k dumps; to recall AUTONOMOUSLY the daemon must
+ * compute the SAME signature for the live query, which means reading the live
+ * cache's global-layer K back to host. gemma4_kv_snapshot reads ALL layers into
+ * caller-sized per-layer buffers; this is the focused B3 read — just the global
+ * owners, just [0,npos), packed contiguously as [n_global][npos][g_kvd] row-major
+ * in GLOBAL-LAYER ASCENDING order (the same order the curator iterates: L = 5,
+ * 11, ... < NL). Globals are full-cache (slot==pos, no ring) so the copy is a
+ * straight per-position memcpy. Returns the number of global layers written
+ * (>0) on success, -1 on bad args / OOB / CUDA error. Null floor: dead code
+ * unless called; the cache is byte-untouched (read-only D2H). */
+extern "C" int gemma4_kv_read_global_k(const sp_g4_kv *s, float *out, int npos) {
+    if (!s || !out || npos <= 0) { sp_set_error("gemma4_kv_read_global_k: bad args"); return -1; }
+    if (npos > s->dpos_host) { sp_set_error("gemma4_kv_read_global_k: npos exceeds dpos"); return -1; }
+    cudaStreamSynchronize(g_w.stream);
+    const int g_kvd = s->g_nkv * s->g_hd;
+    int gi = 0;
+    for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+        const int global = ((L % s->period) == s->period - 1);
+        if (!global) continue;
+        /* globals are full-cache: slot==pos, contiguous [pos*g_kvd]. Copy [0,npos). */
+        float *dst = out + (size_t)gi * npos * g_kvd;
+        if (cudaMemcpy(dst, s->dKc[L], (size_t)npos * g_kvd * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            sp_set_error("gemma4_kv_read_global_k: D2H"); return -1;
+        }
+        gi++;
+    }
+    return gi;
+}
+
 extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (!s) return;
     if (s->dseq) cudaFree(s->dseq); if (s->dpos) cudaFree(s->dpos);

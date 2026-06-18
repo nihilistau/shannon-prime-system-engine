@@ -134,6 +134,18 @@ unsafe extern "C" {
         n_frames: c_int,
         ph_token: c_int,
     ) -> c_int;
+
+    /// CONTRACT-CHAT-FULLSTACK B3 (AUTONOMOUS RECALL) —
+    /// `gemma4_kv_read_global_k(s, out, npos)`. Reads the GLOBAL-owner K rows
+    /// `[0,npos)` out of the resident cache into `out` (packed
+    /// `[n_global][npos][g_kvd]` row-major, global layers ascending). Returns the
+    /// number of global layers written (>0) on success, -1 on error. The cache is
+    /// byte-untouched (read-only D2H).
+    fn sp_daemon_cuda_kvdecode_read_global_k(
+        handle: *const c_void,
+        out: *mut f32,
+        npos: c_int,
+    ) -> c_int;
 }
 
 /// Open a session-resident KV-decode cache on the CUDA backend.
@@ -313,6 +325,24 @@ pub unsafe fn inject_frames(
         sp_daemon_cuda_kvdecode_inject_frames(handle, frames.as_ptr(), n_frames, ph_token)
     };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// CONTRACT-CHAT-FULLSTACK B3 (AUTONOMOUS RECALL) — read global-owner K `[0,npos)`
+/// out of the resident cache for the daemon's C2 query-signature. `out` must hold
+/// `n_global * npos * g_kvd` f32 (the caller sizes it from the known geometry:
+/// gemma4-12b has 8 global layers, g_kvd=512). Returns the number of global layers
+/// written (>0) on success. The cache is byte-untouched.
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`]; `out` valid for the buffer
+/// size above; the caller MUST hold the cache Mutex (no concurrent decode).
+pub unsafe fn read_global_k(handle: *const c_void, out: &mut [f32], npos: i32) -> Result<i32, String> {
+    if handle.is_null() || out.is_empty() || npos <= 0 {
+        return Err("kvdecode read_global_k: NULL handle / empty out / non-positive npos".to_string());
+    }
+    // SAFETY: handle live per caller; out slice gives the packed buffer ptr.
+    let n = unsafe { sp_daemon_cuda_kvdecode_read_global_k(handle, out.as_mut_ptr(), npos) };
+    if n > 0 { Ok(n) } else { Err(last_error()) }
 }
 
 /// Current decode position (`dpos`), or -1 on NULL.

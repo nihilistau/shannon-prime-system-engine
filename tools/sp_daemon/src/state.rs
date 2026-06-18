@@ -149,6 +149,16 @@ pub struct AppState {
     #[cfg(feature = "wire_cuda_backend")]
     pub cuda_kvdecode_handle: Option<Mutex<CudaKvDecodeHandle>>,
 
+    /// CONTRACT-CHAT-FULLSTACK B3 — AUTONOMOUS MEMORY RECALL. The episode
+    /// registry (loaded from `SP_RECALL_REGISTRY` at startup; one JSONL row per
+    /// episode {dir, npos, topic, sig_bits}) + the frozen ±1 C2 projection R.
+    /// `Some` only when the env var points at a readable registry AND >=1 row
+    /// parsed; otherwise `None` and `auto_recall:true` is a no-op (the turn falls
+    /// straight through to the byte-untouched non-recall path). Read-only after
+    /// startup, so no Mutex.
+    pub recall_registry: Option<Vec<sp_daemon::recall::Episode>>,
+    pub recall_proj: Arc<sp_daemon::recall::Projection>,
+
     // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the
     /// skel could not be admitted; `/v1/dsp/echo` then returns 501. Per-request

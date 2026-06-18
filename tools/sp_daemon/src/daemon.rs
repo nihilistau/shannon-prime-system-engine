@@ -639,6 +639,40 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         }
     };
 
+    // ── CONTRACT-CHAT-FULLSTACK B3 — AUTONOMOUS MEMORY RECALL registry ──────
+    // Load the episode registry (one JSONL row per episode: {dir, npos, topic,
+    // sig_bits}) from SP_RECALL_REGISTRY at startup, plus build the frozen ±1 C2
+    // projection R once. The /v1/chat `auto_recall:true` path uses these to
+    // self-select an episode by Hamming-matching the live query signature. No env
+    // var (or an unreadable / empty registry) ⇒ None ⇒ auto_recall is a no-op.
+    let recall_proj = std::sync::Arc::new(sp_daemon::recall::Projection::build());
+    let recall_registry: Option<Vec<sp_daemon::recall::Episode>> =
+        match std::env::var("SP_RECALL_REGISTRY") {
+            Ok(p) if !p.is_empty() => {
+                match sp_daemon::recall::load_registry(std::path::Path::new(&p)) {
+                    Ok(eps) if !eps.is_empty() => {
+                        info!(
+                            "B3 AUTONOMOUS RECALL: loaded {} episode(s) from {} (TAU_BITS={})",
+                            eps.len(), p, sp_daemon::recall::TAU_BITS
+                        );
+                        for e in &eps {
+                            info!("B3   episode '{}' topic='{}' dir={} npos={}", e.name, e.topic, e.dir, e.npos);
+                        }
+                        Some(eps)
+                    }
+                    Ok(_) => {
+                        tracing::warn!("B3 AUTONOMOUS RECALL: registry {p} parsed 0 episodes — auto_recall disabled");
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("B3 AUTONOMOUS RECALL: failed to read registry {p}: {e} — auto_recall disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -672,6 +706,9 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         // dropped (gemma4_kv_close) before `model` by AppState declaration order.
         #[cfg(feature = "wire_cuda_backend")]
         cuda_kvdecode_handle,
+        // B3 AUTONOMOUS RECALL — episode registry + frozen C2 projection.
+        recall_registry,
+        recall_proj,
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]

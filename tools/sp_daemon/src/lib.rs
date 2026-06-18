@@ -1,6 +1,16 @@
 pub mod network;
 pub mod ntt_ffi;
 
+// CONTRACT-CHAT-FULLSTACK B3 — AUTONOMOUS MEMORY RECALL. The C2 discrete
+// bit-collision resolver (tools/curator/discrete_resolve.py) ported to Rust so
+// /v1/chat can compute a turn's query signature on its own and Hamming-match the
+// episode registry — the model "remembers" with no operator-specified `replay`.
+// Pure host-safe Rust (splitmix64 ±1 projection + popcount); the registry + R
+// matrix live in AppState, gated behind the per-request `auto_recall` flag
+// (default off = byte-untouched null floor). The actual cache-K read is the
+// wire_cuda-only gemma4_kv_read_global_k; this module is arithmetic only.
+pub mod recall;
+
 // §4-MeMo Sprint M.2 — Zero-copy dialogue loop (Grounding → Entity ID →
 // Synthesis) + Spinor receipt envelope. Host-build-safe: the module itself
 // compiles on host (struct + tests); the L1-driven `run_dialogue()` helper

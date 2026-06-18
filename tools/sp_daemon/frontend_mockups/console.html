@@ -284,6 +284,14 @@
           <label title="byte-exact: exact-integer / dual-prime decode (run-to-run bit-identical). Pair with temp=0.">
             <input type="checkbox" id="s-byteexact"> auditable
           </label>
+          <!-- CONTRACT-CHAT-FULLSTACK B3: AUTONOMOUS MEMORY RECALL. The daemon
+               computes this turn's C2 signature from the resident-cache global-K,
+               Hamming-matches the episode registry (SP_RECALL_REGISTRY), and
+               auto-replays the best episode if it clears TAU — no operator replay
+               field. Off = byte-untouched null floor. -->
+          <label title="auto-recall: the model self-selects + replays a relevant stored episode (C2 signature match), no manual replay.">
+            <input type="checkbox" id="s-autorecall"> auto-recall
+          </label>
           <!-- CONTRACT-CHAT-FULLSTACK B5: the SINGLE LATENT ENTRY POINT. Ingest the
                prompt through the ONE residual seam (gemma4_kv_inject_tokens:
                embd[id]*sqrt(E) → the model mints K/V natively) instead of prefill.
@@ -610,6 +618,9 @@
     // B5: the single latent entry point — ingest text through the one residual
     // seam (the same seam audio + memory enter through). Bit-identical to prefill.
     if ($('s-singleentry') && $('s-singleentry').checked) out.single_entry = true;
+    // B3: autonomous memory recall — the daemon self-selects + replays a relevant
+    // stored episode by matching this turn's C2 signature (no manual replay field).
+    if ($('s-autorecall') && $('s-autorecall').checked) out.auto_recall = true;
     return out;
   }
 
@@ -641,6 +652,18 @@
           if (!line.startsWith('data:')) continue;            // ignore ':keepalive', 'event:' etc.
           let payload = line.slice(5).trimStart();
           if (payload === '[DONE]') return { text: acc };
+          // B3: the `event: recall` frame carries {recalled: <name|null>, agree}.
+          // Surface a badge before the answer tokens; it has no `delta`.
+          try {
+            const ro = JSON.parse(payload);
+            if (Object.prototype.hasOwnProperty.call(ro, 'recalled')) {
+              const badge = ro.recalled
+                ? `\u{1F9E0} recalled episode: ${ro.recalled} (agree ${ro.agree}/256)`
+                : `\u{1F9E0} auto-recall: no episode matched (baseline answer)`;
+              try { pushToken(`\n[${badge}]\n`); } catch (_) {}
+              continue;
+            }
+          } catch (_) {}
           let delta = null;
           try { const o = JSON.parse(payload); if (o.error) throw new Error(o.error); delta = o.delta; }
           catch (e) { if (e.message && e.message !== 'Unexpected end of JSON input') throw e; delta = null; }

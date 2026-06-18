@@ -1,0 +1,126 @@
+================================================================================
+ G-CHAT-B3-RECALL — AUTONOMOUS MEMORY RECALL into the served /v1/chat (12B)
+ CONTRACT-CHAT-FULLSTACK B3.  Receipts-first.  2026-06-19.
+ Engine HEAD at start: 9b74e8b.  Real Gemma-4-12B (gemma4-12b-b1.sp-model), RTX 2060.
+================================================================================
+
+VERDICT (honest):
+  - The autonomous-recall PLUMBING is COMPLETE and CORRECT end-to-end:
+    /v1/chat auto_recall:true -> prefill query -> read resident-cache GLOBAL-layer K
+    (new additive engine verb gemma4_kv_read_global_k) -> compute the 256-bit C2 LSH
+    signature in-daemon (recall.rs, byte-exact port of discrete_resolve.py;
+    cross-checked 256/256 against the Python registry build) -> Hamming-match the
+    episode registry -> auto-gemma4_kv_replay the best episode if it clears TAU_BITS.
+  - The REPLAY-CONDITIONING mechanism works (B6 reproduced this run): explicit replay
+    of ep_wiki makes the 12B answer the verbatim ground truth incl. the @-@ telltale;
+    no-recall hallucinates. (transcripts below)
+  - The recall SELECTION does NOT work: the C2 mean-of-global-K signature is NOT
+    discriminative enough to map a short QUESTION to its answer-PASSAGE. Measured
+    below. So G-CHAT-B3-RECALL is RED on leg (a) right-episode recall. Leg (b)
+    foreign-reject "passes" only trivially (nothing ever clears TAU, so nothing
+    spuriously fires) — which is the same coin as leg (a) failing.
+  - This is reported as an HONEST NEGATIVE with the crux precisely located (below),
+    NOT faked. auto_recall defaults OFF = byte-untouched null floor; no closed gate
+    regresses.
+
+--------------------------------------------------------------------------------
+ REGISTRY (3 text episodes, distinct topics; tests/fixtures/chat_fullstack/recall_registry.jsonl)
+--------------------------------------------------------------------------------
+  ep_wiki    Robert Boulter (English film/TV/theatre actor, The Bill)   npos=84   dir=_c2_ep_wiki
+  ep_homarus Homarus gammarus (the European/common lobster)             npos=180  dir=_b3_ep_homarus
+  ep_headlam Frank Headlam (RAAF Air Vice Marshal)                       npos=179  dir=_b3_ep_headlam
+  Episodes captured via the PPL harness SP_XBAR_RECALL_WRITE path (test_gemma4_ppl_cuda),
+  same way _c2_ep_wiki was made.  New passages = WikiText-2 valid articles, tokenized
+  by the new sp_tok_enc tool (text -> ids off the .sp-tokenizer blob, gemma4 GEMMA4_BPE lane).
+
+  Inter-episode signature agreement (256-bit; built from the resident-cache read path):
+              ep_wiki  ep_homarus ep_headlam
+   ep_wiki        256       200       200
+   ep_homarus     200       256       198
+   ep_headlam     200       198       256
+  ==> episodes already agree with EACH OTHER at ~200/256 (78%): a large COMMON-MODE
+      (positional/structural global-K geometry shared by every gemma4 prefill) swamps
+      the per-topic content.  Discriminating signal must beat ~56 bits of separation.
+
+--------------------------------------------------------------------------------
+ THE EXTRACTION GAP WE FOUND AND FIXED (representation parity) — receipts
+--------------------------------------------------------------------------------
+  First registry was built from the on-disk ep.k owner-K dumps.  Comparing a query
+  sig against it scored ~124-140/256 (below the random 128 floor for the foreign).
+  Even feeding an episode's OWN passage text back as the query scored ~132 (random) —
+  a self-match should be ~256.  Root cause, measured by dumping the live read_global_k
+  buffer and diffing against ep.k for the SAME tokens/positions/layers (homarus, 179 pos):
+      live_cache_K norm / ep.k norm = 0.500  EXACTLY  (std 0.000 across all positions)
+      per-position cosine(live, ep.k) = ~0.00  (uncorrelated direction)
+      relL2(live, ep.k) = ~1.12 on every global layer L in {5,11,17,23,29,35,41,47}
+  ==> the one-shot gemma4_decode_cuda path that CAPTURED the episodes and the resident
+      g4_kv_step prefill the daemon decodes through produce DIFFERENT global-K for the
+      same input (exact 0.5x magnitude + decorrelated direction).  The query can only
+      read the resident-cache representation, so the on-disk-ep.k registry is not
+      comparable to it.
+  FIX: rebuild the registry from the SAME path the query uses (gemma4_kv_read_global_k
+      over the resident cache of each episode's own tokens).  This is parity-correct and
+      raised all scores to ~155-182 — but see the residual negative below.
+
+--------------------------------------------------------------------------------
+ LEG (a) RIGHT-EPISODE RECALL — query-vs-PARITY-registry agreement matrix (AS MEASURED)
+--------------------------------------------------------------------------------
+  TAU_BITS=168.  argmax = highest-agreement episode.  want = the topically-correct one.
+
+   query                                         wiki homarus headlam  argmax    want      hit?
+   "Who is Robert Boulter?"                       160   160   162    ep_headlam  ep_wiki    NO
+   "What is Homarus gammarus?"                     169   159   153    ep_wiki     ep_homarus NO
+   "Who was Frank Headlam?"                        164   162   162    ep_wiki     ep_headlam NO
+   "Tell me about the European lobster."           162   166   158    ep_homarus  ep_homarus YES
+   "Who was the Australian air force cmdr Headlam?"182   172   178    ep_wiki     ep_headlam NO
+   "What is the capital of France?" (foreign)      158   160   154    ep_homarus  (reject)   --
+   "How do I bake sourdough bread?"  (foreign)     166   174   174    ep_hom/head (reject)   --
+
+  - The right episode is the argmax in only 1/5 topical queries.
+  - Scores cluster at ~155-182 with NO relevance ordering: the foreign "sourdough"
+    query (174) outscores most on-topic queries.  The signature does not separate
+    relevant from irrelevant.
+  - At TAU=168, the daemon never fires on the topical queries (the relevant episode's
+    score sits at/below 168) yet a foreign query (sourdough=174) WOULD fire on a
+    wrong episode — so no TAU choice both fires-on-target and rejects-foreign.
+
+--------------------------------------------------------------------------------
+ CONTROL — the replay mechanism itself works (B6 reproduced this run)
+--------------------------------------------------------------------------------
+ A) auto_recall:false (null floor, NO recall) — "Who is Robert Boulter?":
+    "Robert Boulter is a British actor and comedian. He is best known for his work in
+     the British television series "The Thick of It" and "Veep". He has also appeared
+     in films such as "The King's Speech" and "The Iron Lady"..."          <-- HALLUCINATION
+
+ B) EXPLICIT replay ep_wiki npos=84 — "...who is Robert Boulter and what role on The Bill?":
+    "Robert Boulter is an English film , television and theatre actor . He had a guest
+     @-@ starring role on the television series The Bill in 2000 . This was followed by
+     a starring role in the play Herons written by Simon Stephens , which was performed
+     in 2001 at the Royal Court Theatre ..."                               <-- VERBATIM GROUND TRUTH (@-@ telltale)
+
+  ==> conditioning works; if the C2 sig SELECTED ep_wiki, auto-recall would emit (B).
+      The whole gap is the SELECTION representation, not the replay or the plumbing.
+
+--------------------------------------------------------------------------------
+ WHAT WAS BUILT (all additive / default-off = byte-untouched null floor)
+--------------------------------------------------------------------------------
+  engine src/backends/cuda/cuda_forward.cu : + gemma4_kv_read_global_k (read-only D2H of
+      the global-owner K [0,npos) for the daemon's query sig; cache byte-untouched)
+  tools/sp_daemon/c_backend_cuda/sp_daemon_cuda_glue.c : + glue forwarder
+  tools/sp_daemon/src/cuda_kvdecode_dispatch.rs : + read_global_k() wrapper
+  tools/sp_daemon/src/recall.rs (NEW) : C2 discrete resolver in Rust (splitmix64 ±1 R,
+      sign-projection, popcount Hamming) — byte-exact port (256/256 vs Python)
+  tools/sp_daemon/src/{routes.rs,state.rs,daemon.rs,lib.rs} : auto_recall:bool field,
+      SP_RECALL_REGISTRY load at startup, the online recall loop (read->sig->match->
+      conditional auto-replay) + an SSE `event: recall` indicator + per-episode score logs
+  tools/sp_tok_dump/sp_tok_enc.c (NEW) : text->ids off the .sp-tokenizer blob (episode capture)
+  tools/curator/build_recall_registry.py (NEW) : registry builder (mean-over-prompt sig)
+  console.html : auto-recall toggle + recalled-episode badge
+  NO sp_l1.h change (reused gemma4_kv_replay/prefill/reset + the additive read verb) => no submodule bump.
+
+ GATE: G-CHAT-B3-RECALL = RED on autonomous selection (honest negative).  The replay
+ pipeline + the representation-parity fix are GREEN; the C2 mean-of-global-K signature
+ is measured-inadequate for question->passage retrieval.  Next lever would be a
+ *content* signature (e.g. last-token / answer-bearing projection, or a learned LSH
+ like the §3q router) rather than the position-meaned global-K centroid.
+================================================================================
