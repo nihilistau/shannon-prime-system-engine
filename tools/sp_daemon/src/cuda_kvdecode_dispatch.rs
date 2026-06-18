@@ -190,44 +190,112 @@ pub unsafe fn close(handle: *mut c_void) {
     }
 }
 
+// ── §6b dispatch-table trampolines ──────────────────────────────────────────
+// The bindgen `sp_kvdecode_dispatch_fn` fn-ptr fields are typed over the opaque
+// `sp_kvdecode_handle` + `qwen3_model*` (as `*const c_void`); the C glue uses
+// plain `void*`. These thin `extern "C"` trampolines bridge the two (an
+// `sp_kvdecode_handle*` IS the glue's `void*` handle — an `sp_g4_kv*`). They
+// forward straight to the already-filled glue symbols, with `decode_step`
+// bumping the gate's step counter so the harness can confirm the verb was hit.
+
+type KvHandle = crate::ffi_l1::sp_kvdecode_handle;
+
+unsafe extern "C" fn tramp_open(
+    qm_opaque: *const c_void,
+    pmax: c_int,
+    out: *mut *mut KvHandle,
+) -> c_int {
+    // SAFETY: glue checks NULL qm; `out` written with the opaque handle.
+    let h = unsafe { sp_daemon_cuda_kvdecode_open(qm_opaque, pmax) };
+    if h.is_null() {
+        return -1;
+    }
+    if !out.is_null() {
+        unsafe { *out = h as *mut KvHandle };
+    }
+    0
+}
+
+unsafe extern "C" fn tramp_prefill(h: *mut KvHandle, tokens: *const i32, n_tok: c_int) -> c_int {
+    // SAFETY: glue validates args; handle is the opaque void* cast.
+    unsafe { sp_daemon_cuda_kvdecode_prefill(h as *mut c_void, tokens, n_tok) }
+}
+
+unsafe extern "C" fn tramp_decode_step(h: *mut KvHandle, token: i32, logits: *mut f32) -> c_int {
+    KVDECODE_STEP_COUNT.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: glue forwards to gemma4_kv_decode_logits on the resident cache.
+    unsafe { sp_daemon_cuda_kvdecode_step(h as *mut c_void, token, logits) }
+}
+
+unsafe extern "C" fn tramp_rewind(h: *mut KvHandle, n: c_int) -> c_int {
+    // SAFETY: glue validates args.
+    unsafe { sp_daemon_cuda_kvdecode_rewind(h as *mut c_void, n) }
+}
+
+unsafe extern "C" fn tramp_position(h: *const KvHandle) -> c_int {
+    // SAFETY: glue is NULL-safe.
+    unsafe { sp_daemon_cuda_kvdecode_position(h as *const c_void) }
+}
+
+unsafe extern "C" fn tramp_close(h: *mut KvHandle) {
+    // SAFETY: glue is NULL-safe.
+    unsafe { sp_daemon_cuda_kvdecode_close(h as *mut c_void) };
+}
+
+/// The dispatch table handed to L1. `'static` so the pointer stays valid for
+/// the whole process — L1 stores `&DT` and re-emits the fn pointers per decode.
+static DT: crate::ffi_l1::sp_kvdecode_dispatch_fn = crate::ffi_l1::sp_kvdecode_dispatch_fn {
+    open: Some(tramp_open),
+    prefill: Some(tramp_prefill),
+    decode_step: Some(tramp_decode_step),
+    rewind: Some(tramp_rewind),
+    position: Some(tramp_position),
+    close: Some(tramp_close),
+};
+
 /// Register the CUDA KV-decode backend with an L1 session.
 ///
-/// SCAFFOLD: the real wiring calls `sp_session_register_kvdecode_backend`
-/// (sp_l1.h §6b, addendum §2) once that verb is added to the frozen header +
-/// bindgen-regenerated. Until then this opens the resident cache and stashes
-/// the handle via the caller (daemon.rs stores it in AppState), routing
-/// `sp_decode_step` through the new verb at INTEGRATION.
+/// Opens the resident `sp_g4_kv` cache (via the glue `open`) and registers the
+/// §6b dispatch table with the session through
+/// `sp_session_register_kvdecode_backend`. After this returns, the session's
+/// `sp_decode_step` routes the single-token forward through `tramp_decode_step`
+/// → `gemma4_kv_decode_logits` on the resident handle.
 ///
 /// Returns the opaque KV handle on success so the caller (AppState) can own its
-/// lifetime and pass it back at `close` time.
+/// lifetime and pass it back at `close` time (the resident cache is freed by
+/// `release_for_model`). The caller MUST drive `prefill` (history ingest) on
+/// the returned handle before the first `sp_decode_step`.
 ///
 /// # Safety
 /// `session_raw` must be a valid `*mut sp_session` with the L2-side Mutex held;
-/// `qm_opaque` the session's borrowed `qwen3_model*`.
+/// `qm_opaque` the session's borrowed `qwen3_model*` (valid for the session
+/// lifetime).
 pub unsafe fn register_with_session(
-    _session_raw: *mut crate::ffi_l1::sp_session,
+    session_raw: *mut crate::ffi_l1::sp_session,
     qm_opaque: *const c_void,
     pmax: i32,
 ) -> Result<*mut c_void, String> {
-    // Step 1 (done in scaffold): open the resident KV cache.
+    // Step 1: open the resident KV cache.
     // SAFETY: caller guarantees qm_opaque + session validity.
     let handle = unsafe { open(qm_opaque, pmax) }?;
 
-    // TODO(WIRE-CUDA-DECODE): once `sp_session_register_kvdecode_backend` is in
-    // the frozen L1 header (addendum §6/§7 step 2), point sp_decode_step at the
-    // glue dispatch table:
-    //
-    //   let dt = sp_kvdecode_dispatch_fn {
-    //       open: Some(sp_daemon_cuda_kvdecode_open_trampoline),
-    //       prefill: Some(...), decode_step: Some(...), rewind: Some(...),
-    //       position: Some(...), close: Some(...),
-    //   };
-    //   let rc = crate::ffi_l1::sp_session_register_kvdecode_backend(
-    //       _session_raw, handle, &dt);
-    //   if rc != crate::ffi_l1::sp_status_SP_OK { return Err(last_error()); }
-    //
-    // Until that verb exists, the caller (daemon.rs) drives decode_step on the
-    // returned handle directly through this module's free fns.
+    // Step 2: point sp_decode_step at the glue dispatch table on this session.
+    // SAFETY: caller holds the SpSession's Mutex; no concurrent decode.
+    let rc = unsafe {
+        crate::ffi_l1::sp_session_register_kvdecode_backend(
+            session_raw,
+            handle as *mut KvHandle,
+            &DT as *const crate::ffi_l1::sp_kvdecode_dispatch_fn,
+        )
+    };
+    if rc != crate::ffi_l1::sp_status_SP_OK {
+        // Roll back the resident cache so we don't leak it on a failed register.
+        unsafe { close(handle) };
+        return Err(format!(
+            "sp_session_register_kvdecode_backend → status={rc}: {}",
+            last_error()
+        ));
+    }
 
     Ok(handle)
 }

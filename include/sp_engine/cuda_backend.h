@@ -86,6 +86,19 @@ int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
 int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq, int n_prompt,
                        int n_gen, int eos_id);
 
+/* WIRE-CUDA-DECODE-GEMMA4 §3.1.A: logits-returning persistent-KV decode step
+ * (the additive sibling of the KAI-1b gemma4_kv_decode). Forwards ONE token at
+ * the resident cache's live position through the same g4_kv_step, then D2H-copies
+ * the post-head full-vocab logits row [n_vocab] instead of the internal argmax —
+ * so the universal daemon's L1 kvdecode verb owns sampling. `s` is the opaque
+ * sp_g4_kv* from gemma4_kv_open (the rest of the gemma4_kv_* lifecycle ABI is
+ * declared inline in tests/test_gemma4_cuda.c / forward-declared in the daemon
+ * glue; only this additive symbol is surfaced in the public backend header).
+ * `logits` is caller-allocated [n_vocab] f32. 0 on success; null floor decode
+ * paths (gemma4_kv_decode / gemma4_decode_cuda) stay byte-untouched. */
+typedef struct sp_g4_kv sp_g4_kv;
+int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
+
 /* Release any cached device-resident weights for model `m` (called from
  * qwen3_free when the CUDA backend is built). No-op if nothing cached. */
 void sp_cuda_model_release(const qwen3_model *m);

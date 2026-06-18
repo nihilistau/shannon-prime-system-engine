@@ -86,6 +86,16 @@ path = "src/bin/sp_ntt_5c_forward_smoke.rs"
 name = "sp_ntt_bench_toks"
 path = "src/bin/sp_ntt_bench_toks.rs"
 
+# Sprint WIRE-CUDA-DECODE-GEMMA4 — the persistent-KV decode verb gate.
+# Drives a real Gemma-4-12B token-by-token through sp_decode_step -> the L1
+# kvdecode verb -> the CUDA glue -> gemma4_kv_decode_logits, asserting the
+# stream is bit-identical to the null-floor gemma4_kv_decode oracle. Requires
+# the CUDA backend lib (gemma4_kv_*); gated behind wire_cuda_backend.
+[[bin]]
+name = "sp_wire_cuda_decode_gate"
+path = "src/bin/sp_wire_cuda_decode_gate.rs"
+required-features = ["wire_cuda_backend"]
+
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
 tokio       = { version = "1", features = ["full"] }

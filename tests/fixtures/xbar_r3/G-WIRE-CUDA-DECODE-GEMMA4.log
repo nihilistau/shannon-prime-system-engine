@@ -1,0 +1,15 @@
+G-WIRE-CUDA-DECODE-GEMMA4 — persistent-KV decode verb gate
+  model     : D:\F\shannon-prime-repos\models\gemma4-12b-b1.sp-model
+  prompt    : 9 tokens
+  n_decode  : 32
+  Pmax      : 49
+  arch      : vocab=262144 n_layers=48 hidden=3840
+  [leg A oracle] gemma4_kv_decode: 32 tokens, first 8 = [258882, 258882, 258882, 258882, 258882, 258882, 258882, 258882]
+  [leg B verb ] sp_decode_step×32: kvdecode steps counted = 32
+  [leg B verb ] resident dpos = 41 (expected 41)
+  [leg B verb ] first 8 = [258882, 258882, 258882, 258882, 258882, 258882, 258882, 258882]
+  VRAM free (MiB): start=11213 afterA=1330 afterB=1330
+  VRAM delta A-vs-B = 0 MiB (flat ⇒ O(1) resident cache; ~equal allocs)
+
+  TOKEN STREAM: IDENTICAL (32/32 match)
+G-WIRE-CUDA-DECODE-GEMMA4: GREEN

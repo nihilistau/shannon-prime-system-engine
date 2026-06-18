@@ -3812,6 +3812,62 @@ extern "C" int gemma4_kv_decode(sp_g4_kv *s, int n_gen, int32_t *out) {
     return 0;
 }
 
+/* WIRE-CUDA-DECODE-GEMMA4 §3.1.A — logits-returning persistent-KV decode step.
+ *
+ * The additive sibling of gemma4_kv_decode for the universal-daemon L1 kvdecode
+ * verb (sp_session_register_kvdecode_backend → sp_decode_step → this). Forwards
+ * ONE token at the live dpos through the SAME g4_kv_step path, but instead of the
+ * internal greedy argmax it D2H-copies the post-head full-vocab logits row
+ * [n_vocab] so L2 owns sampling (greedy / temperature / top-p / spec verify).
+ *
+ * `token` is written into dseq[dpos] first (the input the step embeds), so the
+ * caller — not a prior step's argmax — controls the decode input. g4_kv_step
+ * runs out_norm + tied head + softcap into s->dlog and ALSO writes its own argmax
+ * into dseq[dpos+1] (harmless: L2 picks its own next token); dpos then advances.
+ *
+ * BIT-EXACT to gemma4_kv_decode when L2 argmaxes the returned row: identical
+ * dseq[dpos] input ⇒ identical g4_kv_step arithmetic ⇒ identical s->dlog ⇒
+ * identical argmax. The null floor gemma4_kv_decode / gemma4_decode_cuda are
+ * BYTE-UNTOUCHED; this is a new extern "C" symbol that merely reuses the step.
+ *
+ * `logits` is caller-allocated [n_vocab] f32 (host). Returns 0 on success. */
+extern "C" int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits) {
+    if (!s || !logits) { sp_set_error("gemma4_kv_decode_logits: bad args"); return -1; }
+    if (s->dpos_host + 1 >= s->Pmax) { sp_set_error("gemma4_kv_decode_logits: exceeds Pmax"); return -1; }
+    cudaStream_t st = g_w.stream;
+    /* set the input token at the live device position (overrides any argmax-
+     * predicted dseq[dpos]); the step embeds dseq[*dpos]. */
+    if (cudaMemcpyAsync(s->dseq + s->dpos_host, &token, sizeof(int),
+                        cudaMemcpyHostToDevice, st) != cudaSuccess) {
+        sp_set_error("gemma4_kv_decode_logits: token H2D"); return -1; }
+    if (g4_kv_step(s, /*do_head=*/1)) return -1;
+    /* D2H the post-softcap full-vocab logits row for the NEXT position. */
+    if (cudaMemcpyAsync(logits, s->dlog, (size_t)s->V * sizeof(float),
+                        cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+        sp_set_error("gemma4_kv_decode_logits: logits D2H"); return -1; }
+    s->dpos_host++;
+    cudaError_t e = cudaStreamSynchronize(st);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_decode_logits sync");
+    return 0;
+}
+
+/* WIRE-CUDA-DECODE-GEMMA4 gate helper — read-only D2H peek of the resident
+ * dseq window [from, from+n). Used by the G-WIRE-CUDA-DECODE-GEMMA4 oracle to
+ * recover the EXACT token sequence the null-floor gemma4_kv_decode CONSUMED
+ * (dseq[from] is the prefill-head prediction; the rest are its greedy outputs),
+ * so the daemon's kvdecode path can be teacher-forced with identical inputs and
+ * the two argmax streams compared bit-for-bit. Read-only/additive; touches no
+ * decode arithmetic. 0 on success. */
+extern "C" int gemma4_kv_seq_peek(const sp_g4_kv *s, int32_t *out, int from, int n) {
+    if (!s || !out || from < 0 || n <= 0 || from + n > s->Pmax) {
+        sp_set_error("gemma4_kv_seq_peek: bad args"); return -1; }
+    cudaStreamSynchronize(g_w.stream);
+    if (cudaMemcpy(out, s->dseq + from, (size_t)n * sizeof(int),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        sp_set_error("gemma4_kv_seq_peek: dseq D2H"); return -1; }
+    return 0;
+}
+
 /* O(1) cold-evict: shear the logical decode position back by delta. Full cache
  * slot==pos ⇒ the sheared slots [dpos-delta, dpos) are never read (attention
  * bounds at dpos) and are overwritten on the next prefill ⇒ rewind is a perfect

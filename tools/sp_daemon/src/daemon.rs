@@ -560,6 +560,66 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         info!("WIRE-VULKAN: feature linked but SP_DAEMON_BACKEND!=vulkan — staying on math-core reference forward");
     }
 
+    // ── Sprint WIRE-CUDA-DECODE-GEMMA4: optional persistent-KV decode backend ─
+    //
+    // When SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1 AND the daemon was built
+    // with --features wire_cuda_backend, open a session-resident sp_g4_kv cache
+    // and register it on the TARGET session via the §6b L1 kvdecode verb
+    // (sp_session_register_kvdecode_backend). After registration, sp_decode_step
+    // routes the token-by-token forward through the resident cache + the engine's
+    // gemma4_kv_decode_logits — the O(1) persistent-KV decode the prefill bridge
+    // (§6, WIRE-CUDA) cannot serve. Gemma-4 only (the glue's open() errors on
+    // other arches). The handle's lifetime is owned by AppState
+    // (CudaKvDecodeHandle Drop → release_for_model → gemma4_kv_close); the §6b
+    // registration is dropped implicitly when sp_session_destroy runs.
+    //
+    // SCOPE: registration is the seam. The resident cache opens at dpos=0; a chat
+    // path that uses it must drive the dispatch table's prefill before decode
+    // (the §6 forward hook + §6b decode hook own disjoint state). Unset env OR
+    // wrong feature = skipped (the prefill-bridge / reference path stays default).
+    #[cfg(feature = "wire_cuda_backend")]
+    let cuda_kvdecode_handle = {
+        let want = std::env::var("SP_DAEMON_BACKEND")
+            .map(|v| v.trim().eq_ignore_ascii_case("cuda"))
+            .unwrap_or(false)
+            && std::env::var("SP_DAEMON_KVDECODE")
+                .map(|v| v.trim() == "1")
+                .unwrap_or(false);
+        if want {
+            let session_raw: *mut sp_daemon::ffi_l1::sp_session =
+                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+            // The session's borrowed qwen3_model* (the glue open() needs it).
+            let qm = unsafe {
+                sp_daemon::ffi_l1::sp_session_qwen3_model(session_raw)
+            } as *const std::ffi::c_void;
+            // pmax = max resident context budget. Use the model's max_context
+            // (arch default) with a floor; the resident cache allocs to Pmax.
+            let pmax: i32 = std::env::var("SP_DAEMON_KVDECODE_PMAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4096);
+            // SAFETY: we own `session` exclusively here; no concurrent decode.
+            match unsafe {
+                sp_daemon::cuda_kvdecode_dispatch::register_with_session(session_raw, qm, pmax)
+            } {
+                Ok(h) => {
+                    info!("WIRE-CUDA-DECODE: sp_session_register_kvdecode_backend OK on TARGET session (Pmax={pmax}) — sp_decode_step routes to gemma4_kv_decode_logits (persistent-KV 12B decode)");
+                    Some(Mutex::new(crate::state::CudaKvDecodeHandle(h)))
+                }
+                Err(e) => {
+                    tracing::warn!("WIRE-CUDA-DECODE: registration failed: {e} — staying on math-core reference decode");
+                    None
+                }
+            }
+        } else {
+            #[cfg(feature = "wire_cuda_backend")]
+            if wire_cuda_active {
+                info!("WIRE-CUDA-DECODE: feature linked + cuda backend active, but SP_DAEMON_KVDECODE!=1 — decode stays on math-core reference (prefill bridge unaffected)");
+            }
+            None
+        }
+    };
+
     let state = Arc::new(crate::state::AppState {
         model,
         session: Mutex::new(session),
@@ -587,13 +647,12 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         memo_vocab_size,
         // ledger-autowire: shared PoUW ledger handle (None when --pouw-ledger-path unset).
         ledger,
-        // Sprint WIRE-CUDA-DECODE-GEMMA4 — resident KV-decode cache. SCAFFOLD:
-        // None until the INTEGRATION step opens it at startup behind
-        // SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1 (addendum §5/§7.4) via
-        // cuda_kvdecode_dispatch::register_with_session, wrapped in
-        // CudaKvDecodeHandle. Field is feature-gated to match the AppState decl.
+        // Sprint WIRE-CUDA-DECODE-GEMMA4 — resident KV-decode cache (INTEGRATION
+        // §7.4): Some(handle) when SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1
+        // opened + registered the §6b verb above; None otherwise. The handle is
+        // dropped (gemma4_kv_close) before `model` by AppState declaration order.
         #[cfg(feature = "wire_cuda_backend")]
-        cuda_kvdecode_handle: None,
+        cuda_kvdecode_handle,
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]

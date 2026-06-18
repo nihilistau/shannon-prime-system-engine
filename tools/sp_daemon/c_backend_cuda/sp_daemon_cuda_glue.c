@@ -127,10 +127,10 @@ extern int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
 extern int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
 extern int   gemma4_kv_pos(const sp_g4_kv *s);
 extern void  gemma4_kv_close(sp_g4_kv *s);
-/* TODO(WIRE-CUDA-DECODE): additive logits-returning step (addendum §3.1.A).
- * Declared here so the glue compiles against the intended symbol; the engine
- * definition is the INTEGRATION step. Until then `step` returns an error.
- *   extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits); */
+/* WIRE-CUDA-DECODE-GEMMA4 §3.1.A — additive logits-returning step (now defined
+ * in cuda_forward.cu, declared in sp_engine/cuda_backend.h). Forward K/V at the
+ * live dpos, D2H the post-head full-vocab logits row [n_vocab], advance dpos. */
+extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
 
 /* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
  * gemma4_kv_open). pmax = max resident position budget. Requires the model to
@@ -154,19 +154,13 @@ int sp_daemon_cuda_kvdecode_prefill(void *handle, const int32_t *tokens, int n_t
 
 /* decode_step(handle, token, logits): forward ONE token at the live dpos, write
  * the full-vocab logits row [n_vocab] for the NEXT position, advance dpos.
- *
- * TODO(WIRE-CUDA-DECODE): wire to the additive gemma4_kv_decode_logits once it
- * exists in cuda_forward.cu (addendum §3.1 option A + §7 step 1):
- *   return gemma4_kv_decode_logits(s, token, logits);
- * Until then surface a clear, non-silent error (the gate stays RED, by design —
- * no fake greedy path that would lose L2-side sampling). */
+ * Wired (WIRE-CUDA-DECODE §7.1/§3.1.A) to the additive gemma4_kv_decode_logits in
+ * cuda_forward.cu — the logits-returning sibling of the null-floor argmax-only
+ * gemma4_kv_decode. L2 owns sampling over the returned row. 0 on success. */
 int sp_daemon_cuda_kvdecode_step(void *handle, int32_t token, float *logits) {
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || !logits) { sp_set_error("cuda kvdecode step: bad args"); return -1; }
-    (void)token;
-    sp_set_error("cuda kvdecode step: TODO(WIRE-CUDA-DECODE) — needs additive "
-                 "gemma4_kv_decode_logits (WIRE-CUDA-DECODE-GEMMA4.md §3.1.A/§7.1)");
-    return -1;
+    return gemma4_kv_decode_logits(s, token, logits);
 }
 
 /* rewind(handle, n): O(1) cold-evict (dpos -= n). 0 ok. */
