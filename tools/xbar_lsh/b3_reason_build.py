@@ -34,16 +34,21 @@ def enc(text):
     os.remove(p)
     return [int(x) for x in r.stdout.split()]
 
+TURN_S, TURN_E = 105, 106   # gemma4 <|turn> / <turn|>  (S1: real instruct turn tokens)
+
 def main():
     eptext = {k: open(v,encoding="utf-8").read().strip() for k,v in EPTXT.items()}
+    # gemma4 chat template: <bos>(<|turn>{role}\n{content}<turn|>\n)*<|turn>model\n
+    u_role = enc("user\n")[1:]; m_role = enc("model\n")[1:]; nl = enc("\n")[1:]
     manifest, meta = [], []
     for qi,(q,lab) in enumerate(QUERIES):
         for ep,etxt in eptext.items():
-            prefix = PROMPT.format(E=etxt, Q=q)
-            pids = enc(prefix)                       # [BOS, prefix...]
+            content = enc(PROMPT.format(E=etxt, Q=q))[1:]    # question tokens (no BOS)
+            # in-format prefix: <bos><|turn>user\n{content}<turn|>\n<|turn>model\n
+            pids = [2, TURN_S] + u_role + content + [TURN_E] + nl + [TURN_S] + m_role
             for ans in ("Yes","No"):
-                aids = enc(" " + ans)                # [BOS, ans-token(s)]
-                seq = pids + aids[1:]                # drop the answer's BOS
+                aids = enc(" " + ans)[1:]            # answer token(s), no BOS
+                seq = pids + aids
                 sfrom = len(pids)                    # score only the answer token(s)
                 tf = os.path.join(OUT, f"q{qi}_{ep}_{ans}.txt")
                 open(tf,"w").write("\n".join(str(x) for x in seq)+"\n")
