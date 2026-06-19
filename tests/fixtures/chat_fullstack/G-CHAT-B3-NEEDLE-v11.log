@@ -1,0 +1,31 @@
+G-CHAT-B3-NEEDLE (v11)  NOVEL-NEEDLE curator + ablation — curator PROVEN, collapse still MILD
+=============================================================================================
+THE CURATOR PATH WORKS, REUSING EXISTING PARTS (no new code): _b3_capture_ep.bat (tokens nctx
+outdir) -> test_gemma4_ppl_cuda with SP_XBAR_RECALL_WRITE -> serializes ep.k/ep.v/ep.mf via the
+P3.1b sp_xbar_manifest_serialize path; ep.tok = the EXACT input token file ⇒ alignment guaranteed
+by construction (the 213-vs-84 ghost is gone). Minted two novel non-parametric needles end-to-end.
+
+ABLATION on the novel needles (full-strength inject, lobster as parametric control):
+  needle1 "access code 8-FALCON-7729" (code stated TWICE): M=42 collapse -0.08(ntgt8); full +0.01(8)
+  needle2 "access code ... single statement"  (npos31): full-strength collapse -0.02(ntgt5)
+  lobster (parametric) on every run: 0.00..+0.01  (ablation strands nothing — in the weights)
+
+VERDICT: DIRECTIONALLY RIGHT, MAGNITUDE WRONG. The novel needle is the only episode to register a
+NEGATIVE collapse (and only on its matched query); the parametric control stays flat — the thesis'
+SIGN is confirmed. But the collapse is MILD (-0.02..-0.08), NOT the predicted catastrophic -8.5.
+Removing the redundant-code confound (needle1 stated the code twice ⇒ ablating one copy let the
+model recover from the other — the v10-predicted "flawed needle") and going full-strength did NOT
+deepen it. So the limiter is NOT parametric-vs-episodic and NOT corpus novelty — it is the
+INSTRUMENT'S SENSITIVITY: ΣΔLL over the model's OWN greedy continuation in window [2,8) is a weak
+probe. Two suspects, both diagnosed for next pass: (1) at greedy temp=0 the model may not strongly
+RECITE the secret in positions 2-8 (so there is little code-token probability to collapse), and
+(2) the payload window [2,8) only partially overlaps where the code surfaces (ntgt 5-8 of ~11 code
+tokens). FIX (v12): verify the WITH-needle generation actually emits the secret (B6-style), then
+score ΣΔLL over the ACTUAL secret-token positions (not a fixed [2,8) window) — i.e. teacher-force
+the KNOWN secret string and ablate+rescore exactly those positions. That measures the secret's
+dependency directly instead of the greedy continuation's.
+
+ASSETS (committed; episodes are regenerable so the multi-MB ep.k/ep.v are NOT committed): needle
+texts (_needle1/2.txt), registries (reg_needle*.jsonl), ep.tok sidecars, launch bats, this receipt.
+The curator is now a one-command pipeline; the ablation instrument is sound; the SCORING WINDOW is
+the next refinement, not the corpus.
