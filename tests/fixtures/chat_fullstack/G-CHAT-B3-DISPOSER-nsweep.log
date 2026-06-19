@@ -1,0 +1,33 @@
+G-CHAT-B3-DISPOSER (v9g)  N-SWEEP — registry grown 3→4→5→6 (operator: "try it with 4,5,6")
+==========================================================================================
+Grew the registry by adding episodes as extra candidates: N=4 (+_ep_audio, a NOVEL non-
+parametric KAI-3 audio episode), N=5 (+_p33_ep), N=6 (+_p31_ep). Re-ran the 9-query matrix
+at each N with the v9e multi-token ΔLL Disposer + q·K Stage-1 (both telemetry, TAU=+inf).
+Hypothesis under test: is the N=3 wiki set the binding constraint (would MORE/novel memory
+help)? RESULT: NO — adding episodes makes it WORSE and exposes the root causes sharply.
+
+OUTCOME (identical at N=4, N=5, N=6): ep_audio becomes the argmax of BOTH q·K AND multi-tok
+ΔLL on the 3 MATCHED queries, and q·K argmax on ALL 9. A single high-energy novel episode is
+a UNIVERSAL super-attractor in both signal spaces. Consensus fires ep_audio on all 3 matched
+queries (WRONG recall — not the true wiki/homarus/headlam) and abstains on the 6 foreigns
+(q·K=audio but ΔLL disagrees ⇒ no fire ⇒ 0 false fires). Diagonal dominance: qK 0/3, ΔLL 0/3,
+consensus 0/3 — WORSE than N=3 (was 2/3 ΔLL).
+
+RAW (N=6, q0 "Who is Boulter?"):
+  q·K  topm: wiki 0.394  homarus 0.396  headlam 0.397  AUDIO 0.546  p33 0.491  p31 0.368
+  ΔLL  pay:  wiki -0.44  homarus -1.03  headlam -1.36  AUDIO -0.08
+TWO ROOT CAUSES, now unmistakable:
+  1. q·K IS K-NORM-DOMINATED, not relevance. ep_audio/ep_p33 (high-norm global-K, max≈0.66)
+     out-score the wiki episodes (max≈0.44) on EVERY query. q·K measures magnitude, not
+     direction. FIX: cosine-normalize q·K (divide by ||K||) — trivial, kills the norm bias.
+  2. ΔLL SIGN IS INVERTED. ep_audio wins ΔLL by being ~0 (ignored, OOD); the TRUE episodes are
+     NEGATIVE (wiki -0.44 … headlam -1.36) because injecting the matched memory makes the
+     model's OWN greedy continuation LESS self-consistent (it pulls toward facts off the naive
+     trajectory). argmax(ΔLL) therefore picks the LEAST-disruptive = MOST-irrelevant episode.
+     Confirms v9f (true q3 ΔLL=-0.19 < false q4 +0.62). FIX: the relevant memory is the one
+     that DISRUPTS MOST — use -ΔLL / |ΔLL| against a relevance-aware reference, not argmax(ΔLL).
+
+VERDICT: "more / novel memory" is NOT the unlock at this scale — it amplifies the magnitude
+(q·K) and sign (ΔLL) confounds. The unlock is NORMALIZED signals: cosine q·K + polarity-correct
+ΔLL. The verify-rewind O(1) plumbing handled N=6 (6 episodes × 16 fwd × 9 q) clean, zero crash.
+Receipts: registries reg{4,5,6}.jsonl + logs _dispN{4,5,6}.log + this v9g analysis.
