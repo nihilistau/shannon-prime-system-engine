@@ -1,0 +1,20 @@
+G-CHAT-B3-WC-TRAIN-200 — learned-head train on the 200-needle ablation-validated corpus
+date: 2026-06-19   trainer: b3_train_wc_fast.py (vectorized; original looped per-episode in
+  Python -> ~40min/epoch at 201 eps, infeasible; vectorized = ~50 epochs/25s, 400 ep in ~3.5min)
+data: b3_data_200.npz = 861 query-Q (801 positive [200 needles x (query+3 paraphrases)] + 60 foreign) x 201 episode-K
+train: r=32, 400 epochs, InfoNCE + 0.2 hinge, learnable s0=TAU. ce 5.54 -> 1.97; tau 0.265; s0 +0.173.
+RESULT (dual):
+  WIN  — float reject boundary SEPARATES: min_target=+0.507 > s0=+0.173 > max_foreign=-0.494.
+         The head cleanly puts every true-episode score above threshold and every foreign below it
+         (the 60-foreign null class did its job; archetype + foreign-reject is learned).
+  NEG  — instance top-1 weak: diagonal argmax-correct 270/801 (~34%) float; the INT16 matrix shows
+         in-domain queries bunch dozens of same-archetype episodes at +0.7..1.0, true episode rarely
+         the argmax. ROOT CAUSE: the corpus is TEMPLATED — queries within an archetype (all 67 code
+         needles share the same carrier sentence) are near-identical, so query-Q collides intra-archetype.
+         The head can route archetype + reject foreign but cannot resolve WHICH needle inside an archetype.
+VERDICT: full pipeline proven end-to-end (mint->capture->admit->label->feature-dump->train->int16 export),
+  head learns a real signal (archetype + foreign-reject), but INSTANCE-level live recall is blocked by
+  templated-corpus query collisions. The unlock is QUERY DIVERSITY (distinct, non-templated needle queries),
+  the same binding constraint identified all campaign — NOT the machinery. Do NOT deploy as an instance
+  selector yet (would fire wrong-but-same-archetype memory; M=42 bounds harm but it's not clean recall).
+artifacts: _b3_wc/lsh_Wc_f32_200.npz, lsh_Wc_i16_s14.bin (int16, quant-err 3.05e-5). Logs _train200fast.log, _export200.log.
