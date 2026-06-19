@@ -790,66 +790,75 @@ fn run_kvdecode_chat(
                         if disposer {
                             let disp_tau: f32 = std::env::var("SP_B3_DISPOSER_TAU").ok()
                                 .and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY);
-                            // Δ-CONTINUATION signal (v9d). The absolute Yes/No bridge was convicted
-                            // (per-episode baseline bias; diagonal dominance 0/3). The relevance
-                            // signal is DIFFERENTIAL against the SAME query: does injecting E's
-                            // CONTENT shift the model's own first-gen token vs a content-free
-                            // control? Per candidate we inject REAL E and a ZEROED E (zero=true ⇒
-                            // same npos = same RoPE/position shift, null content) and measure the
-                            // divergence of the two first-gen distributions after decode_step(last).
-                            // Episode "gravity" that is pure length/position cancels (both legs share
-                            // it); only CONTENT relevance survives — immune to the per-episode Yes-bias
-                            // because each episode is compared to ITSELF zeroed on THIS query. Logs
-                            // KL(real‖zero), L1, max-mass-gain; ranks on KL.
-                            let softmax = |z: &[f32]| -> Vec<f32> {
+                            // MULTI-TOKEN Δ-CONTINUATION signal (v9e). First-token Δcont was blind
+                            // (1/3): biographical answers open with boilerplate ("Robert"/"He"); the
+                            // memory-specific facts ("The Bill","Herons") surface positions 3-8. So
+                            // measure the SEMANTIC PAYLOAD: under REAL E greedily decode K tokens =
+                            // the model's own continuation g[0..K); then under ZEROED E (same npos,
+                            // null content) teacher-force THAT SAME sequence and read each token's
+                            // log-prob. signal = Σ ΔLL = Σ (log p_real(g_i) - log p_zero(g_i)) over
+                            // the PAYLOAD window i∈[2,K) (skip the boilerplate). A true match forces
+                            // tokens that are HIGHLY SURPRISING to the zeroed cache (large +ΔLL); a
+                            // mismatch yields the prompt-driven continuation the zeroed cache already
+                            // expects (~0). This is the teacher-forced ΔLL on the model's OWN answer —
+                            // content-aware, not a raw distribution magnitude, so the per-episode
+                            // content-mass bias is suppressed. Ranks on the payload-window ΔLL.
+                            const KGEN: usize = 8;
+                            let lse = |z: &[f32]| -> f32 {
                                 let m = z.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                                let mut s = 0.0f32; let mut p = vec![0.0f32; z.len()];
-                                for (i, &v) in z.iter().enumerate() { let e = (v - m).exp(); p[i] = e; s += e; }
-                                if s > 0.0 { for x in p.iter_mut() { *x /= s; } }
-                                p
+                                let mut s = 0.0f32; for &v in z { s += (v - m).exp(); } m + s.ln()
+                            };
+                            let argmax = |z: &[f32]| -> usize {
+                                let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
+                                for (i, &v) in z.iter().enumerate() { if v > bv { bv = v; bi = i; } } bi
                             };
                             let mut best_disp: Option<(usize, f32)> = None;
                             let mut drows: Vec<String> = Vec::with_capacity(registry.len());
                             for (i, ep) in registry.iter().enumerate() {
                                 if ep.npos <= 0 || ep.gk.is_empty() { continue; }
-                                // Leg 1: REAL E content (SP_REPLAY_MTARGET budget if set).
+                                // Leg 1: REAL E — greedily decode the continuation, record its log-probs.
                                 if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
-                                let ok_r = unsafe { kv::decode_step(handle, last[0], logits) }.is_ok();
-                                let p_real = if ok_r { softmax(logits) } else { Vec::new() };
-                                let _ = unsafe { kv::rewind(handle, 1 + ep.npos) };
-                                // Leg 2: ZEROED E control — same npos (same position shift), null content.
-                                if unsafe { kv::replay(handle, &ep.dir, ep.npos, true) }.is_err() { continue; }
-                                let ok_z = unsafe { kv::decode_step(handle, last[0], logits) }.is_ok();
-                                let p_ctrl = if ok_z { softmax(logits) } else { Vec::new() };
-                                let _ = unsafe { kv::rewind(handle, 1 + ep.npos) };
-                                // Divergence(real ‖ control) on the first-gen distribution.
-                                let (mut kl, mut l1, mut mg) = (f32::NAN, 0.0f32, 0.0f32);
-                                if p_real.len() == p_ctrl.len() && !p_real.is_empty() {
-                                    let mut k = 0.0f32;
-                                    for j in 0..p_real.len() {
-                                        let a = p_real[j]; let b = p_ctrl[j];
-                                        if a > 0.0 && b > 0.0 { k += a * (a.ln() - b.ln()); }
-                                        l1 += (a - b).abs();
-                                        let d = a - b; if d > mg { mg = d; }
-                                    }
-                                    kl = k;
+                                let mut gen: Vec<i32> = Vec::with_capacity(KGEN);
+                                let mut lpr: Vec<f32> = Vec::with_capacity(KGEN);
+                                let mut tok = last[0];
+                                for _ in 0..KGEN {
+                                    if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                    let g = argmax(logits);
+                                    lpr.push(logits[g] - lse(logits));
+                                    gen.push(g as i32);
+                                    tok = g as i32;
                                 }
-                                drows.push(format!("{}(kl={:.3},l1={:.3},mg={:.3})", ep.name, kl, l1, mg));
-                                let key = if kl.is_nan() { f32::NEG_INFINITY } else { kl };
-                                match best_disp { Some((_, b)) if key <= b => {}, _ => best_disp = Some((i, key)) }
+                                let _ = unsafe { kv::rewind(handle, gen.len() as i32 + ep.npos) };
+                                if gen.is_empty() { drows.push(format!("{}(pay=nan)", ep.name)); continue; }
+                                // Leg 2: ZEROED E — teacher-force the SAME sequence, read its log-probs.
+                                if unsafe { kv::replay(handle, &ep.dir, ep.npos, true) }.is_err() { continue; }
+                                let mut lpz: Vec<f32> = Vec::with_capacity(gen.len());
+                                let mut tok = last[0];
+                                for i2 in 0..gen.len() {
+                                    if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                    lpz.push(logits[gen[i2] as usize] - lse(logits));
+                                    tok = gen[i2];
+                                }
+                                let _ = unsafe { kv::rewind(handle, lpz.len() as i32 + ep.npos) };
+                                // ΔLL = log p_real - log p_zero, summed over the payload window [2,n).
+                                let n = lpr.len().min(lpz.len());
+                                let (mut dll_all, mut dll_pay) = (0.0f32, 0.0f32);
+                                for j in 0..n { let d = lpr[j] - lpz[j]; dll_all += d; if j >= 2 { dll_pay += d; } }
+                                drows.push(format!("{}(pay={:.2},all={:.2})", ep.name, dll_pay, dll_all));
+                                match best_disp { Some((_, b)) if dll_pay <= b => {}, _ => best_disp = Some((i, dll_pay)) }
                             }
-                            tracing::info!("B3-DISPOSER Δcont KL(real‖zero)/L1/maxgain: [{}] TAU={:.3}", drows.join(" "), disp_tau);
-                            if let Some((idx, kl)) = best_disp {
+                            tracing::info!("B3-DISPOSER Δcont(multi-tok) ΣΔLL pay[2,{})/all: [{}] TAU={:.3}", KGEN, drows.join(" "), disp_tau);
+                            if let Some((idx, dll)) = best_disp {
                                 let ep = &registry[idx];
-                                let fire = kl > disp_tau && ep.npos > 0 && !ep.gk.is_empty();
-                                tracing::info!("B3-DISPOSER: best='{}' (topic='{}') KL={:.3} ⇒ {}",
-                                    ep.name, ep.topic, kl, if fire { "AUTHORIZE (re-inject)" } else { "REJECT (rewound; clean prompt)" });
+                                let fire = dll > disp_tau && ep.npos > 0 && !ep.gk.is_empty();
+                                tracing::info!("B3-DISPOSER: best='{}' (topic='{}') ΣΔLL_pay={:.3} ⇒ {}",
+                                    ep.name, ep.topic, dll, if fire { "AUTHORIZE (re-inject)" } else { "REJECT (rewound; clean prompt)" });
                                 if fire {
                                     // SAFETY: handle live; cache Mutex held.
                                     if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
                                         tracing::warn!("B3-DISPOSER: authorized re-inject({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
                                     } else {
-                                        recalled = Some((ep.name.clone(), (kl.max(0.0) * 1000.0) as u32));
+                                        recalled = Some((ep.name.clone(), (dll.max(0.0) * 1000.0) as u32));
                                     }
                                 }
                             }

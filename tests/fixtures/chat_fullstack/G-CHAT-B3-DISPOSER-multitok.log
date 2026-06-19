@@ -1,0 +1,43 @@
+G-CHAT-B3-DISPOSER (v9e)  MULTI-TOKEN Δ-CONTINUATION (ΣΔLL over payload window [2,8))
+====================================================================================
+Per candidate: under REAL E greedily decode 8 tokens = the model's own continuation g[0..8);
+under ZEROED E (same npos, null content) teacher-force g and read each token's log-prob;
+signal = Σ (log p_real(g_i) - log p_zero(g_i)) over i∈[2,8) (skip boilerplate positions 0-1).
+Teacher-forced ΔLL on the model's OWN answer. Same O(1) inject→score→rewind plumbing.
+Telemetry TAU=+inf. Registry Boulter-84/lobster-180/Headlam-179; M_target=42; greedy.
+
+ΣΔLL_pay MATRIX:
+  q (→matched)            wiki    homarus  headlam   argmax
+  q1 Boulter (→wiki)     -0.44   -1.03    -1.36     wiki     HIT
+  q2 lobster (→homarus)   0.40    0.13     0.20     wiki     MISS
+  q3 Headlam (→headlam)  -0.53   -0.53    -0.19     headlam  HIT
+  q4 sourdough-boul (F)  -0.75   -1.31     0.62     headlam
+  q5 dp4a GEMV (F)        1.16   -1.32    -1.10     wiki
+  q6 remember (F)        -0.30   -0.07    -0.23     homarus
+  q7 stopwords (F)        0.53    0.79     0.84     headlam
+  q8 France (F)           5.11    4.42     4.47     wiki
+  q9 sourdough (F)        0.10   -2.01     4.59     headlam
+
+VERDICT: BEST SIGNAL YET, mechanism VALIDATED, gate still FAILS.
+  * Diagonal dominance 2/3 (q1+q3) — the MONOTONIC LADDER Yes/No 0/3 -> first-tok Δcont 1/3
+    -> multi-tok Δcont 2/3 confirms the depth diagnosis: relevance lives in the payload
+    tokens (positions 3-8), not the boilerplate. Measuring there is correct.
+  * GATE FAILS on the absolute threshold: min(matched)=-0.44 << max(foreign)=+5.11. Foreign
+    queries throw confident ΔLL spikes (q5 dp4a->wiki +1.16; q9 sourdough->headlam +4.59;
+    q8 France pins ALL THREE ~+4.5). ROOT CAUSE: "memory changed my answer" != "memory was
+    relevant" — injecting an off-topic episode can still perturb an off-topic continuation,
+    so a large +ΔLL is necessary but NOT sufficient for relevance.
+  * q2 miss: lobster query, the matched lobster episode is mid (0.13) — the 12B's lobster
+    continuation is generic enough that the episode adds little surprise vs zeroed.
+
+NEXT (the orthogonal-consensus sieve, now with two GOOD signals): the v5 sieve failed because
+its members (geom/learned/thermo) were correlated-bad. We now have TWO ~2/3 ORTHOGONAL signals:
+q·K (Stage-1 GEOMETRIC relevance) and multi-tok ΔLL (Stage-2 GENERATIVE relevance). A foreign
+ΔLL spike (q5/q9) is unlikely to coincide with a q·K top-rank for the same episode. Gate =
+fire iff BOTH rank the SAME episode top AND each clears its own telemetry-pinned threshold.
+This is the principled two-stage retrieve-and-verify the campaign pointed at, finally with two
+signals worth intersecting. M_target=42 budget = the safety floor under it.
+
+LADDER: Yes/No 0/3 (pure bias) -> first-tok Δcont 1/3 (right axis, wrong depth) -> multi-tok
+Δcont 2/3 (right depth; necessary-not-sufficient) -> consensus(q·K ∧ ΔLL) [next].
+CODE: tools/sp_daemon/src/routes.rs (SP_B3_DISPOSER, multi-tok Δcont; telemetry TAU=+inf null floor).
