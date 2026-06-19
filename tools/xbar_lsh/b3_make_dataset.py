@@ -82,10 +82,29 @@ def read_qdump(path):
     return q.reshape(ng, G_NH, HD)
 
 
-def load_registry(eng):
-    reg = os.path.join(eng, "tests", "fixtures", "chat_fullstack", "recall_registry.jsonl")
+def qpairs_from_manifest(manifest_path, foreign_path):
+    """Build (query,label) from corpus_manifest.jsonl (per-needle query+paraphrases ->
+    label ep_<id>) plus foreign_queries.txt (-> __foreign__). Replaces DEFAULT_QUERIES
+    for the scaled novel-needle corpus."""
+    pairs = []
+    for ln in open(manifest_path, encoding="utf-8"):
+        if not ln.strip():
+            continue
+        r = json.loads(ln)
+        label = f"ep_{r['id']}"
+        for q in [r["query"]] + list(r.get("paraphrases", [])):
+            pairs.append((q, label))
+    if foreign_path and os.path.exists(foreign_path):
+        for ln in open(foreign_path, encoding="utf-8"):
+            q = ln.strip()
+            if q:
+                pairs.append((q, "__foreign__"))
+    return pairs
+
+
+def load_registry(reg_path):
     eps = []
-    for line in open(reg):
+    for line in open(reg_path):
         line = line.strip()
         if not line:
             continue
@@ -94,7 +113,7 @@ def load_registry(eng):
     return eps
 
 
-def post_queries(base, qdir):
+def post_queries(base, qdir, qpairs):
     """Live mode: POST every query (auto_recall:true) so the daemon dumps its global-Q
     into qdir as q_<chat_id>.bin (the daemon must run with SP_B3_QDUMP=<qdir>). The dump
     filename is the chat_id, not the prompt, so we POST SEQUENTIALLY and pair each query
@@ -103,8 +122,8 @@ def post_queries(base, qdir):
     import urllib.request, time, glob as _glob
     os.makedirs(qdir, exist_ok=True)
     qmap = {}
-    for label, qs in DEFAULT_QUERIES.items():
-        for q in qs:
+    for q, label in qpairs:
+        if True:
             before = set(os.path.basename(f) for f in _glob.glob(os.path.join(qdir, "q_*.bin")))
             body = json.dumps({"messages": [{"role": "user", "content": q}],
                                "max_tokens": 4, "temperature": 0, "auto_recall": True}).encode()
@@ -138,14 +157,22 @@ def main():
     ap.add_argument("--live", action="store_true", help="POST the query set to a running daemon first")
     ap.add_argument("--base", default="http://127.0.0.1:3000")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--registry", default=None, help="registry.jsonl (default: legacy recall_registry.jsonl)")
+    ap.add_argument("--manifest", default=None, help="corpus_manifest.jsonl -> dynamic queries")
+    ap.add_argument("--foreign", default=None, help="foreign_queries.txt (NULL class, one/line)")
     args = ap.parse_args()
     eng = args.eng
     qdir = args.qdir or os.path.join(eng, "_b3_wc", "qdump")
     out = args.out or os.path.join(eng, "_b3_wc", "b3_data.npz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    eps = load_registry(eng)
+    reg_path = args.registry or os.path.join(eng, "tests", "fixtures", "chat_fullstack", "recall_registry.jsonl")
+    eps = load_registry(reg_path)
     name_to_idx = {e["name"]: i for i, e in enumerate(eps)}
+    if args.manifest:
+        qpairs = qpairs_from_manifest(args.manifest, args.foreign)
+    else:
+        qpairs = [(q, label) for label, qs in DEFAULT_QUERIES.items() for q in qs]
     K_list = []
     for e in eps:
         K, npos = load_episode_global_k(e["dir"], int(e["npos"]))
@@ -153,8 +180,9 @@ def main():
         print(f"[ds] episode {e['name']}: K {K.shape} (npos={npos})", flush=True)
 
     if args.live:
-        print(f"[ds] LIVE: POST {sum(len(v) for v in DEFAULT_QUERIES.values())} queries -> {qdir}", flush=True)
-        qmap = post_queries(args.base, qdir)
+        npp = sum(1 for _,l in qpairs if l!="__foreign__"); nff = sum(1 for _,l in qpairs if l=="__foreign__")
+        print(f"[ds] LIVE: POST {len(qpairs)} queries ({npp} positive / {nff} foreign) -> {qdir}", flush=True)
+        qmap = post_queries(args.base, qdir, qpairs)
     else:
         # offline: the qmap.json sidecar (written by a prior --live run) maps
         # q_<chat_id>.bin -> [query, label].
