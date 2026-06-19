@@ -40,3 +40,16 @@ FFI; the ep.tok sidecar convention (homarus/headlam written, alignment proven); 
 inject->generate->intersect->ablate->rescore->rewind orchestration (SP_B3_DISPOSER=2). Ready to
 re-fire the instant a novel-needle corpus exists (NIAH secrets the model cannot know parametrically).
 DEFINITIVE NEXT (different campaign): build a novel-needle episode corpus + re-run the ablation gate.
+G-CHAT-B3-ABLATION-v10 ADDENDUM — N=2 control (registry {homarus, headlam})
+============================================================================
+Operator probe: does N=2 change the ablation verdict? PREDICTED N-invariant (each candidate
+is injected+ablated+scored in ISOLATION; registry size never enters the per-episode collapse),
+then RAN it. Result == prediction, byte-for-byte vs the N=3 run:
+  lobster query  -> ep_homarus collapse +0.01 (12 tokens ablated)   [N=3 was +0.01/12]
+  Headlam query  -> ep_headlam collapse -0.01 (10 tokens ablated)   [N=3 was -0.01/10]
+  France (F)     -> ep_headlam collapse -0.06 (7)                   [N=3 was -0.06]
+  sourdough (F)  -> both 0.00 (0)
+All collapses in [-0.06,+0.04] = parametric noise; NO collapse on true matches, NO separation.
+CONFIRMED: N is not a variable for the ablation gate — collapse(E) = f(prompt, E) only. The
+parametric-steel verdict holds at N=2 exactly as N=3/6. The lever is a novel-needle corpus,
+not a smaller registry. Receipt _dispA2.log + reg2.jsonl.
