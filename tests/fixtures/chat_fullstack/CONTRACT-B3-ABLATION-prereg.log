@@ -1,0 +1,38 @@
+CONTRACT-XBAR-B3-ABLATION  (v10 pre-registration) — the Thermodynamic Knockout gate
+=====================================================================================
+THESIS: every prior signal compared E against the EMPTY cache, conflating "fact came from
+the episode" with "fact came from the 12B weights (episode = fluent runway)". The ABLATION
+gate measures CAUSAL episodic dependency: knock out the specific episode tokens the payload
+uses, and see if the payload probability collapses.
+
+METRIC: ΔLL_ablation = LL(payload | E) - LL(payload | E with the payload's source tokens zeroed).
+  true match  ("Who is Boulter?"→"The Bill"): ablate the 'The','Bill' rows ⇒ payload collapses ⇒ ΔLL ≪ 0.
+  parametric  ("France"→"Paris"): fact is in weights; ablating Boulter rows ⇒ ΔLL ≈ 0.
+  fluent/audio: no payload-token match in E ⇒ EMPTY ablation mask ⇒ ΔLL = 0 (the lexical limit
+                ENFORCES the semantic boundary — the audio super-attractor fails the knockout instantly).
+GATE: fire iff ΔLL_ablation < TAU_ABL (e.g. < -2.0). Telemetry-first TAU=-inf (never fires) to
+read the matrix, then pin. M_target=42 budget stays the safety floor on the speculative inject.
+
+SUBSTRATE FINDINGS (this session, pre-build):
+  * Episodes store ONLY latent K/V + manifest — NO per-position token ids. Solution: ep.tok SIDECAR
+    file (token id per line) next to ep.k/ep.v ⇒ NO math-core manifest ABI change.
+  * Alignment: homarus 180==npos180 ✓, headlam 179==npos179 ✓ (ep.tok WRITTEN, alignment PROVEN:
+    homarus payload "a species of lobster found in the North Atlantic Ocean" = 12 toks, 9 located
+    inside _b3_ep_homarus/ep.tok). Boulter _c2_ep_wiki npos84 ≠ source 213 toks ⇒ NEEDS RE-MINT
+    (the 84-tok source passage is lost) before it can be targeted; until then Boulter ablation mask
+    is empty ⇒ ΔLL=0 ⇒ never-fires (a known incomplete leg, not a wrong fire).
+
+BUILD ORDER (de-risked):
+  1. [DONE] ep.tok sidecars for the 2 aligned episodes (homarus, headlam) + alignment proof.
+  2. Re-mint Boulter from a known 84-tok (or use the 213-tok full text as a fresh npos=213 episode) +
+     write its ep.tok. (Needs the curator capture path: prefill text → gemma4_kv_snapshot → ep.k/v/mf.)
+  3. CUDA: gemma4_kv_ablate_rows(s, base, int32 pos[], k) — cudaMemset 0 the K/V rows at (base+pos[i])
+     across all owner layers (the replay 'zero' mechanism, scoped to k rows). FFI + dispatch.
+  4. routes.rs Disposer: replay E → greedy 8-tok payload → load ep.tok → intersect payload tok ids →
+     map to episode positions → ablate_rows → teacher-force re-score the 8 payload toks → ΔLL_ablation →
+     rewind(npos). SP_B3_DISPOSER=2 selects ablation mode; TAU telemetry.
+  5. Run the 9-query matrix; look for catastrophic ΔLL collapse STRICTLY on true matches, ≈0 on
+     parametric/fluent/audio.
+
+STATUS: targeting half DE-RISKED + PROVEN (ep.tok + matcher feasibility). Remaining = re-mint Boulter
+(capture tool) + CUDA memset-ablate + routes ablation block + 2 rebuilds. Cross-repo, multi-rebuild.
