@@ -1,36 +1,13 @@
 G-CHAT-B3-RECALL-v4  query-deflection (dLL per token, E as text prefix, 12B one-shot SP_G4_SCORE)
 dLL = (NLL(query|0) - NLL(query|E)) / n_query ; relevant E -> dLL>0 (query more predictable)
-Who is Robert Boulter?                                  +2.403    -2.790    -1.803   want=Boulter OK
-What is the European lobster, Homarus gammarus?         -0.318    +0.028    -2.180   want=lobster OK
-Who was Frank Headlam?                                  -0.287    -3.120    -0.175   want=Headlam OK
-What is the standard hydration ratio for a French so    +0.813    -1.568    -1.598   FOREIGN max=Boulter (FOREIGN_lexical)
-Explain the memory-bandwidth limits of the dp4a GEMV    -0.358    -1.248    -1.282   FOREIGN max=Boulter (FOREIGN_technical)
-Hey, can you help me remember what we were just talk    -0.442    -1.249    -1.585   FOREIGN max=Boulter (FOREIGN_drift)
-the and of to a in is that it with as                   +1.474    -3.306    -1.048   FOREIGN max=Boulter (FOREIGN_stopword)
-What is the capital of France?                          -0.132    -2.417    -2.095   FOREIGN max=Boulter (FOREIGN_plain)
-How do I bake sourdough bread?                          -0.236    -1.970    -2.690   FOREIGN max=Boulter (FOREIGN_plain)
+Who is Robert Boulter?                                  +1.084    -1.681    -1.287   want=Boulter OK
+What is the European lobster, Homarus gammarus?         -0.228    -0.149    -1.402   want=lobster OK
+Who was Frank Headlam?                                  -0.231    -1.856    -0.276   want=Headlam WRONG(Boulter)
+What is the standard hydration ratio for a French so    +0.538    -1.139    -1.150   FOREIGN max=Boulter (FOREIGN_lexical)
+Explain the memory-bandwidth limits of the dp4a GEMV    -0.242    -0.908    -0.908   FOREIGN max=Boulter (FOREIGN_technical)
+Hey, can you help me remember what we were just talk    -0.456    -1.041    -1.285   FOREIGN max=Boulter (FOREIGN_drift)
+the and of to a in is that it with as                   +0.321    -2.157    -0.617   FOREIGN max=Boulter (FOREIGN_stopword)
+What is the capital of France?                          -0.151    -1.911    -1.344   FOREIGN max=Boulter (FOREIGN_plain)
+How do I bake sourdough bread?                          -0.265    -1.602    -1.715   FOREIGN max=Boulter (FOREIGN_plain)
 
-min true-positive dLL = -0.175   max foreign dLL = +1.474   => NO SEPARATION (RED)
-
---------------------------------------------------------------------------------
- VERDICT  G-CHAT-B3-RECALL-v4 = RED on absolute reject (honest negative #4) — but RANKING works.
---------------------------------------------------------------------------------
- RANKING: 3/3 true positives argmax their correct episode (Boulter +2.40 huge, lobster +0.03,
- Headlam -0.18) -> the relevance RANKING is correct, a 3rd independent method agreeing with
- W_c and q.K that ranking generalizes.
- REJECT (absolute threshold) FAILS, two killers:
-  (1) FLUENT-PREFIX CONFOUND: stop-word soup "the and of to a..." scores +1.474 off the Boulter
-      prefix -- MORE than any true positive but Boulter. A content-rich English passage makes
-      generic tokens more predictable, so absolute dLL rewards "is the prefix fluent English",
-      not just "is it relevant".
-  (2) SHORT-QUERY NOISE (operator predicted): lobster/Headlam true-positive dLL are tiny
-      (+0.03/-0.18); a few high-overlap tokens dominate a 5-10 token query.
- min true-positive dLL -0.175 < max foreign dLL +1.474 => no threshold separates.
- META-PATTERN: three reject mechanisms now measured (q.K magnitude, W_c magnitude, query dLL) —
- all three RANK correctly, all three fail the OPEN-WORLD ABSOLUTE REJECT. Ranking is solved;
- the absolute reject is the hard nut.
- AUTHORIZED NEXT (operator's pre-registered rule): the +1 piece — forced continuation
- (score query + a short bounded continuation = more tokens, less noise, and the fluent-prefix
- confound is diluted by content-bearing continuation tokens). Combine with the working ranking:
- use the generalizing RANK as the shortlist, a continuation-dLL or a RELATIVE/contrastive reject
- (one episode must stand out vs the others) as the disposer.
+min true-positive dLL = -0.276   max foreign dLL = +0.538   => NO SEPARATION (RED)

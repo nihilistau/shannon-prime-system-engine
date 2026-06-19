@@ -44,10 +44,21 @@ DEFAULT_QUERIES = {
         "Was Frank Headlam an Australian commander?",
     ],
     "__foreign__": [
+        # first 5 -> TRAIN split (the verifier tunes its margin on these)
         "What is the capital of France?", "How do I bake sourdough bread?",
         "Explain how a transformer neural network works.", "What is the boiling point of water?",
-        "Who wrote Pride and Prejudice?", "How do I change a flat tyre?",
-        "What is the speed of light?", "Recommend a good pasta recipe.",
+        "Who wrote Pride and Prejudice?",
+        # remaining -> HELD-OUT split (never seen by W_c OR the verifier):
+        "How do I change a flat tyre?", "What is the speed of light?", "Recommend a good pasta recipe.",
+        # --- the 4 adversarial classes (operator, v4): stress the reject boundary ---
+        # 1. Deceptive lexical overlap: keyword "boulter" but sourdough semantic class
+        "What is the standard hydration ratio for a French sourdough boulter bread?",
+        # 2. Orthogonal technical / out-of-domain (dense, high-entropy)
+        "Explain the memory-bandwidth limits of the dp4a GEMV accumulate instruction.",
+        # 3. Conversational drift / ambiguous (zero specific markers -> reject all)
+        "Hey, can you help me remember what we were just talking about?",
+        # 4. Adversarial entropy / stop-word soup (baseline thermodynamic stability)
+        "the and of to a in is that it with as",
     ],
 }
 
