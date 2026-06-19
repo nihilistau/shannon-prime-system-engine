@@ -4609,8 +4609,26 @@ extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int ze
      * (prompt keeps primacy ⇒ no hijack). V is left unscaled (full value at reduced attention).
      * alpha=1 = today's full-strength replay (B6). Decouples inform-when-relevant from
      * dominate-when-not — the length→weight fix for the mass-dominance hijack. */
+    /* B3-v9b CONSTANT-BUDGET refinement: SP_REPLAY_MTARGET normalizes the memory's
+     * thermodynamic budget by episode length — alpha = clamp(M_target / npos, 0, 1) — so
+     * every episode (10 tokens or 1000) carries the SAME total sub-dominant attention
+     * budget regardless of how long the source spoke (the alpha*npos invariant; the same
+     * bounded-budget principle as the O(1) SWA ring). M_target is an EMPIRICAL knob:
+     * alpha*npos is only a first-order proxy for the true softmax mass Sum_p exp(alpha*s_p)
+     * (nonlinear in alpha, dependent on the Q.K values), so M_target is swept on the metal,
+     * not closed-form. SP_REPLAY_MTARGET takes precedence over a fixed SP_REPLAY_ALPHA;
+     * both unset => alpha=1.0 => stored K untouched => byte-identical null floor. */
+    const char *mt_e = getenv("SP_REPLAY_MTARGET");
     const char *alpha_e = getenv("SP_REPLAY_ALPHA");
-    const float replay_alpha = alpha_e ? (float)atof(alpha_e) : 1.0f;
+    float replay_alpha;
+    if (mt_e) {
+        const float M = (float)atof(mt_e);
+        replay_alpha = (npos > 0) ? (M / (float)npos) : 1.0f;
+        if (replay_alpha > 1.0f) replay_alpha = 1.0f;   /* never amplify a memory */
+        if (replay_alpha < 0.0f) replay_alpha = 0.0f;
+    } else {
+        replay_alpha = alpha_e ? (float)atof(alpha_e) : 1.0f;
+    }
     /* KAI-1c: in ring mode the replay overwrites SWA ring slots that may still hold live earlier
      * positions, so each clobbered slot is journaled BEFORE overwrite (exactly as g4_kv_step does)
      * ⇒ gemma4_kv_rewind reconstructs the pre-injection window. Needs journal headroom past commit. */
@@ -4671,8 +4689,8 @@ extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int ze
     cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf);
     s->dpos_host += npos;
     if (cudaMemcpy(s->dpos, &s->dpos_host, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) { sp_set_error("kv_replay: dpos H2D"); return -1; }
-    fprintf(stderr, "    [xbar-#222] gemma4_kv_replay: %s episode into resident cache [%d,%d) alpha=%.3f%s\n",
-            zero ? "ZEROED" : "intact", base, base + npos, replay_alpha, zero ? " (reject control)" : "");
+    fprintf(stderr, "    [xbar-#222] gemma4_kv_replay: %s episode into resident cache [%d,%d) alpha=%.3f eff_mass(a*npos)=%.1f%s\n",
+            zero ? "ZEROED" : "intact", base, base + npos, replay_alpha, replay_alpha * (float)npos, zero ? " (reject control)" : "");
     return 0;
 }
 

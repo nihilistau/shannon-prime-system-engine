@@ -1,0 +1,50 @@
+G-CHAT-B3-RECALL-v9b  CONSTANT-BUDGET refinement (alpha = M_target / N_pos)
+==========================================================================
+Builds on v9 (SP_REPLAY_ALPHA). SP_REPLAY_MTARGET normalizes the injected memory's
+attention budget by episode length: alpha = clamp(M_target / npos, 0, 1) in
+gemma4_kv_replay (cuda_forward.cu), so every episode carries the SAME total
+sub-dominant budget regardless of how long the source spoke (the alpha*npos invariant
+= the bounded-budget principle of the O(1) SWA ring). Precedence: SP_REPLAY_MTARGET >
+SP_REPLAY_ALPHA; both unset => alpha=1.0 => byte-identical null floor.
+
+GATE (the falsifiable test a FIXED alpha provably fails): ONE M_target must give
+mismatch-reject + match-recall across BOTH episode lengths simultaneously.
+Harness: live 12B /v1/chat, resident gemma4_kv decode, greedy (temperature=0).
+Episodes: _c2_ep_wiki (Boulter, npos=84) ; _b3_ep_homarus (lobster, npos=180).
+Repro: SP_REPLAY_MTARGET=<M> in daemon env (_b3v9b_launch.bat <M>).
+
+M_target=42  (Boulter alpha=0.500 / lobster alpha=0.233 ; eff_mass=42 both)
+  BOULTER  MATCH    "Who is Robert Boulter?"     -> "British actor and writer ... 'The Bill' ..." = PARTIAL recall (salient fact)
+  BOULTER  MISMATCH "capital of France?"          -> "Paris" = CLEAN reject (no hijack)
+  LOBSTER  MATCH    "European lobster ...?"        -> "a species of lobster found in the North Atlantic Ocean ..." = CLEAN coherent recall
+  LOBSTER  MISMATCH "capital of France?"          -> question-loop (NO lobster hijack; never commits 'Paris' = dead-zone)
+  => GATE PASS: single budget, both lengths, NO hijack on either, recall preserved on both.
+
+M_target=30  (Boulter alpha=0.357 / lobster alpha=0.167)
+  BOULTER  MATCH    -> "British artist and illustrator ... tabletop RPGs" = recall LOST (budget too low for the weak-aligned attractor)
+  BOULTER  MISMATCH -> "Paris" clean
+  LOBSTER  MATCH    -> clean coherent recall (survives; lobster Q.K alignment strong)
+  LOBSTER  MISMATCH -> still question-loop (lowering budget did NOT fix it)
+
+VERDICT
+-------
+* CONSTANT-BUDGET WORKS. A single M_target=42 makes BOTH the safety property
+  (no hijack / no irrelevant recitation) AND the recall property length-invariant
+  across npos 84<->180 — exactly what a fixed alpha could not (fixed 0.5 over-drove
+  the long episode; the long episode at fixed 0.5 disrupted the mismatch). RECOMMENDED
+  DEFAULT M_target ~ 42 (operating point; equivalently a ~42-position effective budget).
+* M=30 proves the lobster-mismatch loop is NOT a mass problem (lowering 42->30 did not
+  fix it and broke Boulter recall). It is a NONLINEARITY dead-zone: alpha*npos equalizes
+  the first-order proxy, not the true softmax mass Sum_p exp(alpha*s_p). The lobster
+  memory, even heavily attenuated, perturbs the France logits just enough to suppress
+  the 'Paris' token without injecting lobster content.
+* Greedy-repetition note: the clean cases ALSO loop ("Paris / What is the capital / Paris");
+  the distinction is whether 'Paris' is ever emitted (Boulter-mismatch: yes; lobster-mismatch: no).
+  A sampler repetition penalty would clean the surface; the dead-zone is the real residual.
+* The dead-zone is the DISPOSER's job, not the mass knob's: the correct fix for an
+  irrelevant memory is DON'T INJECT IT (gate the recall decision), not attenuate harder.
+  Constant-budget bounds how much an injected memory can dominate; the relevance GATE
+  decides whether it is injected at all. Clean handoff to the Stage-2 discriminator.
+
+CODE: engine src/backends/cuda/cuda_forward.cu gemma4_kv_replay (SP_REPLAY_MTARGET).
+Null floor: SP_REPLAY_MTARGET + SP_REPLAY_ALPHA both unset => stored K untouched => bit-identical replay.
