@@ -1,0 +1,27 @@
+G-CHAT-B3-ADMISSION — single-pass corpus admission gate (labeler->head loop, scale half)
+date: 2026-06-19   engine: 52ec468 + per-episode ep.secret (routes.rs)   model: gemma4-12b-b1
+================================================================================
+ONE daemon boot, SP_B3_DISPOSER=2, NO SP_B3_SECRET (each episode self-ablates with its
+own ep.secret sidecar). ONE /v1/chat request (auto_recall=true) -> the disposer iterates
+all 21 episodes: inject E -> teacher-force E's own secret -> ablate E's source rows
+(cudaMemset) -> re-score -> collapse = SigmaDeltaLL over the secret window -> O(1) rewind.
+Admission rule: ACCEPT iff collapse < TAU=-8.0 (the v13 pin); parametric control ~0 = REJECT.
+
+q.K Stage-1 (weak, as expected — corroborates the campaign): novels cluster topm 0.29-0.35,
+ctrl_paris LOWEST at 0.269. Magnitude does not separate; the ablation gate does.
+
+ABLATION collapse (more-negative = load-bearing):
+  n_val_000 -34.60   n_val_001 -34.54   n_val_002 -25.01   n_val_003 -37.93
+  n_val_004 -28.22   n_val_005 -28.47   n_val_006 -37.75   n_val_007 -35.71
+  n_val_008 -23.78   n_val_009 -34.84   n_val_010 -12.97   n_val_011 -25.66
+  n_val_012 -37.28   n_val_013 -28.51   n_val_014 -25.96   n_val_015 -39.04
+  n_val_016 -19.24   n_val_017 -25.21   n_val_018 -40.54   n_val_019 -15.07
+  ep_ctrl_paris -0.23   <-- PARAMETRIC CONTROL
+
+VERDICT: 20/20 novel needles ACCEPT (range [-40.54, -12.97]); 1/1 parametric control
+REJECT (-0.23). No overlap; ~12.7-nat gap (worst needle -12.97 vs control -0.23), both
+sides clear of TAU=-8 with margin. The auto-reject loop catches the parametric leak.
+The ep.secret single-pass enhancement collapsed the per-secret-launch bottleneck:
+one model load labels the whole registry. The corpus admission gate is PROVEN.
+repro: _b3_corpus_capture.bat _needle_corpus ; _b3_label_persec.bat <abs registry> ;
+       POST /v1/chat {prompt, auto_recall:true}
