@@ -608,10 +608,17 @@
     return { text: acc };
   }
 
+  const SEND_BTN_HTML = sendBtn.innerHTML;
+  function setSending(on) {
+    sendBtn.disabled = false;
+    if (on) { sendBtn.classList.add('sending'); sendBtn.innerHTML = '■ stop'; sendBtn.title = 'interrupt (Esc / Ctrl+C)'; sendBtn.style.background = '#b3402f'; sendBtn.style.color = '#fff'; }
+    else { sendBtn.classList.remove('sending'); sendBtn.innerHTML = SEND_BTN_HTML; sendBtn.style.background = ''; sendBtn.style.color = ''; sendBtn.title = ''; }
+  }
+
   async function submitPrompt() {
     const text = chatInput.value.trim();
     if (!text || abortCtrl) return;
-    chatInput.value = ''; sendBtn.disabled = true;
+    chatInput.value = ''; setSending(true);
 
     appendMessage('user', text);
     history.push({ role: 'user', content: text });
@@ -638,7 +645,7 @@
       }
     } finally {
       stopGenIcon();
-      sendBtn.disabled = false; abortCtrl = null;
+      setSending(false); abortCtrl = null;
       resetRewind();
       chatInput.focus();
     }
@@ -664,10 +671,10 @@
   rewindScrub.addEventListener('input', (e) => applyRewind(+e.target.value));
 
   /* ===== 7. UI WIRING =========================================== */
-  sendBtn.addEventListener('click', submitPrompt);
+  sendBtn.addEventListener('click', () => { if (abortCtrl) { abortCtrl.abort(); abortChat(); } else submitPrompt(); });
   chatInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); }
-    if (e.ctrlKey && e.key === 'c') { abortChat(); }
+    if ((e.ctrlKey && e.key === 'c') || e.key === 'Escape') { if (abortCtrl) abortCtrl.abort(); abortChat(); }
     if (e.ctrlKey && e.key === 'l') { e.preventDefault(); clearCanvas(); }
     if (e.ctrlKey && e.key === 'r') { e.preventDefault(); rewindBar.classList.contains('open') ? closeRewind() : openRewind(); }
   });
