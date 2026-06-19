@@ -1,0 +1,25 @@
+G-CHAT-B3-RECALL-v8 BEHAVIORAL — is a leaky false-positive a non-issue/benefit on the LATENT voice
+mechanism (gemma4_kv_replay)? Tested on the live 12B, _c2_ep_wiki (Boulter) injected via replay.
+
+ STRONG inject (replay_npos=84):
+  - MISMATCH 'capital of France?' + Boulter  => "Robert Boulter is an English film, television and
+    theatre actor... The Bill... Herons..."  = CATASTROPHIC HIJACK (ignores France, regurgitates the
+    episode). The echo-chamber. NOT a graceful aside.
+  - ASSOCIATIVE 'sourdough boulter bread' + Boulter => question repeated in a loop (degenerate).
+ GENTLE inject (replay_npos=8):
+  - MISMATCH 'capital of France?' + Boulter  => "Paris = = = ="  = PROMPT WINS (correct answer first;
+    trailing '= =' is the wikitext '= title =' capture-markup bleeding into the tail). NO hijack.
+  - MATCHED 'Who is Robert Boulter?' + Boulter(8) => "British actor and writer... King's Speech...
+    Downton Abbey" = STILL HALLUCINATES (8 tokens too weak to deliver content).
+  - MATCHED baseline (no inject) => "British actor and comedian... Thick of It... Veep" (hallucination).
+
+ VERDICT: with RAW replay, 'close enough' is NOT a free non-issue. The injection strength that RECALLS
+ a true positive (npos=84 => verbatim, B6) is the SAME strength that HIJACKS on a false positive; the
+ gentle strength that avoids the hijack (npos=8 => 'Paris') also loses the recall (matched still
+ hallucinates). recall-strength == hijack-strength on a single global LENGTH knob => no single bleed
+ level both remembers-when-right and ignores-when-wrong => the reject is not optional.
+ CONSTRUCTIVE: the lever IS real (npos=8 returned control to the prompt). The refinement = make it a
+ WEIGHT knob not a LENGTH knob — inject the memory at attenuated ATTENTION weight / as a 'reference'
+ segment the model does not extend, decoupling INFORM-when-relevant from DOMINATE-when-not. THEN a
+ false positive degrades to an aside (the operator's associative-memory vision) without killing recall.
+ Also: clean the episode capture (strip '= title =' wikitext markup) to remove the tail artifact.
