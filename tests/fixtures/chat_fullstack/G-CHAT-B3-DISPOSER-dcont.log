@@ -1,0 +1,51 @@
+G-CHAT-B3-DISPOSER (v9d)  Δ-CONTINUATION signal (real-E vs zeroed-E, first-gen token)
+=======================================================================================
+Same speculative inject→score→O(1)-rewind plumbing as the Yes/No Disposer, signal swapped.
+DIFFERENTIAL against the SAME query: per candidate inject REAL E then ZEROED E (zero=true ⇒
+same npos = same RoPE/position shift, null content), decode_step(last) under each, measure
+divergence of the two first-gen distributions. Logs KL(real‖zero), L1, max-mass-gain (mg).
+Rank on KL. Telemetry-first (TAU=+inf, never fires). Registry: ep_wiki/Boulter(84),
+ep_homarus/lobster(180), ep_headlam/Headlam(179); M_target=42; greedy.
+
+PRE-REGISTERED GATE: matched episode = per-query argmax AND min(matched) > max(foreign).
+
+KL MATRIX (mg in parens where notable):
+  q (→matched)              wiki        homarus    headlam     argmax(KL)
+  q1 Boulter (→wiki)        0.200       1.653      2.215       headlam   MISS
+  q2 lobster (→homarus)     0.983       1.318      1.961       headlam   MISS
+  q3 Headlam (→headlam)     0.717       0.919      1.107       headlam   HIT
+  q4 sourdough-boulter (F)  0.469       0.571      0.499       homarus
+  q5 dp4a GEMV (F)          0.918(.241) 0.455      0.534       wiki
+  q6 remember (F)           0.593       0.064      0.190       wiki
+  q7 stopwords (F)          0.058       0.194      0.180       homarus
+  q8 France (F)             0.414       0.456      0.399       homarus
+  q9 sourdough (F)          0.674       0.310      0.428       wiki
+
+VERDICT: GATE FAILED, but STRICTLY BETTER than Yes/No and INFORMATIVE.
+  * Diagonal dominance 1/3 (vs Yes/No 0/3): q3 matched=argmax. Real query-structure now
+    visible (q5 dp4a → wiki mg-spike 0.241; not pure baseline). The per-episode YES-BIAS
+    is GONE (the differential cancelled it).
+  * Two confounds replaced it, both diagnosed on the metal:
+    1. CONTENT-MAGNITUDE bias — KL scales with how much content E injects, so headlam/homarus
+       (npos≈180) out-shift wiki (npos 84) regardless of relevance. The zeroed control removed
+       the POSITION shift but NOT the amount-of-content shift. Needs per-episode normalization.
+    2. FIRST-TOKEN IS TOO EARLY (the real killer). On "Who is Boulter?" the MATCHED Boulter
+       episode gives the SMALLEST shift (0.200). A biographical answer opens with a generic
+       token ("Robert"/"He"/"A") identical whether the memory is real or zeroed; the
+       memory-specific facts ("The Bill","Herons") surface POSITIONS 3-8 downstream. Measuring
+       only position 1 is blind to the relevance signal.
+
+DIAGNOSIS → NEXT (same plumbing): MULTI-TOKEN Δ-continuation. Greedily decode the first ~8
+tokens under REAL E; score that SAME token sequence's NLL under ZEROED E; signal = the per-token
+log-prob GAIN that the real content gives the on-topic continuation, summed over positions 3-8
+(where facts surface), normalized per-episode (divide by the episode's self-shift to kill the
+content-magnitude bias). This is the teacher-forced ΔLL on the model's OWN answer — relevant
+memory RAISES the prob of the continuation it produced; irrelevant memory does not.
+Yes/No 0/3 (pure bias) → first-token Δcont 1/3 (real structure, wrong depth) → multi-token Δcont
+(facts surface) is the falsifiable ladder. M_target=42 budget remains the safety floor.
+
+NOTE: the test episodes are WIKI passages about real entities; without memory the 12B confabulates
+them (α=0.2 "Who is Boulter?" → "British artist/D&D", a hallucination), so memory IS additive —
+the signal failure is depth/normalization, NOT a known-answer redundancy.
+
+CODE: tools/sp_daemon/src/routes.rs (SP_B3_DISPOSER, Δcont; telemetry-default TAU=+inf = null floor).

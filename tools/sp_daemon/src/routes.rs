@@ -790,53 +790,66 @@ fn run_kvdecode_chat(
                         if disposer {
                             let disp_tau: f32 = std::env::var("SP_B3_DISPOSER_TAU").ok()
                                 .and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY);
-                            let bridge = "\nDoes the memory contain the answer to the query? Answer strictly Yes or No:";
-                            let strip_bos = |mut v: Vec<i32>| { if v.first() == Some(&2) { v.remove(0); } v };
-                            let bridge_ids = strip_bos(app.tokenizer.encode(bridge).unwrap_or_default());
-                            let yes_id = *strip_bos(app.tokenizer.encode(" Yes").unwrap_or_default()).first().unwrap_or(&-1);
-                            let no_id  = *strip_bos(app.tokenizer.encode(" No").unwrap_or_default()).first().unwrap_or(&-1);
+                            // Δ-CONTINUATION signal (v9d). The absolute Yes/No bridge was convicted
+                            // (per-episode baseline bias; diagonal dominance 0/3). The relevance
+                            // signal is DIFFERENTIAL against the SAME query: does injecting E's
+                            // CONTENT shift the model's own first-gen token vs a content-free
+                            // control? Per candidate we inject REAL E and a ZEROED E (zero=true ⇒
+                            // same npos = same RoPE/position shift, null content) and measure the
+                            // divergence of the two first-gen distributions after decode_step(last).
+                            // Episode "gravity" that is pure length/position cancels (both legs share
+                            // it); only CONTENT relevance survives — immune to the per-episode Yes-bias
+                            // because each episode is compared to ITSELF zeroed on THIS query. Logs
+                            // KL(real‖zero), L1, max-mass-gain; ranks on KL.
+                            let softmax = |z: &[f32]| -> Vec<f32> {
+                                let m = z.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                let mut s = 0.0f32; let mut p = vec![0.0f32; z.len()];
+                                for (i, &v) in z.iter().enumerate() { let e = (v - m).exp(); p[i] = e; s += e; }
+                                if s > 0.0 { for x in p.iter_mut() { *x /= s; } }
+                                p
+                            };
                             let mut best_disp: Option<(usize, f32)> = None;
                             let mut drows: Vec<String> = Vec::with_capacity(registry.len());
-                            if !bridge_ids.is_empty() && yes_id >= 0 && no_id >= 0
-                                && (yes_id as usize) < vocab_size && (no_id as usize) < vocab_size {
-                                for (i, ep) in registry.iter().enumerate() {
-                                    if ep.npos <= 0 || ep.gk.is_empty() { continue; }
-                                    // Speculative inject (uses SP_REPLAY_MTARGET budget if set).
-                                    if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
-                                    // Teacher-force last prompt token + the bridge; read the answer
-                                    // distribution after the FINAL bridge token.
-                                    let mut margin = f32::NEG_INFINITY;
-                                    let mut ok = unsafe { kv::decode_step(handle, last[0], logits) }.is_ok();
-                                    if ok {
-                                        for (k, &bt) in bridge_ids.iter().enumerate() {
-                                            if unsafe { kv::decode_step(handle, bt, logits) }.is_err() { ok = false; break; }
-                                            if k == bridge_ids.len() - 1 {
-                                                margin = logits[yes_id as usize] - logits[no_id as usize];
-                                            }
-                                        }
+                            for (i, ep) in registry.iter().enumerate() {
+                                if ep.npos <= 0 || ep.gk.is_empty() { continue; }
+                                // Leg 1: REAL E content (SP_REPLAY_MTARGET budget if set).
+                                if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
+                                let ok_r = unsafe { kv::decode_step(handle, last[0], logits) }.is_ok();
+                                let p_real = if ok_r { softmax(logits) } else { Vec::new() };
+                                let _ = unsafe { kv::rewind(handle, 1 + ep.npos) };
+                                // Leg 2: ZEROED E control — same npos (same position shift), null content.
+                                if unsafe { kv::replay(handle, &ep.dir, ep.npos, true) }.is_err() { continue; }
+                                let ok_z = unsafe { kv::decode_step(handle, last[0], logits) }.is_ok();
+                                let p_ctrl = if ok_z { softmax(logits) } else { Vec::new() };
+                                let _ = unsafe { kv::rewind(handle, 1 + ep.npos) };
+                                // Divergence(real ‖ control) on the first-gen distribution.
+                                let (mut kl, mut l1, mut mg) = (f32::NAN, 0.0f32, 0.0f32);
+                                if p_real.len() == p_ctrl.len() && !p_real.is_empty() {
+                                    let mut k = 0.0f32;
+                                    for j in 0..p_real.len() {
+                                        let a = p_real[j]; let b = p_ctrl[j];
+                                        if a > 0.0 && b > 0.0 { k += a * (a.ln() - b.ln()); }
+                                        l1 += (a - b).abs();
+                                        let d = a - b; if d > mg { mg = d; }
                                     }
-                                    // O(1) rewind: probe tokens (last + bridge) + the episode ⇒ cache back to [head].
-                                    let undo = 1 + bridge_ids.len() as i32 + ep.npos;
-                                    let _ = unsafe { kv::rewind(handle, undo) };
-                                    drows.push(format!("{}(margin={:.3})", ep.name, margin));
-                                    match best_disp { Some((_, b)) if margin <= b => {}, _ => best_disp = Some((i, margin)) }
+                                    kl = k;
                                 }
-                            } else {
-                                tracing::warn!("B3-DISPOSER: bridge/Yes/No tokenization failed (bridge={} yes={} no={}) — no-op",
-                                    bridge_ids.len(), yes_id, no_id);
+                                drows.push(format!("{}(kl={:.3},l1={:.3},mg={:.3})", ep.name, kl, l1, mg));
+                                let key = if kl.is_nan() { f32::NEG_INFINITY } else { kl };
+                                match best_disp { Some((_, b)) if key <= b => {}, _ => best_disp = Some((i, key)) }
                             }
-                            tracing::info!("B3-DISPOSER margins logit(Yes)-logit(No): [{}] TAU={:.3}", drows.join(" "), disp_tau);
-                            if let Some((idx, margin)) = best_disp {
+                            tracing::info!("B3-DISPOSER Δcont KL(real‖zero)/L1/maxgain: [{}] TAU={:.3}", drows.join(" "), disp_tau);
+                            if let Some((idx, kl)) = best_disp {
                                 let ep = &registry[idx];
-                                let fire = margin > disp_tau && ep.npos > 0 && !ep.gk.is_empty();
-                                tracing::info!("B3-DISPOSER: best='{}' (topic='{}') margin={:.3} ⇒ {}",
-                                    ep.name, ep.topic, margin, if fire { "AUTHORIZE (re-inject)" } else { "REJECT (rewound; clean prompt)" });
+                                let fire = kl > disp_tau && ep.npos > 0 && !ep.gk.is_empty();
+                                tracing::info!("B3-DISPOSER: best='{}' (topic='{}') KL={:.3} ⇒ {}",
+                                    ep.name, ep.topic, kl, if fire { "AUTHORIZE (re-inject)" } else { "REJECT (rewound; clean prompt)" });
                                 if fire {
                                     // SAFETY: handle live; cache Mutex held.
                                     if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
                                         tracing::warn!("B3-DISPOSER: authorized re-inject({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
                                     } else {
-                                        recalled = Some((ep.name.clone(), (margin.max(0.0) * 1000.0) as u32));
+                                        recalled = Some((ep.name.clone(), (kl.max(0.0) * 1000.0) as u32));
                                     }
                                 }
                             }
