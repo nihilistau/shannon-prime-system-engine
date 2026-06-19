@@ -1,0 +1,30 @@
+G-CHAT-B3-RECALL-v5 THREE-LAYER SIEVE  L1 consensus(W_c==dLL argmax) + L2 floor(dLL>0.05) + L3 bridge
+query                                                W_c  dLL_arg  dLL_val  L1  L2   decision
+  Who is Robert Boulter?                              Boul     Boul   +1.084  1   1   ACCEPT  want=Boul OK
+  Who was Frank Headlam?                              Head     Boul   -0.231  0   0   reject  want=Head MISS
+  What is the standard hydration ratio for a French    lob     Boul   +0.538  0   1   reject  FOREIGN OK-rejected
+  Explain the memory-bandwidth limits of the dp4a GE   lob     Boul   -0.242  0   0   reject  FOREIGN OK-rejected
+  Hey, can you help me remember what we were just ta  Head     Boul   -0.456  0   0   reject  FOREIGN OK-rejected
+  the and of to a in is that it with as               Boul     Boul   +0.321  1   1   ACCEPT  FOREIGN LEAK!
+  What is the capital of France?                      Boul     Boul   -0.151  1   0   reject  FOREIGN OK-rejected
+  How do I bake sourdough bread?                      Head     Boul   -0.265  0   0   reject  FOREIGN OK-rejected
+
+SIEVE: true-positives accepted=False  foreigns all-rejected=False  => leak remains
+
+--------------------------------------------------------------------------------
+ DIAGNOSIS (honest): board NOT green. L1 consensus + L2 floor WORK (catch lexical trap +
+ technical + drift + sourdough + France = 5/6 foreigns, vs 6/6 leaks for raw dLL). But the
+ FIXED generic bridge (L3) BACKFIRED:
+  - stop-word soup STILL leaks (+0.321, both spaces agree on Boulter);
+  - the Headlam TRUE POSITIVE now MISSES (bridge flipped its dLL argmax to Boulter).
+ ROOT CAUSE: Boulter (ep_wiki) is a FLUENT ATTRACTOR. The generic bridge "...and therefore
+ the answer is that" is generic English, so the rich fluent Boulter passage predicts it better
+ than any sparse/specific episode -> a generic continuation is helped by FLUENCY not RELEVANCE
+ -> it amplifies the confound it was meant to kill, and tramples weak true positives. Also: the
+ floor that catches France (> -0.13) ALSO rejects the weak Headlam TP (-0.18) -> weak-TP signal
+ sits inside the foreign-noise band; no scalar threshold separates them.
+ CORRECT L3 (next build): content-bearing continuation, NOT a fixed connective. Generate the
+ query's natural answer FROM THE QUERY ALONE (E-independent => no echo chamber), then score
+ THOSE topical tokens under E vs none. A relevant episode raises the likelihood of the query's
+ actual answer; the fluent attractor cannot help "Paris" or a stop-word continuation. The
+ scored span is topical => fluency confound collapses. (Fixed generic bridge = honest negative.)

@@ -21,6 +21,11 @@ EPISODES = {  # name -> source text file (the passage the ep.k was captured from
     "ep_headlam": os.path.join(ENG, "_b3_headlam.txt"),
 }
 # the held-out + adversarial query set (label = the episode it SHOULD recall, or foreign)
+# Layer-3 SEMANTIC BRIDGE (forced continuation): appended to every query so the scored
+# span includes a logical connective whose likelihood needs the episode's semantic mass,
+# not just fluent syntax. Kills the stop-word fluent-prefix confound. Set "" to disable.
+BRIDGE = os.environ.get("B3_BRIDGE", " and therefore the answer is that")
+
 QUERIES = [
     ("Who is Robert Boulter?",                       "ep_wiki"),
     ("What is the European lobster, Homarus gammarus?", "ep_homarus"),
@@ -56,7 +61,7 @@ def main():
         print(f"[dl] episode {name}: {len(ids) if ids else 0} tokens")
     manifest, meta = [], []
     for qi, (q, lab) in enumerate(QUERIES):
-        qids = enc(q, False)                    # [BOS, query tokens...]
+        qids = enc(q + BRIDGE, False)           # [BOS, query + semantic-bridge tokens...]
         for ename, eids in ep_ids.items():
             if eids is None:                    # baseline: [BOS, query], score from 1
                 seq = qids; sfrom = 1

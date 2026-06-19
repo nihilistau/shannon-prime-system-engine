@@ -1,0 +1,12 @@
+G-CHAT-B3-RECALL-v5 COMBINE: v3(W_c contrastive) AND v4(query-dLL thermodynamic) agreement
+accept iff both spaces argmax the SAME episode; foreign = the two spaces disagree (orthogonal blind spots)
+  Who is Robert Boulter?                                         Boul             Boul   True  ACCEPT  want=Boul OK
+  Who was Frank Headlam?                                         Head             Head   True  ACCEPT  want=Head OK
+  What is the standard hydration ratio for a French               lob             Boul  False  reject  FOREIGN OK-rejected
+  Explain the memory-bandwidth limits of the dp4a GE              lob             Boul  False  reject  FOREIGN OK-rejected
+  Hey, can you help me remember what we were just ta             Head             Boul  False  reject  FOREIGN OK-rejected
+  the and of to a in is that it with as                          Boul             Boul   True  ACCEPT  FOREIGN LEAK!
+  What is the capital of France?                                 Boul             Boul   True  ACCEPT  FOREIGN LEAK!
+  How do I bake sourdough bread?                                 Head             Boul  False  reject  FOREIGN OK-rejected
+
+CONJUNCTION (agreement-gate): true-positives accepted=True  foreigns all-rejected=False  => still leaks (see LEAK rows)

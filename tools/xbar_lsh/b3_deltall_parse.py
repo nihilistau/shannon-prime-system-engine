@@ -44,6 +44,13 @@ for qi in sorted(byq):
     disp = "".join(f"{dlls[e]:+10.3f}" for e in EPS)
     line = f"{q[:52]:52}{disp}   {verd}"
     print(line); log.append(line)
+# dump fresh {query: [dll_wiki, dll_homarus, dll_headlam]} for the 3-layer sieve
+dump = {}
+for qi in sorted(byq):
+    row = byq[qi]; q = row[EPS[0]]["query"]
+    n0, _ = nll.get(byq[qi]["none"]["tokfile"])
+    dump[q] = [ (n0 - nll[row[ep]["tokfile"]][0]) / max(1, nll[row[ep]["tokfile"]][1]) for ep in EPS ]
+json.dump(dump, open(os.path.join(OUT, "deltall_dll.json"), "w"), indent=0)
 mt = min(tpos) if tpos else float('nan'); mf = max(fmax) if fmax else float('nan')
 sep = mt > mf
 verdict = (f"\nmin true-positive dLL = {mt:+.3f}   max foreign dLL = {mf:+.3f}   => "
