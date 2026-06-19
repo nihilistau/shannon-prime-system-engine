@@ -1,0 +1,47 @@
+G-CHAT-B3-DISPOSER (v9f)  ORTHOGONAL CONSENSUS — computed exactly from the v9e run logs
+========================================================================================
+The consensus gate fire(E) = [argmax(q·K) == argmax(multitok ΔLL) == E] is a DETERMINISTIC
+function of two argmax columns already logged in the v9e telemetry run (_disp_daemon3.log:
+the q·K matrix runs unconditionally before the Disposer branch; the ΔLL matrix is the v9e
+signal). Greedy decode ⇒ wiring + re-running yields IDENTICAL argmaxes. Computed exactly
+here (receipts-first; no rebuild needed to know the gate outcome).
+
+q·K argmax (topm): q1 headlam q2 homarus q3 headlam q4 headlam q5 headlam q6 headlam
+                   q7 homarus q8 headlam q9 homarus   [headlam wins 6/9 = q·K's own bias]
+ΔLL argmax (pay):  q1 wiki    q2 wiki    q3 headlam q4 headlam q5 wiki    q6 homarus
+                   q7 headlam q8 wiki    q9 headlam
+
+CONSENSUS (fire iff the two argmaxes agree):
+  q1 Boulter(→wiki)     headlam vs wiki    DISAGREE  no fire   (miss TP)
+  q2 lobster(→homarus)  homarus vs wiki    DISAGREE  no fire   (miss TP — q·K had it, ΔLL didn't)
+  q3 Headlam(→headlam)  headlam vs headlam AGREE     FIRE      CORRECT ✓
+  q4 sourdough-boul(F)  headlam vs headlam AGREE     FIRE      FALSE FIRE ✗ (shared headlam bias)
+  q5 dp4a(F)            headlam vs wiki    DISAGREE  no fire   ✓
+  q6 remember(F)        headlam vs homarus DISAGREE  no fire   ✓
+  q7 stopwords(F)       homarus vs headlam DISAGREE  no fire   ✓
+  q8 France(F)          headlam vs wiki    DISAGREE  no fire   ✓
+  q9 sourdough(F)       homarus vs headlam DISAGREE  no fire   ✓
+
+VERDICT: CONSENSUS DOES NOT SEAL THE OPEN WORLD.
+  * Recall collapses to 1/3 — the two 2/3 diagonals DON'T OVERLAP (q·K hits q2,q3; ΔLL hits
+    q1,q3; agree-and-correct only on q3). Intersection kills TPs where the signals disagree.
+  * A false fire still LEAKS (q4): both signals carry a residual HEADLAM ATTRACTOR bias
+    (q·K argmax=headlam 6/9; ΔLL also picks headlam on q4), so they spuriously AGREE WRONGLY.
+    The orthogonality assumption partially fails — shared bias correlates the error.
+  * FLOORS INVERT (the deepest cut): the correct fire q3 has ΔLL=-0.19 (negative); the false
+    fire q4 has ΔLL=+0.62 (positive). A perturbation floor ΔLL>0 rejects the TRUE positive and
+    keeps the FALSE one. On q·K, foreigns (headlam 0.435-0.446) outscore the true q3 (0.403),
+    so a geometric floor can't separate either. Both floors point the wrong way.
+
+CAMPAIGN BEDROCK: six verifiers (v2 geom / v3 W_c / v4-5 dLL / v6-7 Yes/No) + three Disposer
+signals (Yes/No 0/3, first-tok Δcont 1/3, multi-tok Δcont 2/3) + their orthogonal consensus —
+every open-world separator at N=3 with these wiki episodes is dominated by a per-episode or
+SHARED bias. The MONOTONIC LADDER and the payload-ΔLL DIRECTION are validated wins; the
+absolute open-world GATE does not exist at this scale. This is an honest, strong NEGATIVE
+(the boundary thesis for autonomous recall), not a bug.
+
+PRAGMATIC SHIP: q·K Stage-1 ranker + the M_target=42 budget = BOUNDED-HARM recall (a wrong
+fire stumbles sub-dominantly, never hijacks; v9/v9b proven). The O(1) verify-rewind Disposer
+plumbing + multi-tok ΔLL instrument are retained for a future LEARNED consensus head trained
+on a LARGER, novel-memory corpus (the N=3 wiki set is the binding constraint, not the method).
+Receipts: G-CHAT-B3-DISPOSER-{yesno,dcont,multitok}.log + this v9f analysis.
