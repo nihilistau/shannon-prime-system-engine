@@ -1,0 +1,38 @@
+G-CHAT-B3-DISPOSER (v9h)  DUAL-FIX — cosine-q·K + ΔLL polarity-flip — BOTH REFUTED on the metal
+================================================================================================
+Operator dual-fix for the N-sweep confounds: (1) L2/cosine-normalize q·K (SP_B3_QK_COSINE=1)
+to strip the K-norm gravity-well; (2) polarity-flip ΔLL to argMIN (SP_B3_DCONT_SIGN=-1) on the
+"truth-is-surprising ⇒ most-disruptive" hypothesis. Wired as toggles, default off = null floor.
+Re-ran the 9-query matrix at N=3 (clean) and N=6 (with audio/p33/p31 distractors).
+
+VERDICT: BOTH FIXES MAKE IT WORSE. Comprehensive refutation; the failures are diagnostic.
+
+(1) COSINE-q·K COLLAPSES Stage-1. N=3 q0 cosine topm: wiki 0.140, homarus 0.141, headlam 0.140
+    — the three episodes become NUMERICALLY INDISTINGUISHABLE. cosine-qK diagonal 0/3 (vs RAW
+    q·K 2/3). The per-position ANGLE between a question-Q and a text-passage-K is ~0.14 for EVERY
+    episode (questions and their answer-passages are different token types ⇒ ~constant small
+    angle), so cosine carries almost no discriminative signal. The MAGNITUDE cosine strips was
+    CARRYING the relevance, not just confound. At N=6 cosine ALSO fails to strip the audio/p33
+    dominance (q0 cosine: audio 0.384, p33 0.346 vs wiki ~0.14) — audio/p33 K have a DIRECTIONAL
+    "hub" component that aligns with any Q, which cosine cannot remove. Norm-confound hypothesis
+    REFUTED: q·K relevance lives partly in magnitude.
+(2) POLARITY-FLIP (argMIN ΔLL) is WORSE. N=3 argmin diagonal 1/3 (vs argmax 2/3); the matched
+    episode is MID-disruption (coherent moderate ΔLL), not the extremum — an unrelated DENSE
+    episode disrupts MORE (conflict>coherence). argmin selects the most-conflicting = often most-
+    irrelevant; on N=6 it false-fires. "Most-disruptive = most-relevant" REFUTED.
+(3) CONSENSUS(cosine-qK ∧ either ΔLL): 0/3 + 1 false fire, at BOTH N=3 and N=6. Strictly worse
+    than the unmodified raw-qK ∧ argmax-ΔLL consensus.
+
+CAMPAIGN BEDROCK (now fully mapped): 6 verifiers + 4 Disposer signals (Yes/No 0/3, first-tok Δ
+1/3, multi-tok Δ argmax 2/3, argmin 1/3) + consensus + N-sweep(3→6) + cosine-norm + polarity-flip
+— EVERY hand-designed lever fails the open-world N=3 gate, and the two "pristine" normalizations
+make it WORSE for principled reasons: q·K relevance needs magnitude (cosine kills it); the matched
+memory is a moderate COHERENT disruptor (no extremum isolates it). The best achieved is RAW q·K +
+argmax multi-tok ΔLL (2/3 episode-ranking, 1/3 consensus recall). The remaining lever is a LEARNED
+head (contrastive q·K subspace OR learned ΔLL combiner) — but v3 W_c already overfit at N=3:
+there isn't enough data to learn it on 3 episodes. The binding constraint is corpus SIZE+diversity,
+not the normalization. HONEST TERMINAL: autonomous open-world recall is not solvable at N=3 with
+hand-designed signals; the O(1) verify-rewind plumbing + the validated multi-tok-ΔLL instrument
+are the durable assets for a future learned head on a larger corpus. Pragmatic ship stays:
+raw q·K Stage-1 + M_target=42 bounded-harm budget.
+Receipts: _dispC3_max.log, _dispC6_max.log + prior G-CHAT-B3-DISPOSER-{yesno,dcont,multitok,consensus,nsweep}.log

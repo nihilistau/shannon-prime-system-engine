@@ -790,6 +790,11 @@ fn run_kvdecode_chat(
                         if disposer {
                             let disp_tau: f32 = std::env::var("SP_B3_DISPOSER_TAU").ok()
                                 .and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY);
+                            // v9h: ΔLL polarity. +1 (default) = argmax payload-ΔLL (current); -1 =
+                            // argmin = the episode that DISRUPTS the continuation MOST (the
+                            // "truth-is-surprising" hypothesis). Toggle to adjudicate on the metal.
+                            let dcont_sign: f32 = std::env::var("SP_B3_DCONT_SIGN").ok()
+                                .and_then(|s| s.parse().ok()).unwrap_or(1.0);
                             // MULTI-TOKEN Δ-CONTINUATION signal (v9e). First-token Δcont was blind
                             // (1/3): biographical answers open with boilerplate ("Robert"/"He"); the
                             // memory-specific facts ("The Bill","Herons") surface positions 3-8. So
@@ -845,7 +850,8 @@ fn run_kvdecode_chat(
                                 let (mut dll_all, mut dll_pay) = (0.0f32, 0.0f32);
                                 for j in 0..n { let d = lpr[j] - lpz[j]; dll_all += d; if j >= 2 { dll_pay += d; } }
                                 drows.push(format!("{}(pay={:.2},all={:.2})", ep.name, dll_pay, dll_all));
-                                match best_disp { Some((_, b)) if dll_pay <= b => {}, _ => best_disp = Some((i, dll_pay)) }
+                                let better = match best_disp { None => true, Some((_, b)) => dcont_sign * dll_pay > dcont_sign * b };
+                                if better { best_disp = Some((i, dll_pay)); }
                             }
                             tracing::info!("B3-DISPOSER Δcont(multi-tok) ΣΔLL pay[2,{})/all: [{}] TAU={:.3}", KGEN, drows.join(" "), disp_tau);
                             if let Some((idx, dll)) = best_disp {

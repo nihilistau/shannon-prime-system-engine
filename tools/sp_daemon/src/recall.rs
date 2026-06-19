@@ -123,6 +123,11 @@ pub fn qk_relevance(q: &[f32], gk: &[f32], gk_ng: usize, npos: usize, m: usize) 
     let ng = n_global_q.min(gk_ng);
     if ng == 0 { return (f32::NEG_INFINITY, f32::NEG_INFINITY); }
     let scale = 1.0f64 / (HD as f64).sqrt();
+    // v9h: SP_B3_QK_COSINE=1 ⇒ L2-normalize q and K per (head,position) so the score is the
+    // ANGLE (cosine ∈ [-1,1]), stripping the K-NORM gravity-well that let a high-energy episode
+    // (audio/p33) win q·K on EVERY query regardless of semantic direction (the N-sweep confound).
+    // Default off = raw q·K/√d (byte-identical null floor).
+    let cosine = std::env::var("SP_B3_QK_COSINE").ok().as_deref() == Some("1");
     let mut best = f64::NEG_INFINITY;
     // Collect the top-m scores in a tiny ascending min-heap (m is small).
     let mut top: Vec<f64> = Vec::with_capacity(m + 1);
@@ -134,17 +139,27 @@ pub fn qk_relevance(q: &[f32], gk: &[f32], gk_ng: usize, npos: usize, m: usize) 
             for h in 0..G_NH {
                 let qh = qbase + h * HD;
                 let mut dot = 0.0f64;
+                let mut qn = 0.0f64;
+                let mut kn = 0.0f64;
                 for d in 0..HD {
-                    dot += (q[qh + d] as f64) * (gk[kbase + d] as f64);
+                    let qv = q[qh + d] as f64;
+                    let kv = gk[kbase + d] as f64;
+                    dot += qv * kv;
+                    if cosine { qn += qv * qv; kn += kv * kv; }
                 }
-                dot *= scale;
-                if dot > best { best = dot; }
+                let s = if cosine {
+                    let den = qn.sqrt() * kn.sqrt();
+                    if den > 0.0 { dot / den } else { 0.0 }
+                } else {
+                    dot * scale
+                };
+                if s > best { best = s; }
                 // maintain top-m
                 if top.len() < m {
-                    top.push(dot);
+                    top.push(s);
                     if top.len() == m { top.sort_by(|a, b| a.partial_cmp(b).unwrap()); }
-                } else if dot > top[0] {
-                    top[0] = dot;
+                } else if s > top[0] {
+                    top[0] = s;
                     // re-sift the smallest to the front (m tiny ⇒ a sort is fine)
                     top.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 }
