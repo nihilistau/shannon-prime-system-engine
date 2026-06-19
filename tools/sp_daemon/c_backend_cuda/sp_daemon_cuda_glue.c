@@ -136,6 +136,9 @@ extern int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
 extern int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
 /* CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — episode replay into the live turn. */
 extern int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero);
+/* B3-v10 ABLATION GATE — memset-zero k specific episode positions (base+pos[i]) for the
+ * thermodynamic-knockout re-score; restored by gemma4_kv_rewind (transient). */
+extern int gemma4_kv_ablate_rows(sp_g4_kv *s, int base, const int *pos, int k);
 /* CONTRACT-CHAT-FULLSTACK B5 (§6e) — the single latent entry seam.
  *   inject_tokens: TEXT via the residual seam, bit-identical to prefill by construction.
  *   inject_seq:    GENERIC residual-frame channel (audio/memory) at a placeholder. */
@@ -235,6 +238,14 @@ int sp_daemon_cuda_kvdecode_replay(void *handle, const char *epdir, int npos, in
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || !epdir || npos <= 0) { sp_set_error("cuda kvdecode replay: bad args"); return -1; }
     return gemma4_kv_replay(s, epdir, npos, zero);
+}
+
+/* ablate(handle, base, pos, k): B3-v10 — knock out k episode positions for the ablation
+ * gate's knockout re-score. base = the episode's anchor (dpos at replay time). 0 ok. */
+int sp_daemon_cuda_kvdecode_ablate(void *handle, int base, const int *pos, int k) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s) { sp_set_error("cuda kvdecode ablate: bad handle"); return -1; }
+    return gemma4_kv_ablate_rows(s, base, pos, k);
 }
 
 /* inject_tokens(handle, toks, n): CONTRACT-CHAT-FULLSTACK B5 (§6e) — TEXT through

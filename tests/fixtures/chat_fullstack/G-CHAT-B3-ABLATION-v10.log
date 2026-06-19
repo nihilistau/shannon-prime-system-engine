@@ -1,0 +1,42 @@
+G-CHAT-B3-DISPOSER (v10)  ABLATION GATE (Thermodynamic Knockout) — BUILT, RUN, definitive negative
+===================================================================================================
+The full causal-ablation gate is LIVE and MECHANICALLY CORRECT: CUDA gemma4_kv_ablate_rows
+(cudaMemset-zero k episode K/V rows) + glue + Rust FFI kv::ablate + routes SP_B3_DISPOSER=2.
+Per candidate: inject E (M=42) -> greedy 8-tok payload -> read ep.tok sidecar -> intersect
+payload-window token ids with episode tokens -> ablate those rows -> teacher-force re-score the
+SAME payload -> collapse = Σ(LL_ablated - LL_E) over [2,8) -> rewind. Telemetry TAU=-inf (null floor).
+
+THE MATCHER WORKS: ep_homarus query ablated 12 source-token positions; ep_headlam 10. The trapdoor
+fired, re-scored, and the O(1) rewind restored cleanly (zero crashes across the 9-query matrix).
+
+MATRIX (collapse, more-negative = load-bearing):
+  q1 Boulter(→wiki)     wiki 0.00(ntgt0)  homarus 0.00(0)  headlam 0.00(0)   [Boulter no ep.tok = incomplete leg]
+  q2 lobster(→homarus)  wiki 0.00(0)      homarus +0.01(12) headlam +0.04(5)
+  q3 Headlam(→headlam)  wiki 0.00(0)      homarus 0.00(0)  headlam -0.01(10)
+  q4 sour-b(F)          ...               ...             headlam -0.05(7)
+  q5 dp4a(F)            all 0.00(0)
+  q6 remember(F)        all 0.00(0)
+  q7 stopwords(F)       homarus -0.04(12) headlam -0.09(12)
+  q8 France(F)          homarus 0.00(12)  headlam -0.06(7)
+  q9 sourdough(F)       all 0.00(0)
+  ⇒ EVERY collapse ∈ [-0.09, +0.04] — pure noise. NO collapse on true matches, NO separation.
+
+VERDICT: the gate is causally correct and tells us the TRUE answer — the payload was NEVER causally
+dependent on the episode for these entities. Ablating 12 load-bearing lobster tokens moved the
+payload LL by +0.01 because "a species of lobster found in the North Atlantic Ocean" is PARAMETRIC
+knowledge: the 12B regenerates it from weights. The roof is held up by parametric steel, not the
+episodic columns. The wiki facts are parametric, not episodic.
+
+ROOT CAUSE (the campaign's terminal truth, now proven at the root): you cannot measure episodic
+causal dependency on memories whose content the model ALREADY HAS parametrically. The corpus —
+wiki passages about real entities the model knows — is the wall. The one genuinely-novel episode
+(audio needle, where ablation WOULD collapse) has no tokens to target (empty mask = 0, the
+"feature not bug"); the one wiki entity the model actually confabulates without memory (Boulter)
+is the lost-provenance 84-tok ghost we could not re-mint. The thesis (causal ablation > empty-cache
+baseline) is SOUND and the instrument is DURABLE — it just needs a NOVEL-needle corpus to fire.
+
+DURABLE ASSETS (all committed, null-floor-safe, default-off): gemma4_kv_ablate_rows + kv::ablate
+FFI; the ep.tok sidecar convention (homarus/headlam written, alignment proven); the full
+inject->generate->intersect->ablate->rescore->rewind orchestration (SP_B3_DISPOSER=2). Ready to
+re-fire the instant a novel-needle corpus exists (NIAH secrets the model cannot know parametrically).
+DEFINITIVE NEXT (different campaign): build a novel-needle episode corpus + re-run the ablation gate.

@@ -786,8 +786,89 @@ fn run_kvdecode_chat(
                         // The M_target=42 budget is the safety floor: a wrong FIRE stumbles
                         // (sub-dominant), it does not hijack. Default-off ⇒ falls through to the
                         // existing q·K fire (null floor).
-                        let disposer = std::env::var("SP_B3_DISPOSER").ok().as_deref() == Some("1");
-                        if disposer {
+                        let disp_mode = std::env::var("SP_B3_DISPOSER").ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0);
+                        if disp_mode == 2 {
+                            // B3-v10 ABLATION GATE (the Thermodynamic Knockout). Per candidate: inject E,
+                            // greedily decode the 8-tok payload, then memset-zero the episode positions
+                            // whose tokens match the payload window (ep.tok sidecar), re-score the SAME
+                            // payload, and measure collapse = Σ(LL_ablated - LL_E) over [2,8). A TRUE match
+                            // is structurally load-bearing ⇒ catastrophic NEGATIVE collapse; a parametric
+                            // bleed / empty-match shrugs it off ⇒ ≈0. The audio super-attractor has no
+                            // ep.tok ⇒ empty mask ⇒ collapse 0 ⇒ fails the knockout (lexical limit ENFORCES
+                            // the semantic boundary). Fire iff collapse < SP_B3_DISPOSER_TAU (telemetry -inf).
+                            let abl_tau: f32 = std::env::var("SP_B3_DISPOSER_TAU").ok()
+                                .and_then(|s| s.parse().ok()).unwrap_or(f32::NEG_INFINITY);
+                            const KGEN: usize = 8;
+                            let lse = |z: &[f32]| -> f32 {
+                                let m = z.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                let mut s = 0.0f32; for &v in z { s += (v - m).exp(); } m + s.ln()
+                            };
+                            let argmax = |z: &[f32]| -> usize {
+                                let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
+                                for (i, &v) in z.iter().enumerate() { if v > bv { bv = v; bi = i; } } bi
+                            };
+                            let anchor = unsafe { kv::position(handle) };
+                            let mut best_abl: Option<(usize, f32)> = None;
+                            let mut drows: Vec<String> = Vec::with_capacity(registry.len());
+                            for (i, ep) in registry.iter().enumerate() {
+                                if ep.npos <= 0 || ep.gk.is_empty() { continue; }
+                                let eptok: Vec<i32> = std::fs::read_to_string(std::path::Path::new(&ep.dir).join("ep.tok"))
+                                    .ok().map(|s| s.lines().filter_map(|l| l.trim().parse::<i32>().ok()).collect())
+                                    .unwrap_or_default();
+                                // Leg 1: inject E, greedy-decode the payload, record lp_E.
+                                if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
+                                let mut gen: Vec<i32> = Vec::with_capacity(KGEN);
+                                let mut lpe: Vec<f32> = Vec::with_capacity(KGEN);
+                                let mut tok = last[0];
+                                for _ in 0..KGEN {
+                                    if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                    let g = argmax(logits); lpe.push(logits[g] - lse(logits)); gen.push(g as i32); tok = g as i32;
+                                }
+                                let ng = gen.len();
+                                let _ = unsafe { kv::rewind(handle, ng as i32) };   // undo payload, keep E
+                                if ng == 0 { drows.push(format!("{}(collapse=nan)", ep.name)); let _ = unsafe { kv::rewind(handle, ep.npos) }; continue; }
+                                // Target positions: episode indices whose token matches a payload-window token.
+                                let mut targets: Vec<i32> = Vec::new();
+                                if !eptok.is_empty() {
+                                    let want: std::collections::HashSet<i32> = gen[2.min(ng)..ng].iter().copied().collect();
+                                    for (p, &t) in eptok.iter().enumerate() {
+                                        if p >= ep.npos as usize { break; }
+                                        if want.contains(&t) { targets.push(p as i32); }
+                                    }
+                                    if targets.len() > 12 { targets.truncate(12); }
+                                }
+                                // Leg 2: ablate targets, teacher-force the SAME payload, record lp_ablated.
+                                let _ = unsafe { kv::ablate(handle, anchor, &targets) };
+                                let mut lpa: Vec<f32> = Vec::with_capacity(ng);
+                                let mut tok = last[0];
+                                for i2 in 0..ng {
+                                    if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                    lpa.push(logits[gen[i2] as usize] - lse(logits)); tok = gen[i2];
+                                }
+                                let _ = unsafe { kv::rewind(handle, lpa.len() as i32 + ep.npos) };   // clear payload + episode (restores ablated rows)
+                                let n = lpe.len().min(lpa.len());
+                                let mut collapse = 0.0f32;
+                                for j in 2..n { collapse += lpa[j] - lpe[j]; }
+                                drows.push(format!("{}(collapse={:.2},ntgt={})", ep.name, collapse, targets.len()));
+                                let better = match best_abl { None => true, Some((_, b)) => collapse < b };
+                                if better { best_abl = Some((i, collapse)); }
+                            }
+                            tracing::info!("B3-DISPOSER ABLATION collapse=ΣΔLL_ablated[2,{}) (more-neg=load-bearing): [{}] TAU={:.3}", KGEN, drows.join(" "), abl_tau);
+                            if let Some((idx, collapse)) = best_abl {
+                                let ep = &registry[idx];
+                                let fire = collapse < abl_tau && ep.npos > 0 && !ep.gk.is_empty();
+                                tracing::info!("B3-DISPOSER: best='{}' (topic='{}') collapse={:.3} ⇒ {}",
+                                    ep.name, ep.topic, collapse, if fire { "AUTHORIZE (load-bearing, re-inject)" } else { "REJECT (rewound; clean prompt)" });
+                                if fire {
+                                    if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                        tracing::warn!("B3-DISPOSER: ablation re-inject({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
+                                    } else {
+                                        recalled = Some((ep.name.clone(), ((-collapse).max(0.0) * 1000.0) as u32));
+                                    }
+                                }
+                            }
+                        } else if disp_mode == 1 {
                             let disp_tau: f32 = std::env::var("SP_B3_DISPOSER_TAU").ok()
                                 .and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY);
                             // v9h: ΔLL polarity. +1 (default) = argmax payload-ΔLL (current); -1 =

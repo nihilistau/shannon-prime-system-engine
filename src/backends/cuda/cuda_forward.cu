@@ -4694,6 +4694,31 @@ extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int ze
     return 0;
 }
 
+/* B3-v10 ABLATION GATE (the Thermodynamic Knockout): content-blind k specific positions of an
+ * injected episode by memset-zeroing their K/V rows (the replay 'zero' mechanism, scoped to k
+ * rows at base+pos[i]). Used to measure CAUSAL episodic dependency — re-score the payload with
+ * the source tokens knocked out; a true match collapses, a parametric/empty match is unmoved.
+ * No journaling: gemma4_kv_replay already journaled the pre-replay slot values, so the eventual
+ * gemma4_kv_rewind(npos) restores these rows bit-exactly (ablation is transient/non-destructive). */
+extern "C" int gemma4_kv_ablate_rows(sp_g4_kv *s, int base, const int *pos, int k) {
+    if (!s || !pos || k <= 0) return 0;   /* empty mask (e.g. no payload-token match) = no-op */
+    cudaStream_t st = g_w.stream;
+    for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+        const int global = ((L % s->period) == s->period - 1);
+        const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
+        const int ring = (s->ring_W > 0 && !global);
+        for (int i = 0; i < k; i++) {
+            const int p = base + pos[i];
+            if (p < 0 || p >= s->Pmax) continue;
+            const size_t slot = ring ? (size_t)(p % s->ring_W) : (size_t)p;
+            cudaMemsetAsync(s->dKc[L] + slot * kvd, 0, (size_t)kvd * sizeof(float), st);
+            cudaMemsetAsync(s->dVc[L] + slot * kvd, 0, (size_t)kvd * sizeof(float), st);
+        }
+    }
+    cudaStreamSynchronize(st);
+    return 0;
+}
+
 extern "C" long gemma4_kv_snapshot(const sp_g4_kv *s, float **hK, float **hV) {
     if (!s || !hK || !hV) return -1;
     cudaStreamSynchronize(g_w.stream);

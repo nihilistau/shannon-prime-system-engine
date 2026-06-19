@@ -114,6 +114,14 @@ unsafe extern "C" {
         zero: c_int,
     ) -> c_int;
 
+    /// B3-v10 ablation gate — memset-zero `k` episode positions (base+pos[i]) K/V.
+    fn sp_daemon_cuda_kvdecode_ablate(
+        handle: *mut c_void,
+        base: c_int,
+        pos: *const c_int,
+        k: c_int,
+    ) -> c_int;
+
     /// CONTRACT-CHAT-FULLSTACK B5 (§6e) — `gemma4_kv_inject_tokens(s, toks, n)`.
     /// TEXT through the single latent entry seam: per token, stage embd[id]*sqrt(E)
     /// into the inject buffer and step the real id, so the residual is bit-identical
@@ -293,6 +301,20 @@ pub unsafe fn replay(handle: *mut c_void, epdir: &str, npos: i32, zero: bool) ->
     let rc = unsafe {
         sp_daemon_cuda_kvdecode_replay(handle, c_epdir.as_ptr(), npos, if zero { 1 } else { 0 })
     };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// B3-v10 ablation gate — content-blind `positions` (relative to the episode anchor `base`)
+/// by memset-zeroing their K/V rows. Restored by the subsequent `rewind` (transient).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn ablate(handle: *mut c_void, base: i32, positions: &[i32]) -> Result<(), String> {
+    if handle.is_null() { return Err("kvdecode ablate: NULL handle".to_string()); }
+    if positions.is_empty() { return Ok(()); } // empty mask = no-op (no payload-token match)
+    let pos: Vec<c_int> = positions.iter().map(|&p| p as c_int).collect();
+    // SAFETY: handle live per caller; pos slice valid for the call.
+    let rc = unsafe { sp_daemon_cuda_kvdecode_ablate(handle, base as c_int, pos.as_ptr(), pos.len() as c_int) };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
 
