@@ -808,6 +808,15 @@ fn run_kvdecode_chat(
                                 let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
                                 for (i, &v) in z.iter().enumerate() { if v > bv { bv = v; bi = i; } } bi
                             };
+                            // v12 TEACHER-FORCED KNOCKOUT: SP_B3_SECRET=<exact secret string>. Instead of
+                            // greedy-decoding (which may not recite the secret in [2,8)), teacher-force the
+                            // KNOWN secret tokens and score THEIR NLL with vs without the episode's source
+                            // rows. Measures the secret's dependency DIRECTLY; window = the full secret.
+                            let secret_ids: Vec<i32> = std::env::var("SP_B3_SECRET").ok()
+                                .map(|s| app.tokenizer.encode(&s).unwrap_or_default())
+                                .map(|mut v| { if v.first() == Some(&2) { v.remove(0); } v })
+                                .unwrap_or_default();
+                            let w0: usize = if secret_ids.is_empty() { 2 } else { 0 };
                             let anchor = unsafe { kv::position(handle) };
                             let mut best_abl: Option<(usize, f32)> = None;
                             let mut drows: Vec<String> = Vec::with_capacity(registry.len());
@@ -818,12 +827,19 @@ fn run_kvdecode_chat(
                                     .unwrap_or_default();
                                 // Leg 1: inject E, greedy-decode the payload, record lp_E.
                                 if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
-                                let mut gen: Vec<i32> = Vec::with_capacity(KGEN);
-                                let mut lpe: Vec<f32> = Vec::with_capacity(KGEN);
+                                let mut gen: Vec<i32> = Vec::new();
+                                let mut lpe: Vec<f32> = Vec::new();
                                 let mut tok = last[0];
-                                for _ in 0..KGEN {
-                                    if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
-                                    let g = argmax(logits); lpe.push(logits[g] - lse(logits)); gen.push(g as i32); tok = g as i32;
+                                if secret_ids.is_empty() {
+                                    for _ in 0..KGEN {
+                                        if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                        let g = argmax(logits); lpe.push(logits[g] - lse(logits)); gen.push(g as i32); tok = g as i32;
+                                    }
+                                } else {
+                                    for &s in &secret_ids {   // teacher-force the KNOWN secret
+                                        if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                        lpe.push(logits[s as usize] - lse(logits)); gen.push(s); tok = s;
+                                    }
                                 }
                                 let ng = gen.len();
                                 let _ = unsafe { kv::rewind(handle, ng as i32) };   // undo payload, keep E
@@ -831,7 +847,7 @@ fn run_kvdecode_chat(
                                 // Target positions: episode indices whose token matches a payload-window token.
                                 let mut targets: Vec<i32> = Vec::new();
                                 if !eptok.is_empty() {
-                                    let want: std::collections::HashSet<i32> = gen[2.min(ng)..ng].iter().copied().collect();
+                                    let want: std::collections::HashSet<i32> = gen[w0.min(ng)..ng].iter().copied().collect();
                                     for (p, &t) in eptok.iter().enumerate() {
                                         if p >= ep.npos as usize { break; }
                                         if want.contains(&t) { targets.push(p as i32); }
@@ -849,7 +865,7 @@ fn run_kvdecode_chat(
                                 let _ = unsafe { kv::rewind(handle, lpa.len() as i32 + ep.npos) };   // clear payload + episode (restores ablated rows)
                                 let n = lpe.len().min(lpa.len());
                                 let mut collapse = 0.0f32;
-                                for j in 2..n { collapse += lpa[j] - lpe[j]; }
+                                for j in w0..n { collapse += lpa[j] - lpe[j]; }
                                 drows.push(format!("{}(collapse={:.2},ntgt={})", ep.name, collapse, targets.len()));
                                 let better = match best_abl { None => true, Some((_, b)) => collapse < b };
                                 if better { best_abl = Some((i, collapse)); }

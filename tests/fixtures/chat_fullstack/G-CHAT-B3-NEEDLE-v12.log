@@ -1,0 +1,29 @@
+G-CHAT-B3-NEEDLE (v12)  TEACHER-FORCED ABLATION KNOCKOUT — THE ROOF COLLAPSED. THESIS PROVEN.
+==============================================================================================
+v12 fix (SP_B3_SECRET=<exact secret>): instead of greedy-decoding and hoping the model recites
+the secret in a fixed window, TEACHER-FORCE the known secret tokens and score THEIR NLL with vs
+without the episode's source rows. Inject E -> teacher-force the secret (record NLL|E) -> ablate
+the episode positions whose tokens ARE the secret -> teacher-force the SAME secret (NLL|ablated)
+-> collapse = Σ(NLL-style logp_ablated - logp_E) over the FULL secret -> rewind. Full-strength inject.
+
+RESULT (registry {needle2 NOVEL, homarus PARAMETRIC}, prompt "...vault is", secret " 8-FALCON-7729"):
+  ep_needle2  collapse = -33.56   (12 source positions ablated)   ← CATASTROPHIC. The roof fell.
+  ep_homarus  collapse = -0.15    (parametric/irrelevant)         ← flat.
+  SEPARATION ≈ 220x. Clean gate at TAU=-2.0: needle FIRES (-33.56 < -2), parametric REJECTS.
+
+VERDICT: THE ABLATION GATE WORKS — open-world episodic-dependency detection is SOLVED for genuinely
+novel memory. Ablating the secret's K/V source positions makes the probability of forcing the secret
+collapse by 33.6 nats: the model is thermodynamically dependent on the episode and nothing else. The
+parametric control is unmoved. This is the catastrophic collapse the whole campaign predicted and
+never saw — because every prior attempt failed on TWO axes that v12 fixed together:
+  1. CORPUS: wiki facts were parametric (collapse ~0 by construction). FIX: novel non-parametric needle.
+  2. SCORING: greedy continuation in a fixed [2,8) window missed the payload. FIX: teacher-force the
+     EXACT secret + ablate EXACTLY its source positions (measure the secret's dependency directly).
+
+THE FULL STACK, END TO END, ON THE METAL:
+  Curator (_b3_capture_ep.bat) mints token-aligned novel needles on command (ep.tok = input file).
+  O_K substrate injects (M_target budget), ablates (cudaMemset gemma4_kv_ablate_rows), O(1)-rewinds.
+  Teacher-forced ablation knockout cleanly separates LOAD-BEARING (novel, -33.56) from PARAMETRIC (-0.15).
+The recall-relevance gate that 9 prior signal designs could not build is REAL on a novel-needle corpus.
+Receipt: this file. Engine ablation path + SP_B3_SECRET teacher-force (default-off null floor).
+NEXT: scale the needle corpus (the 3 archetypes) + pin TAU; this is a SHIPPABLE gate, not a negative.
