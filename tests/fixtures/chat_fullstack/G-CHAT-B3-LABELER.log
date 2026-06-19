@@ -1,0 +1,38 @@
+G-CHAT-B3-LABELER  THE LABELER→LEARNED-HEAD LOOP — labeler WIRED + PROVEN (clean separable matrix)
+==================================================================================================
+The teacher-forced ablation gate (v12/v13) can't run LIVE (it needs the answer key) — but it is a
+PERFECT LABELER. Run each query (with its known secret) against a registry of ALL novel needles +
+the parametric control; the per-episode collapse is the ground-truth relevance label.
+
+LABELED CROSS-MATRIX (collapse = ΣΔLL of the teacher-forced secret with vs without each episode's
+source rows ablated; ★ = the query's true source episode):
+                  ep_needle2    ep_needle3    ep_needle4    ep_homarus(ctrl)
+  Q2 access-code  -33.56 ★      -0.71         -0.63         -0.15
+  Q3 Oricon-Prime -0.29         -18.58 ★      -0.54          0.00
+  Q4 Tyrian-400   -0.04         -0.44         -16.10 ★       1.45
+  ⇒ PERFECT DIAGONAL. matched ∈ [-33.56,-16.10]; all off-diagonal (incl. other novel needles + the
+    parametric control) ∈ [-0.71,+1.45]. ~15-nat margin on EVERY cell. Fully separable labels.
+
+WHY THIS IS THE UNLOCK: the original B3 problem (autonomous LIVE recall: pick the right memory for a
+query WITHOUT the answer) was convicted on the N=3 wiki corpus because every hand-designed signal was
+contaminated by per-episode/parametric bias. This labeler gives CLEAN, ground-truth-validated labels
+on a novel corpus — the training signal a LEARNED HEAD needs. The head runs LIVE on query-only features.
+
+THE LOOP (labeler → learned head → live gate), with the reusable pieces:
+  1. LABELER  [DONE, PROVEN here]: curator mints novel needles (_b3_capture_ep) → teacher-forced
+     ablation cross-matrix → ground-truth (query,episode)→relevant labels (diagonal=1, off=0).
+  2. FEATURES [pieces exist]: query global-Q via SP_B3_QDUMP (q_<chat>.bin, B3-v3 hook) + episode
+     global-K via ep.gk (recall::load_episode_global_k). Both available at QUERY TIME (no answer).
+  3. HEAD     [harness exists, REUSE]: tools/xbar_lsh/b3_train_wc.py — contrastive g(Q,K)→score
+     trained to rank the diagonal episode top, now on ABLATION-VALIDATED labels (not the v3 InfoNCE
+     heuristic that overfit at N=3). Export int16 W_c (b3_export_wc.py, O_K-exact).
+  4. DEPLOY   [hook exists]: recall.rs W_c scoring (B3-v3 L1 deploy hook) + M_target=42 safety floor;
+     the head SELECTS live, the gate's job is done by the head it was distilled into.
+SCALE NEEDED: the proof matrix is 3 needles; the head needs a corpus of ~50-200 needles × the 3
+archetypes (curator mints on command) for generalization (v3 overfit at N=3 — the binding constraint
+was always corpus size, now removed by the curator + labeler).
+
+STATUS: labeler half of the loop is WIRED + PROVEN on the metal (perfect-diagonal separable matrix).
+Remaining = scale the needle corpus + train/export/deploy the head (reuse the v3 xbar_lsh harness on
+the ablation-validated labels). This converts the OFFLINE validator into a LIVE autonomous selector.
+Receipts: _labQ{2,3,4}.log + reg_all.jsonl + this file.
