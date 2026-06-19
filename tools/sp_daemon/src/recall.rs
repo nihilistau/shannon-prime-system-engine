@@ -336,3 +336,61 @@ mod tests {
         assert!(a.iter().all(|&x| x == 1 || x == -1));
     }
 }
+
+// ===== B3 DEPLOY: learned W_c head — logsumexp-mean reduction + NULL(s0) argmax =====
+// The autonomous instance selector (G-CHAT-B3-WC-DIV2: 360/361 recall + 50/50 foreign reject,
+// int16-exact). Reduction is logsumexp over positions then mean over (layer,head) — the metric
+// the head was trained with and the ONLY one that discriminates (max/top-m collapse to ~12-16/361).
+// Reject = the s0 NULL slot in the (E+1)-way argmax (NOT an absolute threshold). Deploy blob =
+// wc_deploy.bin (WCB1 magic; see tools/xbar_lsh/export_wc_deploy.py).
+pub struct WcHead { pub hd: usize, pub r: usize, pub s0: f32, pub sscale: f32, pub w: Vec<f32> }
+
+pub fn load_wc(path: &str) -> Option<WcHead> {
+    let b = std::fs::read(path).ok()?;
+    if b.len() < 20 || &b[0..4] != b"WCB1" { return None; }
+    let u = |o: usize| u32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) as usize;
+    let fl = |o: usize| f32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]);
+    let hd = u(4); let r = u(8); let s0 = fl(12); let sscale = fl(16);
+    if b.len() < 20 + hd*r*4 { return None; }
+    let mut w = Vec::with_capacity(hd*r);
+    let mut o = 20;
+    for _ in 0..hd*r { w.push(fl(o)); o += 4; }
+    Some(WcHead { hd, r, s0, sscale, w })
+}
+
+/// Project v[base..base+hd] through W_c [hd,r] -> out[0..r].
+#[inline]
+fn wc_proj(v: &[f32], base: usize, w: &[f32], hd: usize, r: usize, out: &mut [f32]) {
+    for j in 0..r { let mut s = 0.0f32; for d in 0..hd { s += v[base+d]*w[d*r+j]; } out[j] = s; }
+}
+
+/// lse-mean relevance of episode (gk) to the live query (q), projected through head.W_c.
+/// q = [n_global][G_NH*HD] (read_global_q layout); gk = [n_global][npos*HD].
+pub fn wc_score(q: &[f32], gk: &[f32], gk_ng: usize, npos: usize, head: &WcHead) -> f32 {
+    if gk.is_empty() || gk_ng == 0 || npos == 0 { return f32::NEG_INFINITY; }
+    let (hd, r) = (head.hd, head.r);
+    let qd = G_NH * hd;
+    let ng = (q.len()/qd).min(gk_ng);
+    if ng == 0 { return f32::NEG_INFINITY; }
+    let mut qp = vec![0.0f32; r];
+    let mut sum_a = 0.0f64; let mut cnt = 0usize;
+    for l in 0..ng {
+        let kbase_l = l*npos*hd;
+        let mut kps = vec![0.0f32; npos*r];                       // project all positions once / layer
+        for p in 0..npos { wc_proj(gk, kbase_l + p*hd, &head.w, hd, r, &mut kps[p*r..p*r+r]); }
+        let qbase = l*qd;
+        for h in 0..G_NH {
+            wc_proj(q, qbase + h*hd, &head.w, hd, r, &mut qp);
+            let mut mx = f32::NEG_INFINITY;
+            let mut sims = vec![0.0f32; npos];
+            for p in 0..npos {
+                let mut dot = 0.0f32; for j in 0..r { dot += qp[j]*kps[p*r+j]; }
+                let s = dot*head.sscale; sims[p] = s; if s > mx { mx = s; }   // stable-LSE max
+            }
+            let mut se = 0.0f64; for p in 0..npos { se += ((sims[p]-mx) as f64).exp(); }
+            sum_a += (mx as f64) + se.ln();                       // logsumexp_p, add max back
+            cnt += 1;
+        }
+    }
+    if cnt == 0 { f32::NEG_INFINITY } else { (sum_a/(cnt as f64)) as f32 }   // mean over (l,h)
+}

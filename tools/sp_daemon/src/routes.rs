@@ -771,6 +771,40 @@ fn run_kvdecode_chat(
                             match best { Some((_, b)) if key <= b => {}, _ => best = Some((i, key)) }
                         }
                         tracing::info!("B3-v2 q·K relevance (npos_q={} topm={}): [{}]", npos_q, topm, rows.join(" "));
+                        // ===== B3-WC DEPLOY: learned W_c head, logsumexp-mean + (E+1) NULL argmax =====
+                        // SP_B3_WC=<wc_deploy.bin> => the autonomous instance selector decides recall.
+                        // Score every episode by wc lse-mean (the metric the head trained on, int16-exact),
+                        // append the s0 NULL slot, argmax over [episodes, NULL]. Episode wins => replay it
+                        // (M_target/SP_REPLAY_MTARGET=42 clamps injection mass); NULL wins => clean prompt.
+                        // Default-off (env unset) = null floor; run WITHOUT SP_B3_DISPOSER/SP_B3_TAU_QK.
+                        if let Some(wcp) = std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) {
+                            match recall::load_wc(&wcp) {
+                                Some(head) => {
+                                    let (mut bi, mut bv) = (usize::MAX, f32::NEG_INFINITY);
+                                    let mut wrows: Vec<String> = Vec::with_capacity(registry.len());
+                                    for (i, ep) in registry.iter().enumerate() {
+                                        let np = (ep.npos as usize).min(
+                                            if ep.gk_ng > 0 { ep.gk.len() / (ep.gk_ng * recall::HD) } else { 0 });
+                                        let sc = recall::wc_score(&qbuf, &ep.gk, ep.gk_ng, np, &head);
+                                        wrows.push(format!("{}={:.3}", ep.name, sc));
+                                        if sc > bv { bv = sc; bi = i; }
+                                    }
+                                    tracing::info!("B3-WC lse-mean (E+1)-argmax s0={:.3}: [{}]", head.s0, wrows.join(" "));
+                                    if bi == usize::MAX || !(bv > head.s0) {
+                                        tracing::info!("B3-WC: NULL wins (best={:.3} <= s0={:.3}) -> REJECT (clean prompt)", bv, head.s0);
+                                    } else {
+                                        let ep = &registry[bi];
+                                        tracing::info!("B3-WC: RECALL '{}' score={:.3} > s0={:.3} -> replay@M_target", ep.name, bv, head.s0);
+                                        if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                            tracing::warn!("B3-WC: replay({}, {}) failed: {e} -- clean prompt", ep.dir, ep.npos);
+                                        } else {
+                                            recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
+                                        }
+                                    }
+                                }
+                                None => tracing::warn!("B3-WC: SP_B3_WC set but load_wc({}) failed -- skipping", wcp),
+                            }
+                        }
                         // B3-v9c THE DISPOSER (Stage-2 post-inject semantic verify-and-rewind).
                         // The q·K Stage-1 ranker (above) PROPOSES; the Disposer DISPOSES. For
                         // each candidate episode it SPECULATIVELY injects (M_target budget if set)
