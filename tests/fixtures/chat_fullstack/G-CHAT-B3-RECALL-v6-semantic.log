@@ -1,0 +1,25 @@
+G-CHAT-B3-RECALL-v6 SEMANTIC DISCRIMINATOR  margin = logP(Yes)-logP(No) = NLL(No)-NLL(Yes), TAU=0.0
+query                                                 Boul    lob   Head  pick   margin   verdict
+  Who is Robert Boulter?                              -0.91  -1.07  -1.23   Boul   -0.91  reject  want=Boul MISS
+  What is the European lobster, Homarus gammarus?     -0.92  -0.75  -0.80    lob   -0.75  reject  want=lob MISS
+  Who was Frank Headlam?                              -0.91  -1.02  -1.06   Boul   -0.91  reject  want=Head MISS
+  What is the standard hydration ratio for a French   -1.08  -1.02  -1.00   Head   -1.00  reject  FOREIGN OK-rejected
+  Explain the memory-bandwidth limits of the dp4a GE  -0.81  -0.73  -0.83    lob   -0.73  reject  FOREIGN OK-rejected
+  Hey, can you help me remember what we were just ta  -0.71  -0.93  -0.71   Boul   -0.71  reject  FOREIGN OK-rejected
+  the and of to a in is that it with as               -0.99  -1.14  -0.94   Head   -0.94  reject  FOREIGN OK-rejected
+  What is the capital of France?                      -1.13  -1.05  -1.01   Head   -1.01  reject  FOREIGN OK-rejected
+  How do I bake sourdough bread?                      -0.87  -0.95  -0.88   Boul   -0.87  reject  FOREIGN OK-rejected
+
+SEMANTIC SIEVE: true-positives accepted=False  foreigns all-rejected=True  => leak remains
+
+--------------------------------------------------------------------------------
+ DIAGNOSIS: DEGENERATE — the 12B says No to ALL (margins -0.71..-1.23, true positives NOT
+ above foreigns). Trivially rejects all foreigns only because it rejects everything incl.
+ obvious matches. CAUSE (S1 lesson resurfacing): the reasoning prompt was RAW TEXT, not the
+ gemma4 CHAT TEMPLATE. gemma4-12b-b1 IS instruction-tuned (instruct HF bucket); fed bare text
+ it is OFF-DISTRIBUTION and never enters "answer the user" mode, so it won't commit Yes/No.
+ The architecture (reasoning-subspace discriminator) is NOT disproven — it was asked in the
+ wrong dialect. FIX (v7): wrap the prompt in the real turn template (<|turn>=105 user / content
+ / <turn|>=106 / <|turn>model), assembling token IDs (sp_tok_enc can't emit the special turn
+ tokens from text), then re-score the Yes/No margin in-format. Honest negative #5 (raw-prompt
+ semantic discriminator); the in-format version is the named next gate.
