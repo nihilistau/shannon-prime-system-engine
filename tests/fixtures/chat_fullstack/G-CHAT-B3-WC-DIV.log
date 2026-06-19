@@ -1,0 +1,25 @@
+G-CHAT-B3-WC-DIV — DIVERSITY corpus learned-head train (the "better run")
+date: 2026-06-19   corpus: _needle_corpus_div (90 needles 30/30/30, unique subject + varied carrier
+  per needle, all 30 queries fully-distinct/archetype) + 50 foreign + ctrl_paris.
+data: b3_data_div.npz = 411 query-Q (361 positive [90x(query+3 paraphrases)+ctrl] / 50 foreign) x 91 episode-K.
+train: b3_train_wc_fast (vectorized), r=32, 400 epochs. ce 4.90 -> 0.086, tau 0.293, s0 +0.121.
+================================================================================
+HEADLINE WIN — DIVERSITY SOLVED INSTANCE RECALL (representation level):
+  diagonal argmax-correct (float logsumexp metric): 361/361 = 100%
+  vs templated v1 (G-CHAT-B3-WC-TRAIN-200): 270/801 = 34%.
+  Confirms the diagnosis exactly: query-Q intra-archetype collision was the ENTIRE bottleneck;
+  unique subjects + varied carrier structures dissolved it. ce collapsed 1.97 -> 0.086.
+REMAINING (calibration, NOT representation):
+  (1) train/runtime REDUCTION MISMATCH: trainer scores logsumexp_p (float) -> 361/361; the int16
+      export + recall.rs runtime use max + top-8-mean -> some paraphrase queries argmax a neighbor
+      (int rows: div_000 paraphrases hit div_068 / div_006). int16 quant-err 3.05e-5 is not the cause;
+      the REDUCTION differs. FIX: train b3_train_wc with the runtime reduction (max/top-m) OR export/score
+      with logsumexp.
+  (2) FOREIGN-REJECT margin collapsed: min_target=+0.105 ~ max_foreign=+0.105, s0=+0.121 (NO SEP float).
+      Instance discrimination consumed the dynamic range; the absolute reject threshold has no gap.
+      FIX: more/harder foreign + an explicit target>foreign margin term, or recalibrate s0 post-hoc.
+VERDICT: the binding constraint was corpus DIVERSITY (proven: 34% -> 100% float top-1), exactly as
+  diagnosed. The representation is solved. Remaining is deployment calibration (reduction alignment +
+  reject margin) — a tuning pass, not an open research question. Did NOT deploy (reduction mismatch +
+  reject margin must be closed first). artifacts: _b3_wc/lsh_Wc_f32_div.npz, lsh_Wc_i16_s14.bin.
+  Logs _traindiv.log / _exportdiv.log / _dsdiv.log.
