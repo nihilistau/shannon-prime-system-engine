@@ -812,11 +812,13 @@ fn run_kvdecode_chat(
                             // greedy-decoding (which may not recite the secret in [2,8)), teacher-force the
                             // KNOWN secret tokens and score THEIR NLL with vs without the episode's source
                             // rows. Measures the secret's dependency DIRECTLY; window = the full secret.
-                            let secret_ids: Vec<i32> = std::env::var("SP_B3_SECRET").ok()
-                                .map(|s| app.tokenizer.encode(&s).unwrap_or_default())
-                                .map(|mut v| { if v.first() == Some(&2) { v.remove(0); } v })
-                                .unwrap_or_default();
-                            let w0: usize = if secret_ids.is_empty() { 2 } else { 0 };
+                            // SECRET resolution is PER-EPISODE (resolved inside the loop below): env
+                            // SP_B3_SECRET is the single-shot override; otherwise each episode supplies
+                            // its own knockout target via an ep.secret sidecar (the corpus admission
+                            // path — ONE daemon boot labels the whole registry, each ep self-tested with
+                            // ITS OWN secret). Missing sidecar => empty => that ep falls back to the
+                            // greedy [2,8) window (no crash, null floor preserved).
+                            let env_secret = std::env::var("SP_B3_SECRET").ok().filter(|s| !s.is_empty());
                             let anchor = unsafe { kv::position(handle) };
                             let mut best_abl: Option<(usize, f32)> = None;
                             let mut drows: Vec<String> = Vec::with_capacity(registry.len());
@@ -825,6 +827,15 @@ fn run_kvdecode_chat(
                                 let eptok: Vec<i32> = std::fs::read_to_string(std::path::Path::new(&ep.dir).join("ep.tok"))
                                     .ok().map(|s| s.lines().filter_map(|l| l.trim().parse::<i32>().ok()).collect())
                                     .unwrap_or_default();
+                                // per-episode knockout target: env override else this ep's ep.secret
+                                // sidecar (leading space preserved; only trailing CR/LF stripped).
+                                let secret_ids: Vec<i32> = env_secret.clone()
+                                    .or_else(|| std::fs::read_to_string(std::path::Path::new(&ep.dir).join("ep.secret")).ok())
+                                    .map(|s| { let s = s.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string();
+                                               app.tokenizer.encode(&s).unwrap_or_default() })
+                                    .map(|mut v| { if v.first() == Some(&2) { v.remove(0); } v })
+                                    .unwrap_or_default();
+                                let w0: usize = if secret_ids.is_empty() { 2 } else { 0 };
                                 // Leg 1: inject E, greedy-decode the payload, record lp_E.
                                 if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
                                 let mut gen: Vec<i32> = Vec::new();
