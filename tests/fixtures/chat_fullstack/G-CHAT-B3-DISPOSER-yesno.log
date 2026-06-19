@@ -1,0 +1,57 @@
+G-CHAT-B3-DISPOSER  Stage-2 post-inject verify-and-rewind — Yes/No reasoning bridge
+====================================================================================
+THE DISPOSER (routes.rs, SP_B3_DISPOSER=1): the q·K Stage-1 ranker PROPOSES; the
+Disposer DISPOSES. For each candidate episode it SPECULATIVELY injects (SP_REPLAY_MTARGET
+budget) into the resident gemma4_kv cache, teacher-forces the bridge
+"\nDoes the memory contain the answer to the query? Answer strictly Yes or No:"
+via decode_step, reads margin = logit(Yes)-logit(No) at the answer position, then O(1)
+rewinds (last token + bridge + episode) to vaporise it. Best-margin episode re-injected +
+recalled IFF margin > SP_B3_DISPOSER_TAU. TELEMETRY-FIRST: TAU defaults +inf (never fires)
+to MEASURE the open-world separation BEFORE trusting the signal — because the Yes/No bridge
+is the v6/v7 verifier already convicted in-prompt (per-episode baseline bias). This run
+re-measures it POST-LATENT-INJECT (M_target=42).
+
+PLUMBING: WORKS. All 9 queries swept, each of 3 candidates speculatively injected + scored
++ O(1)-rewound, cache clean every turn, zero crashes/hijacks. The verify-and-rewind machine
+is sound (built on gemma4_kv replay/decode_step/rewind; KAI-1b G-1b-REWIND-NULL inverse).
+
+PRE-REGISTERED GATE: pass iff min(margin over 3 matched) > max(margin over 6 foreign) AND
+the matched episode is the per-query argmax. (Open-world separation; what q·K + in-prompt
+Yes/No both failed.)
+
+MATRIX (margin = logit(Yes) - logit(No); registry ep_wiki/Boulter-84, ep_homarus/lobster-180,
+ep_headlam/Headlam-179; M_target=42; greedy):
+  q (→matched)                          wiki      homarus    headlam    argmax
+  q1 Who is Robert Boulter? (→wiki)    -1.517    -1.462     -1.399     headlam  MISS
+  q2 European lobster? (→homarus)      -1.370    -1.288     -1.255     headlam  MISS
+  q3 Who was Frank Headlam? (→headlam) -1.297    -1.171     -1.276     homarus  MISS
+  q4 sourdough boulter (FOREIGN)       -1.242    -1.052     -1.180     homarus
+  q5 dp4a GEMV (FOREIGN)               -0.916    -0.442     -0.633     homarus
+  q6 help me remember (FOREIGN)        -1.142    -1.153     -1.235     wiki
+  q7 stopwords (FOREIGN)               -0.926    -0.853     -0.909     homarus
+  q8 capital of France (FOREIGN)       -1.100    -0.947     -1.089     homarus
+  q9 bake sourdough (FOREIGN)          -1.380    -1.467     -1.423     wiki
+
+VERDICT: GATE FAILED (catastrophic). The post-inject Yes/No bridge does NOT separate.
+  1. ALL margins negative — the model answers "No" to every relevance question, matched
+     or not (the v6 "says-No-to-all" degeneracy, unchanged by latent injection).
+  2. Diagonal dominance 0/3 — the matched episode is NEVER the per-query argmax (q1 matched
+     Boulter is the WORST of three). min matched margin (-1.517) << max foreign (-0.442).
+  3. PER-EPISODE BASELINE BIAS confirmed AGAIN — ep_homarus wins the margin on ~6/9 queries
+     regardless of topic; the signal tracks the episode's intrinsic Yes-bias, not query
+     relevance. Identical pathology to the six prior verifiers (v2 geom / v3 W_c / v4-5 dLL /
+     v6-7 in-prompt Yes/No). Baseline-subtraction does not rescue it (matched margin sits
+     BELOW the episode's own cross-query mean).
+
+CONCLUSION: the verify-and-rewind ARCHITECTURE is correct and built; the Yes/No SEMANTIC
+SIGNAL is dead post-inject, exactly as it was in-prompt. Receipts-first vindicated — the
+convicted verifier was MEASURED, not shipped (TAU stayed +inf; no live gate change).
+NEXT (challenger signal, same plumbing): replace the meta-question with a Δ-CONTINUATION
+signal — does injecting E MOVE THE MODEL'S OWN answer on THIS query? Measure the first-token
+logit shift / NLL drop of the natural continuation WITH E vs WITHOUT E (the M=42 behavioural
+data already shows matched changes the output: "The Bill"/lobster facts appear; mismatched
+does not: France->Paris either way). That is a relevance signal immune to the per-episode
+Yes-bias because it is differential against the no-inject baseline of the SAME query.
+The M_target=42 budget remains the safety floor under whatever Disposer signal we adopt.
+
+CODE: tools/sp_daemon/src/routes.rs (SP_B3_DISPOSER, telemetry-default TAU=+inf = null floor).

@@ -771,7 +771,76 @@ fn run_kvdecode_chat(
                             match best { Some((_, b)) if key <= b => {}, _ => best = Some((i, key)) }
                         }
                         tracing::info!("B3-v2 q·K relevance (npos_q={} topm={}): [{}]", npos_q, topm, rows.join(" "));
-                        if let Some((idx, score)) = best {
+                        // B3-v9c THE DISPOSER (Stage-2 post-inject semantic verify-and-rewind).
+                        // The q·K Stage-1 ranker (above) PROPOSES; the Disposer DISPOSES. For
+                        // each candidate episode it SPECULATIVELY injects (M_target budget if set)
+                        // into the resident cache, teacher-forces a Yes/No reasoning bridge via
+                        // decode_step, reads margin = logit(Yes)-logit(No) at the answer position,
+                        // then O(1)-rewinds the probe (last token + bridge + episode) to vaporise
+                        // it (the KAI-1b slot==pos / SWA-journal inverse). The best-margin episode
+                        // is re-injected and recalled IFF margin > SP_B3_DISPOSER_TAU. TELEMETRY-
+                        // FIRST (the codebase's tau_qk discipline): TAU defaults to +inf so the
+                        // first run NEVER fires — we read the per-(query,episode) margin matrix,
+                        // verify open-world separation (the v6/v7 Yes/No bridge FAILED in-prompt;
+                        // this is the post-LATENT-inject variant, re-measured), THEN pin TAU.
+                        // The M_target=42 budget is the safety floor: a wrong FIRE stumbles
+                        // (sub-dominant), it does not hijack. Default-off ⇒ falls through to the
+                        // existing q·K fire (null floor).
+                        let disposer = std::env::var("SP_B3_DISPOSER").ok().as_deref() == Some("1");
+                        if disposer {
+                            let disp_tau: f32 = std::env::var("SP_B3_DISPOSER_TAU").ok()
+                                .and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY);
+                            let bridge = "\nDoes the memory contain the answer to the query? Answer strictly Yes or No:";
+                            let strip_bos = |mut v: Vec<i32>| { if v.first() == Some(&2) { v.remove(0); } v };
+                            let bridge_ids = strip_bos(app.tokenizer.encode(bridge).unwrap_or_default());
+                            let yes_id = *strip_bos(app.tokenizer.encode(" Yes").unwrap_or_default()).first().unwrap_or(&-1);
+                            let no_id  = *strip_bos(app.tokenizer.encode(" No").unwrap_or_default()).first().unwrap_or(&-1);
+                            let mut best_disp: Option<(usize, f32)> = None;
+                            let mut drows: Vec<String> = Vec::with_capacity(registry.len());
+                            if !bridge_ids.is_empty() && yes_id >= 0 && no_id >= 0
+                                && (yes_id as usize) < vocab_size && (no_id as usize) < vocab_size {
+                                for (i, ep) in registry.iter().enumerate() {
+                                    if ep.npos <= 0 || ep.gk.is_empty() { continue; }
+                                    // Speculative inject (uses SP_REPLAY_MTARGET budget if set).
+                                    if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
+                                    // Teacher-force last prompt token + the bridge; read the answer
+                                    // distribution after the FINAL bridge token.
+                                    let mut margin = f32::NEG_INFINITY;
+                                    let mut ok = unsafe { kv::decode_step(handle, last[0], logits) }.is_ok();
+                                    if ok {
+                                        for (k, &bt) in bridge_ids.iter().enumerate() {
+                                            if unsafe { kv::decode_step(handle, bt, logits) }.is_err() { ok = false; break; }
+                                            if k == bridge_ids.len() - 1 {
+                                                margin = logits[yes_id as usize] - logits[no_id as usize];
+                                            }
+                                        }
+                                    }
+                                    // O(1) rewind: probe tokens (last + bridge) + the episode ⇒ cache back to [head].
+                                    let undo = 1 + bridge_ids.len() as i32 + ep.npos;
+                                    let _ = unsafe { kv::rewind(handle, undo) };
+                                    drows.push(format!("{}(margin={:.3})", ep.name, margin));
+                                    match best_disp { Some((_, b)) if margin <= b => {}, _ => best_disp = Some((i, margin)) }
+                                }
+                            } else {
+                                tracing::warn!("B3-DISPOSER: bridge/Yes/No tokenization failed (bridge={} yes={} no={}) — no-op",
+                                    bridge_ids.len(), yes_id, no_id);
+                            }
+                            tracing::info!("B3-DISPOSER margins logit(Yes)-logit(No): [{}] TAU={:.3}", drows.join(" "), disp_tau);
+                            if let Some((idx, margin)) = best_disp {
+                                let ep = &registry[idx];
+                                let fire = margin > disp_tau && ep.npos > 0 && !ep.gk.is_empty();
+                                tracing::info!("B3-DISPOSER: best='{}' (topic='{}') margin={:.3} ⇒ {}",
+                                    ep.name, ep.topic, margin, if fire { "AUTHORIZE (re-inject)" } else { "REJECT (rewound; clean prompt)" });
+                                if fire {
+                                    // SAFETY: handle live; cache Mutex held.
+                                    if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                        tracing::warn!("B3-DISPOSER: authorized re-inject({}, {}) failed: {e} — proceeding without recall", ep.dir, ep.npos);
+                                    } else {
+                                        recalled = Some((ep.name.clone(), (margin.max(0.0) * 1000.0) as u32));
+                                    }
+                                }
+                            }
+                        } else if let Some((idx, score)) = best {
                             let ep = &registry[idx];
                             let fire = score >= tau_qk && ep.npos > 0 && !ep.gk.is_empty();
                             tracing::info!(
