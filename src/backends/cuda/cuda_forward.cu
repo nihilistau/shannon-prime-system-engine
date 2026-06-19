@@ -4602,6 +4602,15 @@ extern "C" long gemma4_kv_devfree_mib(void) {
 extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int zero) {
     if (!s || !epdir || npos <= 0) { sp_set_error("gemma4_kv_replay: bad args"); return -1; }
     if (s->dpos_host + npos > s->Pmax) { sp_set_error("gemma4_kv_replay: exceeds Pmax"); return -1; }
+    /* WEIGHTED REFERENCE INJECTION (B3-v9): SP_REPLAY_ALPHA in [0,1] attenuates the injected
+     * memory's ATTENTION WEIGHT by scaling its stored (post-RoPE) K by alpha ⇒ logit = Q·(alpha K)
+     * = alpha·(Q·K) for exactly the memory slots. A MATCHED memory (huge Q·K) still clears the
+     * softmax even at low alpha (conditions recall); a MISMATCHED memory (small Q·K) is crushed
+     * (prompt keeps primacy ⇒ no hijack). V is left unscaled (full value at reduced attention).
+     * alpha=1 = today's full-strength replay (B6). Decouples inform-when-relevant from
+     * dominate-when-not — the length→weight fix for the mass-dominance hijack. */
+    const char *alpha_e = getenv("SP_REPLAY_ALPHA");
+    const float replay_alpha = alpha_e ? (float)atof(alpha_e) : 1.0f;
     /* KAI-1c: in ring mode the replay overwrites SWA ring slots that may still hold live earlier
      * positions, so each clobbered slot is journaled BEFORE overwrite (exactly as g4_kv_step does)
      * ⇒ gemma4_kv_rewind reconstructs the pre-injection window. Needs journal headroom past commit. */
@@ -4624,7 +4633,12 @@ extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int ze
     if (!hs) { cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: host OOM"); return -1; }
     snprintf(rp, sizeof rp, "%s/ep.k", epdir); rf = fopen(rp, "rb");
     if (!rf || fread(hs, 1, sb, rf) != sb) { if (rf) fclose(rf); free(hs); cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: ep.k read"); return -1; }
-    fclose(rf); cudaMemcpy(dK, hs, sb, cudaMemcpyHostToDevice);
+    fclose(rf);
+    if (replay_alpha != 1.0f) {   /* attenuate the memory's attention weight: scale stored K by alpha */
+        float *kf = (float *)hs; size_t nf = sb / sizeof(float);
+        for (size_t i = 0; i < nf; i++) kf[i] *= replay_alpha;
+    }
+    cudaMemcpy(dK, hs, sb, cudaMemcpyHostToDevice);
     snprintf(rp, sizeof rp, "%s/ep.v", epdir); rf = fopen(rp, "rb");
     if (!rf || fread(hs, 1, sb, rf) != sb) { if (rf) fclose(rf); free(hs); cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf); sp_set_error("kv_replay: ep.v read"); return -1; }
     fclose(rf); cudaMemcpy(dV, hs, sb, cudaMemcpyHostToDevice); free(hs);
@@ -4657,8 +4671,8 @@ extern "C" int gemma4_kv_replay(sp_g4_kv *s, const char *epdir, int npos, int ze
     cudaFree(dK); cudaFree(dV); sp_xbar_manifest_free(&mf);
     s->dpos_host += npos;
     if (cudaMemcpy(s->dpos, &s->dpos_host, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) { sp_set_error("kv_replay: dpos H2D"); return -1; }
-    fprintf(stderr, "    [xbar-#222] gemma4_kv_replay: %s episode into resident cache [%d,%d)%s\n",
-            zero ? "ZEROED" : "intact", base, base + npos, zero ? " (reject control)" : "");
+    fprintf(stderr, "    [xbar-#222] gemma4_kv_replay: %s episode into resident cache [%d,%d) alpha=%.3f%s\n",
+            zero ? "ZEROED" : "intact", base, base + npos, replay_alpha, zero ? " (reject control)" : "");
     return 0;
 }
 

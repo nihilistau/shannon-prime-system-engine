@@ -1,0 +1,57 @@
+G-CHAT-B3-RECALL-v9  WEIGHTED REFERENCE INJECTION (alpha attenuation at gemma4_kv_replay)
+=========================================================================================
+Mechanism: SP_REPLAY_ALPHA scales the injected episode's stored (post-RoPE) K by alpha
+before the H2D copy in gemma4_kv_replay (cuda_forward.cu). Since logit = Q.K/sqrt(d),
+scaling the memory K by alpha gives logit -> alpha*(Q.K) for EXACTLY the memory slots,
+in whatever decode attention kernel reads them (no kernel change). V left unscaled.
+Default (env unset) = alpha 1.0 = byte-identical to the prior full-strength replay (null floor).
+This is the LENGTH-knob -> WEIGHT-knob move: decouple inform-when-relevant from
+dominate-when-irrelevant (the mass-dominance hijack the npos/length knob could not break).
+
+Harness: live daemon /v1/chat, resident 12B gemma4_kv decode (SP_DAEMON_BACKEND=cuda
++ KVDECODE + INT8, Pmax=4096), byteexact default, temperature=0 (greedy). Operator
+`replay` field injects the episode after the prompt prefill, before decode.
+Episodes: _c2_ep_wiki (Robert Boulter, npos=84) ; _b3_ep_homarus (European lobster, npos=180).
+Repro: set SP_REPLAY_ALPHA=<a> in the daemon env (_b3v9_launch.bat <a>), POST
+  {"messages":[{"role":"user","content":"<Q>"}],"replay":"<engdir>/_c2_ep_wiki","replay_npos":84,"temperature":0,"max_tokens":48}
+
+ALPHA SWEEP — Boulter episode (npos=84)
+---------------------------------------
+a=1.0  MATCH  "Who is Robert Boulter?"  -> "Robert Boulter is an English film, television and theatre actor.
+                                           He had a guest-starring role ... The Bill in 2000 ... Herons" = VERBATIM recall (== B6)
+a=1.0  MISMATCH "capital of France?"    -> "Robert Boulter is an English film, television and theatre actor..." = FULL HIJACK (the problem)
+a=0.7  MISMATCH "capital of France?"    -> question-loop (no hijack, but Paris not clean) ; MATCH -> "The Bill"+halluc
+a=0.5  MATCH  "Who is Robert Boulter?"  -> "Robert Boulter is a British actor ... best known for ... The Bill ..." = PARTIAL recall (salient fact recovered)
+a=0.5  MISMATCH "capital of France?"    -> "Paris" = CLEAN REJECT (no hijack)            <-- operating point
+a=0.2  MATCH  "Who is Robert Boulter?"  -> "British artist and illustrator ... Dungeons & Dragons" = recall LOST
+a=0.2  MISMATCH "capital of France?"    -> "Paris" = clean
+
+ALPHA SWEEP — lobster episode (npos=180)
+----------------------------------------
+a=0.5  MATCH  "What is the European lobster, Homarus gammarus?"
+            -> "The European lobster, Homarus gammarus, is a species of lobster found in the North Atlantic Ocean.
+                It is the most common species of lobster in Europe and is also found in the Mediterranean Sea." = CLEAN COHERENT recall
+a=0.5  MISMATCH "capital of France?"    -> question-loop (NO lobster hijack; not clean Paris)
+
+VERDICT
+-------
+* The weight knob WORKS and is real on the metal. alpha=1.0 = byte-identical null floor
+  (MATCH reproduces B6 verbatim; MISMATCH reproduces the documented full hijack).
+* alpha attenuation SUPPRESSES the mass-dominance hijack: at a=0.5 NO query is hijacked
+  into reciting an irrelevant memory (the recall==hijack coupling the length knob could
+  not break is BROKEN). Operator thesis (LENGTH->WEIGHT) vindicated.
+* The knob is a MASS knob: effective attention mass = alpha * npos. Matched recall is
+  CLEAN for a normal episode (lobster, npos=180: coherent correct recall at a=0.5) and
+  PARTIAL for the fluent-attractor episode (Boulter, npos=84: salient fact at a=0.5,
+  the known universal-Yes-attractor hard case). Longer episode conditions match better
+  but disrupts mismatch more (France -> loop vs Paris) at the same alpha.
+* HONEST CAVEAT: a single global alpha does NOT give clean verbatim-on-match +
+  clean-Paris-on-mismatch simultaneously across episodes of different length. The clean
+  fix is alpha normalized by npos (target a fixed effective mass alpha*npos), i.e. set
+  alpha per episode so the memory carries a constant, sub-dominant attention budget.
+  This is the next refinement (alpha = M_target / npos), not a new mechanism.
+* Boundary-thesis consistent: the win is on the EXACT, controllable attention budget
+  (the container), realized by a one-line host scale of the stored K. No new kernel.
+
+CODE: engine src/backends/cuda/cuda_forward.cu gemma4_kv_replay (SP_REPLAY_ALPHA).
+Null floor: SP_REPLAY_ALPHA unset/1.0 => stored K untouched => bit-identical replay.
