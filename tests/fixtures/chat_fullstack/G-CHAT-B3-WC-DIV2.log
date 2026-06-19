@@ -1,0 +1,21 @@
+G-CHAT-B3-WC-DIV2 — autonomous-recall head FINISHED (reduction-aligned + reject via NULL)
+date: 2026-06-19   trainer: b3_train_wc_fast2 (logsumexp-mean reduction + reject-margin hinge),
+  rmargin=0.30 wrm=0.5, 600 epochs on b3_data_div.npz (411 query-Q / 91 episodes), cuda.
+RESOLUTION OF THE TWO DIV-RUN GAPS:
+  (A) "int16 degradation" was a RUNTIME-REDUCTION bug, NOT quantization. Measured on the div head
+      (_redeval.py): diagonal under max=12/361, top-8-mean=16/361, LOGSUMEXP-MEAN=361/361 — and
+      int16 == f32 for all three. logsumexp-mean is the discriminating reduction AND quantizes
+      LOSSLESSLY. FIX = recall.rs must score with logsumexp-mean (NOT max/top-m). Aligning the
+      TRAINER to max+top-m was the wrong direction (b3_train_wc_align top8 -> 138/361).
+  (B) reject: the absolute min_target~max_foreign "NO SEP" is the WRONG deploy rule. The head is an
+      (E+1)-way softmax with NULL=s0; the deploy decision is argmax over [episodes, NULL].
+DEPLOY GATE (_deployeval.py, (E+1)-argmax, s0=+0.102):
+  f32   : positives recall 360/361 (99.7%) | foreign reject 50/50 (100%)
+  int16 : positives recall 360/361 (99.7%) | foreign reject 50/50 (100%)   <-- quantization-EXACT
+VERDICT: the autonomous-recall head is DONE at the model level — 360/361 instance recall + 100%
+  foreign reject, int16-lossless, on a 90-episode diverse corpus (vs templated 34%). The whole
+  thesis closes: episode diversity gives the latent space capacity to resolve every instance; the
+  learned W_c head + NULL reject realizes it. REMAINING = pure deploy wiring: recall.rs scores with
+  logsumexp-mean over [episodes, NULL=s0], recall the argmax episode iff != NULL, + M=42 budget.
+artifacts: lsh_Wc_f32_div2.npz (+int16 via b3_export_wc scale 2^14, lossless). repro: _redeval.py,
+  _deployeval.py, b3_train_wc_fast2.py.
