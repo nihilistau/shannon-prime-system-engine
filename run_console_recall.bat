@@ -24,7 +24,7 @@ set "SP_DAEMON_BACKEND=cuda"
 set "SP_DAEMON_KVDECODE=1"
 set "SP_CUDA_DECODE_INT8=1"
 set "SP_DAEMON_KVDECODE_RING_W=1024"
-set "SP_DAEMON_KVDECODE_PMAX=20000"
+set "SP_DAEMON_KVDECODE_PMAX=4096"
 
 REM ---- B3-WC autonomous librarian (the only delta vs run_console.bat) ----
 set "SP_RECALL_REGISTRY=%ENGINE%_needle_corpus_div\registry.jsonl"
