@@ -300,6 +300,15 @@ pub async fn v1_chat(
             .into_response();
     }
 
+    // B4 NIGHTSHIFT: capture THIS turn's last user message text (raw, NO chat
+    // template — match the curator, which captured raw needle sentences) so the
+    // turn-end consolidation hook can mint a position-0 standalone episode. Only
+    // meaningful when `messages` was supplied; `prompt`/`prompt_tokens` callers
+    // pass None (no consolidation). Cheap clone; ignored unless SP_B4_NIGHTSHIFT=1.
+    let raw_user: Option<String> = req.messages.as_ref().and_then(|ms| {
+        ms.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone())
+    });
+
     // Tokenize input.
     let tokenizer = state.tokenizer.clone();
     let tokens: Vec<i32> = if let Some(ids) = req.prompt_tokens {
@@ -460,6 +469,7 @@ pub async fn v1_chat(
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
                 &mut sampler, byteexact, replay_dir, replay_npos,
                 single_entry, inject_frames, inject_ph, auto_recall,
+                raw_user,
             );
             return;
         }
@@ -590,6 +600,7 @@ fn run_kvdecode_chat(
     inject_frames: Option<Vec<Vec<f32>>>,
     inject_ph: i32,
     auto_recall: bool,
+    raw_user: Option<String>,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -780,25 +791,47 @@ fn run_kvdecode_chat(
                         if let Some(wcp) = std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) {
                             match recall::load_wc(&wcp) {
                                 Some(head) => {
+                                    // B4 NIGHTSHIFT: score the static curated registry AND a snapshot of
+                                    // the LIVE consolidated episodes (static first, then nightshift). The
+                                    // (E+1)-NULL argmax is over [all_candidates, NULL=s0]; a live episode
+                                    // can beat NULL + every curated episode and fire its own recall.
+                                    let ns_guard = app.nightshift.read().unwrap();
+                                    let cands: Vec<&recall::Episode> =
+                                        registry.iter().chain(ns_guard.iter()).collect();
+                                    let n_static = registry.len();
                                     let (mut bi, mut bv) = (usize::MAX, f32::NEG_INFINITY);
-                                    let mut wrows: Vec<String> = Vec::with_capacity(registry.len());
-                                    for (i, ep) in registry.iter().enumerate() {
+                                    let mut wrows: Vec<String> = Vec::with_capacity(cands.len());
+                                    for (i, ep) in cands.iter().enumerate() {
                                         let np = (ep.npos as usize).min(
                                             if ep.gk_ng > 0 { ep.gk.len() / (ep.gk_ng * recall::HD) } else { 0 });
                                         let sc = recall::wc_score(&qbuf, &ep.gk, ep.gk_ng, np, &head);
                                         wrows.push(format!("{}={:.3}", ep.name, sc));
                                         if sc > bv { bv = sc; bi = i; }
                                     }
-                                    tracing::info!("B3-WC lse-mean (E+1)-argmax s0={:.3}: [{}]", head.s0, wrows.join(" "));
+                                    tracing::info!("B3-WC lse-mean (E+1)-argmax s0={:.3} ({} curated + {} live): [{}]",
+                                        head.s0, n_static, cands.len() - n_static, wrows.join(" "));
                                     if bi == usize::MAX || !(bv > head.s0) {
                                         tracing::info!("B3-WC: NULL wins (best={:.3} <= s0={:.3}) -> REJECT (clean prompt)", bv, head.s0);
                                     } else {
-                                        let ep = &registry[bi];
-                                        tracing::info!("B3-WC: RECALL '{}' score={:.3} > s0={:.3} -> replay@M_target", ep.name, bv, head.s0);
-                                        if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
-                                            tracing::warn!("B3-WC: replay({}, {}) failed: {e} -- clean prompt", ep.dir, ep.npos);
+                                        let ep = cands[bi];
+                                        if let Some(ref toks) = ep.tokens {
+                                            // B4 live episode: recall by re-injecting its raw tokens through the
+                                            // B5 seam (bit-identical to prefill) — no ep.k/ep.v files on disk.
+                                            tracing::info!("B3-WC: RECALL '{}' (LIVE/nightshift) score={:.3} > s0={:.3} -> inject_tokens(n={})",
+                                                ep.name, bv, head.s0, toks.len());
+                                            if let Err(e) = unsafe { kv::inject_tokens(handle, toks) } {
+                                                tracing::warn!("B3-WC: inject_tokens('{}', n={}) failed: {e} -- clean prompt", ep.name, toks.len());
+                                            } else {
+                                                recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
+                                            }
                                         } else {
-                                            recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
+                                            // Curated episode: the existing disk-replay path (M_target unchanged).
+                                            tracing::info!("B3-WC: RECALL '{}' (curated) score={:.3} > s0={:.3} -> replay@M_target", ep.name, bv, head.s0);
+                                            if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                                tracing::warn!("B3-WC: replay({}, {}) failed: {e} -- clean prompt", ep.dir, ep.npos);
+                                            } else {
+                                                recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
+                                            }
                                         }
                                     }
                                 }
@@ -1148,6 +1181,88 @@ fn run_kvdecode_chat(
         let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
         let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "done" });
     }
+
+    // ── B4 NIGHTSHIFT: between-turn memory CONSOLIDATION ────────────────────────
+    // After the assistant reply has finished decoding for THIS turn, capture the
+    // raw USER message as a LIVE episode so the W_c head can self-select it on a
+    // LATER turn (the chat GROWS its memory). The capture is a position-0 STANDALONE
+    // prefill on a SCRATCH session (NOT a read of the live conversation cache) so the
+    // episode-K has the same provenance as the curated registry-K the head trained on.
+    // Env-gated SP_B4_NIGHTSHIFT=1; unset ⇒ this whole hook is skipped ⇒ byte-identical
+    // null floor. We still hold the resident-cache Mutex (`guard`/`handle` from the top
+    // of this fn) for the WHOLE capture, so no concurrent decode races the scratch open.
+    // A capture failure logs a warning and does NOT break the (already-sent) response.
+    // TODO(B4-v2): admit via the teacher-forced ablation oracle (collapse < TAU=-8)
+    // before append — v1 captures EVERY sufficiently-long user turn (no relevance gate).
+    if std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() == Some("1") {
+        if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            // (a) tokenize the RAW user content (no chat template — match the curator).
+            match app.tokenizer.encode(&text) {
+                Ok(mut toks) => {
+                    // Strip a leading forced-BOS (id 2) so the capture matches a bare prefill.
+                    if toks.first() == Some(&2) { toks.remove(0); }
+                    let ntok = toks.len();
+                    if ntok < 4 {
+                        tracing::info!("B4-NIGHTSHIFT: skip (too short, ntok={ntok})");
+                    } else {
+                        // (b) qm = the session's borrowed qwen3_model* (shares loaded weights).
+                        let qm = {
+                            let mut sguard = app.session.lock().unwrap();
+                            let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+                            // SAFETY: session is locked + valid for this borrow.
+                            (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
+                        };
+                        if qm.is_null() {
+                            tracing::warn!("B4-NIGHTSHIFT: sp_session_qwen3_model NULL — capture skipped");
+                        } else {
+                            // (c) scratch session: open → prefill(toks)@dpos=0 → read global-K → close.
+                            // SAFETY: qm valid (session held above); we hold the resident-cache Mutex
+                            // so no concurrent device decode; scratch handle closed on every path.
+                            let cap: Result<(Vec<f32>, usize), String> = (|| unsafe {
+                                let sh = kv::open(qm, ntok as i32)?;
+                                if let Err(e) = kv::prefill(sh, &toks) { kv::close(sh); return Err(e); }
+                                let hd = sp_daemon::recall::HD;
+                                let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD;
+                                let mut gk = vec![0f32; n_global * ntok * hd];
+                                let ng = match kv::read_global_k(sh, &mut gk, ntok as i32) {
+                                    Ok(n) => n as usize,
+                                    Err(e) => { kv::close(sh); return Err(e); }
+                                };
+                                kv::close(sh);
+                                gk.truncate(ng * ntok * hd);
+                                Ok((gk, ng))
+                            })();
+                            match cap {
+                                Ok((gk, ng)) => {
+                                    let mut ns = app.nightshift.write().unwrap();
+                                    let idx = ns.len();
+                                    let topic: String = text.chars().take(40).collect();
+                                    ns.push(sp_daemon::recall::Episode {
+                                        name: format!("ep_live_{:03}", idx),
+                                        dir: String::new(),
+                                        npos: ntok as i32,
+                                        topic,
+                                        sig: [0u64; 4],
+                                        gk,
+                                        gk_ng: ng,
+                                        tokens: Some(toks),
+                                    });
+                                    let total = ns.len();
+                                    tracing::info!(
+                                        "B4-NIGHTSHIFT: consolidated turn -> 'ep_live_{:03}' (npos={}, ng={}) — registry now has {} live episode(s)",
+                                        idx, ntok, ng, total
+                                    );
+                                }
+                                Err(e) => tracing::warn!("B4-NIGHTSHIFT: capture failed: {e} — no episode appended"),
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("B4-NIGHTSHIFT: tokenize failed: {e} — no episode appended"),
+            }
+        }
+    }
+
     sessions.remove(chat_id);
 }
 

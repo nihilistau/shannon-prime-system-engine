@@ -709,6 +709,9 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         // B3 AUTONOMOUS RECALL — episode registry + frozen C2 projection.
         recall_registry,
         recall_proj,
+        // B4 NIGHTSHIFT — live between-turn consolidated episodes (grows at runtime;
+        // empty + never written unless SP_B4_NIGHTSHIFT=1 ⇒ null floor).
+        nightshift: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]

@@ -1,0 +1,70 @@
+G-CHAT-B4-NIGHTSHIFT ? between-turn memory consolidation on the served Gemma-4-12B
+================================================================================
+CONTRACT-CHAT-FULLSTACK B4. Engine: shannon-prime-system-engine (cargo-only, no
+C/CUDA rebuild). Build: _disp_build.bat -> DISP_BUILD_DONE_0 (clean, warnings only).
+Default-OFF env flag SP_B4_NIGHTSHIFT (unset => hook skipped => byte-identical null
+floor). Launcher: run_console_nightshift.bat (= run_console_recall.bat + SP_B4_NIGHTSHIFT=1).
+
+WHAT B4 DOES
+  recall.rs   : Episode gains `tokens: Option<Vec<i32>>` (None=curated/disk replay,
+                Some=live NIGHTSHIFT replay via inject_tokens). load_registry sets None.
+  state.rs    : AppState.nightshift: Arc<RwLock<Vec<Episode>>> (grows live; curated
+                recall_registry stays immutable).
+  daemon.rs   : constructs nightshift = Arc::new(RwLock::new(Vec::new())).
+  routes.rs   : (1) SP_B3_WC (E+1)-NULL argmax now scores curated registry + a snapshot
+                    of nightshift (static first, then live); a live win recalls via
+                    inject_tokens(&ep.tokens), a curated win via the existing kv::replay.
+                (2) turn-end hook (SP_B4_NIGHTSHIFT=1): after the assistant reply finishes,
+                    capture the raw USER message as a position-0 STANDALONE episode on a
+                    SCRATCH kv session (open -> prefill@dpos=0 -> read_global_k -> close),
+                    held under the resident-cache Mutex; push to nightshift. Skip if <4 tok.
+                    TODO(B4-v2): admit via teacher-forced ablation oracle (collapse<TAU=-8)
+                    before append ? v1 captures EVERY sufficiently-long user turn (no gate).
+
+LIVE 2-TURN PROOF (12B, gemma4-12b-b1.sp-model, temp=0, auto_recall=true,
+                   90-needle _needle_corpus_div registry + ctrl_paris)
+  listening on 127.0.0.1:3000
+
+  TURN 1 (STATE): "Remember this: the override key for the Tannhauser gate is 5-RAVEN-9921."
+    B4-NIGHTSHIFT: consolidated turn -> 'ep_live_000' (npos=23, ng=8) ? registry now has 1 live episode(s)
+    (reply echoed the secret 5-RAVEN-9921 verbatim)
+
+  TURN 2 (ASK):   "What is the override key for the Tannhauser gate?"
+    B3-WC lse-mean (E+1)-argmax s0=0.102 (91 curated + 1 live):
+        ... [highest curated ~7.8] ... ep_ctrl_paris=0.294 ep_live_000=21.227
+    B3-WC: RECALL 'ep_live_000' (LIVE/nightshift) score=21.227 > s0=0.102 -> inject_tokens(n=23)
+    => recall SELECTION CORRECT: the LIVE episode beat NULL + all 91 curated by a wide margin.
+
+  TURN 3 (FOREIGN): "What is the capital of France?"
+    curated div scores collapse (max=-4.401, ctrl_paris=-0.026, all below s0=0.102 => would reject),
+    but ep_live_000=21.907 ep_live_001=13.335  -> RECALL 'ep_live_000' (does NOT reject)
+
+VERDICT ? PLUMBING GREEN, foreign-reject on LIVE episodes = MEASURED NEGATIVE
+  GREEN: end-to-end machinery works on the metal ? turn-end capture (position-0 scratch
+    prefill), hot-append to the live registry, combined (curated + live) (E+1) scoring, and
+    inject_tokens recall of a live episode. The MATCHED query (turn 2) cleanly self-selects
+    the just-stated fact (ep_live_000=21.227, >> curated ~7.8, >> NULL 0.102).
+  NEGATIVE (honest): live episodes act as universal super-attractors. On the FOREIGN France
+    query the curated episodes correctly collapse to the reject band (max -4.4 < s0=0.102),
+    but the live episodes score +21.9 / +13.3 and win regardless of query content. ROOT CAUSE
+    = a K-SOURCE CALIBRATION MISMATCH: the W_c head was trained on curated episode-K read from
+    ep.k via load_episode_global_k (slice of a [NL][P][HD] capture); the live path reads K via
+    kv::read_global_k from a scratch session. The two K sources are NOT magnitude-calibrated, so
+    wc_score on live gk is systematically inflated (~13-21 for ALL queries). The selector ranks
+    live-vs-live fine but cannot reject foreign against an uncalibrated live episode.
+  Also observed: turn 2 (the question) is itself consolidated as ep_live_001 ? expected v1
+    behavior (no admission gate; every long user turn is captured).
+
+NEXT (to make live recall production-clean)
+  - Calibrate the live read_global_k K to the trained ep.k scale (match load_episode_global_k's
+    global-layer slice + any normalization), OR re-export/re-train the head with live-path K, so
+    live wc_scores share the curated reject boundary (ctrl_paris/foreign < s0).
+  - B4-v2 admission: gate each capture through the teacher-forced ablation oracle
+    (SP_B3_DISPOSER=2, collapse < TAU=-8) so only load-bearing novel facts are consolidated
+    (also stops the question-turn self-capture).
+
+REPRO
+  _disp_build.bat
+  run_console_nightshift.bat   (wait for "listening")
+  POST /v1/chat (temp=0, auto_recall=true): turn1 STATE -> turn2 ASK -> foreign France
+  watch the daemon console for "B4-NIGHTSHIFT: consolidated" + "B3-WC: RECALL 'ep_live_000'"

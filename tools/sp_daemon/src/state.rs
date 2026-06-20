@@ -159,6 +159,14 @@ pub struct AppState {
     pub recall_registry: Option<Vec<sp_daemon::recall::Episode>>,
     pub recall_proj: Arc<sp_daemon::recall::Projection>,
 
+    /// CONTRACT-CHAT-FULLSTACK B4 — NIGHTSHIFT. Live, between-turn consolidated
+    /// episodes (`SP_B4_NIGHTSHIFT=1`): a user turn that states a fact is captured
+    /// at turn-end as a position-0 standalone episode (W_c-head-compatible) and
+    /// pushed here, so the head can self-select it on a LATER turn. Unlike the
+    /// immutable curated `recall_registry`, this grows live ⇒ RwLock. Empty until a
+    /// turn is consolidated; default-off (env unset) ⇒ never written ⇒ null floor.
+    pub nightshift: Arc<std::sync::RwLock<Vec<sp_daemon::recall::Episode>>>,
+
     // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the
     /// skel could not be admitted; `/v1/dsp/echo` then returns 501. Per-request

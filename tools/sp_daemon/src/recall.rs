@@ -99,6 +99,12 @@ pub struct Episode {
     /// the memory the live query is scored against by q·K attention relevance.
     pub gk: Vec<f32>,
     pub gk_ng: usize,
+    /// B4 NIGHTSHIFT: the raw token ids of a LIVE-captured episode. `None` for
+    /// disk/curated episodes (recalled via `kv::replay(dir)`); `Some(toks)` for
+    /// turn-end NIGHTSHIFT episodes (recalled via `kv::inject_tokens(&toks)` — no
+    /// ep.k/ep.v files on disk). Constructed at position-0 standalone capture so it
+    /// is W_c-head-compatible (same provenance as the curated registry-K).
+    pub tokens: Option<Vec<i32>>,
 }
 
 // gemma4-12b global attention head geometry (g_nkv=1, g_nh=16, g_hd=512 ⇒ g_kvd=HD).
@@ -245,6 +251,7 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
             sig,
             gk,
             gk_ng,
+            tokens: None,
         });
     }
     Ok(out)
