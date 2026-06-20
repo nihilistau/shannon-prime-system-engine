@@ -1074,8 +1074,78 @@ fn run_kvdecode_chat(
                                 let mut rng = move || {
                                     seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed
                                 };
-                                // candidate episode indices, KAIROS-bounded then Fisher-Yates shuffled.
-                                let mut cand_idx: Vec<usize> = (0..registry.len().min(kbound)).collect();
+                                // ===== KAIROS DUAL-AXIS WORKING-SET ASSEMBLY =====
+                                // The "first K episodes" window is replaced by a recency+salience
+                                // selection so recent salient memories never fall off the bottom as the
+                                // registry grows (N >> K). Two axes feed the SAME generative judge:
+                                //   (1) RECENCY  : the last SP_B3_JUDGE_R episodes (registry tail =
+                                //       most-recently-appended; NIGHTSHIFT appends ep_live_NNN to the end).
+                                //       Always included -- short-term working memory.
+                                //   (2) SALIENCE : ONLY if N > K, the demoted Stage-0 C2-LSH Hamming
+                                //       pre-filter rescues OLDER memories matching THIS query. Compute the
+                                //       live query's C2 sig, score every non-recency episode by Hamming
+                                //       agreement (R_BITS - hamming) to its STORED sig_bits (exact, captured
+                                //       at ingest -- recomputing from lossy data flips near-zero bits), take
+                                //       the top (K - R), append. Dedup, cap at K.
+                                // The judge still makes the final pick; Stage-0 only widens what it can see.
+                                let n_total = registry.len();
+                                let rbound: usize = std::env::var("SP_B3_JUDGE_R").ok()
+                                    .and_then(|s| s.parse().ok()).unwrap_or(8);
+                                let rkeep = rbound.min(kbound).min(n_total);
+                                let mut cand_idx: Vec<usize>;
+                                let mut kairos_rescued: Vec<usize> = Vec::new();
+                                if n_total <= kbound {
+                                    // small registry: everything fits, no salience needed.
+                                    cand_idx = (0..n_total).collect();
+                                } else {
+                                    // (1) recency axis: the last rkeep registry indices (the tail).
+                                    let mut chosen: Vec<usize> = (n_total - rkeep..n_total).collect();
+                                    let in_recency = |i: usize| i >= n_total - rkeep;
+                                    // (2) salience axis: rescue (kbound - rkeep) OLDER episodes by C2 Hamming.
+                                    let salience_slots = kbound.saturating_sub(rkeep);
+                                    if salience_slots > 0 {
+                                        // live query C2 sig from the prompt's global-K (same source the
+                                        // SP_INT2 Stage-1 cull uses: read_global_k is non-mutating).
+                                        let mut qkbuf = vec![0.0f32; n_global * recall::HD * (npos_q as usize)];
+                                        match unsafe { kv::read_global_k(handle, &mut qkbuf, npos_q) } {
+                                            Ok(ngk) => {
+                                                let qsig = app.recall_proj.signature(
+                                                    &qkbuf, ngk as usize, npos_q as usize);
+                                                // score every NON-recency episode by Hamming agreement to its
+                                                // STORED sig (ep.sig parsed from sig_bits at registry load).
+                                                let mut scored: Vec<(usize, u32)> = (0..n_total)
+                                                    .filter(|&i| !in_recency(i))
+                                                    .map(|i| (i, recall::agree(&qsig, &registry[i].sig)))
+                                                    .collect();
+                                                // descending agreement (= ascending Hamming); take top slots.
+                                                scored.sort_by(|a, b| b.1.cmp(&a.1));
+                                                for &(i, ag) in scored.iter().take(salience_slots) {
+                                                    chosen.push(i);
+                                                    kairos_rescued.push(i);
+                                                    let _ = ag;
+                                                }
+                                                tracing::info!(
+                                                    "B3-JUDGE KAIROS: N={} K={} R={} salience_slots={} qsig={:016x}.. rescued=[{}]",
+                                                    n_total, kbound, rkeep, salience_slots, qsig[0],
+                                                    kairos_rescued.iter()
+                                                        .map(|&i| registry[i].name.clone())
+                                                        .collect::<Vec<_>>().join(", "));
+                                            }
+                                            Err(e) => {
+                                                // salience unavailable: fall back to recency tail only
+                                                // (judge still runs on the working set it has).
+                                                tracing::warn!(
+                                                    "B3-JUDGE KAIROS: read_global_k(npos_q={}) failed: {e} -- recency-only working set",
+                                                    npos_q);
+                                            }
+                                        }
+                                    }
+                                    // dedup (recency/salience disjoint by construction, but be safe) + cap K.
+                                    let mut seen = std::collections::HashSet::new();
+                                    chosen.retain(|&i| seen.insert(i));
+                                    chosen.truncate(kbound);
+                                    cand_idx = chosen;
+                                }
                                 for i in (1..cand_idx.len()).rev() {
                                     let j = (rng() % (i as u64 + 1)) as usize;
                                     cand_idx.swap(i, j);

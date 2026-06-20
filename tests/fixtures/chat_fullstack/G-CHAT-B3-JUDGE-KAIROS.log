@@ -1,0 +1,158 @@
+   Compiling bindgen v0.70.1
+   Compiling sp-daemon v0.1.0 (D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon)
+warning: sp-daemon@0.1.0: WIRE-CUDA: linking sp_cuda_daemon_backend + cudart + cublas + cublasLt
+warning: unused import: `std::collections::HashMap`
+  --> src\network\ring2_quic.rs:21:5
+   |
+21 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sp_model_store_qm` redeclared with a different signature
+   --> D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda\release\build\sp-daemon-3cb79c100f40855a\out/sp_bindings.rs:312:5
+    |
+312 | /     pub fn sp_model_store_qm(
+313 | |         m: *mut sp_model,
+314 | |         qm: *mut qwen3_model,
+315 | |         free_fn: ::std::option::Option<unsafe extern "C" fn(arg1: *mut qwen3_model)>,
+316 | |     );
+    | |      ^
+    | |      |
+    | |______`sp_model_store_qm` previously declared here
+    |        this signature doesn't match the previous declaration
+    |
+    = note: expected `unsafe extern "C" fn(*mut ffi_l1::sp_model, *mut ffi_l1::qwen3_model, Option<unsafe extern "C" fn(*mut ffi_l1::qwen3_model)>)`
+               found `unsafe extern "C" fn(*mut memo_routing::ffi::sp_model, *mut memo_routing::ffi::qwen3_model, Option<unsafe extern "C" fn(*mut memo_routing::ffi::qwen3_model)>)`
+    = note: `#[warn(clashing_extern_declarations)]` on by default
+
+warning: `sp_session_register_kvdecode_backend` redeclared with a different signature
+   --> D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda\release\build\sp-daemon-3cb79c100f40855a\out/sp_bindings.rs:648:5
+    |
+648 | /     pub fn sp_session_register_kvdecode_backend(
+649 | |         s: *mut sp_session,
+650 | |         handle: *mut sp_kvdecode_handle,
+651 | |         dt: *const sp_kvdecode_dispatch_fn,
+652 | |     ) -> sp_status;
+    | |                   ^
+    | |                   |
+    | |___________________`sp_session_register_kvdecode_backend` previously declared here
+    |                     this signature doesn't match the previous declaration
+    |
+    = note: expected `unsafe extern "C" fn(*mut ffi_l1::sp_session, *mut ffi_l1::sp_kvdecode_handle, *const ffi_l1::sp_kvdecode_dispatch_fn) -> i32`
+               found `unsafe extern "C" fn(*mut memo_routing::ffi::sp_session, *mut memo_routing::ffi::sp_kvdecode_handle, *const memo_routing::ffi::sp_kvdecode_dispatch_fn) -> i32`
+
+warning: `sp_session_kvdecode_backend_dt` redeclared with a different signature
+   --> D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda\release\build\sp-daemon-3cb79c100f40855a\out/sp_bindings.rs:658:5
+    |
+658 |     pub fn sp_session_kvdecode_backend_dt(s: *const sp_session) -> *const sp_kvdecode_dispatch_fn;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     |
+    |     `sp_session_kvdecode_backend_dt` previously declared here
+    |     this signature doesn't match the previous declaration
+    |
+    = note: expected `unsafe extern "C" fn(*const ffi_l1::sp_session) -> *const ffi_l1::sp_kvdecode_dispatch_fn`
+               found `unsafe extern "C" fn(*const memo_routing::ffi::sp_session) -> *const memo_routing::ffi::sp_kvdecode_dispatch_fn`
+
+warning: `sp-daemon` (lib) generated 4 warnings (run `cargo fix --lib -p sp-daemon` to apply 1 suggestion)
+warning: unnecessary parentheses around `let` scrutinee expression
+   --> src\routes.rs:992:44
+    |
+992 |                         if let Some(wcp) = (if int2_decided { None } else { std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) }) {
+    |                                            ^                                                                                          ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+992 -                         if let Some(wcp) = (if int2_decided { None } else { std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) }) {
+992 +                         if let Some(wcp) = if int2_decided { None } else { std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) }  {
+    |
+
+warning: unnecessary parentheses around `let` scrutinee expression
+    --> src\routes.rs:1497:60
+     |
+1497 |                         } else if let Some((idx, score)) = (if int2_decided { None } else { best }) {
+     |                                                            ^                                      ^
+     |
+help: remove these parentheses
+     |
+1497 -                         } else if let Some((idx, score)) = (if int2_decided { None } else { best }) {
+1497 +                         } else if let Some((idx, score)) = if int2_decided { None } else { best }  {
+     |
+
+warning: value assigned to `judge_ok` is never read
+    --> src\routes.rs:1221:53
+     |
+1221 | ...                   judge_ok = false; break;
+     |                       ^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `new` is never used
+   --> src\sampler.rs:119:12
+    |
+118 | impl Sampler {
+    | ------------ associated function in this implementation
+119 |     pub fn new(params: SamplingParams) -> Self {
+    |            ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `rewind` is never used
+   --> src\session.rs:208:12
+    |
+ 91 | impl SpSession {
+    | -------------- method in this implementation
+...
+208 |     pub fn rewind(&mut self, n_tokens: usize) -> Result<(), String> {
+    |            ^^^^^^
+
+warning: struct `SpecResult` is never constructed
+  --> src\spec.rs:10:12
+   |
+10 | pub struct SpecResult {
+   |            ^^^^^^^^^^
+
+warning: function `spec_step` is never used
+  --> src\spec.rs:30:8
+   |
+30 | pub fn spec_step(
+   |        ^^^^^^^^^
+
+warning: function `argmax` is never used
+  --> src\spec.rs:89:8
+   |
+89 | pub fn argmax(logits: &[f32]) -> i32 {
+   |        ^^^^^^
+
+warning: fields `draft_session` and `node_signing_key` are never read
+   --> src\state.rs:60:9
+    |
+ 48 | pub struct AppState {
+    |            -------- fields in this struct
+...
+ 60 |     pub draft_session: Option<Mutex<SpSession>>,
+    |         ^^^^^^^^^^^^^
+...
+109 |     pub node_signing_key: SigningKey,
+    |         ^^^^^^^^^^^^^^^^
+
+warning: struct `TemplateError` is never constructed
+   --> src\tokenizer.rs:129:12
+    |
+129 | pub struct TemplateError {
+    |            ^^^^^^^^^^^^^
+
+warning: method `apply_template` is never used
+   --> src\tokenizer.rs:579:12
+    |
+312 | impl SptbTokenizer {
+    | ------------------ method in this implementation
+...
+579 |     pub fn apply_template(&self, messages: &[Message]) -> Result<String, TemplateError> {
+    |            ^^^^^^^^^^^^^^
+
+warning: `sp-daemon` (bin "sp-daemon") generated 11 warnings (run `cargo fix --bin "sp-daemon" -p sp-daemon` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 19.91s
+EXITCODE=0 
