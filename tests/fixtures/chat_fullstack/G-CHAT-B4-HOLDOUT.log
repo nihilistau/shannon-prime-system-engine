@@ -1,0 +1,100 @@
+================================================================================
+G-CHAT-B4-HOLDOUT  --  W_c generalization holdout retrain (open-set metric test)
+================================================================================
+Goal: shift the deployed W_c recall head from a closed-set 90-needle classifier to
+an OPEN-SET metric learner, and PROVE generalization with a STRICT held-out-needle
+validation. OFFLINE (Python torch+cu124 on Windows GPU; cached features; NO daemon).
+
+Tool: tools/xbar_lsh/b3_train_wc_holdout.py  (copy of b3_train_wc_fast2.py + holdout split)
+Data: _b3_wc/b3_data_div.npz  (the diverse corpus)
+Relevance: logsumexp over positions THEN mean over heads  (== recall.rs runtime; == fast2)
+Objective: InfoNCE over [train episodes + NULL=s0] + reject-margin hinge  (== fast2)
+
+--------------------------------------------------------------------------------
+DATA SHAPES CONFIRMED (np.load b3_data_div.npz, allow_pickle):
+  keys      = [Q, labels, texts, K, ep_names, ep_npos]
+  Q         = (411,) object, each [ng=8, G_NH=16, HD=512] float32   (411 query rows)
+  K         = (91,)  object, each [ng=8, npos(~21-23), HD=512]      (91 episodes)
+  labels    = (411,) int, range -1..90   (91 distinct needle labels 0..90)
+  n_pos     = 361 positive query rows   (90 needles x 4 rows + 1 needle x 1 row)
+  n_foreign = 50    (label = -1, NULL/foreign class)
+  ep_names  = 91    (ep_n_div_000 ...)
+NOTE: corpus has 91 needles (task said "90"); split holds out 20% = 18 of 91.
+
+--------------------------------------------------------------------------------
+SPLIT (seeded, reproducible): np.random.default_rng(SPLIT_SEED)
+  SPLIT_SEED = 0  (primary)
+  hold 20% = 18 needles of 91; train = 73 needles
+  HELD-OUT excluded ENTIRELY from training: held-out query rows NOT in loss AND
+  held-out episodes NOT in the train InfoNCE candidate set (train softmax over
+  [73 train episodes + NULL] only). 50 foreign train the NULL class.
+  seed-0 holdout ep idx: [1,3,6,14,20,24,38,43,47,49,52,54,56,62,64,67,77,85]
+  train query rows = 339 (289 train-pos + 50 foreign); holdout query rows = 72 (18x4)
+
+--------------------------------------------------------------------------------
+STRICT VALIDATION = each held-out needle's query rows scored against ALL 91
+episodes + NULL (logsumexp-mean), (E+1)-argmax -> top-1 correct iff the matched
+held-out (UNSEEN) episode wins.
+
+================================================================================
+PRIMARY RUN  (seed 0, no regularization -- reproduces fast2 objective)
+  cmd: python tools/xbar_lsh/b3_train_wc_holdout.py _b3_wc/b3_data_div.npz --epochs 600
+  final: ce=0.0235  tau=0.219  s0=0.099
+  train-diagonal (sanity, train needles, argmax over all+NULL): 101/289 = 34.9%
+  >>> HOLDOUT top-1 recall (UNSEEN needles): 8/72 = 11.1% <<<     [HEADLINE]
+  foreign-reject (NULL wins): 46/50 = 92.0%
+  holdout misses: ->trained-needle=13  ->NULL=0  ->other-holdout=51
+
+  DIAGNOSTIC (true held-out episode rank):
+    among ALL 91 episodes : top1=8/72  top3=9  top5=15  median rank 21.5
+    among the 18 HOLDOUT eps only: top1=8/72  top3=33  median rank 4.0
+  -> Even restricted to the 18 unseen needles, the true needle is top-1 only 8/72
+     (~11%); random-within-holdout = 1/18 = ~5.6% (4/72). Barely above chance.
+     The head did NOT learn a general g(Q,K); it memorized the trained buckets.
+
+================================================================================
+REGULARIZATION SWEEP (force semantic-payload reliance over index memorization)
+  dropout=0.2  wd=1e-4  (epochs 600):
+    train-diag 205/289=70.9%   HOLDOUT 3/72 = 4.2%   foreign-reject 50/50=100%
+    misses ->trained=56 ->NULL=0 ->other-holdout=13    (WORSE: pushes to trained)
+  dropout=0.1  wd=0    (epochs 500):
+    train-diag 207/289=71.6%   HOLDOUT 4/72 = 5.6%   foreign-reject 50/50=100%
+    misses ->trained=49 ->NULL=0 ->other-holdout=19    (WORSE)
+  dropout=0.0  wd=1e-3  tau_floor=-0.7 (epochs 500):
+    train-diag 122/289=42.2%   HOLDOUT 8/72 = 11.1%  foreign-reject 47/50=94%
+    misses ->trained=19 ->NULL=0 ->other-holdout=45    (== baseline, no gain)
+  -> Regularization either matched (~11%) or HURT (down to 4-6%) holdout recall
+     while cleaning foreign-reject. No regularization lifts unseen-needle recall.
+
+================================================================================
+ROBUSTNESS (second split seed)
+  SPLIT_SEED = 1 (epochs 600, no reg):
+    holdout ep idx: [2,11,20,22,23,25,35,36,38,50,57,65,72,73,76,84,86,89]
+    train-diag 186/289=64.4%   HOLDOUT 7/72 = 9.7%   foreign-reject 50/50=100%
+  -> seed-0 11.1% vs seed-1 9.7%: the ~10% ceiling is NOT seed-specific.
+
+================================================================================
+HEADLINE:  HOLDOUT top-1 recall on UNSEEN needles = 11.1% (8/72)  [seed 0, best]
+           (seed 1: 9.7%; chance-within-holdout ~5.6%)
+FOREIGN-REJECT: 92-100% (boundary maintained -- foreign still rejects to NULL)
+REGULARIZATION TRIED: projection dropout {0.1,0.2,0.3}, weight-decay {1e-4,1e-3},
+           logsumexp-temperature floor (tau_floor -0.7) -- none lifted holdout;
+           dropout+wd actively HURT (pushed unseen queries onto trained needles).
+
+VERDICT:  HONEST NEGATIVE -- the W_c head does NOT generalize to unseen needles at
+          91-needle scale. It is fundamentally INTERPOLATING among trained buckets:
+          on an unseen needle the true (untrained) episode is barely above chance
+          even when the comparison is restricted to other unseen needles (top1 8/72,
+          median rank 4 of 18). This is the SAME boundary-thesis shape as the rest
+          of the campaign: the closed-set 100%/foreign-reject win was MEMORIZATION
+          of 90 buckets, not a learned general g(Q,K).
+          The real lever for NIGHTSHIFT novel-fact recall is corpus SCALE/diversity
+          (many more needles so the metric must generalize) or a different relevance
+          architecture -- NOT regularization of the r=32 logsumexp-mean head.
+          NIGHTSHIFT novel-fact recall is therefore NOT achievable by simply
+          retraining this head on this corpus; the metric does not transfer.
+
+Durable assets: b3_train_wc_holdout.py (seeded open-set split + strict unseen-needle
+validation harness) -- reusable to re-measure generalization at any future corpus scale.
+Did NOT deploy / did NOT re-export int16 (this task only proves the metric).
+================================================================================
