@@ -722,6 +722,109 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         ntt_hex_backend,
     });
 
+    // ── B4-NIGHTSHIFT PATH-FIX DIAGNOSTIC (SP_B4_DIAG=<epdir>) ───────────────
+    // Decisive metal test for the live-vs-curated K-norm divergence: re-capture a
+    // KNOWN curated needle through the LIVE persistent-KV path (gemma4_kv_prefill +
+    // gemma4_kv_read_global_k) and compare element-wise to its stored ep.k (already
+    // loaded into the registry as `gk`). Prints per-vector mean norms + the
+    // element-wise ratio at pos0 and a mid pos for the FIRST global layer, BOTH with
+    // the leading forced-BOS kept (full ep.tok) and with it stripped (current B4 code
+    // path). A ~UNIFORM ratio ⇒ scalar/config cause; a VARYING ratio ⇒ structural.
+    // Default unset ⇒ this whole block is skipped ⇒ null floor. Runs once at startup.
+    #[cfg(feature = "wire_cuda_backend")]
+    if let Ok(epdir) = std::env::var("SP_B4_DIAG") {
+        if !epdir.is_empty() {
+            use sp_daemon::cuda_kvdecode_dispatch as kv;
+            let hd = sp_daemon::recall::HD;
+            // read ep.tok (one id per line; first id should be BOS=2)
+            let tokpath = std::path::Path::new(&epdir).join("ep.tok");
+            match std::fs::read_to_string(&tokpath) {
+                Ok(txt) => {
+                    let full: Vec<i32> = txt.split_whitespace()
+                        .filter_map(|s| s.parse::<i32>().ok()).collect();
+                    info!("B4-DIAG: ep={} ep.tok={} ids (first={:?})", epdir, full.len(),
+                          full.first());
+                    // the curated stored K for this episode (registry gk = load_episode_global_k)
+                    let epname = std::path::Path::new(&epdir).file_name()
+                        .map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                    let cur = state.recall_registry.as_ref().and_then(|reg| {
+                        reg.iter().find(|e| e.dir.replace('\\', "/").contains(&epname) && !e.gk.is_empty())
+                            .or_else(|| reg.iter().find(|e| !e.gk.is_empty()))
+                    });
+                    let qm = {
+                        let mut sguard = state.session.lock().unwrap();
+                        let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+                        (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
+                    };
+                    let mean_norm = |v: &[f32]| -> f64 {
+                        if v.is_empty() { return 0.0; }
+                        let nvec = v.len()/hd; let mut acc=0.0f64;
+                        for c in v.chunks_exact(hd){ let mut s=0.0f64; for &x in c { s+=(x as f64)*(x as f64);} acc+=s.sqrt(); }
+                        acc / nvec as f64
+                    };
+                    // run the live prefill+read both ways
+                    let run = |toks: &[i32]| -> Option<(Vec<f32>, usize)> {
+                        if qm.is_null() || toks.is_empty() { return None; }
+                        unsafe {
+                            let sh = kv::open(qm, toks.len() as i32).ok()?;
+                            if kv::prefill(sh, toks).is_err() { kv::close(sh); return None; }
+                            let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD;
+                            let mut gk = vec![0f32; n_global * toks.len() * hd];
+                            let ng = kv::read_global_k(sh, &mut gk, toks.len() as i32).ok()? as usize;
+                            kv::close(sh);
+                            gk.truncate(ng * toks.len() * hd);
+                            Some((gk, ng))
+                        }
+                    };
+                    let stripped: Vec<i32> = if full.first()==Some(&2) { full[1..].to_vec() } else { full.clone() };
+                    if let Some(c) = cur {
+                        info!("B4-DIAG: curated gk: ng={} npos~{} mean_pervec_norm={:.4}",
+                              c.gk_ng, if c.gk_ng>0 { c.gk.len()/hd/c.gk_ng } else {0}, mean_norm(&c.gk));
+                    } else {
+                        info!("B4-DIAG: NO curated gk found in registry");
+                    }
+                    for (label, toks) in [("WITH-BOS", &full), ("STRIP-BOS", &stripped)] {
+                        match run(toks) {
+                            Some((gk, ng)) => {
+                                let npos = toks.len();
+                                info!("B4-DIAG: live[{}] ng={} npos={} mean_pervec_norm={:.4}",
+                                      label, ng, npos, mean_norm(&gk));
+                                // element-wise ratio vs curated for global layer 0, pos0 and mid
+                                if let Some(c) = cur {
+                                    if !c.gk.is_empty() && c.gk_ng>0 {
+                                        let cur_npos = c.gk.len()/hd/c.gk_ng;
+                                        // align pos: curated WITH-BOS so live WITH-BOS shares pos index.
+                                        for &(pname, p) in &[("pos0", 0usize), ("posMID", npos/2)] {
+                                            if p>=npos || p>=cur_npos { continue; }
+                                            // global layer 0 slice
+                                            let lb = p*hd; // layer 0 base in [ng][npos][hd]
+                                            let lc = p*hd;
+                                            let mut ratios: Vec<f32> = Vec::new();
+                                            for d in (0..hd).step_by(hd/8) {
+                                                let cv = c.gk[lc+d];
+                                                if cv.abs() > 1e-6 { ratios.push(gk[lb+d]/cv); }
+                                            }
+                                            // ratio spread
+                                            let (mn,mx,mean) = ratios.iter().fold((f32::MAX,f32::MIN,0.0f32),
+                                                |(a,b,s),&r| (a.min(r), b.max(r), s+r));
+                                            let mean = if ratios.is_empty(){0.0}else{mean/ratios.len() as f32};
+                                            info!("B4-DIAG: live[{}] vs curated L0 {} ratio mean={:.3} min={:.3} max={:.3} (n={}) samples={:?}",
+                                                  label, pname, mean, mn, mx, ratios.len(),
+                                                  ratios.iter().take(8).map(|r| (r*1000.0).round()/1000.0).collect::<Vec<_>>());
+                                        }
+                                    }
+                                }
+                            }
+                            None => info!("B4-DIAG: live[{}] capture FAILED", label),
+                        }
+                    }
+                    info!("B4-DIAG: done (UNIFORM ratio across pos/dims => config/scalar; VARYING => structural).");
+                }
+                Err(e) => tracing::warn!("B4-DIAG: cannot read {}: {e}", tokpath.display()),
+            }
+        }
+    }
+
     // ── Background PoUW mining task ────────────────────────────────────────
     tokio::spawn(crate::mining::run_mining_loop(
         mining_signing_key,

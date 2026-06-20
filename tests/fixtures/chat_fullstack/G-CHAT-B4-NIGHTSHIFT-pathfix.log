@@ -1,0 +1,95 @@
+=== G-CHAT-B4-NIGHTSHIFT-pathfix — Path 1 (Substrate Forcing): why live read_global_k K != curated ep.k ===
+engine base: 19d09af (B4 NIGHTSHIFT v1 + capture-time mean-norm calib). Change here:
+  + daemon.rs SP_B4_DIAG=<epdir> startup diagnostic (default-off = null floor): opens a
+    scratch persistent-KV session, prefills a KNOWN curated needle's ep.tok through the LIVE
+    path (gemma4_kv_prefill + gemma4_kv_read_global_k), and compares element-wise to that
+    episode's stored ep.k (load_episode_global_k, already in the registry as `gk`), BOTH with
+    the forced-BOS kept and stripped. Prints per-vector mean L2 norm + per-element ratio
+    (global layer 0, pos0 + posMID). This is the DECISIVE config-vs-structural test the prior
+    calib session (G-CHAT-B4-NIGHTSHIFT-calib) did NOT run.
+
+== INVESTIGATION (ruled out, in order) ==
+1. BYTE-EXACT (SP_BYTEEXACT): RULED OUT. Default-off in BOTH paths. Neither run_console_recall.bat /
+   run_console_nightshift.bat NOR _b3_capture_ep.bat / _b3_corpus_capture.bat set SP_BYTEEXACT;
+   gemma4_kv_open does no byteexact_set; the scratch NIGHTSHIFT session (routes.rs kv::open) runs
+   FLOAT islands, same as the curator. (cuda_forward.cu sp_byteexact_attn / gemma4_kv_byteexact_set
+   both gate on the env var = off.)
+2. INT8 vs FLOAT Wk: RULED OUT. Both paths use the int8/OK_Q4B dp4a Wk. The live daemon sets
+   SP_CUDA_DECODE_INT8=1; the curator's test_gemma4_ppl_cuda.c does _putenv("SP_CUDA_DECODE_INT8=1")
+   INTERNALLY (lines 92/149) before gemma4_decode_cuda. MMD (one-shot) and KMMD (g4_kv_step) have
+   identical use_int8 logic, so with int8 on in both, Wk is the same packed-GEMV in both.
+3. BOS / position-0: RULED OUT as the cause of the norm gap. ep.tok includes BOS=2 at pos 0 (22 ids).
+   The diag prefilled WITH-BOS (22 toks, matching curated) AND STRIP-BOS (21 toks): live mean-norm =
+   1.4149 in BOTH cases — the BOS strip changes NOTHING about the K magnitude. (B4 v1 strips BOS; the
+   diag confirms that is not the lever.)
+4. Capture point: RULED OUT. Curator ep.k = d_xbar_K mirrored from dKc (cuda_forward.cu ~3713);
+   read_global_k = D2H of the same dKc. Same byte source on both sides.
+
+== DECISIVE METAL TEST (engine built DISP_BUILD_DONE_0, daemon pid 4460, model load ~4s/capture) ==
+target episode = _needle_corpus_div/eps/ep_n_div_000 (ep.tok=22 ids, first=2/BOS).
+
+  curated gk:                 ng=8 npos=22  mean_pervec_norm = 2.7759
+  live[WITH-BOS] (22 toks):   ng=8 npos=22  mean_pervec_norm = 1.4149   (= 2.7759 / 1.9619)
+  live[STRIP-BOS] (21 toks):  ng=8 npos=21  mean_pervec_norm = 1.4149   (identical; BOS-independent)
+
+  ELEMENT-WISE RATIO live/curated, global layer 0 (8 sampled dims, hd-step):
+   WITH-BOS pos0   : mean=-0.403 min=-4.322 max= 1.267   samples=[-4.322, 1.267, -0.081, -0.763, -0.021, 0.164, 0.658, -0.126]
+   WITH-BOS posMID : mean=-5.224 min=-59.015 max=11.641  samples=[11.641, 7.157, -59.015, -1.169, -0.144, 0.172, -0.192, -0.24]
+   STRIP-BOS pos0  : mean= 4.271 min=-5.815 max=43.511   samples=[43.511, -5.815, 3.016, -2.905, -0.787, -2.041, -1.063, 0.251]
+   STRIP-BOS posMID: mean=-0.185 min=-5.296 max= 1.616   samples=[0.031, 1.534, -0.078, -0.364, 0.971, -5.296, 1.616, 0.103]
+
+== VERDICT: VARYING ratio => STRUCTURAL (NOT a scalar/config cause) ==
+  The aggregate per-vector norm is UNIFORM (~1.96x every capture, every position) BUT the per-ELEMENT
+  ratio VARIES WILDLY and FLIPS SIGN (e.g. posMID dim ratios +11.6, +7.2, -59.0 in the same vector;
+  range -59..+43 across positions). A uniform scalar (or any single config knob) CANNOT produce
+  sign-flipping, position-dependent, dim-dependent ratios. The live read_global_k K and the curated
+  ep.k are DIFFERENT VECTORS, not the same vector at a different magnitude. The ~1.96x norm match is
+  coincidental aggregate, not a recoverable scale. This is the same conclusion the calib session
+  reached by inference; here it is MEASURED element-wise on a matched needle.
+
+  Why a scalar can't fix it (already known, now confirmed): wc_score = logsumexp-over-positions then
+  mean-over-heads of W_c-projected q.K. The W_c head learned the curated-K DIRECTION manifold; the live
+  K points elsewhere (sign-flipped per dim), so no per-vector rescale aligns them.
+
+== ROOT CAUSE (located, not hacked) ==
+  The two forwards that fill dKc are structurally different and produce different global-K for the SAME
+  tokens + SAME int8 Wk + SAME float islands + SAME RoPE kernels:
+    - CURATOR ep.k: gemma4_decode_cuda one-shot ingest loop (cuda_forward.cu ~2972-3040): the whole
+      prompt is ingested inside ONE gemma4_decode_cuda invocation; positions via k_rope_*_at(pos).
+    - LIVE read_global_k: g4_kv_step (cuda_forward.cu ~4067), called PER TOKEN by gemma4_kv_prefill;
+      positions via k_rope_*_dyn(device dpos); per-call int8 activation re-quant (dqx/dsx), and the
+      gemma4 AltUp/PLE residual (k_altup_ipl + per-layer k_altup_gate) evolves through a separately-
+      launched step each position.
+  The norm HALVING (2.78->1.41) originates BEFORE RoPE (RoPE preserves norm), i.e. in the residual /
+  RMSNorm input feeding the global Wk — consistent with an AltUp/PLE residual-state difference between
+  the batched-ingest and per-token-step paths, NOT a kernel knob. Per the brief's rule, the kernel is
+  NOT hacked: matching it would require proving the exact AltUp/quant divergence and altering the hot
+  forward, which risks the byte-exact null floor for no head-level guarantee.
+
+== RECOMMENDATION: PATH 2 (retrain the W_c head on live read_global_k K) ==
+  The durable fix is to make the head's TRAINING distribution match its SERVING distribution:
+  re-dump the curated corpus's episode-K via the LIVE path (a scratch gemma4_kv_prefill +
+  read_global_k per needle — the exact provenance the daemon serves) and re-train b3_train_wc_fast2 on
+  that K (or a MIXED curated+live K set for robustness). The SP_B4_DIAG harness added here is the
+  dump primitive: point it at each ep dir, read the live[WITH-BOS] gk it computes. No kernel change;
+  no ABI change; default-off null floor preserved.
+  (Alternative, deferred: the B4-v2 admission gate — teacher-forced ablation oracle, collapse<TAU=-8 —
+  rejects a foreign live capture regardless of K-shape, sidestepping the calibration entirely.)
+
+== CHANGE STATUS / NULL FLOOR ==
+  - daemon.rs SP_B4_DIAG block: runs ONLY when SP_B4_DIAG is set + non-empty; otherwise skipped =>
+    byte-identical null floor. Read-only (scratch session opened+closed; live cache untouched).
+  - The v1 capture-time mean-norm calib in routes.rs is LEFT AS-IS (gated by SP_B4_NIGHTSHIFT, an
+    honest-negative lever): the element-wise evidence above is the receipt that a uniform scale is the
+    wrong tool. It is not removed (removing it is a no-op for the null floor and would lose the
+    instrumented negative); B4-v2 will replace it with retrained-K + admission gate.
+  - 3-TURN RE-TEST: NOT RUN. The cause is STRUCTURAL (per brief, the structural branch => do NOT hack
+    the kernel, recommend Path 2, leave NIGHTSHIFT machinery green). Re-running the 3-turn test would
+    re-confirm the known calib HONEST NEGATIVE (G-CHAT-B4-NIGHTSHIFT-calib.log: T3 foreign still
+    recalls ep_live_000) — no new information, since no fix was applied to the capture path. NIGHTSHIFT
+    machinery (capture->hot-append->(E+1) scoring->inject) stays GREEN; recall calibration remains the
+    open B4-v2 item, now with a precise root cause + Path-2 plan.
+
+VERDICT: HONEST NEGATIVE for Path 1 (no config knob reconciles the two K sources) + a LOCATED ROOT
+  CAUSE (batched-ingest vs per-token-step forward divergence in the AltUp/PLE residual feeding global
+  Wk) + the Path-2 recommendation (retrain on live K) with the dump primitive (SP_B4_DIAG) shipped.
