@@ -696,6 +696,14 @@ fn run_kvdecode_chat(
             return;
         }
     }
+    // G-INT-2-FIX (text-in-context recall): the synthesis tail token. Defaults to
+    // last[0] (the original prompt's last token). When the B3-JUDGE PICKs a memory
+    // it rebuilds the cache from an AUGMENTED prompt (memory text prepended to the
+    // user query, RAG-style) and overrides syn_last with that augmented prompt's
+    // last token, so the synthesis decode_step(syn_last) below starts from the
+    // text-in-context reconstruction. NULL / judge-off leaves syn_last == last[0]
+    // (byte-identical null floor).
+    let mut syn_last: i32 = last[0];
     // B5 (§6e) — the GENERIC residual-frame channel. After the prompt scaffold is
     // ingested, inject any raw residual frames (audio/memory source) at consecutive
     // positions through the same seam (gemma4_kv_inject_seq via inject_frames). Each
@@ -1018,10 +1026,12 @@ fn run_kvdecode_chat(
                                         if let Some(ref toks) = ep.tokens {
                                             // B4 live episode: recall by re-injecting its raw tokens through the
                                             // B5 seam (bit-identical to prefill) — no ep.k/ep.v files on disk.
-                                            tracing::info!("B3-WC: RECALL '{}' (LIVE/nightshift) score={:.3} > s0={:.3} -> inject_tokens(n={})",
+                                            // G-INT-2-FIX: attenuated inject (M_target=42) so the
+                                            // recalled memory BINDS instead of hijacking synthesis.
+                                            tracing::info!("B3-WC: RECALL '{}' (LIVE/nightshift) score={:.3} > s0={:.3} -> inject_tokens_atten(n={})",
                                                 ep.name, bv, head.s0, toks.len());
-                                            if let Err(e) = unsafe { kv::inject_tokens(handle, toks) } {
-                                                tracing::warn!("B3-WC: inject_tokens('{}', n={}) failed: {e} -- clean prompt", ep.name, toks.len());
+                                            if let Err(e) = unsafe { kv::inject_tokens_atten(handle, toks) } {
+                                                tracing::warn!("B3-WC: inject_tokens_atten('{}', n={}) failed: {e} -- clean prompt", ep.name, toks.len());
                                             } else {
                                                 recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
                                             }
@@ -1074,81 +1084,88 @@ fn run_kvdecode_chat(
                                 let mut rng = move || {
                                     seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed
                                 };
-                                // ===== KAIROS DUAL-AXIS WORKING-SET ASSEMBLY =====
+                                // ===== KAIROS DUAL-AXIS WORKING-SET ASSEMBLY (LIVE-CONVERSATION) =====
                                 // The "first K episodes" window is replaced by a recency+salience
-                                // selection so recent salient memories never fall off the bottom as the
-                                // registry grows (N >> K). Two axes feed the SAME generative judge:
-                                //   (1) RECENCY  : the last SP_B3_JUDGE_R episodes (registry tail =
-                                //       most-recently-appended; NIGHTSHIFT appends ep_live_NNN to the end).
-                                //       Always included -- short-term working memory.
-                                //   (2) SALIENCE : ONLY if N > K, the demoted Stage-0 C2-LSH Hamming
-                                //       pre-filter rescues OLDER memories matching THIS query. Compute the
-                                //       live query's C2 sig, score every non-recency episode by Hamming
-                                //       agreement (R_BITS - hamming) to its STORED sig_bits (exact, captured
-                                //       at ingest -- recomputing from lossy data flips near-zero bits), take
-                                //       the top (K - R), append. Dedup, cap at K.
-                                // The judge still makes the final pick; Stage-0 only widens what it can see.
-                                let n_total = registry.len();
+                                // selection over a UNIFIED candidate pool = curated registry ∪ the LIVE
+                                // NIGHTSHIFT episodes (the conversation's own immediate past). Two axes
+                                // feed the SAME generative judge:
+                                //   (1) RECENCY  : the last SP_B3_JUDGE_R episodes of app.nightshift (the
+                                //       most-recent conversational turns; NIGHTSHIFT appends ep_live_NNN
+                                //       to the end). ALWAYS included -- short-term working memory. This is
+                                //       the loop-closure: the judge can recall what was just said.
+                                //   (2) SALIENCE : ONLY if the cold pool > the remaining slots, the demoted
+                                //       Stage-0 C2-LSH Hamming pre-filter rescues OLDER memories (curated
+                                //       registry + nightshift episodes older than the recency-R tail) that
+                                //       match THIS query. Compute the live query's C2 sig, score every cold
+                                //       candidate by Hamming agreement (R_BITS - hamming) to its STORED sig
+                                //       (exact, captured at ingest), take the top (K - R), append.
+                                // Candidates are CLONED into a working Vec (<=K episodes; cheap) with a
+                                // parallel provenance flag (live = recall via inject_tokens; curated =
+                                // replay(dir)). The judge still makes the final pick; Stage-0 only widens
+                                // what it can see. NULL FLOOR: with SP_B4_NIGHTSHIFT unset, app.nightshift
+                                // is empty ⇒ recency is empty ⇒ the cold pool is the curated registry only
+                                // ⇒ behaviour is registry-only, byte-identical to the prior KAIROS path.
                                 let rbound: usize = std::env::var("SP_B3_JUDGE_R").ok()
                                     .and_then(|s| s.parse().ok()).unwrap_or(8);
-                                let rkeep = rbound.min(kbound).min(n_total);
-                                let mut cand_idx: Vec<usize>;
-                                let mut kairos_rescued: Vec<usize> = Vec::new();
-                                if n_total <= kbound {
-                                    // small registry: everything fits, no salience needed.
-                                    cand_idx = (0..n_total).collect();
-                                } else {
-                                    // (1) recency axis: the last rkeep registry indices (the tail).
-                                    let mut chosen: Vec<usize> = (n_total - rkeep..n_total).collect();
-                                    let in_recency = |i: usize| i >= n_total - rkeep;
-                                    // (2) salience axis: rescue (kbound - rkeep) OLDER episodes by C2 Hamming.
-                                    let salience_slots = kbound.saturating_sub(rkeep);
-                                    if salience_slots > 0 {
-                                        // live query C2 sig from the prompt's global-K (same source the
-                                        // SP_INT2 Stage-1 cull uses: read_global_k is non-mutating).
-                                        let mut qkbuf = vec![0.0f32; n_global * recall::HD * (npos_q as usize)];
-                                        match unsafe { kv::read_global_k(handle, &mut qkbuf, npos_q) } {
-                                            Ok(ngk) => {
-                                                let qsig = app.recall_proj.signature(
-                                                    &qkbuf, ngk as usize, npos_q as usize);
-                                                // score every NON-recency episode by Hamming agreement to its
-                                                // STORED sig (ep.sig parsed from sig_bits at registry load).
-                                                let mut scored: Vec<(usize, u32)> = (0..n_total)
-                                                    .filter(|&i| !in_recency(i))
-                                                    .map(|i| (i, recall::agree(&qsig, &registry[i].sig)))
-                                                    .collect();
-                                                // descending agreement (= ascending Hamming); take top slots.
-                                                scored.sort_by(|a, b| b.1.cmp(&a.1));
-                                                for &(i, ag) in scored.iter().take(salience_slots) {
-                                                    chosen.push(i);
-                                                    kairos_rescued.push(i);
-                                                    let _ = ag;
-                                                }
-                                                tracing::info!(
-                                                    "B3-JUDGE KAIROS: N={} K={} R={} salience_slots={} qsig={:016x}.. rescued=[{}]",
-                                                    n_total, kbound, rkeep, salience_slots, qsig[0],
-                                                    kairos_rescued.iter()
-                                                        .map(|&i| registry[i].name.clone())
-                                                        .collect::<Vec<_>>().join(", "));
+                                // Snapshot the live nightshift episodes (clone; bounded by working set).
+                                let ns_snapshot: Vec<recall::Episode> = {
+                                    let g = app.nightshift.read().unwrap();
+                                    g.iter().cloned().collect()
+                                };
+                                let n_live = ns_snapshot.len();
+                                let n_cur = registry.len();
+                                let rkeep = rbound.min(kbound).min(n_live);
+                                // The working candidate set: each entry is (Episode, is_live).
+                                let mut cands: Vec<(recall::Episode, bool)> = Vec::with_capacity(kbound);
+                                let mut kairos_rescued: Vec<String> = Vec::new();
+                                // (1) recency axis = the last rkeep LIVE episodes (the conversation tail).
+                                for j in (n_live - rkeep)..n_live {
+                                    cands.push((ns_snapshot[j].clone(), true));
+                                }
+                                // The cold pool = curated registry (all) ∪ older nightshift (before rkeep).
+                                // Built as (Episode, is_live) so dispatch knows the recall path.
+                                let cold: Vec<(recall::Episode, bool)> = registry.iter().cloned()
+                                    .map(|e| (e, false))
+                                    .chain(ns_snapshot[..(n_live - rkeep)].iter().cloned().map(|e| (e, true)))
+                                    .collect();
+                                let salience_slots = kbound.saturating_sub(cands.len());
+                                if cold.len() <= salience_slots {
+                                    // everything fits: take the whole cold pool, no Hamming cull needed.
+                                    for c in cold.into_iter() { cands.push(c); }
+                                } else if salience_slots > 0 {
+                                    // (2) salience axis: rescue the top (K - R) cold candidates by C2 Hamming.
+                                    let mut qkbuf = vec![0.0f32; n_global * recall::HD * (npos_q as usize)];
+                                    match unsafe { kv::read_global_k(handle, &mut qkbuf, npos_q) } {
+                                        Ok(ngk) => {
+                                            let qsig = app.recall_proj.signature(
+                                                &qkbuf, ngk as usize, npos_q as usize);
+                                            let mut scored: Vec<(usize, u32)> = cold.iter().enumerate()
+                                                .map(|(i, (ep, _))| (i, recall::agree(&qsig, &ep.sig)))
+                                                .collect();
+                                            scored.sort_by(|a, b| b.1.cmp(&a.1)); // descending agreement
+                                            for &(i, _ag) in scored.iter().take(salience_slots) {
+                                                kairos_rescued.push(cold[i].0.name.clone());
+                                                cands.push(cold[i].clone());
                                             }
-                                            Err(e) => {
-                                                // salience unavailable: fall back to recency tail only
-                                                // (judge still runs on the working set it has).
-                                                tracing::warn!(
-                                                    "B3-JUDGE KAIROS: read_global_k(npos_q={}) failed: {e} -- recency-only working set",
-                                                    npos_q);
-                                            }
+                                            tracing::info!(
+                                                "B3-JUDGE KAIROS: live={} cur={} K={} R={} (recency-kept={}) salience_slots={} qsig={:016x}.. rescued=[{}]",
+                                                n_live, n_cur, kbound, rbound, rkeep, salience_slots, qsig[0],
+                                                kairos_rescued.join(", "));
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "B3-JUDGE KAIROS: read_global_k(npos_q={}) failed: {e} -- recency-only working set (live tail)",
+                                                npos_q);
                                         }
                                     }
-                                    // dedup (recency/salience disjoint by construction, but be safe) + cap K.
-                                    let mut seen = std::collections::HashSet::new();
-                                    chosen.retain(|&i| seen.insert(i));
-                                    chosen.truncate(kbound);
-                                    cand_idx = chosen;
                                 }
-                                for i in (1..cand_idx.len()).rev() {
+                                tracing::info!(
+                                    "B3-JUDGE KAIROS working set: {} episode(s) ({} live-recency + {} cold), live_total={} cur_total={}",
+                                    cands.len(), rkeep, cands.len().saturating_sub(rkeep), n_live, n_cur);
+                                // Fisher-Yates shuffle the working set (anti-position-bias, FINDING #3).
+                                for i in (1..cands.len()).rev() {
                                     let j = (rng() % (i as u64 + 1)) as usize;
-                                    cand_idx.swap(i, j);
+                                    cands.swap(i, j);
                                 }
                                 // tag pool = consonant+digit+consonant (collision-free copy-able codes);
                                 // drawn without replacement per query (sampled order from the same rng).
@@ -1161,24 +1178,28 @@ fn run_kvdecode_chat(
                                     let j = (rng() % (i as u64 + 1)) as usize;
                                     pool.swap(i, j);
                                 }
-                                let mut tags: Vec<String> = Vec::with_capacity(cand_idx.len());
-                                let mut texts: Vec<String> = Vec::with_capacity(cand_idx.len());
-                                for (slot, &ei) in cand_idx.iter().enumerate() {
-                                    let ep = &registry[ei];
+                                let mut tags: Vec<String> = Vec::with_capacity(cands.len());
+                                let mut texts: Vec<String> = Vec::with_capacity(cands.len());
+                                for (slot, (ep, is_live)) in cands.iter().enumerate() {
                                     tags.push(pool[slot % pool.len()].clone());
-                                    // detokenize the episode TEXT from its ep.tok sidecar (the registry
-                                    // Episode carries no display text). BOS (id 2) dropped; bytes joined.
-                                    let eptok: Vec<i32> = std::fs::read_to_string(
-                                        std::path::Path::new(&ep.dir).join("ep.tok"))
-                                        .ok().map(|c| c.lines().filter_map(|l| l.trim().parse::<i32>().ok()).collect())
-                                        .unwrap_or_default();
+                                    // detokenize the episode TEXT. LIVE episodes carry the raw turn tokens
+                                    // (ep.tokens, captured with forced BOS + trailing \n); curated episodes
+                                    // have an ep.tok sidecar on disk. BOS (id 2) dropped; bytes joined.
+                                    let eptok: Vec<i32> = if *is_live {
+                                        ep.tokens.clone().unwrap_or_default()
+                                    } else {
+                                        std::fs::read_to_string(
+                                            std::path::Path::new(&ep.dir).join("ep.tok"))
+                                            .ok().map(|c| c.lines().filter_map(|l| l.trim().parse::<i32>().ok()).collect())
+                                            .unwrap_or_default()
+                                    };
                                     let mut bytes: Vec<u8> = Vec::new();
                                     for &t in eptok.iter() {
                                         if t == 2 { continue; } // skip forced BOS
                                         bytes.extend_from_slice(app.tokenizer.decode_token(t));
                                     }
                                     let txt = String::from_utf8_lossy(&bytes).trim().to_string();
-                                    // fall back to the registry topic if ep.tok was unavailable.
+                                    // fall back to the registry/live topic if tokens were unavailable.
                                     texts.push(if txt.is_empty() { ep.topic.clone() } else { txt });
                                 }
                                 // (2) Build the judge prompt (the validated harness template) + apply
@@ -1229,14 +1250,32 @@ Tag of the answer (or [NULL]):");
                                                 tok = g;
                                             }
                                         }
-                                        // RESTORE: reset + re-prefill the original prompt head so the cache
-                                        // is byte-identical to its pre-branch state for synthesis.
-                                        let _ = unsafe { kv::reset(handle) };
+                                        // G-INT-2-FIX: the judge's nested forward is a DESTRUCTIVE read of
+                                        // the resident cache — it advanced dpos past the prompt anchor and
+                                        // wrote judge K/V into global slots [n-1, jhead+J). A plain
+                                        // reset()+prefill(head) only rewinds the counters and rewrites
+                                        // [0,n-1); the judge residue lingers at slots >= n-1. On a NULL turn
+                                        // synthesis sits at pos=n-1 so the residue is beyond dpos (never
+                                        // read => clean), but on a PICK the injected memory advances dpos
+                                        // forward and the synthesis window sweeps the stale judge slots =>
+                                        // prompt-echo degeneration (the proven Phase-4 blocker). Restore via
+                                        // reset_cold (zeroes every owner K/V + journal) so the reconstruction
+                                        // truly starts cold; the inject (below) then lands on a clean head and
+                                        // nothing of the judge pass can be attended. Byte-identical to the
+                                        // null-floor for the NULL/no-inject path (zeroed slots beyond dpos
+                                        // are never read after a fresh prefill).
+                                        // INSTRUMENT (root-cause receipt): log dpos at each stage.
+                                        let dpos_pre = unsafe { kv::position(handle) };
+                                        let _ = unsafe { kv::reset_cold(handle) };
+                                        let dpos_postreset = unsafe { kv::position(handle) };
                                         if !head.is_empty() {
                                             if let Err(e) = unsafe { kv::prefill(handle, head) } {
                                                 tracing::error!("B3-JUDGE: FATAL re-prefill(head) failed: {e}");
                                             }
                                         }
+                                        let dpos_posthead = unsafe { kv::position(handle) };
+                                        tracing::info!("B3-JUDGE COLD-RESTORE: dpos pre-restore={} after reset_cold={} after prefill(head)={} (head.len={})",
+                                            dpos_pre, dpos_postreset, dpos_posthead, head.len());
                                         // (4) Parse the tag (FINDING #3: copy-able TAG, never an ordinal).
                                         // Longest matching tag wins; [NULL]/no-tag ⇒ reject. Match on the
                                         // full "[M_X]" surface so M_A never substring-collides with M_AB.
@@ -1263,25 +1302,71 @@ Tag of the answer (or [NULL]):");
                                             None => tracing::info!(
                                                 "B3-JUDGE: [NULL] (reply={:?}) -> REJECT (clean prompt, foreign)", reply.trim()),
                                             Some(slot) => {
-                                                let ep = &registry[cand_idx[slot]];
-                                                tracing::info!("B3-JUDGE: PICK [{}] '{}' (topic='{}') reply={:?} -> replay@M_target",
-                                                    tags[slot], ep.name, ep.topic, reply.trim());
-                                                // (5) Grounding: inject the chosen episode's lossless payload
-                                                // (M_target clamp via SP_REPLAY_MTARGET, same as SP_B3_WC).
-                                                if ep.npos > 0 && !ep.gk.is_empty() {
-                                                    match unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
-                                                        Ok(()) => {
-                                                            recalled = Some((ep.name.clone(), 1000));
-                                                            // stash the injected text's salient nouns for the
-                                                            // post-synthesis grounding check (telemetry).
-                                                            judge_ground = Some((ep.name.clone(),
-                                                                texts[slot].clone()));
+                                                let (ep, _is_live) = &cands[slot];
+                                                // (5) TEXT-IN-CONTEXT RECALL (G-INT-2-FIX, the Phase-4
+                                                // sealer). The α-sweep PROVED latent injection of a live
+                                                // episode has NO operating point that recites the specific
+                                                // fact (high mass=echo-hijack, low mass=parametric-washout).
+                                                // The generative judge works by READING TEXT, so synthesis
+                                                // reads the recalled memory TEXT too: prepend the picked
+                                                // episode's text (texts[slot]) to the user query, RAG-style,
+                                                // re-template, and rebuild the cache from that augmented
+                                                // prompt. The model then reads + recites the fact natively
+                                                // through its own generative pipeline — NO lossy latent KV
+                                                // inject for the payload. The Ring-2/XBAR substrate stays the
+                                                // SELECTION mechanism (the judge PICK above); recitation goes
+                                                // through the native pipeline. We DROP inject_tokens/replay
+                                                // for the recitation path (operator decision).
+                                                let mem_text = texts[slot].clone();
+                                                let aug_content = format!(
+                                                    "Context (a fact you remember): {mem_text}\n\nUsing that context if relevant, answer: {query}");
+                                                let aug_msgs = vec![Message {
+                                                    role: "user".to_string(), content: aug_content }];
+                                                match app.tokenizer.apply_template_ids(&aug_msgs) {
+                                                    Ok(aug_toks) if aug_toks.len() >= 2 => {
+                                                        // Establish the synthesis cache from the augmented
+                                                        // prompt via the SAME single clean reconstruction the
+                                                        // null path uses: reset_cold (zero every owner K/V +
+                                                        // journal) -> prefill(aug_head). The synthesis decode
+                                                        // loop then starts from decode_step(syn_last) where
+                                                        // syn_last = aug_toks[last]. The recalled fact is now
+                                                        // in the model's context window.
+                                                        let _ = unsafe { kv::reset_cold(handle) };
+                                                        let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
+                                                        let mut ok = true;
+                                                        if !aug_head.is_empty() {
+                                                            if let Err(e) = unsafe { kv::prefill(handle, aug_head) } {
+                                                                tracing::error!("B3-JUDGE: FATAL aug prefill failed: {e} -- clean prompt");
+                                                                ok = false;
+                                                            }
                                                         }
-                                                        Err(e) => tracing::warn!(
-                                                            "B3-JUDGE: replay({}, {}) failed: {e} -- clean prompt", ep.dir, ep.npos),
+                                                        if ok {
+                                                            syn_last = aug_last[0];
+                                                            recalled = Some((ep.name.clone(), 1000));
+                                                            judge_ground = Some((ep.name.clone(), texts[slot].clone()));
+                                                            tracing::info!(
+                                                                "B3-JUDGE: PICK [{}] '{}' (topic='{}') reply={:?} -> TEXT-IN-CONTEXT (aug n={}, dpos={}) -> synthesis recites natively",
+                                                                tags[slot], ep.name, ep.topic, reply.trim(), aug_toks.len(),
+                                                                unsafe { kv::position(handle) });
+                                                        } else {
+                                                            // aug reconstruction failed: fall back to the
+                                                            // original clean prompt (reset_cold + prefill(head))
+                                                            // so synthesis is at least coherent (null-floor-like).
+                                                            let _ = unsafe { kv::reset_cold(handle) };
+                                                            if !head.is_empty() {
+                                                                let _ = unsafe { kv::prefill(handle, head) };
+                                                            }
+                                                        }
                                                     }
-                                                } else {
-                                                    tracing::warn!("B3-JUDGE: PICK '{}' has no replayable payload -- clean prompt", ep.name);
+                                                    other => {
+                                                        if let Err(e) = other.map(|_| ()) {
+                                                            tracing::warn!("B3-JUDGE: aug apply_template_ids failed: {e} -- clean prompt");
+                                                        } else {
+                                                            tracing::warn!("B3-JUDGE: aug prompt too short -- clean prompt");
+                                                        }
+                                                        // leave the restored clean cache (head already prefilled
+                                                        // by the cold-restore above) + syn_last == last[0].
+                                                    }
                                                 }
                                             }
                                         }
@@ -1552,7 +1637,9 @@ Tag of the answer (or [NULL]):");
         sessions.remove(chat_id);
         return;
     }
-    if let Err(e) = unsafe { kv::decode_step(handle, last[0], logits) } {
+    // G-INT-2-FIX: synthesis starts from syn_last (== last[0] for null/clean turns;
+    // the augmented prompt's last token when the B3-JUDGE PICKed a memory text-in-context).
+    if let Err(e) = unsafe { kv::decode_step(handle, syn_last, logits) } {
         send_err(format!("kvdecode decode_step(prefill-tail): {e}"));
         sessions.remove(chat_id);
         return;

@@ -127,6 +127,7 @@ extern sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
 extern int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
 extern int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
 extern int   gemma4_kv_reset(sp_g4_kv *s);
+extern int   gemma4_kv_reset_cold(sp_g4_kv *s);
 extern int   gemma4_kv_pos(const sp_g4_kv *s);
 extern void  gemma4_kv_close(sp_g4_kv *s);
 /* WIRE-CUDA-DECODE-GEMMA4 §3.1.A — additive logits-returning step (now defined
@@ -144,6 +145,8 @@ extern int gemma4_kv_ablate_rows(sp_g4_kv *s, int base, const int *pos, int k);
  *   inject_tokens: TEXT via the residual seam, bit-identical to prefill by construction.
  *   inject_seq:    GENERIC residual-frame channel (audio/memory) at a placeholder. */
 extern int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n);
+/* G-INT-2-FIX — attenuated inject for the LIVE recall path (constant-budget K scale). */
+extern int gemma4_kv_inject_tokens_atten(sp_g4_kv *s, const int32_t *toks, int n);
 extern int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames, int ph_token);
 /* CONTRACT-CHAT-FULLSTACK B3 (AUTONOMOUS RECALL) — read global-owner K [0,npos)
  * out of the resident cache for the daemon's C2 query-signature. Returns the
@@ -261,6 +264,20 @@ int sp_daemon_cuda_kvdecode_reset(void *handle) {
     return gemma4_kv_reset(s);
 }
 
+/* reset_cold(handle): G-INT-2-FIX — like reset() but ADDITIONALLY zeroes every
+ * owner K/V cache (and the SWA undo-journal), so a reconstruction truly starts
+ * cold. Used by the B3-JUDGE branch after the nested judge forward (which advances
+ * dpos past the prompt anchor and leaves judge K/V in slots >= n-1); the plain
+ * reset()+prefill(head) leaves that residue resident, and once a PICK injects memory
+ * the synthesis window sweeps over it -> prompt-echo. Byte-identical to the normal
+ * null-floor reset for the standard path (the zeroed slots are never read after a
+ * fresh prefill). 0 ok. */
+int sp_daemon_cuda_kvdecode_reset_cold(void *handle) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s) { sp_set_error("cuda kvdecode reset_cold: NULL handle"); return -1; }
+    return gemma4_kv_reset_cold(s);
+}
+
 /* position(handle): current dpos, -1 on NULL. */
 int sp_daemon_cuda_kvdecode_position(const void *handle) {
     const sp_g4_kv *s = (const sp_g4_kv *)handle;
@@ -311,6 +328,16 @@ int sp_daemon_cuda_kvdecode_inject_tokens(void *handle, const int32_t *toks, int
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || !toks || n <= 0) { sp_set_error("cuda kvdecode inject_tokens: bad args"); return -1; }
     return gemma4_kv_inject_tokens(s, toks, n);
+}
+
+/* inject_tokens_atten(handle, toks, n): G-INT-2-FIX — the LIVE recall inject seam.
+ * Same residual entry as inject_tokens but the natively-minted memory K is scaled by
+ * the constant-budget alpha (SP_REPLAY_MTARGET, default 42) so a recalled episode
+ * BINDS instead of HIJACKING. Used by the B3-JUDGE/B3-WC live-recall PICK. 0 ok. */
+int sp_daemon_cuda_kvdecode_inject_tokens_atten(void *handle, const int32_t *toks, int n) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !toks || n <= 0) { sp_set_error("cuda kvdecode inject_tokens_atten: bad args"); return -1; }
+    return gemma4_kv_inject_tokens_atten(s, toks, n);
 }
 
 /* inject_frames(handle, embs, n_frames, ph_token): CONTRACT-CHAT-FULLSTACK B5 (§6e) —

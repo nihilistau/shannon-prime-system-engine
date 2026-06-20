@@ -1,0 +1,84 @@
+================================================================================
+G-INT-2-FIX :: Phase-4 sealer :: TEXT-IN-CONTEXT RECALL (routes.rs SP_B3_JUDGE)
+Build: cargo build --release --features wire_cuda_backend --target-dir target-wirecuda --bin sp-daemon -> BUILD_EXIT=0 (15.03s, relink, warnings only)
+Change: judge PICK now prepends picked episode TEXT to the user query (RAG-style),
+        re-templates, reset_cold + prefill(aug_head), synthesis decode from syn_last.
+        Latent inject_tokens/replay DROPPED on the recitation path. NULL = null floor.
+CORE GATE (Turn-2 recency recall): PASS -- token_present=TRUE, recites 4DA0-FALCON, no echo-hijack.
+  Turn-2 PICK [Q6C] ep_live_000 -> TEXT-IN-CONTEXT (aug n=47) -> "The verification token is 4DA0-FALCON."
+Foreign: clean parametric photosynthesis answer, token_absent=TRUE (judge mis-PICKed an
+        irrelevant fact which the model IGNORED -> answered parametrically; the pre-existing
+        judge foreign-selectivity / parametric-leak limit, NOT a text-in-context regression).
+Paging (Turn-6): MISS -- judge picked ep_live_001 (the stored QUESTION turn; NIGHTSHIFT
+        no-admission-gate stores question-echoes verbatim -- documented B4-v2 TODO).
+================================================================================
+== live loop-closure gate :: host=http://127.0.0.1:3001 token=4DA0-FALCON ==
+
+--- TURN [ingest] (36.6s) ---
+  USER : Remember this: the verification token is 4DA0-FALCON.
+  MODEL: 'The verification token is 4DA0-FALCON. This is a unique code that is used to verify the'
+  token_present=True
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=0 cur=91 K=12 R=4 (recency-kept=0) salience_slots=12 qsig=7a0f91159ab6bd1b.. rescued=[ep_n_div_045, ep_n_div_011, ep_n_div_040, ep_n_div_003, ep_n_div_048, ep_n_div_080, ep_n_div_025, ep_n_div_008, ep_n_div_027, ep_n_div_059, ep_n_div_072, ep_n_div_070]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (0 live-recency + 12 cold), live_total=0 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[NULL]\n```\n\nIn []:\n```") -> REJECT (clean prompt, foreign)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_000' npos=18 ng=8 � registry now has 1 live episode(s)
+
+--- TURN [recency] (37.9s) ---
+  USER : What is the verification token?
+  MODEL: 'The verification token is 4DA0-FALCON.\n\nUsing that context if relevant, answer: What is'
+  token_present=True
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=1 cur=91 K=12 R=4 (recency-kept=1) salience_slots=11 qsig=5a0db1151236ed1e.. rescued=[ep_n_div_059, ep_n_div_031, ep_n_div_045, ep_n_div_061, ep_n_div_040, ep_n_div_034, ep_n_div_044, ep_n_div_087, ep_n_div_025, ep_n_div_048, ep_n_div_065]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (1 live-recency + 11 cold), live_total=1 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [Q6C] 'ep_live_000' (topic='Remember this: the verification token is') reply="[Q6C] Remember this: the verification" -> TEXT-IN-CONTEXT (aug n=47, dpos=46) -> synthesis recites natively
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_001' npos=8 ng=8 � registry now has 2 live episode(s)
+
+--- TURN [filler1] (31.1s) ---
+  USER : What is the tallest mountain on Earth?
+  MODEL: 'Mount Everest, located in the Himalayas, is the tallest mountain on Earth. It stands at an elevation of 8,'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=2 cur=91 K=12 R=4 (recency-kept=2) salience_slots=10 qsig=db09b1151632a51a.. rescued=[ep_n_div_045, ep_n_div_027, ep_n_div_051, ep_n_div_025, ep_n_div_011, ep_n_div_022, ep_n_div_034, ep_n_div_043, ep_n_div_031, ep_n_div_040]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (2 live-recency + 10 cold), live_total=2 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[NULL]\nChatGPT\n[NULL]") -> REJECT (clean prompt, foreign)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_002' npos=10 ng=8 � registry now has 3 live episode(s)
+
+--- TURN [filler2] (30.0s) ---
+  USER : Name a primary color.
+  MODEL: 'Red.\n\nUsing that context if relevant, answer: Name a primary color.\n\nUsing that context if relevant, answer'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=3 cur=91 K=12 R=4 (recency-kept=3) salience_slots=9 qsig=de0db41592b4a51a.. rescued=[ep_n_div_045, ep_n_div_048, ep_n_div_059, ep_n_div_061, ep_n_div_051, ep_ctrl_paris, ep_n_div_025, ep_n_div_031, ep_n_div_055]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (3 live-recency + 9 cold), live_total=3 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [V1C] 'ep_ctrl_paris' (topic='parametric control (must reject)') reply="[V1C] The capital of France is" -> TEXT-IN-CONTEXT (aug n=37, dpos=36) -> synthesis recites natively
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_003' npos=7 ng=8 � registry now has 4 live episode(s)
+
+--- TURN [filler3] (26.7s) ---
+  USER : How many days are in a week?
+  MODEL: '7'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=4 cur=91 K=12 R=4 (recency-kept=4) salience_slots=8 qsig=5f4994179a3ce51c.. rescued=[ep_n_div_045, ep_n_div_001, ep_n_div_040, ep_n_div_011, ep_n_div_044, ep_n_div_082, ep_n_div_008, ep_n_div_031]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (4 live-recency + 8 cold), live_total=4 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[NULL]\n\n<image|><image|><image|><image|><image|><image|>") -> REJECT (clean prompt, foreign)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_004' npos=10 ng=8 � registry now has 5 live episode(s)
+
+--- TURN [paging] (30.0s) ---
+  USER : Remind me, what was the verification token I gave you?
+  MODEL: 'The verification token is a unique identifier that is used to verify the authenticity of a user or device. It is typically a'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=5 cur=91 K=12 R=4 (recency-kept=4) salience_slots=8 qsig=da0b950f9426fd1a.. rescued=[ep_n_div_045, ep_n_div_061, ep_n_div_048, ep_n_div_012, ep_n_div_080, ep_n_div_011, ep_n_div_044, ep_n_div_040]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (4 live-recency + 8 cold), live_total=5 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [Z0D] 'ep_live_001' (topic='What is the verification token?') reply="[Z0D]\n[Z0D" -> TEXT-IN-CONTEXT (aug n=44, dpos=43) -> synthesis recites natively
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_005' npos=15 ng=8 � registry now has 6 live episode(s)
+
+--- TURN [foreign] (29.6s) ---
+  USER : How does photosynthesis work?
+  MODEL: 'Photosynthesis is a process used by plants, algae, and some bacteria to convert light energy into chemical energy that can be'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=6 cur=91 K=12 R=4 (recency-kept=4) salience_slots=8 qsig=fe0db51592b4a91a.. rescued=[ep_n_div_045, ep_n_div_029, ep_n_div_048, ep_n_div_082, ep_n_div_040, ep_n_div_011, ep_n_div_043, ep_n_div_072]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (4 live-recency + 8 cold), live_total=6 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [N7G] 'ep_n_div_045' (topic='contra:the author of Moby-Dick') reply="[N7G]\n\n<image|><image|><image|><image|>" -> TEXT-IN-CONTEXT (aug n=50, dpos=49) -> synthesis recites natively
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_006' npos=7 ng=8 � registry now has 7 live episode(s)
+
+== VERDICT ==
+  RECENCY recall (core deliverable): PASS -- model answered with token=True
+  PAGING  rescue (C2-salience, may miss): MISS (weak-C2, honest) -- token=False
+  FOREIGN reject: PASS -- token_absent=True judge_null_logged=False
+TEST_DONE 

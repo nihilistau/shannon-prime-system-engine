@@ -92,6 +92,11 @@ unsafe extern "C" {
     /// does and reads OOB past `Jmax` on the ring path once `pos>Jmax`). 0 on success.
     fn sp_daemon_cuda_kvdecode_reset(handle: *mut c_void) -> c_int;
 
+    /// G-INT-2-FIX — `gemma4_kv_reset_cold(s)`. Like reset() but ALSO zeroes every
+    /// owner K/V cache + the SWA journal, so a reconstruction starts cold (no judge
+    /// residue can be attended after a B3-JUDGE nested pass). 0 on success.
+    fn sp_daemon_cuda_kvdecode_reset_cold(handle: *mut c_void) -> c_int;
+
     /// `gemma4_kv_pos(s)`. Current dpos, or -1 on NULL.
     fn sp_daemon_cuda_kvdecode_position(handle: *const c_void) -> c_int;
 
@@ -127,6 +132,16 @@ unsafe extern "C" {
     /// into the inject buffer and step the real id, so the residual is bit-identical
     /// to prefill (the B5 parity proof). 0 on success.
     fn sp_daemon_cuda_kvdecode_inject_tokens(
+        handle: *mut c_void,
+        toks: *const i32,
+        n: c_int,
+    ) -> c_int;
+
+    /// G-INT-2-FIX — `gemma4_kv_inject_tokens_atten(s, toks, n)`. The LIVE recall inject
+    /// seam: same residual entry as inject_tokens, but the natively-minted memory K is
+    /// scaled by the constant-budget alpha (SP_REPLAY_MTARGET, default 42) so a recalled
+    /// episode BINDS instead of HIJACKING. 0 on success.
+    fn sp_daemon_cuda_kvdecode_inject_tokens_atten(
         handle: *mut c_void,
         toks: *const i32,
         n: c_int,
@@ -305,6 +320,24 @@ pub unsafe fn reset(handle: *mut c_void) -> Result<(), String> {
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
 
+/// G-INT-2-FIX — COLD reset: like [`reset`] but also zeroes every owner K/V cache
+/// (and the SWA undo-journal) so a reconstruction truly starts cold. The B3-JUDGE
+/// branch uses this after the nested judge forward so no stale judge K/V can be
+/// attended during synthesis (the prompt-echo degeneration root cause). Byte-identical
+/// to a plain reset for the normal null-floor path (the zeroed slots are never read
+/// after a fresh prefill). The caller MUST hold the cache Mutex.
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn reset_cold(handle: *mut c_void) -> Result<(), String> {
+    if handle.is_null() {
+        return Err("kvdecode reset_cold: NULL handle".to_string());
+    }
+    // SAFETY: handle live per caller.
+    let rc = unsafe { sp_daemon_cuda_kvdecode_reset_cold(handle) };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
 /// CONTRACT-CHAT-FULLSTACK B1 — toggle byte-exact ("auditable") mode on the
 /// resident cache. `on=true` routes the islands+attention through the
 /// exact-integer dual-prime CRT-NTT substrate (run-to-run bit-identical);
@@ -376,6 +409,25 @@ pub unsafe fn inject_tokens(handle: *mut c_void, tokens: &[i32]) -> Result<(), S
     // SAFETY: handle live per caller; tokens slice gives ptr+len.
     let rc = unsafe {
         sp_daemon_cuda_kvdecode_inject_tokens(handle, tokens.as_ptr(), tokens.len() as c_int)
+    };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// G-INT-2-FIX — the LIVE recall inject seam. Same residual entry as [`inject_tokens`]
+/// but the natively-minted memory K is attenuated by the constant-budget alpha
+/// (SP_REPLAY_MTARGET, default 42) so a recalled episode BINDS instead of HIJACKING the
+/// synthesis. Use ONLY for the B3-JUDGE/B3-WC live-recall PICK injection — NOT for the
+/// prompt-head / B5 frame ingest (those stay full-strength via [`inject_tokens`]).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`]; `tokens` valid for its length.
+pub unsafe fn inject_tokens_atten(handle: *mut c_void, tokens: &[i32]) -> Result<(), String> {
+    if handle.is_null() || tokens.is_empty() {
+        return Err("kvdecode inject_tokens_atten: NULL handle or empty tokens".to_string());
+    }
+    // SAFETY: handle live per caller; tokens slice gives ptr+len.
+    let rc = unsafe {
+        sp_daemon_cuda_kvdecode_inject_tokens_atten(handle, tokens.as_ptr(), tokens.len() as c_int)
     };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }

@@ -461,6 +461,13 @@ __global__ void k_scale_by_dev(float *x, size_t n, const float *s) {
     if (i < n) x[i] *= s[0];
 }
 
+/* B3-JUDGE/G-INT-2-FIX: scale a K row by a HOST scalar alpha in-place (mirrors the
+ * replay path's kf[i]*=replay_alpha, but on-device for the natively-minted inject K). */
+__global__ void k_scale_by_const(float *x, size_t n, float a) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= a;
+}
+
 /* ETA.5 (Gemma4 decode): NEOX RoPE WITH freq factors at ABSOLUTE position p0
  * (single token, grid = n_heads). The decode twin of k_rope_freqs. */
 __global__ void k_rope_freqs_at(float *base, int n_heads, int d, float rbase,
@@ -4486,6 +4493,44 @@ extern "C" int gemma4_kv_reset(sp_g4_kv *s) {
     return 0;
 }
 
+/* G-INT-2-FIX: COLD reset. gemma4_kv_reset only rewinds the position counters
+ * (dpos/commit_pos/jcur) — correct for the in-order full-cache decode (slot==pos,
+ * attention bounds at dpos, stale slots overwritten next prefill). But the B3-JUDGE
+ * branch runs a NESTED forward that advances dpos PAST the prompt anchor, writing
+ * judge K/V at global slots [n-1, jhead+J). A plain reset()+prefill(head) leaves
+ * those judge entries resident at slots >= n-1; on a NULL turn the final decode_step
+ * sits at pos=n-1 (judge residue is beyond dpos => never read => clean), but on a
+ * PICK turn the injected memory advances dpos forward, so the synthesis window can
+ * sweep over the stale judge slots => prompt-echo degeneration. This verb ADDITIONALLY
+ * zeroes every owner K/V cache (and the SWA undo-journal) so the reconstruction truly
+ * starts cold: no residue of ANY prior pass can be attended. Byte-identical to the
+ * normal null-floor path (a plain reset()+prefill(head) at request start produces the
+ * SAME attended state, since prefill overwrites [0,dpos) and attention bounds at dpos;
+ * zeroing the rest of the cache changes nothing that is read). */
+extern "C" int gemma4_kv_reset_cold(sp_g4_kv *s) {
+    if (!s) return -1;
+    cudaStream_t st = g_w.stream;
+    for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+        const int global = ((L % s->period) == s->period - 1);
+        const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
+        const size_t slots = (s->ring_W > 0 && !global) ? (size_t)s->ring_W : (size_t)s->Pmax;
+        if (s->dKc && s->dKc[L]) cudaMemsetAsync(s->dKc[L], 0, slots * (size_t)kvd * sizeof(float), st);
+        if (s->dVc && s->dVc[L]) cudaMemsetAsync(s->dVc[L], 0, slots * (size_t)kvd * sizeof(float), st);
+        if (s->ring_W > 0 && !global) {
+            if (s->jK && s->jK[L]) cudaMemsetAsync(s->jK[L], 0, (size_t)s->Jmax * (size_t)kvd * sizeof(float), st);
+            if (s->jV && s->jV[L]) cudaMemsetAsync(s->jV[L], 0, (size_t)s->Jmax * (size_t)kvd * sizeof(float), st);
+        }
+    }
+    cudaError_t e = cudaStreamSynchronize(st);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_reset_cold memset sync");
+    s->dpos_host = 0; s->commit_pos = 0; s->jcur = 0;
+    int zero = 0;
+    if (cudaMemcpy(s->dpos, &zero, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("gemma4_kv_reset_cold: dpos H2D"); return -1;
+    }
+    return 0;
+}
+
 /* KAI-2: arm a capture — the NEXT step D2H-copies its post-embed residual (E floats) into
  * emb_out. Used by the self-null gate to grab the model's own residual and feed it back. */
 extern "C" int gemma4_kv_capture(sp_g4_kv *s, float *emb_out) {
@@ -4559,7 +4604,11 @@ extern "C" int gemma4_kv_inject_seq(sp_g4_kv *s, const float *embs, int n_frames
  *
  * NULL floor: dead code unless called; gemma4_kv_prefill / decode stay byte-untouched.
  * Returns 0 on success, -1 on any failure. */
-extern "C" int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n) {
+/* atten=0 ⇒ full-strength inject (byte-identical to the prefill seam; the prompt-head
+ * + B5 frame channel path). atten=1 ⇒ G-INT-2-FIX: attenuate the minted memory K by
+ * the constant-budget alpha (the LIVE recall path — a recalled episode must BIND not
+ * HIJACK). The thin gemma4_kv_inject_tokens / _atten wrappers below pin the flag. */
+static int gemma4_kv_inject_tokens_impl(sp_g4_kv *s, const int32_t *toks, int n, int atten) {
     if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_inject_tokens: bad args"); return -1; }
     if (s->dpos_host + n > s->Pmax) { sp_set_error("gemma4_kv_inject_tokens: exceeds Pmax"); return -1; }
     if (!s->dinj) { if (cudaMalloc(&s->dinj, (size_t)s->E*sizeof(float)) != cudaSuccess) {
@@ -4567,6 +4616,7 @@ extern "C" int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n) 
     cudaStream_t st = g_w.stream;
     const int E = s->E;
     const float embscale = s->embscale;   /* sqrt(hidden_size), == prefill's embed_scale */
+    const int base = s->dpos_host;        /* the injected episode occupies [base, base+n) */
     for (int i = 0; i < n; i++) {
         const int32_t id = toks[i];
         /* Stage embd[id]*sqrt(E) into dinj using the resident embedding source
@@ -4583,7 +4633,60 @@ extern "C" int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n) 
          * matching prefill exactly. gemma4_kv_prefill stores the H2D token + steps. */
         if (gemma4_kv_prefill(s, &id, 1)) return -1;
     }
+    /* G-INT-2-FIX (Phase-4 sealer): port the curated replay path's CONSTANT-BUDGET
+     * attention attenuation to the LIVE inject path. gemma4_kv_replay scales the stored
+     * (post-RoPE) K by alpha=clamp(M_target/npos,0,1) so a recalled memory BINDS
+     * (matched Q·K still clears softmax) instead of HIJACKS (full-mass injection right
+     * before the question's last token loops generation). Here the K is MINTED natively
+     * by the forward above into s->dKc[L] at the injected positions, so we scale those
+     * rows IN-PLACE on-device (identical math to replay's kf[i]*=alpha, identical env
+     * logic). V is left unscaled (full value at reduced attention). SP_REPLAY_MTARGET
+     * (default 42 here — the proven B3-v9b operating point for the live judge path)
+     * takes precedence over a fixed SP_REPLAY_ALPHA. alpha==1 ⇒ K untouched ⇒
+     * byte-identical to the un-attenuated inject (null floor when M_target/n >= 1).
+     * Gated by atten=1 so the prompt-head / B5-frame inject seam stays full-strength. */
+    if (atten) {
+        const char *mt_e = getenv("SP_REPLAY_MTARGET");
+        const char *alpha_e = getenv("SP_REPLAY_ALPHA");
+        float inj_alpha;
+        if (mt_e) {
+            const float M = (float)atof(mt_e);
+            inj_alpha = (n > 0) ? (M / (float)n) : 1.0f;
+        } else if (alpha_e) {
+            inj_alpha = (float)atof(alpha_e);
+        } else {
+            inj_alpha = 42.0f / (float)n;   /* live judge default M_target=42 */
+        }
+        if (inj_alpha > 1.0f) inj_alpha = 1.0f;   /* never amplify a memory */
+        if (inj_alpha < 0.0f) inj_alpha = 0.0f;
+        if (inj_alpha != 1.0f) {
+            for (int L = 0; L < s->kvfs && L < s->NL; L++) {
+                const int global = ((L % s->period) == s->period - 1);
+                const int kvd = (global ? s->g_nkv : s->s_nkv) * (global ? s->g_hd : s->s_hd);
+                const int ring = (s->ring_W > 0 && !global);
+                for (int p = 0; p < n; p++) {
+                    const int pos = base + p;
+                    const size_t slot = ring ? (size_t)(pos % s->ring_W) : (size_t)pos;
+                    k_scale_by_const<<<(unsigned)((kvd+255)/256), 256, 0, st>>>(
+                        s->dKc[L] + slot * kvd, (size_t)kvd, inj_alpha);
+                }
+            }
+            cudaStreamSynchronize(st);
+        }
+        fprintf(stderr, "    [xbar-#222] gemma4_kv_inject_tokens: attenuated %d injected tok K into cache [%d,%d) alpha=%.3f eff_mass(a*npos)=%.1f\n",
+                n, base, base + n, inj_alpha, inj_alpha * (float)n);
+    }
     return 0;
+}
+
+/* B5 (§6e) text/frame seam — FULL-strength inject (byte-identical to the prefill seam). */
+extern "C" int gemma4_kv_inject_tokens(sp_g4_kv *s, const int32_t *toks, int n) {
+    return gemma4_kv_inject_tokens_impl(s, toks, n, /*atten=*/0);
+}
+
+/* G-INT-2-FIX live recall seam — constant-budget ATTENUATED inject (memory binds, not hijacks). */
+extern "C" int gemma4_kv_inject_tokens_atten(sp_g4_kv *s, const int32_t *toks, int n) {
+    return gemma4_kv_inject_tokens_impl(s, toks, n, /*atten=*/1);
 }
 
 /* Free device VRAM in MiB (cudaMemGetInfo) — fragmentation-aware, unlike nvidia-smi's coarse

@@ -1,0 +1,70 @@
+== live loop-closure gate :: host=http://127.0.0.1:3001 token=4DA0-FALCON ==
+
+--- TURN [ingest] (38.1s) ---
+  USER : Remember this: the verification token is 4DA0-FALCON.
+  MODEL: 'The verification token is 4DA0-FALCON. This is a unique code that is used to verify the'
+  token_present=True
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=0 cur=91 K=12 R=4 (recency-kept=0) salience_slots=12 qsig=7a0f91159ab6bd1b.. rescued=[ep_n_div_045, ep_n_div_011, ep_n_div_040, ep_n_div_003, ep_n_div_048, ep_n_div_080, ep_n_div_025, ep_n_div_008, ep_n_div_027, ep_n_div_059, ep_n_div_072, ep_n_div_070]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (0 live-recency + 12 cold), live_total=0 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[NULL]\n```\n\nIn []:\n```") -> REJECT (clean prompt, foreign)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_000' npos=18 ng=8 — registry now has 1 live episode(s)
+
+--- TURN [recency] (37.9s) ---
+  USER : What is the verification token?
+  MODEL: 'What is the verification token?\nWhat is the verification token?\nWhat is the verification token?\nWhat is the'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=1 cur=91 K=12 R=4 (recency-kept=1) salience_slots=11 qsig=5a0db1151236ed1e.. rescued=[ep_n_div_059, ep_n_div_031, ep_n_div_045, ep_n_div_061, ep_n_div_040, ep_n_div_034, ep_n_div_044, ep_n_div_087, ep_n_div_025, ep_n_div_048, ep_n_div_065]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (1 live-recency + 11 cold), live_total=1 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [Q6C] 'ep_live_000' (LIVE, topic='Remember this: the verification token is') reply="[Q6C] Remember this: the verification" -> inject_tokens(n=18)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_001' npos=8 ng=8 — registry now has 2 live episode(s)
+
+--- TURN [filler1] (32.2s) ---
+  USER : What is the tallest mountain on Earth?
+  MODEL: 'Mount Everest, located in the Himalayas, is the tallest mountain on Earth. It stands at an elevation of 8,'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=2 cur=91 K=12 R=4 (recency-kept=2) salience_slots=10 qsig=db09b1151632a51a.. rescued=[ep_n_div_045, ep_n_div_027, ep_n_div_051, ep_n_div_025, ep_n_div_011, ep_n_div_022, ep_n_div_034, ep_n_div_043, ep_n_div_031, ep_n_div_040]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (2 live-recency + 10 cold), live_total=2 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[NULL]\nChatGPT\n[NULL]") -> REJECT (clean prompt, foreign)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_002' npos=10 ng=8 — registry now has 3 live episode(s)
+
+--- TURN [filler2] (29.3s) ---
+  USER : Name a primary color.
+  MODEL: 'What is the capital of France?\nWhat is the capital of France?\nWhat is the capital of France?'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=3 cur=91 K=12 R=4 (recency-kept=3) salience_slots=9 qsig=de0db41592b4a51a.. rescued=[ep_n_div_045, ep_n_div_048, ep_n_div_059, ep_n_div_061, ep_n_div_051, ep_ctrl_paris, ep_n_div_025, ep_n_div_031, ep_n_div_055]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (3 live-recency + 9 cold), live_total=3 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [V1C] 'ep_ctrl_paris' (curated, topic='parametric control (must reject)') reply="[V1C] The capital of France is" -> replay@M_target
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_003' npos=7 ng=8 — registry now has 4 live episode(s)
+
+--- TURN [filler3] (27.6s) ---
+  USER : How many days are in a week?
+  MODEL: '7'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=4 cur=91 K=12 R=4 (recency-kept=4) salience_slots=8 qsig=5f4994179a3ce51c.. rescued=[ep_n_div_045, ep_n_div_001, ep_n_div_040, ep_n_div_011, ep_n_div_044, ep_n_div_082, ep_n_div_008, ep_n_div_031]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (4 live-recency + 8 cold), live_total=4 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[NULL]\n\n<image|><image|><image|><image|><image|><image|>") -> REJECT (clean prompt, foreign)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_004' npos=10 ng=8 — registry now has 5 live episode(s)
+
+--- TURN [paging] (29.1s) ---
+  USER : Remind me, what was the verification token I gave you?
+  MODEL: 'Remind me, what was the verification token I gave you?\nRemind me, what was the verification token I'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=5 cur=91 K=12 R=4 (recency-kept=4) salience_slots=8 qsig=da0b950f9426fd1a.. rescued=[ep_n_div_045, ep_n_div_061, ep_n_div_048, ep_n_div_012, ep_n_div_080, ep_n_div_011, ep_n_div_044, ep_n_div_040]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (4 live-recency + 8 cold), live_total=5 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [Z0D] 'ep_live_001' (LIVE, topic='What is the verification token?') reply="[Z0D]\n[Z0D" -> inject_tokens(n=8)
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_005' npos=15 ng=8 — registry now has 6 live episode(s)
+
+--- TURN [foreign] (28.4s) ---
+  USER : How does photosynthesis work?
+  MODEL: 'How does photosynthesis work?\nHow does photosynthesis work?\nHow does photosynthesis work?\nHow does photosynthesis work?'
+  token_present=False
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS: live=6 cur=91 K=12 R=4 (recency-kept=4) salience_slots=8 qsig=fe0db51592b4a91a.. rescued=[ep_n_div_045, ep_n_div_029, ep_n_div_048, ep_n_div_082, ep_n_div_040, ep_n_div_011, ep_n_div_043, ep_n_div_072]
+  [log] INFO sp_daemon::routes: B3-JUDGE KAIROS working set: 12 episode(s) (4 live-recency + 8 cold), live_total=6 cur_total=91
+  [log] INFO sp_daemon::routes: B3-JUDGE: PICK [N7G] 'ep_n_div_045' (curated, topic='contra:the author of Moby-Dick') reply="[N7G]\n\n<image|><image|><image|><image|>" -> replay@M_target
+  [log] INFO sp_daemon::routes: B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_006' npos=7 ng=8 — registry now has 7 live episode(s)
+
+== VERDICT ==
+  RECENCY recall (core deliverable): FAIL -- model answered with token=False
+  PAGING  rescue (C2-salience, may miss): MISS (weak-C2, honest) -- token=False
+  FOREIGN reject: PASS -- token_absent=True judge_null_logged=False
+TEST_EXIT=0 
