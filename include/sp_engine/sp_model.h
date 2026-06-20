@@ -63,7 +63,10 @@ typedef enum {
     /* 5 = SP_ARCH_ID_QWEN35 reserved (Phase 3-SSM) */
     SP_ARCH_ID_QWEN25 = 6,
     SP_ARCH_ID_GEMMA4 = 7,
-    SP_ARCH_ID_QWEN36 = 8   /* qwen35moe: Gated DeltaNet + MoE hybrid (Qwen3.6-35B-A3B) */
+    SP_ARCH_ID_QWEN36 = 8,  /* qwen35moe: Gated DeltaNet + MoE hybrid (Qwen3.6-35B-A3B) */
+    SP_ARCH_ID_DIFFUSION_GEMMA = 9  /* diffusion-gemma: block masked-diffusion on the
+                                       Gemma-4 MoE backbone (DiffusionGemma-26B-A4B; PR 24423).
+                                       Backbone == gemma4 MoE; diffusion surface in dg_* fields. */
 } sp_arch_id;
 
 /* §7 tokenizer type_id. Doubles as the tokenizer FAMILY tag (#115): legacy

@@ -40,12 +40,43 @@ typedef struct {
     uint32_t n_dims;
     uint64_t dims[8];
     uint32_t block_size;
-    uint8_t *bytes;          /* owned payload */
+    uint8_t *bytes;          /* owned payload; NULL after streamed-out */
     uint64_t size_bytes;
     uint64_t data_off;       /* assigned at layout time (rel. to data region) */
+    uint8_t  blake3[32];     /* digest (streaming mode computes it at emit time) */
+    int      streamed;       /* 1 = bytes already written to the temp data file */
 } emit_tensor;
 
 typedef struct { emit_tensor *t; int n, cap; } emit_list;
+
+/* ── STREAMING data region (Phase 5: the 26B diffusion-gemma's ~14 GB OK_Q4B emit set
+ * does not fit the commit limit when held all-in-RAM). When g_stream != NULL each add_*
+ * writes its packed bytes straight to a temp data file (64-aligned, emit order) and frees
+ * them immediately, so peak RAM is ~one tensor (largest ≈ a fused-expert tile). The temp
+ * file is the verbatim data region (concatenated final-layout); main() appends it after the
+ * header+table. Default (no --stream) = the original all-in-RAM path, byte-identical. */
+static FILE    *g_stream    = NULL;   /* temp data file, or NULL = in-RAM mode */
+static uint64_t g_stream_off = 0;     /* running data-region cursor (== next data_off base) */
+
+static uint64_t align_up_(uint64_t x, uint64_t a) { return (x + a - 1) / a * a; }
+
+/* Stream one filled emit_tensor's bytes to the temp data file: pad to 64, write, digest,
+ * free. Sets e->data_off / e->blake3 / e->streamed. Returns 0, 1 on I/O error. */
+static int emit_stream_one(emit_tensor *e) {
+    static const uint8_t zpad[64] = {0};
+    uint64_t aligned = align_up_(g_stream_off, SP_TENSOR_ALIGN);
+    while (g_stream_off < aligned) {
+        uint64_t w = aligned - g_stream_off; if (w > sizeof zpad) w = sizeof zpad;
+        if (fwrite(zpad, 1, (size_t)w, g_stream) != w) return 1;
+        g_stream_off += w;
+    }
+    e->data_off = g_stream_off;
+    sp_blake3_256(e->bytes, (size_t)e->size_bytes, e->blake3);
+    if (e->size_bytes && fwrite(e->bytes, 1, (size_t)e->size_bytes, g_stream) != e->size_bytes) return 1;
+    g_stream_off += e->size_bytes;
+    free(e->bytes); e->bytes = NULL; e->streamed = 1;
+    return 0;
+}
 
 static emit_tensor *el_push(emit_list *L) {
     if (L->n == L->cap) {
@@ -217,6 +248,7 @@ static size_t ggml_row_bytes(uint32_t type, int n) {
         case GGML_T_F32:  return (size_t)n * 4;
         case GGML_T_F16:  return (size_t)n * 2;
         case GGML_T_Q4_0: return (size_t)(n / 32) * 18;   /* QAT-Q4_0 source */
+        case GGML_T_Q5_0: return (size_t)(n / 32) * 22;   /* diffusion-gemma self_cond_down */
         case GGML_T_Q8_0: return (size_t)(n / 32) * 34;
         case GGML_T_Q4_K: return (size_t)(n / 256) * 144;  /* qwen35moe Q4_K_M source */
         case GGML_T_Q6_K: return (size_t)(n / 256) * 210;
@@ -289,6 +321,7 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     q->bytes = (uint8_t *)malloc(q->size_bytes ? q->size_bytes : 1);
     if (!q->bytes) { sp_frob_packed_free(&pt); return 1; }
     memcpy(q->bytes, pt.codes, q->size_bytes);
+    if (g_stream && emit_stream_one(q)) { sp_frob_packed_free(&pt); return 1; }
     /* ".scale" sibling (rows fp32) — pushed immediately after, so it is adjacent
      * in the data region after layout (§9). */
     emit_tensor *s = el_push(L);
@@ -298,6 +331,7 @@ static int add_q8(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     s->bytes = (uint8_t *)malloc(s->size_bytes ? s->size_bytes : 1);
     if (!s->bytes) { sp_frob_packed_free(&pt); return 1; }
     memcpy(s->bytes, pt.row_scale, s->size_bytes);
+    if (g_stream && emit_stream_one(s)) { sp_frob_packed_free(&pt); return 1; }
     sp_frob_packed_free(&pt);
     return 0;
 }
@@ -342,6 +376,7 @@ static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
         for (int c = 0; c < cols; c++) codes[c] = sp_frob_quant1_q4(wrow[c], s);
         sp_frob_q4_pack(codes, cols, q->bytes + (size_t)r * nib_cols);
     }
+    if (g_stream && emit_stream_one(q)) { free(wrow); free(codes); free(scales); return 1; }
     /* ".scale" sibling (total_rows fp32). NOTE: el_push may realloc — q is filled
      * above and not touched after this point. */
     emit_tensor *sc = el_push(L);
@@ -351,6 +386,7 @@ static int add_q4(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     sc->bytes = (uint8_t *)malloc(sc->size_bytes ? sc->size_bytes : 1);
     if (!sc->bytes) { free(wrow); free(codes); free(scales); return 1; }
     memcpy(sc->bytes, scales, (size_t)sc->size_bytes);
+    if (g_stream && emit_stream_one(sc)) { free(wrow); free(codes); free(scales); return 1; }
     free(wrow); free(codes); free(scales);
     return 0;
 }
@@ -410,6 +446,9 @@ static int add_q4b(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
         }
         sp_frob_q4_pack(codes, cols, q->bytes + (size_t)r * nib_cols);
     }
+    /* stream the codes tensor out now (frees q->bytes) BEFORE the next el_push may
+     * realloc L->t and dangle `q`. No-op in RAM mode. */
+    if (g_stream && emit_stream_one(q)) { free(wrow); free(codes); free(bs); return 1; }
     /* ".bscale" sibling (f16, row-major blocks), adjacent per §9. */
     emit_tensor *sc = el_push(L);
     snprintf(sc->name, sizeof sc->name, "%s.bscale", W->name);
@@ -419,6 +458,7 @@ static int add_q4b(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
     sc->bytes = (uint8_t *)malloc(sc->size_bytes ? sc->size_bytes : 1);
     if (!sc->bytes) { free(wrow); free(codes); free(bs); return 1; }
     memcpy(sc->bytes, bs, (size_t)sc->size_bytes);
+    if (g_stream && emit_stream_one(sc)) { free(wrow); free(codes); free(bs); return 1; }
     free(wrow); free(codes); free(bs);
     return 0;
 }
@@ -441,6 +481,7 @@ static int add_f32(emit_list *L, const gguf_ctx *g, const gguf_tensor *W) {
            : sp_dequant_row(base, W->type, n, (float *)e->bytes)) {
         fprintf(stderr, "dequant f32 failed %s\n", W->name); return 1;
     }
+    if (g_stream && emit_stream_one(e)) return 1;
     return 0;
 }
 
@@ -583,9 +624,13 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     int is_qwen25 = (strcmp(arch_str, "qwen2")  == 0);
     int is_qwen3  = (strcmp(arch_str, "qwen3")  == 0);
     int is_qwen36 = (strcmp(arch_str, "qwen35moe") == 0);
-    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3 && !is_qwen36) {
+    int is_dg     = (strcmp(arch_str, "diffusion-gemma") == 0);  /* Phase 5: gemma4 MoE backbone */
+    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3 && !is_qwen36 && !is_dg) {
         fprintf(stderr, "fill_arch_struct: unsupported arch '%s'\n", arch_str); return 1;
     }
+    /* diffusion-gemma reuses the gemma4 per-layer SWA/global geometry block; its
+     * backbone KV keys mirror gemma4.* under the diffusion-gemma.* prefix. */
+    int is_gemma4_like = is_gemma4 || is_dg;
 
     char key[128];
     /* ARCH_KEY: build "arch.suffix" into local `key` and return it. */
@@ -631,6 +676,7 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     memset(&ai, 0, sizeof ai);
     ai.arch_id          = is_gemma3 ? (uint32_t)SP_ARCH_ID_GEMMA3 :
                           is_gemma4 ? (uint32_t)SP_ARCH_ID_GEMMA4 :
+                          is_dg     ? (uint32_t)SP_ARCH_ID_DIFFUSION_GEMMA :
                           is_qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 :
                           is_qwen36 ? (uint32_t)SP_ARCH_ID_QWEN36 : (uint32_t)SP_ARCH_ID_QWEN3;
     ai.vocab_size       = (uint32_t)n_vocab;
@@ -642,8 +688,8 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     ai.max_context      = (uint32_t)context_length;
     ai.swa_window       = (uint32_t)swa_window;
     ai.rope_freq_base   = rope_freq_base;
-    ai.ffn_variant      = (is_gemma3 || is_gemma4) ? 1u : 0u;   /* 1=GeGLU(gemma3/4), 0=SwiGLU(qwen3/qwen25) */
-    ai.norm_variant     = (is_gemma3 || is_gemma4) ? 1u : 0u;   /* 1=sandwich(gemma3/4), 0=pre-norm(qwen3/qwen25) */
+    ai.ffn_variant      = (is_gemma3 || is_gemma4_like) ? 1u : 0u;   /* 1=GeGLU(gemma3/4/dg), 0=SwiGLU(qwen3/qwen25) */
+    ai.norm_variant     = (is_gemma3 || is_gemma4_like) ? 1u : 0u;   /* 1=sandwich(gemma3/4/dg), 0=pre-norm(qwen3/qwen25) */
     ai.tied_embeddings  = (uint32_t)tied;
     ai.has_qk_norm      = (uint32_t)has_qk_norm;
     ai.n_ff             = (uint32_t)n_ff;
@@ -654,22 +700,25 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
      * shared-KV + softcap + period. head_dim above holds key_length (GLOBAL); the
      * per-layer head_dim/n_ff differences are recovered at load time from the
      * emitted per-layer tensor dims. ── */
-    if (is_gemma4) {
+    if (is_gemma4_like) {
         uint64_t gv = 0; float gf = 0.0f;
+        char g4key[128];
+        /* G4K(suf): build "<arch_str>.suf" — gemma4.* OR diffusion-gemma.* (same shape). */
+        #define G4K(suf) (snprintf(g4key, sizeof g4key, "%s." suf, arch_str), (const char *)g4key)
         uint64_t hd_swa = 0;
-        gguf_get_u64(g, "gemma4.attention.key_length_swa", &hd_swa);
+        gguf_get_u64(g, G4K("attention.key_length_swa"), &hd_swa);
         ai.g4_hd_swa  = (uint32_t)(hd_swa ? hd_swa : head_dim);
         ai.g4_nh_swa  = (uint32_t)n_head;      /* n_head constant across layer types  */
         ai.g4_nkv_swa = (uint32_t)n_head_kv;   /* n_head_kv constant                   */
-        ai.g4_rope_base_swa = gguf_get_f32(g, "gemma4.rope.freq_base_swa", &gf) ? gf : 1e4f;
-        if (gguf_get_u64(g, "gemma4.embedding_length_per_layer_input", &gv)) ai.g4_n_embd_per_layer = (uint32_t)gv;
-        ai.g4_logit_softcap = gguf_get_f32(g, "gemma4.final_logit_softcapping", &gf) ? gf : 0.0f;
-        if (gguf_get_u64(g, "gemma4.attention.shared_kv_layers", &gv))
+        ai.g4_rope_base_swa = gguf_get_f32(g, G4K("rope.freq_base_swa"), &gf) ? gf : 1e4f;
+        if (gguf_get_u64(g, G4K("embedding_length_per_layer_input"), &gv)) ai.g4_n_embd_per_layer = (uint32_t)gv;
+        ai.g4_logit_softcap = gguf_get_f32(g, G4K("final_logit_softcapping"), &gf) ? gf : 0.0f;
+        if (gguf_get_u64(g, G4K("attention.shared_kv_layers"), &gv))
             ai.g4_n_kv_from_start = (n_layers > gv) ? (uint32_t)(n_layers - gv) : (uint32_t)n_layers;
         else
             ai.g4_n_kv_from_start = (uint32_t)n_layers;
         {
-            const gguf_kv *kv = gguf_find_kv(g, "gemma4.attention.sliding_window_pattern");
+            const gguf_kv *kv = gguf_find_kv(g, G4K("attention.sliding_window_pattern"));
             uint32_t period = 0;
             if (kv && kv->type == GGUF_T_ARRAY && kv->arr_type == GGUF_T_BOOL &&
                 kv->arr_len == n_layers && kv->arr_data) {
@@ -691,7 +740,7 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
          * geometry as n_kv_heads (GLOBAL) + g4_nkv_swa (SWA); derive both from
          * the array via the SWA period and REQUIRE per-type uniformity. */
         {
-            const gguf_kv *kv = gguf_find_kv(g, "gemma4.attention.head_count_kv");
+            const gguf_kv *kv = gguf_find_kv(g, G4K("attention.head_count_kv"));
             if (kv && kv->type == GGUF_T_ARRAY && kv->arr_data && kv->arr_len == n_layers &&
                 (kv->arr_type == GGUF_T_UINT32 || kv->arr_type == GGUF_T_INT32)) {
                 const uint32_t *hk = (const uint32_t *)kv->arr_data;   /* i32/u32: same width */
@@ -717,6 +766,41 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
             if (fg0 && fg0->n_dims >= 2) ai.n_ff = (uint32_t)fg0->dims[1];
         }
         ai.has_qk_norm = 1u;
+
+        /* ── diffusion-gemma: MoE + diffusion surface (the gemma4 backbone above is
+         * shared; only these are new). The MoE params reuse the q36_* expert slots
+         * (the contract: backbone MoE geometry lives there). The dg_* fields carry
+         * the diffusion-specific surface. canvas_length is REQUIRED. ── */
+        if (is_dg) {
+            uint64_t dv = 0; float df = 0.0f;
+            if (gguf_get_u64(g, G4K("expert_count"), &dv))               ai.q36_n_expert      = (uint32_t)dv;
+            if (gguf_get_u64(g, G4K("expert_used_count"), &dv))          ai.q36_n_expert_used = (uint32_t)dv;
+            if (gguf_get_u64(g, G4K("expert_feed_forward_length"), &dv)) ai.q36_n_ff_exp      = (uint32_t)dv;
+            ai.q36_rope_dim  = gguf_get_u64(g, G4K("rope.dimension_count"), &dv) ? (uint32_t)dv : 0u;
+            ai.q36_rope_base = rope_freq_base;
+            if (ai.q36_n_expert == 0 || ai.q36_n_expert_used == 0) {
+                fprintf(stderr, "fill_arch_struct: diffusion-gemma missing expert_count/used\n"); return 1;
+            }
+            /* diffusion.* (NOT arch-prefixed) — canvas_length REQUIRED; eb_* optional
+             * (this conversion wave omits them; 0 = unspecified, sampler defaults @N4). */
+            if (!gguf_get_u64(g, "diffusion.canvas_length", &dv) || dv == 0) {
+                fprintf(stderr, "fill_arch_struct: diffusion-gemma missing REQUIRED diffusion.canvas_length\n");
+                return 1;
+            }
+            ai.dg_canvas_length = (uint32_t)dv;
+            if (gguf_get_u64(g, "diffusion.eb_max_steps", &dv)) ai.dg_eb_max_steps = (uint32_t)dv;
+            if (gguf_get_f32(g, "diffusion.eb_t_min", &df))                ai.dg_eb_t_min                = df;
+            if (gguf_get_f32(g, "diffusion.eb_t_max", &df))                ai.dg_eb_t_max                = df;
+            if (gguf_get_f32(g, "diffusion.eb_entropy_bound", &df))        ai.dg_eb_entropy_bound        = df;
+            if (gguf_get_f32(g, "diffusion.eb_stability_threshold", &df))  ai.dg_eb_stability_threshold  = df;
+            if (gguf_get_f32(g, "diffusion.eb_confidence_threshold", &df)) ai.dg_eb_confidence_threshold = df;
+            if (gguf_get_u64(g, "diffusion.shift_logits", &dv)) ai.dg_shift_logits = (uint32_t)dv;
+            fprintf(stderr, "    [arch] diffusion-gemma: canvas_length=%u experts=%u/%u expert_ff=%u "
+                            "eb_max_steps=%u entropy_bound=%g\n",
+                    ai.dg_canvas_length, ai.q36_n_expert, ai.q36_n_expert_used,
+                    ai.q36_n_ff_exp, ai.dg_eb_max_steps, ai.dg_eb_entropy_bound);
+        }
+        #undef G4K
     }
 
     /* ── qwen35moe q36_* fields (mirror qwen3_load): GDN geometry + MoE params +
@@ -786,6 +870,16 @@ static int is_matmul_weight(const char *name) {
         strstr(name, "ffn_down_exps.weight") ||
         strstr(name, "ffn_gate_shexp.weight") || strstr(name, "ffn_up_shexp.weight") ||
         strstr(name, "ffn_down_shexp.weight")) return 1;
+    /* diffusion-gemma (Phase 5): the FUSED MoE expert tensor ffn_gate_up_exps
+     * [cols,1408,n_expert] (gate+up concatenated; the forward slices it at N1) is a
+     * rank-3 expert matmul -> Q-transcode (rank-3 path in add_q4b/add_q8). The
+     * decoder self-conditioning gated MLP weights (self_cond_{gate,up,down}.weight)
+     * are matmuls. self_cond_pre_norm.weight is F32 (caught by _norm above);
+     * ffn_gate_inp.weight (router) + *.scale stay F32 (NOT matched here). */
+    if (strstr(name, "ffn_gate_up_exps.weight")) return 1;
+    if (strcmp(name, "self_cond_gate.weight") == 0 ||
+        strcmp(name, "self_cond_up.weight")   == 0 ||
+        strcmp(name, "self_cond_down.weight") == 0) return 1;
     return 0;
 }
 
@@ -811,14 +905,28 @@ int main(int argc, char **argv) {
     }
     const char *in = argv[1], *out_model = argv[2], *out_tok = argv[3];
     int verify = 0;
+    int stream = 0;                              /* --stream: low-RAM (data region to temp file) */
     const char *st_path = NULL;
     for (int a = 4; a < argc; a++) {
         if      (strcmp(argv[a], "--verify") == 0) verify = 1;
+        else if (strcmp(argv[a], "--stream") == 0) stream = 1;
         else if (strcmp(argv[a], "--st") == 0 && a + 1 < argc) st_path = argv[++a];
     }
 
     gguf_ctx *g = gguf_open(in);
     if (!g) { fprintf(stderr, "cannot open GGUF %s\n", in); return 1; }
+
+    /* --stream: write the data region incrementally to a temp file beside the output so
+     * peak RAM is ~one packed tensor (the 26B diffusion-gemma's ~14 GB OK_Q4B emit set
+     * exceeds the commit limit if held all-in-RAM). Default off = the all-in-RAM path. */
+    char stream_tmp[1200];
+    if (stream) {
+        snprintf(stream_tmp, sizeof stream_tmp, "%s.datatmp", out_model);
+        g_stream = fopen(stream_tmp, "wb+");
+        if (!g_stream) { fprintf(stderr, "cannot open stream temp %s\n", stream_tmp); gguf_close(g); return 1; }
+        g_stream_off = 0;
+        fprintf(stderr, "[stream] low-RAM mode: data region -> %s\n", stream_tmp);
+    }
 
     if (st_path) {                               /* Safetensors Direct (gemma4) */
         g_st = st_open(st_path);
@@ -880,14 +988,20 @@ int main(int argc, char **argv) {
     if (rc) { el_free(&L); gguf_close(g); return 1; }
 
     /* 4. assign data offsets in emit order (parent-then-scale already adjacent),
-     * each tensor 64-aligned. */
-    uint64_t data_cursor = 0;
-    for (int i = 0; i < L.n; i++) {
-        data_cursor = align_up(data_cursor, SP_TENSOR_ALIGN);
-        L.t[i].data_off = data_cursor;
-        data_cursor += L.t[i].size_bytes;
+     * each tensor 64-aligned. In stream mode emit_stream_one already set data_off
+     * (and wrote the bytes to the temp file); data_region_size == the temp cursor. */
+    uint64_t data_region_size;
+    if (g_stream) {
+        data_region_size = g_stream_off;
+    } else {
+        uint64_t data_cursor = 0;
+        for (int i = 0; i < L.n; i++) {
+            data_cursor = align_up(data_cursor, SP_TENSOR_ALIGN);
+            L.t[i].data_off = data_cursor;
+            data_cursor += L.t[i].size_bytes;
+        }
+        data_region_size = data_cursor;
     }
-    uint64_t data_region_size = data_cursor;
 
     /* 5. build the tensor table, sort by name_hash. Keep a parallel index into L
      * via the data_off (entries carry offset; data write follows emit order). */
@@ -901,7 +1015,8 @@ int main(int argc, char **argv) {
         e->offset_in_data = L.t[i].data_off; e->size_bytes = L.t[i].size_bytes;
         e->block_size = L.t[i].block_size;
         e->block_count = e->block_size ? (uint32_t)(e->size_bytes / e->block_size) : 0;
-        sp_blake3_256(L.t[i].bytes, (size_t)L.t[i].size_bytes, e->blake3);
+        if (g_stream) memcpy(e->blake3, L.t[i].blake3, 32);   /* computed at emit time */
+        else          sp_blake3_256(L.t[i].bytes, (size_t)L.t[i].size_bytes, e->blake3);
         e->name_hash = sp_xxh64(e->name, strlen(e->name), 0);
     }
     qsort(tbl, (size_t)L.n, sizeof(sp_tensor_entry), cmp_entry);
@@ -936,15 +1051,34 @@ int main(int argc, char **argv) {
         uint64_t want = data_off - pos; if (want > sizeof zeros) want = sizeof zeros;
         ok = fwrite(zeros, 1, (size_t)want, f) == want; pos += want;
     }
-    /* data region in emit order, 64-aligned per tensor */
-    uint64_t dpos = 0;
-    for (int i = 0; ok && i < L.n; i++) {
-        uint64_t aligned = align_up(dpos, SP_TENSOR_ALIGN);
-        while (ok && dpos < aligned) { uint64_t w = aligned - dpos; if (w > sizeof zeros) w = sizeof zeros; ok = fwrite(zeros,1,(size_t)w,f)==w; dpos += w; }
-        ok = fwrite(L.t[i].bytes, 1, (size_t)L.t[i].size_bytes, f) == L.t[i].size_bytes;
-        dpos += L.t[i].size_bytes;
+    if (g_stream) {
+        /* data region already on disk (verbatim, 64-aligned) in the temp file — copy it
+         * in wholesale. The temp file's byte layout == what the in-RAM loop would emit. */
+        if (fflush(g_stream) != 0) ok = 0;
+        if (ok && fseek(g_stream, 0, SEEK_SET) != 0) ok = 0;
+        uint8_t *cpbuf = (uint8_t *)malloc(1u << 22);   /* 4 MiB copy buffer */
+        if (!cpbuf) ok = 0;
+        uint64_t copied = 0;
+        while (ok && copied < data_region_size) {
+            size_t want = (size_t)((data_region_size - copied) < (1u << 22) ? (data_region_size - copied) : (1u << 22));
+            size_t got = fread(cpbuf, 1, want, g_stream);
+            if (got == 0) { ok = 0; break; }
+            if (fwrite(cpbuf, 1, got, f) != got) { ok = 0; break; }
+            copied += got;
+        }
+        free(cpbuf);
+    } else {
+        /* data region in emit order, 64-aligned per tensor */
+        uint64_t dpos = 0;
+        for (int i = 0; ok && i < L.n; i++) {
+            uint64_t aligned = align_up(dpos, SP_TENSOR_ALIGN);
+            while (ok && dpos < aligned) { uint64_t w = aligned - dpos; if (w > sizeof zeros) w = sizeof zeros; ok = fwrite(zeros,1,(size_t)w,f)==w; dpos += w; }
+            ok = fwrite(L.t[i].bytes, 1, (size_t)L.t[i].size_bytes, f) == L.t[i].size_bytes;
+            dpos += L.t[i].size_bytes;
+        }
     }
     fclose(f);
+    if (g_stream) { fclose(g_stream); g_stream = NULL; remove(stream_tmp); }
     if (!ok) { fprintf(stderr, "model write short\n"); free(tbl); el_free(&L); gguf_close(g); return 1; }
 
     fprintf(stderr, "[sp_transcode] %s -> %s (%u tensors, %llu bytes) + %s\n",
