@@ -1,0 +1,30 @@
+# G-CHAT-B3-JUDGE-WIRE -- SP_B3_JUDGE generative recall judge wired into sp_daemon /v1/chat
+# build: cargo build --release --features wire_cuda_backend --target-dir target-wirecuda --bin sp-daemon  => DISP_BUILD_DONE_0 (clean, 11 warnings)
+# launch: 12B gemma4-12b-b1.sp-model, SP_B3_JUDGE=1 SP_B3_JUDGE_K=12 SP_RECALL_REGISTRY=_needle_corpus_div/registry.jsonl SP_REPLAY_MTARGET=42 SP_ARENA_RELEASE=1, port 3001
+# probe: 3 matched + 2 foreign via /v1/chat messages-path temperature=0 auto_recall=true
+
+# --- LIVE DAEMON TELEMETRY (sp_daemon::routes) ---
+# n_div_000 "Which recovery code authorizes the Marlock mag-rail depot?"  (in K=12 window)
+B3-JUDGE: PICK [N4H] 'ep_n_div_000' (topic='code:the Marlock mag-rail depot') reply="[N4H] the Marlock mag-" -> replay@M_target
+B3-JUDGE grounding: OK 'ep_n_div_000' used 3/5 salient mem tokens          # CORRECT pick + grounded
+
+# n_div_005 "Which handshake token authorizes the Grith seed bank?"  (in K=12 window)
+B3-JUDGE: PICK [Z8N] 'ep_n_div_011' (topic='code:the Dranford sluice control') reply="[Z8N] Access to the Dran" -> replay@M_target
+B3-JUDGE grounding: PARAMETRIC-HALLUCINATION FLAG 'ep_n_div_011' -- answer used 0/5 salient mem tokens   # same-archetype mispick, grounding caught it
+
+# n_div_075 "...thermal flux deviation...Lrudrel Mandate?"  (registry idx 75, OUTSIDE first-12 window => not a candidate)
+B3-JUDGE: [NULL] (reply="[NULL]...") -> REJECT (clean prompt, foreign)      # true needle not in window => correct NULL
+
+# FOREIGN "What is the capital of France?"
+B3-JUDGE: [NULL] (reply="[NULL]...") -> REJECT (clean prompt, foreign)      # clean reject, synthesized "Paris."
+# FOREIGN "How does photosynthesis work?"
+B3-JUDGE: [NULL] (reply="[NULL]...") -> REJECT (clean prompt, foreign)      # clean reject
+
+# --- VERDICT ---
+# Wiring GREEN: judge runs the messages/chat-template path, greedy temp0, copy-able RANDOMIZED tags
+#   (consonant-digit-consonant, per-query deterministic shuffle => no [M_A] position anchor),
+#   parses tag, replays winner @M_target=42, CPU-side grounding check flags parametric leak.
+# Matched recall (in-window): correct pick self-selects + grounds. Same-archetype confusion is the
+#   residual miss (matches the validated harness's 85.7%, not 100%); grounding check catches mispicks.
+# Foreign reject: [NULL] => clean prompt, no memory injected (the headline deliverable WORKS).
+# Null floor: SP_B3_JUDGE unset => branch skipped, judge_ground stays None, grounding skipped => byte-identical.

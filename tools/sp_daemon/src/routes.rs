@@ -740,6 +740,9 @@ fn run_kvdecode_chat(
     // G-INT-2: when SP_INT2 Stage-2 has rendered an ACCEPT/NULL verdict, the legacy
     // SP_B3_WC / SP_B3_DISPOSER / q·K fire branches MUST NOT double-fire on the same turn.
     let mut int2_decided = false;
+    // B3-JUDGE: when the generative judge fires, stash (ep_name, injected_text)
+    // for the post-synthesis CPU-side grounding check (parametric-hallucination flag).
+    let mut judge_ground: Option<(String, String)> = None;
     if auto_recall && replay_dir.is_none() {
         if let Some(registry) = app.recall_registry.as_ref() {
             let npos_q = unsafe { kv::position(handle) }; // = head.len() after prefill
@@ -1036,6 +1039,186 @@ fn run_kvdecode_chat(
                                 None => tracing::warn!("B3-WC: SP_B3_WC set but load_wc({}) failed -- skipping", wcp),
                             }
                         }
+                        // ===== B3-JUDGE: 12B GENERATIVE recall judge (SP_B3_JUDGE) =====
+                        // The open-set novel-recall wall that defeated every GEOMETRIC signal
+                        // (q·K, cosine, C2 sig, the W_c head, causal self-ablation) is broken by
+                        // a GENERATIVE judge: the 12B READS the candidate memory TEXTS (the words,
+                        // not post-RoPE K vectors) and picks the one that answers THIS query, or
+                        // [NULL]. Validated offline at 85.7% recall@1 on _needle_corpus_div (the
+                        // EXACT corpus that gave W_c ~50%); harness tools/xbar_lsh/judge_recall_test.py.
+                        // Default-off (SP_B3_JUDGE unset) ⇒ this whole block is skipped ⇒
+                        // byte-identical null floor. Runs only when no prior stage decided.
+                        if !int2_decided && recalled.is_none()
+                            && std::env::var("SP_B3_JUDGE").ok().filter(|s| !s.is_empty()).is_some()
+                        {
+                            // KAIROS-bounded working set: at most SP_B3_JUDGE_K (default 20) episodes.
+                            let kbound: usize = std::env::var("SP_B3_JUDGE_K").ok()
+                                .and_then(|s| s.parse().ok()).unwrap_or(20);
+                            // The user query text (raw, NO chat template — the judge prompt itself
+                            // is what carries the template). raw_user is the last user message.
+                            let query = raw_user.as_ref().map(|s| s.trim().to_string()).unwrap_or_default();
+                            if query.is_empty() {
+                                tracing::info!("B3-JUDGE: no user query text -- skipping (clean prompt)");
+                            } else {
+                                // (1) Assemble the candidate set. KAIROS bounds it to <=kbound. The
+                                // FINDINGS-#3 anti-position-bias discipline of the validated harness:
+                                // the candidate ORDER is shuffled and each gets a RANDOMIZED copy-able
+                                // tag (consonant+digit+consonant) — a fixed [M_A],[M_B],.. order anchors
+                                // the model on the first slot (observed: it returned [M_A] for every
+                                // query). The shuffle/tag draw is DETERMINISTIC per query (seeded by a
+                                // hash of the query text) so a turn is reproducible/byte-exact-when-off.
+                                // A tiny xorshift PRNG (no rand crate dep) drives a Fisher-Yates shuffle.
+                                let mut seed: u64 = 0xcbf29ce484222325;
+                                for b in query.as_bytes() { seed ^= *b as u64; seed = seed.wrapping_mul(0x100000001b3); }
+                                if seed == 0 { seed = 0x9e3779b97f4a7c15; }
+                                let mut rng = move || {
+                                    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed
+                                };
+                                // candidate episode indices, KAIROS-bounded then Fisher-Yates shuffled.
+                                let mut cand_idx: Vec<usize> = (0..registry.len().min(kbound)).collect();
+                                for i in (1..cand_idx.len()).rev() {
+                                    let j = (rng() % (i as u64 + 1)) as usize;
+                                    cand_idx.swap(i, j);
+                                }
+                                // tag pool = consonant+digit+consonant (collision-free copy-able codes);
+                                // drawn without replacement per query (sampled order from the same rng).
+                                const CONS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+                                const DIG: &[u8] = b"0123456789";
+                                let mut pool: Vec<String> = Vec::with_capacity(CONS.len() * 10 * CONS.len());
+                                for &a in CONS { for &d in DIG { for &c in CONS {
+                                    pool.push(String::from_utf8(vec![a, d, c]).unwrap()); } } }
+                                for i in (1..pool.len()).rev() {
+                                    let j = (rng() % (i as u64 + 1)) as usize;
+                                    pool.swap(i, j);
+                                }
+                                let mut tags: Vec<String> = Vec::with_capacity(cand_idx.len());
+                                let mut texts: Vec<String> = Vec::with_capacity(cand_idx.len());
+                                for (slot, &ei) in cand_idx.iter().enumerate() {
+                                    let ep = &registry[ei];
+                                    tags.push(pool[slot % pool.len()].clone());
+                                    // detokenize the episode TEXT from its ep.tok sidecar (the registry
+                                    // Episode carries no display text). BOS (id 2) dropped; bytes joined.
+                                    let eptok: Vec<i32> = std::fs::read_to_string(
+                                        std::path::Path::new(&ep.dir).join("ep.tok"))
+                                        .ok().map(|c| c.lines().filter_map(|l| l.trim().parse::<i32>().ok()).collect())
+                                        .unwrap_or_default();
+                                    let mut bytes: Vec<u8> = Vec::new();
+                                    for &t in eptok.iter() {
+                                        if t == 2 { continue; } // skip forced BOS
+                                        bytes.extend_from_slice(app.tokenizer.decode_token(t));
+                                    }
+                                    let txt = String::from_utf8_lossy(&bytes).trim().to_string();
+                                    // fall back to the registry topic if ep.tok was unavailable.
+                                    texts.push(if txt.is_empty() { ep.topic.clone() } else { txt });
+                                }
+                                // (2) Build the judge prompt (the validated harness template) + apply
+                                // the gemma chat template via apply_template_ids (FINDING #1: the
+                                // messages path = instruct behavior; a raw prompt base-completes/echoes).
+                                let mut entries = String::new();
+                                for (tg, tx) in tags.iter().zip(texts.iter()) {
+                                    entries.push_str(&format!("[{tg}] {tx}\n"));
+                                }
+                                let judge_content = format!(
+                                    "You are a memory index. Each entry below has a TAG in [brackets]. \
+Read the QUESTION and reply with ONLY the tag of the single entry that directly \
+answers it. If no entry answers it, reply [NULL].\n\n{entries}\nQUESTION: {query}\n\
+Tag of the answer (or [NULL]):");
+                                let jmsgs = vec![Message {
+                                    role: "user".to_string(), content: judge_content }];
+                                match app.tokenizer.apply_template_ids(&jmsgs) {
+                                    Err(e) => tracing::warn!("B3-JUDGE: apply_template_ids failed: {e} -- clean prompt"),
+                                    Ok(jtoks) if jtoks.len() < 2 => {
+                                        tracing::warn!("B3-JUDGE: judge prompt too short ({}) -- clean prompt", jtoks.len());
+                                    }
+                                    Ok(jtoks) => {
+                                        // (3) NESTED judge inference. The resident cache currently holds the
+                                        // original prompt prefilled at [0, anchor)=head. We reset, run the
+                                        // judge token-by-token, parse the tag, then reset + re-prefill head
+                                        // to RESTORE the exact pre-branch cache state (no contamination of
+                                        // the final synthesis). reset() is the SWA-ring-safe reset (rewind
+                                        // past Jmax is the diagnosed ring bug).
+                                        let _ = unsafe { kv::reset(handle) };
+                                        let (jhead, jlast) = jtoks.split_at(jtoks.len() - 1);
+                                        let mut judge_ok = jhead.is_empty()
+                                            || unsafe { kv::prefill(handle, jhead) }.is_ok();
+                                        let mut reply = String::new();
+                                        if judge_ok {
+                                            // greedy: decode_step(jlast) gives the first generated logits.
+                                            let mut tok = jlast[0];
+                                            let turn_stops = app.tokenizer.turn_stop_ids();
+                                            for _ in 0..10u32 {
+                                                if unsafe { kv::decode_step(handle, tok, logits) }.is_err() {
+                                                    judge_ok = false; break;
+                                                }
+                                                // greedy argmax (temperature 0, penalty 1.0).
+                                                let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
+                                                for (i, &v) in logits.iter().enumerate() { if v > bv { bv = v; bi = i; } }
+                                                let g = bi as i32;
+                                                if app.tokenizer.eos_ids.contains(&g) || turn_stops.contains(&g) { break; }
+                                                reply.push_str(&String::from_utf8_lossy(app.tokenizer.decode_token(g)));
+                                                tok = g;
+                                            }
+                                        }
+                                        // RESTORE: reset + re-prefill the original prompt head so the cache
+                                        // is byte-identical to its pre-branch state for synthesis.
+                                        let _ = unsafe { kv::reset(handle) };
+                                        if !head.is_empty() {
+                                            if let Err(e) = unsafe { kv::prefill(handle, head) } {
+                                                tracing::error!("B3-JUDGE: FATAL re-prefill(head) failed: {e}");
+                                            }
+                                        }
+                                        // (4) Parse the tag (FINDING #3: copy-able TAG, never an ordinal).
+                                        // Longest matching tag wins; [NULL]/no-tag ⇒ reject. Match on the
+                                        // full "[M_X]" surface so M_A never substring-collides with M_AB.
+                                        let up = reply.to_uppercase();
+                                        let mut picked: Option<usize> = None;
+                                        let mut best_len = 0usize;
+                                        if !up.contains("NULL") {
+                                            for (slot, tg) in tags.iter().enumerate() {
+                                                let needle = format!("[{}]", tg);
+                                                if up.contains(&needle.to_uppercase()) && needle.len() > best_len {
+                                                    best_len = needle.len(); picked = Some(slot);
+                                                }
+                                            }
+                                            // tolerate a bare tag without brackets (model sometimes drops them)
+                                            if picked.is_none() {
+                                                for (slot, tg) in tags.iter().enumerate() {
+                                                    if up.contains(&tg.to_uppercase()) && tg.len() > best_len {
+                                                        best_len = tg.len(); picked = Some(slot);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        match picked {
+                                            None => tracing::info!(
+                                                "B3-JUDGE: [NULL] (reply={:?}) -> REJECT (clean prompt, foreign)", reply.trim()),
+                                            Some(slot) => {
+                                                let ep = &registry[cand_idx[slot]];
+                                                tracing::info!("B3-JUDGE: PICK [{}] '{}' (topic='{}') reply={:?} -> replay@M_target",
+                                                    tags[slot], ep.name, ep.topic, reply.trim());
+                                                // (5) Grounding: inject the chosen episode's lossless payload
+                                                // (M_target clamp via SP_REPLAY_MTARGET, same as SP_B3_WC).
+                                                if ep.npos > 0 && !ep.gk.is_empty() {
+                                                    match unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                                        Ok(()) => {
+                                                            recalled = Some((ep.name.clone(), 1000));
+                                                            // stash the injected text's salient nouns for the
+                                                            // post-synthesis grounding check (telemetry).
+                                                            judge_ground = Some((ep.name.clone(),
+                                                                texts[slot].clone()));
+                                                        }
+                                                        Err(e) => tracing::warn!(
+                                                            "B3-JUDGE: replay({}, {}) failed: {e} -- clean prompt", ep.dir, ep.npos),
+                                                    }
+                                                } else {
+                                                    tracing::warn!("B3-JUDGE: PICK '{}' has no replayable payload -- clean prompt", ep.name);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // B3-v9c THE DISPOSER (Stage-2 post-inject semantic verify-and-rewind).
                         // The q·K Stage-1 ranker (above) PROPOSES; the Disposer DISPOSES. For
                         // each candidate episode it SPECULATIVELY injects (M_target budget if set)
@@ -1313,6 +1496,8 @@ fn run_kvdecode_chat(
     let turn_stop_ids = tokenizer.turn_stop_ids();
     let mut next_token = sampler.sample(logits);
     sampler.observe(next_token);
+    // B3-JUDGE grounding: accumulate the synthesized answer for the post-hoc check.
+    let mut answer_text = String::new();
 
     'decode: for _ in 0..max_tokens {
         if (!tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token))
@@ -1326,6 +1511,7 @@ fn run_kvdecode_chat(
             PushResult::Emit(bytes) => {
                 if !bytes.is_empty() {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
+                    answer_text.push_str(&text);
                     let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
                         .unwrap_or_default();
                     if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
@@ -1366,9 +1552,38 @@ fn run_kvdecode_chat(
     let flushed = dec_buf.flush();
     if !flushed.is_empty() {
         let text = String::from_utf8_lossy(&flushed).into_owned();
+        answer_text.push_str(&text);
         let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
             .unwrap_or_default();
         let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+    }
+
+    // ── B3-JUDGE GROUNDING CHECK (CPU-side, telemetry) ──────────────────────────
+    // If the generative judge injected a memory, verify the synthesized answer
+    // actually USES the memory's salient nouns. If the model ignored the injected
+    // payload and answered parametrically, flag a parametric-hallucination (the
+    // discrete-substrate reject the operator specified). Telemetry-only: it does
+    // not alter the (already-streamed) answer; it surfaces the discrepancy in the
+    // daemon log so a wrong/ignored recall is auditable.
+    if let Some((ref ep_name, ref mem_text)) = judge_ground {
+        let ans_lc = answer_text.to_lowercase();
+        // salient tokens = the memory's words >=4 chars, minus common stopwords.
+        const STOP: &[&str] = &["the","and","for","that","with","this","from","are",
+            "was","were","authorizes","requires","access","code","recovery","using",
+            "your","you","have","will","when","which","what","into","over","each"];
+        let salient: Vec<String> = mem_text.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4)
+            .map(|w| w.to_lowercase())
+            .filter(|w| !STOP.contains(&w.as_str()))
+            .collect();
+        let n_salient = salient.len();
+        let n_used = salient.iter().filter(|w| ans_lc.contains(w.as_str())).count();
+        let grounded = n_salient == 0 || n_used > 0;
+        if grounded {
+            tracing::info!("B3-JUDGE grounding: OK '{}' used {}/{} salient mem tokens", ep_name, n_used, n_salient);
+        } else {
+            tracing::warn!("B3-JUDGE grounding: PARAMETRIC-HALLUCINATION FLAG '{}' -- answer used 0/{} salient mem tokens (model ignored injected memory)", ep_name, n_salient);
+        }
     }
 
     let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;
