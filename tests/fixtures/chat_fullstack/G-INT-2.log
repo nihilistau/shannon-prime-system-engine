@@ -1,0 +1,126 @@
+---
+type: gate-receipt
+title: G-INT-2 — LIVE Stage-2 teacher-forced causal-ablation recall gate (Phase B Step 3)
+description: Promotion of the offline SP_B3_DISPOSER=2 teacher-forced ablation oracle to the LIVE Stage-2 gatekeeper of chat recall (SP_INT2), over the bounded-N curated div working set, with the pre-registered novel-recall (>=80%) + foreign-reject (100%) gate. HONEST NEGATIVE: the gate is query-INDEPENDENT (each candidate self-ablates its OWN secret) so the absolute argmin-collapse picks a fixed episode for every query -> 0% novel-recall, 0% foreign-reject. Default-off = byte-identical null floor; build clean.
+tags: [integration, ppt-arm-lat, g-int-2, ablation-oracle, bounded-n, live-stage-2, honest-negative, query-independence, foreign-reject-fail]
+timestamp: 2026-06-20
+resource: tests/fixtures/chat_fullstack/G-INT-2.log
+sp_status: HONEST-NEGATIVE (built + run on the real 12B; gate FAILS the pre-registered thresholds for a diagnosed structural reason)
+sp_gate: G-INT-2 (>=80% novel-recall + 100% foreign-reject) -> FAIL: novel-recall 0/10 (0%), foreign-reject 0/10 (0%)
+sp_commit: (this change to tools/sp_daemon/src/routes.rs)
+sp_repro: _int2_launch.bat (SP_INT2=1 SP_INT2_W=91 SP_INT2_TAU=-8 SP_REPLAY_MTARGET=42, registry=_needle_corpus_div) -> python _int2_drive2.py
+---
+
+# G-INT-2 — LIVE STAGE-2 CAUSAL-ABLATION RECALL GATE (Phase B, Step 3)
+
+Build: `_disp_build.bat` -> DISP_BUILD_DONE_0, clean compile (cargo, target-wirecuda, only pre-existing warnings).
+Run: ONE daemon boot, gemma4-12b-b1.sp-model, SP_INT2=1 W=91 K=91 TAU=-8.0 M_target=42, registry=_needle_corpus_div (91 episodes: 90 div needles + ctrl_paris). temp=0, auto_recall=true, SP_B3_WC unset.
+Default-off (SP_INT2 unset) = the prior path untouched = byte-identical null floor.
+
+## PRE-REGISTERED GATE RESULT
+
+- NOVEL-RECALL (>=80% required): **0/10 = 0%**  -> **FAIL**
+- FOREIGN-REJECT (100% required, non-negotiable): **0/10 = 0%**  -> **FAIL** (every foreign query FALSE-ACCEPTED a needle)
+- VERDICT: **HONEST NEGATIVE** against >=80% / 100%.
+
+## MATCHED QUERIES (NOVEL-RECALL) — true episode collapses hard but is NEVER the argmin
+
+| query | true_ep | true_collapse | accepted_ep | accepted_dll | verdict | recall_pass |
+|---|---|---|---|---|---|---|
+| n_div_000 | ep_n_div_000 | -34.88 | ep_n_div_034 | -45.447 | ACCEPT | no |
+| n_div_009 | ep_n_div_009 | -36.70 | ep_n_div_034 | -49.973 | ACCEPT | no |
+| n_div_018 | ep_n_div_018 | -38.35 | ep_n_div_034 | -46.389 | ACCEPT | no |
+| n_div_027 | ep_n_div_027 | -33.78 | ep_n_div_033 | -46.963 | ACCEPT | no |
+| n_div_036 | ep_n_div_036 | -24.17 | ep_n_div_034 | -45.82 | ACCEPT | no |
+| n_div_045 | ep_n_div_045 | -37.81 | ep_n_div_034 | -45.755 | ACCEPT | no |
+| n_div_054 | ep_n_div_054 | -41.47 | ep_n_div_034 | -47.15 | ACCEPT | no |
+| n_div_063 | ep_n_div_063 | -29.35 | ep_n_div_034 | -43.339 | ACCEPT | no |
+| n_div_072 | ep_n_div_072 | -26.29 | ep_n_div_034 | -45.732 | ACCEPT | no |
+| n_div_089 | ep_n_div_089 | -32.67 | ep_n_div_034 | -47.919 | ACCEPT | no |
+
+Every matched query ACCEPTed (collapse << TAU=-8), but the accepted episode is a FIXED one
+(ep_n_div_034 9x, ep_n_div_033 1x), NOT the query's true needle. The true needle's own collapse
+(-24..-41) also clears -8, but is out-ranked by the steepest-self-collapse episode.
+
+## FOREIGN QUERIES (FOREIGN-REJECT) — must be 100% NULL; ALL false-ACCEPTed
+
+| query_tag | query | accepted_ep | accepted_dll | verdict | reject_pass |
+|---|---|---|---|---|---|
+| foreign_00 | What is the capital of France? | ep_n_div_034 | -49.069 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_01 | How do I bake sourdough bread? | ep_n_div_033 | -52.81 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_02 | What is machine learning? | ep_n_div_033 | -48.066 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_03 | Who wrote Pride and Prejudice? | ep_n_div_034 | -48.384 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_04 | How does photosynthesis work? | ep_n_div_033 | -48.884 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_05 | Explain the rules of chess. | ep_n_div_034 | -52.245 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_06 | Convert 100 Celsius to Fahrenheit. | ep_n_div_034 | -48.157 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_07 | What do mitochondria do? | ep_n_div_033 | -47.288 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_08 | Recommend a good pasta recipe. | ep_n_div_033 | -50.574 | ACCEPT | NO (FALSE ACCEPT) |
+| foreign_09 | What are the primary colours? | ep_n_div_033 | -49.888 | ACCEPT | NO (FALSE ACCEPT) |
+
+EVERY foreign query (incl 'What is the capital of France?') fired ep_n_div_034/033 at dll ~-48..-53,
+identical to the matched-query behavior. foreign_00 'What is the capital of France?' -> ACCEPT
+ep_n_div_034 dll=-49.069 is the canonical false-accept. FOREIGN-REJECT = 0/10 = 0%.
+
+## ROOT CAUSE (diagnosed, reproducible)
+
+The teacher-forced ablation is a PER-EPISODE SELF-DEPENDENCY oracle, NOT a per-query relevance gate.
+For each candidate it teacher-forces THAT candidate's OWN ep.secret and ablates THAT candidate's OWN
+source rows -> every novel needle self-collapses catastrophically (-24..-50) REGARDLESS of the live
+query, because deleting a needle's source rows always strands its own teacher-forced secret. The live
+query is in the cache but barely modulates the score (the secret, not the query, drives the decode).
+So argmin_j collapse_j picks the episode with the globally steepest self-collapse (the most code-dense
+secret, ep_n_div_034) for EVERY query, matched or foreign. The absolute TAU=-8 gate cannot discriminate:
+the true needle, a wrong needle, and a foreign-driven pick all clear -8 by ~25-40 nats.
+
+This is exactly the offline-labeler property (each ep self-tests with its own secret -> all collapse),
+which is a sound ADMISSION oracle (is this episode internally load-bearing?) but NOT a RECALL relevance
+signal (which episode does THIS query want?). Promoting it per-candidate over a shared live query does not
+introduce query-conditioning; the collapse remains query-independent. Confirmed by the matrix: across all
+10 matched queries the per-episode collapse vector is near-constant; the argmin is the same fixed episode.
+
+## WHAT THE LEARNED W_c HEAD HAS THAT THIS GATE LACKS
+
+The deployed SP_B3_WC head (G-CHAT-B3-WC-DIV2: 360/361 recall + 50/50 reject) scores relevance from the
+LIVE query-Q against each episode-K (logsumexp-mean) -> the score IS query-conditioned, so the argmax
+tracks the query. The ablation gate's collapse is NOT query-conditioned, so its argmin does not. The
+ablation oracle's correct role is the LABELER (it minted the div corpus labels) + a future ADMISSION gate
+on novel live episodes, NOT the live recall selector. The live selector remains the learned W_c head.
+
+## DELTA / SAFETY
+
+- routes.rs SP_INT2 branch extended (Step 3): bounded-N (last-W of registry u nightshift with resolvable
+  ep.secret+ep.tok; live-no-sidecar episodes SKIPPED, logged as the Phase-B extension), per-candidate
+  teacher-forced ablation reusing the SP_B3_DISPOSER=2 FFI sequence EXACTLY, argmin-collapse absolute gate
+  vs SP_INT2_TAU. ACCEPT -> one kv::replay into the live cache; NULL -> nothing (anchor-pristine).
+- Rewind-pristine HELD: per-candidate debug_assert(position==anchor) after each probe; net dpos delta 0;
+  Jmax=64 assert per candidate (npos+ng ~28-35 <= 64, no skips: probed=91 skipped=0 every turn).
+- int2_decided guard: when SP_INT2 renders a verdict, SP_B3_WC / SP_B3_DISPOSER / q.K fire branches are
+  skipped (no double-fire). SP_B3_WC + the offline disposer remain intact and default-off-equivalent.
+- Default-off (SP_INT2 unset) = byte-identical null floor (no new code path entered).
+
+## RAW VERDICT LINES (daemon log)
+
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-45.447 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-49.973 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-46.389 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-46.963 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-45.820 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-45.755 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-47.150 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-43.339 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-45.732 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-47.919 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-49.069 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-52.810 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-48.066 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-48.384 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-48.884 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-52.245 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_034' ΔLL=-48.157 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-47.288 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-50.574 < τ=-8.000 -> replay@M_target (live decode attends memory)
+    B-INT2 ACCEPT 'ep_n_div_033' ΔLL=-49.888 < τ=-8.000 -> replay@M_target (live decode attends memory)
+
+## SAMPLE STAGE-2 MATRIX (query n_div_000, W=91 probed=91 skipped=0 probe_steps=2865)
+
+    B-INT2 Stage-2 ablation (W=91 probed=91 skipped=0 probe_steps=2865): collapse=ΣΔLL (more-neg=load-bearing) [ep_n_div_000(C)(collapse=-34.88,ntgt=11) ep_n_div_001(C)(collapse=-33.99,ntgt=11) ep_n_div_002(C)(collapse=-40.30,ntgt=11) ep_n_div_003(C)(collapse=-35.51,ntgt=12) ep_n_div_004(C)(collapse=-32.33,ntgt=10) ep_n_div_005(C)(collapse=-36.64,ntgt=11) ep_n_div_006(C)(collapse=-35.64,ntgt=11) ep_n_div_007(C)(collapse=-32.78,ntgt=11) ep_n_div_008(C)(collapse=-32.54,ntgt=11) ep_n_div_009(C)(collapse=-34.34,ntgt=10) ep_n_div_010(C)(collapse=-34.75,ntgt=10) ep_n_div_011(C)(collapse=-34.05,ntgt=11) ep_n_div_012(C)(collapse=-34.60,ntgt=11) ep_n_div_013(C)(collapse=-32.23,ntgt=11) ep_n_div_014(C)(co ...

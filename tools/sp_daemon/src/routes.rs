@@ -737,6 +737,9 @@ fn run_kvdecode_chat(
     // separation — no guessing). Score reported either way (the foreign-reject leg
     // needs the below-TAU case visible). `recalled` holds (name, topm*1000 as u32).
     let mut recalled: Option<(String, u32)> = None;
+    // G-INT-2: when SP_INT2 Stage-2 has rendered an ACCEPT/NULL verdict, the legacy
+    // SP_B3_WC / SP_B3_DISPOSER / q·K fire branches MUST NOT double-fire on the same turn.
+    let mut int2_decided = false;
     if auto_recall && replay_dir.is_none() {
         if let Some(registry) = app.recall_registry.as_ref() {
             let npos_q = unsafe { kv::position(handle) }; // = head.len() after prefill
@@ -827,6 +830,155 @@ fn run_kvdecode_chat(
                                 }
                                 Err(e) => tracing::warn!("B-INT2 Stage-1: read_global_k(npos_q={}) failed: {e} -- cull skipped", npos_q),
                             }
+                            // ===== G-INT-2 STEP 3: STAGE-2 LIVE TEACHER-FORCED CAUSAL ABLATION GATE =====
+                            // Promote the offline disposer (SP_B3_DISPOSER==2) to the LIVE Stage-2
+                            // gatekeeper. Phase-A proved bounded-N makes the leaky C2 cull unnecessary,
+                            // so we DO NOT Hamming-cull on the hot path: ablate ALL W bounded candidates
+                            // directly. Candidate set = the last SP_INT2_W episodes of (curated registry
+                            // ∪ nightshift) that have a RESOLVABLE secret (ep.secret + ep.tok on disk);
+                            // live nightshift episodes lacking these are SKIPPED (the Phase-B extension).
+                            // Per candidate (reusing the disposer FFI sequence EXACTLY, in the live turn's
+                            // context — the query prompt is already in the cache at dpos==head.len()):
+                            //   replay E -> teacher-force ITS ep.secret -> rewind(ng) -> ablate src rows
+                            //   -> re-score -> rewind(ng+npos)  ⇒ collapse=ΣΔLL, dpos nets back to anchor.
+                            // best=argmin collapse; collapse < SP_INT2_TAU (default -8.0) ⇒ ACCEPT (one
+                            // replay into the live cache so the real decode attends the memory); else NULL
+                            // (cache nets to anchor, byte-identical to a no-recall turn). SP_INT2 unset =
+                            // this whole branch is skipped = byte-identical null floor.
+                            {
+                                let int2_tau: f32 = std::env::var("SP_INT2_TAU").ok()
+                                    .and_then(|s| s.parse().ok()).unwrap_or(-8.0);
+                                let lse = |z: &[f32]| -> f32 {
+                                    let m = z.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                    let mut s = 0.0f32; for &v in z { s += (v - m).exp(); } m + s.ln()
+                                };
+                                let anchor = unsafe { kv::position(handle) };
+                                // SWA-ring Jmax hazard: assert npos+ng <= Jmax per candidate (full-cache
+                                // served path is latent, but assert it — G-INT-3 ring turns it on).
+                                let jmax: i32 = std::env::var("SP_G4_KV_JMAX").ok()
+                                    .and_then(|s| s.parse().ok()).unwrap_or(64);
+                                // Bounded candidate union = curated registry ∪ last-W nightshift, then
+                                // keep only those with a resolvable secret. (We re-acquire the read lock;
+                                // the Stage-1 cull above already dropped its guard.)
+                                let ns_guard = app.nightshift.read().unwrap();
+                                let ns_len = ns_guard.len();
+                                let ns_skip = ns_len.saturating_sub(w_horizon);
+                                let cands: Vec<(bool, &recall::Episode)> = registry.iter()
+                                    .map(|e| (false, e))
+                                    .chain(ns_guard.iter().skip(ns_skip).map(|e| (true, e)))
+                                    .collect();
+                                let mut best_abl: Option<(usize, f32, String)> = None;
+                                let mut drows: Vec<String> = Vec::with_capacity(cands.len());
+                                let mut n_probed = 0usize;
+                                let mut n_skipped = 0usize;
+                                let mut probe_steps = 0usize;
+                                for (i, &(live, ep)) in cands.iter().enumerate() {
+                                    if ep.npos <= 0 || ep.gk.is_empty() { n_skipped += 1; continue; }
+                                    // Resolvable secret? ep.secret sidecar = teacher-force target;
+                                    // ep.tok = ablation source rows. SKIP candidates lacking either
+                                    // (live nightshift episodes without sidecars — Phase-B extension).
+                                    let secret_raw = std::fs::read_to_string(
+                                        std::path::Path::new(&ep.dir).join("ep.secret")).ok();
+                                    let eptok: Vec<i32> = std::fs::read_to_string(
+                                        std::path::Path::new(&ep.dir).join("ep.tok"))
+                                        .ok().map(|s| s.lines().filter_map(|l| l.trim().parse::<i32>().ok()).collect())
+                                        .unwrap_or_default();
+                                    let secret_ids: Vec<i32> = match secret_raw {
+                                        Some(s) => {
+                                            let s = s.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string();
+                                            let mut v = app.tokenizer.encode(&s).unwrap_or_default();
+                                            if v.first() == Some(&2) { v.remove(0); }
+                                            v
+                                        }
+                                        None => Vec::new(),
+                                    };
+                                    if secret_ids.is_empty() || eptok.is_empty() {
+                                        n_skipped += 1;
+                                        if live {
+                                            tracing::info!("B-INT2 Stage-2: SKIP '{}' (live, no resolvable secret/tok sidecar)", ep.name);
+                                        }
+                                        continue;
+                                    }
+                                    // Jmax assert (hazard §B.1): one candidate's uncommitted span = npos + ng.
+                                    let ng_max = secret_ids.len() as i32;
+                                    if ep.npos + ng_max > jmax {
+                                        tracing::warn!("B-INT2 Stage-2: '{}' npos({})+ng({}) > Jmax({}) -- raising SP_G4_KV_JMAX advised; skipping to preserve pristineness", ep.name, ep.npos, ng_max, jmax);
+                                        n_skipped += 1; continue;
+                                    }
+                                    n_probed += 1;
+                                    // Leg 1: inject E, teacher-force the KNOWN secret, record lp_E.
+                                    if unsafe { kv::replay(handle, &ep.dir, ep.npos, false) }.is_err() { continue; }
+                                    let mut gen: Vec<i32> = Vec::new();
+                                    let mut lpe: Vec<f32> = Vec::new();
+                                    let mut tok = last[0];
+                                    for &s in &secret_ids {
+                                        if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                        lpe.push(logits[s as usize] - lse(logits)); gen.push(s); tok = s;
+                                    }
+                                    let ng = gen.len();
+                                    probe_steps += ng + ep.npos as usize;
+                                    let _ = unsafe { kv::rewind(handle, ng as i32) };   // undo payload, keep E
+                                    if ng == 0 {
+                                        drows.push(format!("{}(collapse=nan)", ep.name));
+                                        let _ = unsafe { kv::rewind(handle, ep.npos) };   // shear E -> back to anchor
+                                        debug_assert_eq!(unsafe { kv::position(handle) }, anchor);
+                                        continue;
+                                    }
+                                    // Source rows: episode positions whose token matches a secret token.
+                                    let mut targets: Vec<i32> = Vec::new();
+                                    let want: std::collections::HashSet<i32> = gen.iter().copied().collect();
+                                    for (p, &t) in eptok.iter().enumerate() {
+                                        if p >= ep.npos as usize { break; }
+                                        if want.contains(&t) { targets.push(p as i32); }
+                                    }
+                                    if targets.len() > 12 { targets.truncate(12); }
+                                    // Leg 2: ablate src rows, teacher-force the SAME secret, record lp_abl.
+                                    let _ = unsafe { kv::ablate(handle, anchor, &targets) };
+                                    let mut lpa: Vec<f32> = Vec::with_capacity(ng);
+                                    let mut tok = last[0];
+                                    for i2 in 0..ng {
+                                        if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                        lpa.push(logits[gen[i2] as usize] - lse(logits)); tok = gen[i2];
+                                    }
+                                    let _ = unsafe { kv::rewind(handle, lpa.len() as i32 + ep.npos) };   // clear payload + episode (restores ablated rows)
+                                    // CRITICAL (Phase-A §B): net dpos delta per candidate == 0.
+                                    debug_assert_eq!(unsafe { kv::position(handle) }, anchor,
+                                        "B-INT2 Stage-2: candidate '{}' did not rewind to anchor", ep.name);
+                                    let n = lpe.len().min(lpa.len());
+                                    let mut collapse = 0.0f32;
+                                    for j in 0..n { collapse += lpa[j] - lpe[j]; }
+                                    drows.push(format!("{}{}(collapse={:.2},ntgt={})", ep.name, if live { "(L)" } else { "(C)" }, collapse, targets.len()));
+                                    let better = match best_abl { None => true, Some((_, b, _)) => collapse < b };
+                                    if better { best_abl = Some((i, collapse, ep.name.clone())); }
+                                }
+                                tracing::info!(
+                                    "B-INT2 Stage-2 ablation (W={} probed={} skipped={} probe_steps={}): collapse=ΣΔLL (more-neg=load-bearing) [{}] TAU={:.3}",
+                                    w_horizon, n_probed, n_skipped, probe_steps, drows.join(" "), int2_tau);
+                                // The absolute thermodynamic gate: best=argmin collapse.
+                                match best_abl {
+                                    Some((idx, collapse, name)) if collapse < int2_tau => {
+                                        let ep = cands[idx].1;
+                                        // Final dpos MUST be at anchor before the accept replay.
+                                        debug_assert_eq!(unsafe { kv::position(handle) }, anchor);
+                                        match unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
+                                            Ok(_) => {
+                                                tracing::info!("B-INT2 ACCEPT '{}' ΔLL={:.3} < τ={:.3} -> replay@M_target (live decode attends memory)", name, collapse, int2_tau);
+                                                recalled = Some((name.clone(), ((-collapse).max(0.0) * 1000.0) as u32));
+                                            }
+                                            Err(e) => tracing::warn!("B-INT2 ACCEPT '{}': replay({}, {}) failed: {e} -- proceeding clean", name, ep.dir, ep.npos),
+                                        }
+                                        int2_decided = true;
+                                    }
+                                    Some((_, collapse, name)) => {
+                                        tracing::info!("B-INT2 NULL (best '{}' ΔLL={:.3} >= τ={:.3}) -> clean prompt (null floor)", name, collapse, int2_tau);
+                                        int2_decided = true;
+                                    }
+                                    None => {
+                                        tracing::info!("B-INT2 NULL (no resolvable candidate in W={}) -> clean prompt (null floor)", w_horizon);
+                                        int2_decided = true;
+                                    }
+                                }
+                            }
                         }
                         // ===== B3-WC DEPLOY: learned W_c head, logsumexp-mean + (E+1) NULL argmax =====
                         // SP_B3_WC=<wc_deploy.bin> => the autonomous instance selector decides recall.
@@ -834,7 +986,7 @@ fn run_kvdecode_chat(
                         // append the s0 NULL slot, argmax over [episodes, NULL]. Episode wins => replay it
                         // (M_target/SP_REPLAY_MTARGET=42 clamps injection mass); NULL wins => clean prompt.
                         // Default-off (env unset) = null floor; run WITHOUT SP_B3_DISPOSER/SP_B3_TAU_QK.
-                        if let Some(wcp) = std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) {
+                        if let Some(wcp) = (if int2_decided { None } else { std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()) }) {
                             match recall::load_wc(&wcp) {
                                 Some(head) => {
                                     // B4 NIGHTSHIFT: score the static curated registry AND a snapshot of
@@ -899,8 +1051,8 @@ fn run_kvdecode_chat(
                         // The M_target=42 budget is the safety floor: a wrong FIRE stumbles
                         // (sub-dominant), it does not hijack. Default-off ⇒ falls through to the
                         // existing q·K fire (null floor).
-                        let disp_mode = std::env::var("SP_B3_DISPOSER").ok()
-                            .and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0);
+                        let disp_mode = if int2_decided { 0 } else { std::env::var("SP_B3_DISPOSER").ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0) };
                         if disp_mode == 2 {
                             // B3-v10 ABLATION GATE (the Thermodynamic Knockout). Per candidate: inject E,
                             // greedily decode the 8-tok payload, then memset-zero the episode positions
@@ -1089,7 +1241,7 @@ fn run_kvdecode_chat(
                                     }
                                 }
                             }
-                        } else if let Some((idx, score)) = best {
+                        } else if let Some((idx, score)) = (if int2_decided { None } else { best }) {
                             let ep = &registry[idx];
                             let fire = score >= tau_qk && ep.npos > 0 && !ep.gk.is_empty();
                             tracing::info!(
