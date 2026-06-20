@@ -37,6 +37,7 @@
 #include "sp/forward_dispatch.h"      /* sp_matmul / sp_embed_row / sp_as_f32 / sp_kernels_read_env */
 #include "sp/model.h"                 /* qwen3_model + sp_arch_t + SP_ARCH_GEMMA3 / SP_ARCH_QWEN3 + gguf_tensor */
 #include <stdint.h>
+#include <stdlib.h>              /* malloc/free + _putenv_s */
 
 extern void sp_set_error(const char *msg);
 
@@ -154,6 +155,60 @@ extern int gemma4_kv_read_global_k(const sp_g4_kv *s, float *out, int npos);
  * back; the cache is unchanged for the caller's subsequent replay + decode. Returns
  * the number of global layers written (>0), or -1. */
 extern int gemma4_kv_read_global_q(sp_g4_kv *s, int token, float *out);
+
+/* ── B4 NIGHTSHIFT Option-2 PROVENANCE FIX — batched-forward episode capture ──
+ *
+ * The curator built ep.k/ep.v/ep.mf via the BATCHED one-shot forward
+ * `gemma4_decode_cuda` (cuda_forward.cu) with SP_XBAR_RECALL_WRITE pointing at
+ * the episode dir (writer ~cuda_forward.cu:2642). The W_c head trained on THAT
+ * provenance. The previous NIGHTSHIFT capture used a per-token
+ * gemma4_kv_prefill + read_global_k (scratch session), which evolves the gemma4
+ * AltUp/PLE residual differently => structurally-divergent K => live episodes
+ * super-attract => foreign-reject fails. This entry captures a live episode
+ * through the SAME batched path so the on-disk ep.k is byte-compatible with the
+ * curated registry, and the deployed W_c head works with ZERO retraining.
+ *
+ *   qm_opaque : the session's borrowed qwen3_model* (const void*).
+ *   tokens    : the raw episode token ids (no chat template — match the curator).
+ *   n         : token count.
+ *   out_dir   : the episode dir to write ep.k/ep.v/ep.mf into (must exist).
+ *
+ * gemma4_decode_cuda allocates its OWN scratch cache and reuses the model's
+ * cached device weights, so this adds NO 9GB reload — just a small per-call
+ * forward. n_gen=0 => forward-only over seq[0..n). We set SP_XBAR_RECALL_WRITE
+ * tightly around the one call and UNSET it immediately after (the capture is
+ * serialized under the daemon's kvdecode Mutex; the chat path uses g4_kv_step,
+ * not gemma4_decode_cuda, so there is no concurrent reader of the env). Returns
+ * gemma4_decode_cuda's rc (0 on success). */
+extern int gemma4_decode_cuda(const qwen3_model *m, int32_t *seq,
+                              int n_prompt, int n_gen, int eos_id);
+
+int sp_daemon_cuda_kvcapture_batched(const void *qm_opaque, const int32_t *tokens,
+                                     int n, const char *out_dir) {
+    const qwen3_model *qm = (const qwen3_model *)qm_opaque;
+    if (!qm || !tokens || n <= 0 || !out_dir) {
+        sp_set_error("cuda kvcapture_batched: bad args");
+        return -1;
+    }
+    /* gemma4_decode_cuda wants a MUTABLE int32_t* seq; copy the const input. */
+    int32_t *seq = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    if (!seq) { sp_set_error("cuda kvcapture_batched: seq OOM"); return -1; }
+    for (int i = 0; i < n; i++) seq[i] = tokens[i];
+
+    /* Point the curator's WRITE path at out_dir, run the batched forward, then
+     * unset tightly. _putenv_s is the Windows env setter (this is the host CUDA
+     * build); empty value clears the var. */
+    _putenv_s("SP_XBAR_RECALL_WRITE", out_dir);
+    int rc = gemma4_decode_cuda(qm, seq, n, /*n_gen*/0, /*eos*/1);
+    _putenv_s("SP_XBAR_RECALL_WRITE", "");
+
+    free(seq);
+    /* gemma4_decode_cuda returns the valid token count `n` (= n_prompt for
+     * n_gen=0) on SUCCESS and -1 on error (cuda_forward.cu: `int rc=-1, n=n_prompt;`
+     * then `rc = n`). Normalize to 0=success / -1=failure so the Rust caller's
+     * `rc == 0` check is correct (a non-negative count is NOT a failure). */
+    return (rc < 0) ? -1 : 0;
+}
 
 /* open(qm, pmax) -> sp_g4_kv* (as void*). NULL on failure (sp_last_error set by
  * gemma4_kv_open). pmax = max resident position budget. Requires the model to

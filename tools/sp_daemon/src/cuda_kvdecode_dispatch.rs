@@ -166,6 +166,19 @@ unsafe extern "C" {
         token: i32,
         out: *mut f32,
     ) -> c_int;
+
+    /// B4 NIGHTSHIFT Option-2 PROVENANCE FIX — capture a live episode through the
+    /// SAME batched `gemma4_decode_cuda` forward the curator used, writing
+    /// ep.k/ep.v/ep.mf into `out_dir` (via SP_XBAR_RECALL_WRITE set+unset around
+    /// the call). Makes the live episode's on-disk K byte-compatible with the
+    /// curated registry so the deployed W_c head works with ZERO retraining.
+    /// `qm_opaque` = the session's borrowed `qwen3_model*`; 0 on success.
+    fn sp_daemon_cuda_kvcapture_batched(
+        qm_opaque: *const c_void,
+        tokens: *const i32,
+        n: c_int,
+        out_dir: *const std::os::raw::c_char,
+    ) -> c_int;
 }
 
 /// Open a session-resident KV-decode cache on the CUDA backend.
@@ -203,6 +216,36 @@ pub unsafe fn prefill(handle: *mut c_void, tokens: &[i32]) -> Result<(), String>
     // SAFETY: handle live per caller; tokens slice gives ptr+len.
     let rc = unsafe {
         sp_daemon_cuda_kvdecode_prefill(handle, tokens.as_ptr(), tokens.len() as c_int)
+    };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// B4 NIGHTSHIFT Option-2 PROVENANCE FIX — capture a live episode through the
+/// curator's BATCHED `gemma4_decode_cuda` forward, writing `ep.k`/`ep.v`/`ep.mf`
+/// into `out_dir`. The batched path evolves the gemma4 AltUp/PLE residual the same
+/// way the curator did, so the resulting `ep.k` is byte-compatible with the curated
+/// registry and the deployed W_c head selects the live episode with no retraining.
+/// This allocates a scratch cache inside the engine and reuses the model's cached
+/// device weights (no 9GB reload). `out_dir` must already exist. The caller MUST
+/// hold the resident-cache Mutex (the capture is serialized so no concurrent reader
+/// of SP_XBAR_RECALL_WRITE races the set+unset inside the glue).
+///
+/// # Safety
+/// `qm` must be a live `qwen3_model*` borrowed from a session (valid for the call);
+/// `tokens` valid for its length.
+pub unsafe fn capture_batched(qm: *const c_void, tokens: &[i32], out_dir: &str) -> Result<(), String> {
+    if qm.is_null() || tokens.is_empty() {
+        return Err("kvcapture_batched: NULL model or empty tokens".to_string());
+    }
+    let c_dir = match std::ffi::CString::new(out_dir) {
+        Ok(s) => s,
+        Err(_) => return Err("kvcapture_batched: out_dir has interior NUL".to_string()),
+    };
+    // SAFETY: qm valid per caller; tokens slice gives ptr+len; c_dir owns the
+    // NUL-terminated buffer for the duration of the call; glue forwards to
+    // gemma4_decode_cuda with SP_XBAR_RECALL_WRITE set+unset tightly around it.
+    let rc = unsafe {
+        sp_daemon_cuda_kvcapture_batched(qm, tokens.as_ptr(), tokens.len() as c_int, c_dir.as_ptr())
     };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }

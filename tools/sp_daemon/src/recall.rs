@@ -262,7 +262,7 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
 /// `read_global_q`/`gemma4_kv_read_global_k` layout so a live query and the stored
 /// memory are directly comparable. ep.k is raw little-endian f32 `[NL][P][HD]` (the
 /// curator's `loadK`: P = filesize / (NL*HD)). Returns (packed_global_K, n_global).
-fn load_episode_global_k(dir: &str, npos: i32) -> Option<(Vec<f32>, usize)> {
+pub fn load_episode_global_k(dir: &str, npos: i32) -> Option<(Vec<f32>, usize)> {
     let path = Path::new(dir).join("ep.k");
     let bytes = std::fs::read(&path).ok()?;
     if bytes.len() % 4 != 0 { return None; }

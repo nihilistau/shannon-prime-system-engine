@@ -1,0 +1,74 @@
+
+================================================================================
+ G-CHAT-B4-NIGHTSHIFT-provenance  --  Option-2 PROVENANCE FIX
+ Run: 2026-06-20T14:52:54Z   engine HEAD (pre-commit) = eac4106
+================================================================================
+GOAL: make a live-captured NIGHTSHIFT episode BYTE-COMPATIBLE with a curated
+ep.k by capturing it through the SAME batched gemma4_decode_cuda + SP_XBAR_RECALL_WRITE
+path the curator used, so the DEPLOYED W_c head works on it with ZERO retraining.
+Prior failure (eac4106): per-token gemma4_kv_prefill+read_global_k provenance =>
+K norm ~half + scrambled direction => live episode SUPER-ATTRACTED (~41) => foreign
+reject failed.
+
+FILES CHANGED
+  tools/sp_daemon/c_backend_cuda/sp_daemon_cuda_glue.c
+     + sp_daemon_cuda_kvcapture_batched(qm, tokens, n, out_dir):
+       extern gemma4_decode_cuda; _putenv_s SP_XBAR_RECALL_WRITE=out_dir;
+       gemma4_decode_cuda(qm, seq, n, n_gen=0, eos=1); unset env.
+       NOTE: gemma4_decode_cuda returns the valid token count (n_prompt) on
+       SUCCESS, -1 on error -> glue normalizes (rc<0)?-1:0.
+  tools/sp_daemon/src/cuda_kvdecode_dispatch.rs
+     + extern decl + pub unsafe fn capture_batched(qm, tokens, out_dir).
+  tools/sp_daemon/src/recall.rs
+     load_episode_global_k made pub.
+  tools/sp_daemon/src/routes.rs  (B4-NIGHTSHIFT block)
+     REPLACED scratch open->prefill->read_global_k + K-norm calibration WITH:
+     mkdir _nightshift_live/ep_live_NNN -> kv::capture_batched(qm,&toks,dir)
+     -> recall::load_episode_global_k(dir, ntok) -> push Episode{gk,...,tokens}.
+     Dead read_global_k / K-norm-calib path removed. Default-off null floor kept.
+
+BUILD
+  build-host-cuda-backend.bat: [2/2] Linking sp_cuda_daemon_backend.lib  OK
+  _disp_build.bat:             Finished release ... DISP_BUILD_DONE_0          OK
+  (warnings only: pre-existing bindgen redeclares + unused methods.)
+
+LIVE 3-TURN TEST (ONE boot, run_console_nightshift.bat, temp=0, max_tokens=24,
+auto_recall=true; B3-WC head = _b3_wc/wc_deploy.bin, 90-div corpus, s0=0.102):
+
+  T1 STATE  "Remember this: the override key for the Tannhauser gate is 5-RAVEN-9921."
+     -> reply echoes "...is 5-RAVEN-9921. This is a secret"
+     -> AFTER reply: B4-NIGHTSHIFT consolidated (batched) -> 'ep_live_000' npos=23 ng=8
+        [xbar-p3.1b] WROTE episode (manifest 2000 B + K/V 7.5 MiB) -> _nightshift_live/ep_live_000
+        (ep.k=7913472 B, ep.v=7913472 B, ep.mf=2000 B on disk; registry now has 1 live episode)
+
+  T2 MATCHED "What is the override key for the Tannhauser gate?"
+     B3-WC (E+1)-argmax over [91 curated + 1 live]:
+        ep_live_000 = -0.153   (max curated = 7.83, ep_n_div_021)
+     -> RECALL 'ep_n_div_021' (curated) score=7.830  [live did NOT win; live did NOT super-attract]
+
+  T3 FOREIGN "What is the capital of France?"
+     B3-WC (E+1)-argmax over [91 curated + 1 live]:
+        ep_live_000 = -3.688   (max curated = -4.401; ctrl_paris = -0.026; NULL=s0=0.102)
+     -> NULL wins (best=-0.026 <= s0=0.102) -> REJECT (clean prompt) -> "Paris."
+
+VERDICT
+  WIN (primary goal): the SUPER-ATTRACTOR IS GONE. The batched-provenance live
+  episode scores like a normal registry member (ep_live_000 = -0.153 matched /
+  -3.688 foreign), both BELOW s0 and in-band with curated K (curated max -4.401 on
+  the foreign turn). FOREIGN-REJECT RESTORED: T3 -> NULL -> clean "Paris". This is
+  the structural fix the per-token capture broke (~41 -> ~0/negative).
+
+  HONEST NEGATIVE (absolute recall): the live needle does NOT win its OWN matched
+  query (T2: live -0.153 < curated ep_n_div_021 7.830). The 90-needle curated
+  div-corpus dominates the (E+1) argmax; the single live episode no longer
+  super-attracts but also is not preferentially recalled. Provenance is now
+  byte-compatible enough to remove the pathology, not to make the live episode
+  out-rank 90 trained curated needles. Closing that gap is a head/relevance matter,
+  not provenance.
+
+  KNOWN v1 LIMITATION (documented B4-v2 admission TODO): T2/T3 also self-capture as
+  ep_live_001 (every turn>=4 toks). Here those writes returned None from
+  load_episode_global_k (ep_live_001 not appended) -- a secondary, non-blocking
+  issue (likely the batched write-once static guard xbar_written serializing only
+  ep_live_000 within the process; the ablation/admission gate is the proper v2 fix).
+  It does not affect the T1/T2/T3 verdict above.

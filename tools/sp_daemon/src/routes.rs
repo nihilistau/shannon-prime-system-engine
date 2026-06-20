@@ -1215,105 +1215,65 @@ fn run_kvdecode_chat(
                         if qm.is_null() {
                             tracing::warn!("B4-NIGHTSHIFT: sp_session_qwen3_model NULL — capture skipped");
                         } else {
-                            // (c) scratch session: open → prefill(toks)@dpos=0 → read global-K → close.
-                            // SAFETY: qm valid (session held above); we hold the resident-cache Mutex
-                            // so no concurrent device decode; scratch handle closed on every path.
-                            let cap: Result<(Vec<f32>, usize), String> = (|| unsafe {
-                                let sh = kv::open(qm, ntok as i32)?;
-                                if let Err(e) = kv::prefill(sh, &toks) { kv::close(sh); return Err(e); }
-                                let hd = sp_daemon::recall::HD;
-                                let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD;
-                                let mut gk = vec![0f32; n_global * ntok * hd];
-                                let ng = match kv::read_global_k(sh, &mut gk, ntok as i32) {
-                                    Ok(n) => n as usize,
-                                    Err(e) => { kv::close(sh); return Err(e); }
-                                };
-                                kv::close(sh);
-                                gk.truncate(ng * ntok * hd);
-                                Ok((gk, ng))
-                            })();
-                            match cap {
-                                Ok((mut gk, ng)) => {
-                                    // ── B4-NIGHTSHIFT: capture-time K-norm CALIBRATION ──────────────
-                                    // The live gk from `kv::read_global_k` (scratch session) has a
-                                    // systematically larger per-vector magnitude than the curated gk the
-                                    // W_c head trained on (`ep.k` via load_episode_global_k). `wc_score`
-                                    // is logsumexp-over-positions then mean-over-heads of W_c-projected
-                                    // q·K, so a uniformly larger K inflates the score independent of
-                                    // direction => live episodes become K-norm super-attractors that win
-                                    // even on foreign queries. Rescale the live gk so its mean per-vector
-                                    // L2 norm matches the curated/trained distribution. gk layout is
-                                    // [ng][npos][HD], HD=512 contiguous f32 per vector.
-                                    {
-                                        let hd = sp_daemon::recall::HD;
-                                        // mean per-vector L2 norm of the LIVE gk.
-                                        let live_nvec = if hd > 0 { gk.len() / hd } else { 0 };
-                                        let live_mean_norm: f32 = if live_nvec > 0 {
-                                            let mut acc = 0.0f64;
-                                            for v in gk.chunks_exact(hd) {
-                                                let mut s = 0.0f64;
-                                                for &x in v { s += (x as f64) * (x as f64); }
-                                                acc += s.sqrt();
-                                            }
-                                            (acc / live_nvec as f64) as f32
-                                        } else { 0.0 };
-                                        // mean per-vector L2 norm of the CURATED registry gk (the trained
-                                        // distribution), accumulated across all curated episodes.
-                                        let cur_ref: Option<f32> = app.recall_registry.as_ref().and_then(|reg| {
-                                            let mut acc = 0.0f64;
-                                            let mut cnt: usize = 0;
-                                            for ep in reg.iter() {
-                                                if ep.gk_ng == 0 || ep.gk.is_empty() { continue; }
-                                                for v in ep.gk.chunks_exact(hd) {
-                                                    let mut s = 0.0f64;
-                                                    for &x in v { s += (x as f64) * (x as f64); }
-                                                    acc += s.sqrt();
-                                                    cnt += 1;
-                                                }
-                                            }
-                                            if cnt > 0 { Some((acc / cnt as f64) as f32) } else { None }
-                                        });
-                                        match cur_ref {
-                                            Some(cur_mean_norm)
-                                                if live_mean_norm.is_finite()
-                                                    && cur_mean_norm.is_finite()
-                                                    && live_mean_norm > 0.0 =>
-                                            {
-                                                let scale = cur_mean_norm / live_mean_norm;
-                                                for x in gk.iter_mut() { *x *= scale; }
+                            // (c) Option-2 PROVENANCE FIX: capture through the SAME batched
+                            // `gemma4_decode_cuda` forward the curator used. It writes
+                            // ep.k/ep.v/ep.mf into a temp episode dir under the engine, so the live
+                            // episode's K is BYTE-COMPATIBLE with the curated registry and the deployed
+                            // W_c head selects it with ZERO retraining (no scratch per-token prefill,
+                            // no K-norm calibration). gemma4_decode_cuda reads SP_XBAR_SWA_RING /
+                            // SP_XBAR_SWA_W / SP_BYTEEXACT — NONE of which the nightshift launcher sets
+                            // (it sets SP_DAEMON_KVDECODE_RING_W, a different var), so this runs in the
+                            // curator's clean full-cache float config and matches the curated ep.k. We
+                            // hold the resident-cache Mutex (`guard`/`handle`) for the whole capture, so
+                            // the SP_XBAR_RECALL_WRITE set+unset inside the glue is serialized.
+                            let idx = { app.nightshift.read().unwrap().len() };
+                            let engine_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .parent().and_then(|p| p.parent())
+                                .unwrap_or_else(|| std::path::Path::new("."));
+                            let dir = engine_root
+                                .join("_nightshift_live")
+                                .join(format!("ep_live_{:03}", idx));
+                            let dir_str = dir.to_string_lossy().to_string();
+                            if let Err(e) = std::fs::create_dir_all(&dir) {
+                                tracing::warn!("B4-NIGHTSHIFT: mkdir {dir_str} failed: {e} — no episode appended");
+                            } else {
+                                // SAFETY: qm valid (session held above); we hold the resident-cache
+                                // Mutex so no concurrent device forward / SP_XBAR_RECALL_WRITE env race.
+                                let cap_rc = unsafe { kv::capture_batched(qm, &toks, &dir_str) };
+                                match cap_rc {
+                                    Err(e) => tracing::warn!("B4-NIGHTSHIFT: batched capture failed: {e} — no episode appended"),
+                                    Ok(()) => {
+                                        // Load the just-written ep.k as global-K with the SAME extractor
+                                        // the curated registry uses (byte-compatible by construction).
+                                        match sp_daemon::recall::load_episode_global_k(&dir_str, ntok as i32) {
+                                            None => tracing::warn!(
+                                                "B4-NIGHTSHIFT: load_episode_global_k('{dir_str}') -> None — no episode appended"),
+                                            Some((gk, ng)) => {
+                                                let mut ns = app.nightshift.write().unwrap();
+                                                let idx = ns.len();
+                                                let topic: String = text.chars().take(40).collect();
+                                                // tokens: Some(toks) so the recall side still injects via
+                                                // kv::inject_tokens (unchanged); ep.k/ep.v/ep.mf now also
+                                                // exist on disk at `dir` if a future path prefers kv::replay.
+                                                ns.push(sp_daemon::recall::Episode {
+                                                    name: format!("ep_live_{:03}", idx),
+                                                    dir: dir_str.clone(),
+                                                    npos: ntok as i32,
+                                                    topic,
+                                                    sig: [0u64; 4],
+                                                    gk,
+                                                    gk_ng: ng,
+                                                    tokens: Some(toks),
+                                                });
+                                                let total = ns.len();
                                                 tracing::info!(
-                                                    "B4-NIGHTSHIFT: K-norm calib live={:.3} curated={:.3} scale={:.4}",
-                                                    live_mean_norm, cur_mean_norm, scale
-                                                );
-                                            }
-                                            _ => {
-                                                tracing::info!(
-                                                    "B4-NIGHTSHIFT: K-norm calib no curated ref — skip calib (live={:.3})",
-                                                    live_mean_norm
+                                                    "B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_{:03}' npos={} ng={} — registry now has {} live episode(s)",
+                                                    idx, ntok, ng, total
                                                 );
                                             }
                                         }
                                     }
-                                    let mut ns = app.nightshift.write().unwrap();
-                                    let idx = ns.len();
-                                    let topic: String = text.chars().take(40).collect();
-                                    ns.push(sp_daemon::recall::Episode {
-                                        name: format!("ep_live_{:03}", idx),
-                                        dir: String::new(),
-                                        npos: ntok as i32,
-                                        topic,
-                                        sig: [0u64; 4],
-                                        gk,
-                                        gk_ng: ng,
-                                        tokens: Some(toks),
-                                    });
-                                    let total = ns.len();
-                                    tracing::info!(
-                                        "B4-NIGHTSHIFT: consolidated turn -> 'ep_live_{:03}' (npos={}, ng={}) — registry now has {} live episode(s)",
-                                        idx, ntok, ng, total
-                                    );
                                 }
-                                Err(e) => tracing::warn!("B4-NIGHTSHIFT: capture failed: {e} — no episode appended"),
                             }
                         }
                     }
