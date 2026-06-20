@@ -1,0 +1,48 @@
+# G-DG-N1 ? DiffusionGemma native port, N1a LOADER portion (loads + prints geometry; NO forward).
+# Gate: sp_model_load + sp_model_to_diffusion_gemma on diffusiongemma-26B-A4B.sp-model (arch_id=9),
+#       map gemma4 backbone + MoE experts + diffusion tensors with NO missing-tensor/shape error.
+# Repro: env-cuda shell -> cmake . in build-cuda -> ninja test_diffgemma_load -> tests\test_diffgemma_load.exe
+# Files: lib/shannon-prime-system/core/session/sp_model_bridge.c (sp_model_to_diffusion_gemma),
+#        include/{sp,sp_engine}/model.h (SP_ARCH_DIFFUSION_GEMMA + config/layer/model fields),
+#        include/{sp,sp_engine}/sp_model.h (decl), tests/test_diffgemma_load.c, tests/CMakeLists.txt.
+# Date: 2026-06-21
+# RESULT: GREEN ? 26/26 checks, exit 0.
+# ---------------------------------------------------------------------------
+    model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+    tok  =C:/sp_models/diffusiongemma-26B-A4B.sp-tokenizer
+
+    === DiffusionGemma resolved geometry ===
+    arch_id            = 9
+    n_layers           = 30
+    n_embd (hidden)    = 2816
+    n_ff (dense MLP)   = 2112
+    n_head / n_head_kv = 16 / 2  (GLOBAL geom)
+    head_dim           = 512
+    n_vocab            = 262144
+    SWA  hd/nh/nkv     = 256 / 16 / 8  rope_base_swa=10000
+    swa_window         = 1024  swa_period=6
+    rope_freq_base     = 1e+06  rms_eps=1e-06
+    g4_n_embd_per_layer= 0  (0 = NO AltUp/PLE)
+    g4_n_kv_from_start = 30  logit_softcap=30  tied=1
+    canvas_length      = 256
+    MoE n_expert       = 128  n_expert_used=8  n_ff_exp=704
+
+    === sample tensor shapes ===
+    token_embd                   ndims=2 dims=[2816,262144]
+    blk.0.attn_q                 ndims=2 dims=[2816,4096]
+    blk.0.ffn_gate_up_exps       ndims=3 dims=[2816,1408,128]
+    blk.0.ffn_down_exps          ndims=3 dims=[704,2816,128]
+    blk.0.ffn_gate_inp (router)  ndims=2 dims=[2816,128]
+    blk.0.enc_out_scale          ndims=1 dims=[1]
+    blk.0.pre_ffw_norm_2         ndims=1 dims=[2816]
+    self_cond_gate               ndims=2 dims=[2816,2112]
+    self_cond_pre_norm           ndims=1 dims=[2816]
+    rope_freqs                   ndims=1 dims=[256]
+
+    attn_v: present=25 absent=5 (V-less global layers)
+
+    G-DG-N1 (N1a LOADER): DiffusionGemma loaded clean, no missing tensor.
+[T_DG_N1A_LOAD] PASS
+---- checks=26 fails=0 ----
+GATE_EXIT=0
+

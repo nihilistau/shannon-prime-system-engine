@@ -174,6 +174,7 @@ const void            *sp_model_tokenizer_blob(const sp_model *m, uint64_t *size
 struct qwen3_model;
 struct qwen3_model *sp_model_to_qwen3(const sp_model *m);
 struct qwen3_model *sp_model_to_qwen25(const sp_model *m);
+struct qwen3_model *sp_model_to_diffusion_gemma(const sp_model *m);  /* diffusion-gemma: gemma4 backbone + MoE FFN */
 
 #ifdef __cplusplus
 }

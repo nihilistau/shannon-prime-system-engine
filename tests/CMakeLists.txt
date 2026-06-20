@@ -384,6 +384,21 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
         target_compile_options(test_gemma4_ppl PRIVATE -Wall -Wextra)
     endif()
     add_test(NAME M_GEMMA4 COMMAND test_gemma4_ppl)
+
+    # ── G-DG-N1 (N1a LOADER): DiffusionGemma .sp-model (arch_id 9) -> runnable
+    # qwen3_model via sp_model_to_diffusion_gemma. Pure load + geometry print (NO
+    # forward — N1b is blocked on a CUDA MoE backbone). Links the CORE lane
+    # (sp_session: sp_model_load + sp_model_to_diffusion_gemma), no CUDA needed.
+    # Skips cleanly when the 26B model is absent. Override SP_DG_SPMODEL/SP_DG_SPTOK. ──
+    add_executable(test_diffgemma_load test_diffgemma_load.c)
+    target_link_libraries(test_diffgemma_load PRIVATE sp_session)
+    if(MSVC)
+        target_compile_options(test_diffgemma_load PRIVATE /W4)
+    else()
+        target_compile_options(test_diffgemma_load PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME G_DG_N1 COMMAND test_diffgemma_load)
+    set_tests_properties(G_DG_N1 PROPERTIES TIMEOUT 600)
     # n_ctx + oracle PPL match the methodology-matched g4_ppl_oracle (single
     # window, BOS re-anchor, score [n_ctx/2, n_ctx-1)) on wiki.tiny @ n_ctx=84.
     # Gate 8% = the inherent f32-SP-vs-Q8-native-oracle precision floor (only Q8

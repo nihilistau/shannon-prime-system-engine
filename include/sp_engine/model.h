@@ -27,7 +27,8 @@ extern "C" {
  * fields the core added) made sizeof(qwen3_config) differ, shifting token_embd's
  * offset -> the backend read it as NULL -> segfault in embed_row. Synced to core. */
 typedef enum { SP_ARCH_QWEN3 = 0, SP_ARCH_GEMMA3 = 1, SP_ARCH_QWEN25 = 2, SP_ARCH_GEMMA4 = 3,
-               SP_ARCH_QWEN36 = 4 /* qwen35moe: Gated DeltaNet + MoE hybrid */ } sp_arch_t;
+               SP_ARCH_QWEN36 = 4, /* qwen35moe: Gated DeltaNet + MoE hybrid */
+               SP_ARCH_DIFFUSION_GEMMA = 5 /* diffusion-gemma: gemma4 backbone + MoE FFN + block masked-diffusion */ } sp_arch_t;
 
 typedef struct {
     sp_arch_t arch;           /* SP_ARCH_QWEN3 (default) | SP_ARCH_GEMMA3 */
@@ -69,6 +70,11 @@ typedef struct {
     uint32_t q36_rope_dim;        /* rope.dimension_count (64)          */
     float    q36_rope_base;       /* rope.freq_base (1e7)               */
     uint32_t q36_nextn_predict_layers; /* trailing NextN/MTP blocks loaded-not-run (1) */
+    /* ── DiffusionGemma (SP_ARCH_DIFFUSION_GEMMA) extras; zero on other archs. The
+     * gemma4 backbone geometry (n_head/n_head_kv/head_dim/g4_*) + the MoE expert
+     * counts (q36_n_expert/q36_n_expert_used/q36_n_ff_exp, REUSED) carry the model;
+     * dg_canvas_length is the [prompt|canvas] split point (the diffusion surface). ── */
+    uint32_t dg_canvas_length;       /* diffusion.canvas_length (256) */
 } qwen3_config;
 
 typedef struct {
@@ -112,6 +118,18 @@ typedef struct {
     const gguf_tensor *ffn_gate_shexp;/* [n_embd, n_ff_shexp]                      */
     const gguf_tensor *ffn_up_shexp;  /* [n_embd, n_ff_shexp]                      */
     const gguf_tensor *ffn_down_shexp;/* [n_ff_shexp, n_embd]                      */
+    /* ── DiffusionGemma (SP_ARCH_DIFFUSION_GEMMA); NULL/0 on other archs. The MoE
+     * FFN reuses ffn_gate_inp (router) + ffn_down_exps (down) above; the gate+up are
+     * FUSED into ONE rank-3 tensor (n_ff_exp*2 = 1408 second dim). The dense shared
+     * MLP reuses ffn_gate/ffn_up/ffn_down. Extra F32 scale sidecars + the MoE
+     * sandwich norms + the per-layer encoder output scalar live here. ── */
+    const gguf_tensor *ffn_gate_up_exps;  /* [n_embd, n_ff_exp*2, n_expert] rank-3 (FUSED gate|up) */
+    const gguf_tensor *ffn_gate_inp_scale;/* router per-input scale [n_embd]                       */
+    const gguf_tensor *ffn_down_exps_scale;/* per-expert down scale [n_expert]                     */
+    const gguf_tensor *enc_out_scale;     /* per-layer encoder output scalar [1]                   */
+    const gguf_tensor *pre_ffw_norm_2;    /* MoE-branch pre-norm  [n_embd]                         */
+    const gguf_tensor *post_ffw_norm_1;   /* MoE-branch post-norm [n_embd]                         */
+    const gguf_tensor *post_ffw_norm_2;   /* MoE-branch post-norm [n_embd]                         */
 } qwen3_layer;
 
 struct sp_arena;   /* sp_engine/arena.h — packed-weight arena (Phase 1a) */
@@ -134,6 +152,11 @@ typedef struct qwen3_model {
     const gguf_tensor  *per_layer_model_proj; /* [n_embd, n_embd_per_layer*n_layers]  */
     const gguf_tensor  *per_layer_proj_norm;  /* [n_embd_per_layer]                   */
     const gguf_tensor  *rope_freqs;           /* [head_dim/2] global-layer freq factors */
+    /* ── DiffusionGemma model-global self-conditioning block; NULL on other archs ── */
+    const gguf_tensor  *self_cond_pre_norm;   /* [n_embd]                             */
+    const gguf_tensor  *self_cond_gate;       /* [n_embd, n_ff]                       */
+    const gguf_tensor  *self_cond_up;         /* [n_embd, n_ff]                       */
+    const gguf_tensor  *self_cond_down;       /* [n_ff, n_embd]                       */
 } qwen3_model;
 
 /* Open the GGUF, read the qwen3 config, and bind every weight. Returns NULL on
