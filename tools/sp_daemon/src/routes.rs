@@ -1298,6 +1298,65 @@ fn run_kvdecode_chat(
 // A2: `fn argmax` moved to `crate::sampler::argmax` (the temp=0 null floor);
 // both decode loops now go through `Sampler::sample`.
 
+// ── POST /v1/capture (B4 SCALE-UP curator) ───────────────────────────────
+// Batch-capture an episode's ep.k/ep.v/ep.mf by running ONE curated forward on the
+// RESIDENT model (reuses loaded weights — no 9GB reload per needle). Tokenizes the
+// raw needle text EXACTLY as the B4 provenance fix does: KEEP the forced-BOS (id 2)
+// AND append a trailing "\n" before encoding — this is why live==curated (the head
+// scores ep.k identically). Calls kv::capture_batched under the kvdecode/session
+// lock. Default behaviour unchanged for all other endpoints. Returns {ok, npos} or
+// {error}. Used by tools/xbar_lsh/b4_capture_driver.py to populate a corpus in ONE
+// model load.
+#[derive(serde::Deserialize)]
+pub struct CaptureReq {
+    pub text: String,
+    pub out_dir: String,
+}
+
+pub async fn v1_capture(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CaptureReq>,
+) -> Response {
+    use sp_daemon::cuda_kvdecode_dispatch as kv;
+    let app = state.clone();
+    let text = req.text.trim().to_string();
+    let out_dir = req.out_dir.clone();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"empty text"}))).into_response();
+    }
+    // PROVENANCE: byte-match the curator's sp_tok_enc — BOS kept + trailing newline.
+    let text_nl = format!("{text}\n");
+    let toks = match app.tokenizer.encode(&text_nl) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(serde_json::json!({"error": format!("tokenize: {e}")}))).into_response(),
+    };
+    let ntok = toks.len();
+    if ntok < 4 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"too short","npos":ntok}))).into_response();
+    }
+    // Run the blocking CUDA capture on a blocking thread; hold the session lock for
+    // the qm borrow + the whole capture (serializes SP_XBAR_RECALL_WRITE env inside).
+    let res = task::spawn_blocking(move || -> Result<usize, String> {
+        let qm = {
+            let mut sguard = app.session.lock().unwrap();
+            let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+            (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
+        };
+        if qm.is_null() {
+            return Err("sp_session_qwen3_model NULL".to_string());
+        }
+        std::fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir {out_dir}: {e}"))?;
+        unsafe { kv::capture_batched(qm, &toks, &out_dir) }?;
+        Ok(ntok)
+    }).await;
+    match res {
+        Ok(Ok(npos)) => (StatusCode::OK, Json(serde_json::json!({"ok":true,"npos":npos}))).into_response(),
+        Ok(Err(e))   => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":e}))).into_response(),
+        Err(e)       => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("join: {e}")}))).into_response(),
+    }
+}
+
 // ── /v1/abort/{id} ────────────────────────────────────────────────────────
 
 pub async fn v1_abort(

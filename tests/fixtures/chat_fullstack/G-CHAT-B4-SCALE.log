@@ -1,0 +1,160 @@
+================================================================================
+G-CHAT-B4-SCALE  --  B4 corpus SCALE-UP: break the open-set generalization wall?
+================================================================================
+Goal: the deployed W_c recall head memorizes its training needles -- holdout (unseen-
+needle) top-1 was 11.1% at 91 needles (G-CHAT-B4-HOLDOUT, ~2x chance), i.e. it
+INTERPOLATES among trained buckets rather than learning a transferable g(Q,K). This
+campaign scales the diverse corpus (de-risk at 300 FIRST), retrains with a STRICT
+held-out split, and measures whether holdout top-1 climbs off 11%. Receipts-first;
+honest negative if the slope is flat.
+
+DE-RISK GATE (set BEFORE the run): capture+train at 300 first; if 300 holdout top-1
+climbs MEANINGFULLY off 11% (>= ~25-30%, trending up) -> scale to 1000. If 300 stays
+~flat (~11-15%) -> STOP (projection-head capacity wall, not a data-scale problem;
+1000 won't fix it). Save the GPU hours.
+
+Machine: RTX 2060 12GB (sm_75), gemma4-12b-b1.sp-model, torch 2.6.0+cu124. All work
+LOCAL (no cloud).
+
+================================================================================
+STEP 1 -- VOCAB EXPANSION + MINT  (tools/xbar_lsh/mint_corpus_v2.py)
+--------------------------------------------------------------------------------
+Pools DEEPENED so N=1000 draws stay geometrically distinct (not mad-libs repeats):
+  _ADJ        25 -> 55     entity adjectives
+  _CORE       16 -> 37     entity cores  (=> entity pool 1980)
+  _SNOUN      16 -> 26     secret-noun slots
+  _CODEWORDS  28 -> 60     code words
+  _FACTS      ~51 -> 108   real contradiction facts  (+ compositional fact-overflow
+                           generator: _PLACES(30) x _FEATS(16) = 480 more distinct
+                           "real-fact-shaped" subjects, used only when n > ~108x3)
+  _ADJ2       15 -> 40     contradiction register adjectives
+  _SYLA/_SYLB 25/20 -> 54/42  invented-name syllable pools (huge composite space)
+  _DOMAINS    12 -> 24 ;   _QTY 8 -> 16     relational domains/quantities
+  carrier structures per archetype  4-5 -> 6-8  (state-secret-ONCE + secret-is-tail
+                           + unique-query-leading-subject guarantees PRESERVED)
+  _FOREIGN_POOL  ~50 -> 99  (NULL/reject class)
+
+MINT (300):  python tools/xbar_lsh/mint_corpus_v2.py --n 300 --out _needle_corpus_300
+                    --foreign 100 --paraphrases 3 --seed-tag s3
+  MINTED 300 diverse needles {code:100, contradiction:100, relational:100}
+         + 3 paraphrases + 100 foreign
+  DISTINCTNESS: unique_texts=300  unique_secrets=300  unique_subjects=300
+                unique_queries=300   (zero collisions -- verified)
+  (minter also verified to mint 1000 fully-distinct needles
+   {code:333, contradiction:333, relational:334}, unique 1000/1000 -- ready if needed)
+
+================================================================================
+STEP 2 -- FAST ONE-MODEL-LOAD CAPTURE  (new daemon endpoint)
+--------------------------------------------------------------------------------
+The per-needle curator reloads the 9GB model each needle = infeasible at scale.
+NEW endpoint POST /v1/capture {text, out_dir} added to the resident daemon
+(routes.rs::v1_capture + server.rs route; reuses the B4-provenance tokenizer:
+KEEP forced-BOS id 2 + append trailing "\n" -- the exact path that makes live==curated):
+it tokenizes and calls kv::capture_batched (FFI sp_daemon_cuda_kvcapture_batched,
+batched gemma4_decode_cuda on the LOADED weights) -> writes curator-identical
+ep.k/ep.v/ep.mf. One model load for the whole corpus.
+  Build: _disp_build.bat (cargo, wire_cuda_backend) -> DISP_BUILD_DONE_0 (C untouched).
+  Smoke: POST one needle -> {"ok":true,"npos":22}, ep.k/ep.v(7.57MB)/ep.mf written.
+  Driver: tools/xbar_lsh/b4_capture_driver.py POSTs every needle text -> ep dir,
+          records real npos into registry_npos.jsonl.
+  CAPTURE 300:  300/300 ok, 0 fail, 593s (~2.0s/ep) -- ONE model load. <<<
+  (vs per-needle reload at ~30-60s/load each = would have been hours.)
+
+================================================================================
+STEP 3 -- FEATURE DUMP + HOLDOUT TRAIN
+--------------------------------------------------------------------------------
+Feature dump (daemon rebooted with SP_RECALL_REGISTRY=registry_npos + SP_B3_QDUMP):
+  b3_make_dataset.py --live --manifest corpus_manifest --foreign --registry registry_npos
+  -> _b3_wc/b3_data_300.npz : 1300 query-Q [ng=8,GH=16,HD=512]  (1200 positive: 300
+     needles x (1 query + 3 paraphrases)  +  100 foreign)  x  300 episode-K [8,~21,512]
+  (one query POST per row, ~1.07 q/s -> ~20 min; daemon resident, no reload.)
+
+Trainer: tools/xbar_lsh/b3_train_wc_holdout_fast.py  -- VECTORIZED rewrite of
+  b3_train_wc_holdout.py (the unvectorized original loops 240 episodes in Python per
+  epoch -> stuck at ep0 after 130s @ 300 scale). The fast version STACKS all episodes
+  into one padded K[E,ng,Pmax,HD] tensor with a -inf position mask (logsumexp over only
+  real positions preserved EXACTLY -- ep0 ce=5.7908 byte-matches the slow version) and
+  chunks episodes (WC_EP_CHUNK=24) to bound the 2060's 12GB. RELEVANCE = logsumexp over
+  positions then mean over heads == recall.rs runtime (transfers to deploy). Objective =
+  InfoNCE over [train episodes + NULL=s0] + reject-margin hinge. STRICT split: held-out
+  needles excluded from loss AND from the train InfoNCE candidate set; foreign train NULL.
+
+================================================================================
+RESULTS  (300 needles, 600 epochs, seeded 80/20 split)
+--------------------------------------------------------------------------------
+  cmd: python tools/xbar_lsh/b3_train_wc_holdout_fast.py _b3_wc/b3_data_300.npz
+              --epochs 600 --split_seed {0,1}
+
+  SEED 0 (hold 60 of 300; train 240; train-q 1060, hold-q 240):
+    final ce=0.408 tau=0.105 s0=0.098
+    train-diagonal (argmax over ALL 300+NULL): 24/960 = 2.5%
+    HOLDOUT top-1 (argmax over ALL 300+NULL):  19/240 = 7.9%
+    foreign-reject (NULL wins): 93/100 = 93.0%
+    holdout true-rank: median 54.0 of 300 ; median 9.0 of the 60 holdout-only
+  SEED 1:
+    final ce=0.252 tau=0.108 s0=0.099
+    train-diagonal: 87/960 = 9.1%
+    HOLDOUT top-1:  14/240 = 5.8%
+    foreign-reject: 98/100 = 98.0%
+    holdout true-rank: median 71.5 of 300 ; median 11.0 of the 60 holdout-only
+
+  CLEAN HOLDOUT-ONLY top-1 (rank the true unseen needle among ONLY unseen needles --
+  removes the trained/untrained score-scale mixing; apples-to-apples vs baseline):
+    seed0: 19/240 = 7.9%  (chance 1.7%)
+    seed1: 14/240 = 5.8%  (chance 1.7%)
+
+================================================================================
+THE SLOPE  (HOLDOUT-ONLY top-1, the apples-to-apples generalization metric)
+--------------------------------------------------------------------------------
+   91 needles (G-CHAT-B4-HOLDOUT, re-verified 8/72): 11.1%   chance 5.6%  -> 2.0x chance
+  300 needles (this run, seed0/seed1):           7.9% / 5.8%  chance 1.7%  -> ~4x chance
+
+  ABSOLUTE holdout top-1 did NOT climb off 11% -- it DROPPED to ~6-8%.
+  (Relative-to-chance rose 2.0x -> ~4x ONLY because the haystack grew 18 -> 60; the
+   absolute true-rank among unseen needles got WORSE: median 4 of 18 -> 9-11 of 60.)
+
+ROOT-CAUSE DIAGNOSTIC (_b4_diag_scores.py, seed0 model):
+  mean per-episode logsumexp-mean score: trained eps 4.696 vs holdout eps 4.714 (~equal)
+  BUT max-column score: trained 6.418 vs holdout 7.974 -- a few UNTRAINED episodes are
+  universal SUPER-ATTRACTORS (high score for EVERY query regardless of relevance).
+  => 200/200 train queries have their true trained episode beaten by SOME holdout
+     episode. This is why train-diagonal collapsed to 2.5%: the full argmax is captured
+     by high-norm untrained K, not by relevance. The head learned to RANK WITHIN its
+     trained set, not a scale-calibrated, transferable g(Q,K).
+
+================================================================================
+VERDICT:  HONEST NEGATIVE -- CAPACITY / ARCHITECTURE WALL, not a data-scale wall.
+--------------------------------------------------------------------------------
+Per the pre-set de-risk gate: 300-needle holdout top-1 stayed ~flat-to-DOWN (5.8-7.9%
+vs 11.1% at 91), nowhere near the >=25-30% climb that would justify scaling to 1000.
+THEREFORE: STOPPED at 300. Did NOT capture/train 1000 (saved the GPU hours, per plan).
+Did NOT re-export int16 / did NOT redeploy (the head does not generalize -- deploying
+it as an instance selector on novel needles would fire wrong-but-trained memory).
+
+The r=32 logsumexp-mean projection head is fundamentally INTERPOLATIVE: it memorizes
+the trained needle buckets (train CE -> 0.25-0.41, it clearly separates the 240 trained
+episodes) but the learned metric does NOT transfer to unseen needles, and the per-
+episode score is not scale-calibrated (untrained episodes super-attract). More data does
+not fix a representation-capacity ceiling. Same boundary-thesis shape as the rest of the
+B3/B4 campaign: the closed-set 100%/foreign-reject win was MEMORIZATION, not a general
+relevance function.
+
+RECOMMENDED ARCHITECTURE LEVER (the real next move, NOT more corpus):
+  Replace the bilinear r=32 logsumexp-mean head with a higher-capacity, scale-calibrated
+  relevance model -- a CROSS-ENCODER over (query-Q, episode-K) (lets query tokens attend
+  to episode tokens, so relevance is computed not just ranked), or reuse the model's
+  NATIVE attention as the scorer (the teacher-forced ablation knockout already proves the
+  12B itself measures episodic dependency cleanly: novel -33.56 vs parametric -0.15).
+  The ablation oracle remains the labeler; the open question is the LIVE scorer's capacity,
+  not the corpus size.
+
+================================================================================
+DURABLE ASSETS (committed):
+  tools/xbar_lsh/mint_corpus_v2.py          -- deepened pools (scales to 1000 distinct)
+  tools/sp_daemon/src/routes.rs (v1_capture)+ server.rs route -- /v1/capture one-load curator
+  tools/xbar_lsh/b4_capture_driver.py       -- batch-capture driver (resume-safe)
+  tools/xbar_lsh/b3_train_wc_holdout_fast.py-- vectorized holdout trainer (math-identical,
+                                               ~6 min vs hours; reusable at any scale)
+Receipts/data left untracked (multi-GB): _needle_corpus_300/, _b3_wc/b3_data_300.npz,
+  lsh_Wc_f32_holdout300_s{0,1}.npz, _b4_*.log.
+================================================================================
