@@ -1,0 +1,73 @@
+=== G-CHAT-B4-NIGHTSHIFT-calib — capture-time K-norm calibration (HONEST NEGATIVE) ===
+date: 2026-06-20
+engine: built on top of 54bd612 (B4 NIGHTSHIFT v1); change = routes.rs B4 capture-time K-norm calib
+flag: SP_B4_NIGHTSHIFT=1 (default-off = byte-identical null floor); recall = SP_B3_WC wc_deploy.bin
+model: gemma4-12b-b1.sp-model (real 12B), temp=0, auto_recall=true, max_tokens=24, ONE daemon boot
+build: _disp_build.bat -> DISP_BUILD_DONE_0 (clean, warnings only)
+registry: _needle_corpus_div/registry.jsonl = 91 curated episodes (90 div needles + ep_ctrl_paris)
+
+THE FIX UNDER TEST
+  In routes.rs B4 capture block, after kv::read_global_k fills the live gk and before
+  pushing the Episode: scale the live gk in place so its mean per-vector L2 norm
+  (over ng*npos HD=512 vectors) matches the curated registry's mean per-vector L2 norm.
+  Logged as "B4-NIGHTSHIFT: K-norm calib live=.. curated=.. scale=..".
+
+MEASURED K-NORMS (constant every capture)
+  live_mean_norm   = 1.415
+  curated_mean_norm= 2.774
+  scale            = 2.774 / 1.415 = 1.9605
+
+  >>> DIAGNOSIS WAS INVERTED. The live gk per-vector norm (1.415) is SMALLER than the
+      curated/trained distribution (2.774), NOT larger. The calibration therefore scales
+      the live K UP by 1.96x, not down. (The "live K-norm super-attractor / live > curated"
+      framing in the bug ticket does not hold against the substrate.)
+
+3-TURN VERDICT (ONE daemon boot, in order)
+  Turn 1 STATE  "Remember this: the override key for the Tannhauser gate is 5-RAVEN-9921."
+    -> B4: K-norm calib live=1.415 curated=2.774 scale=1.9605
+    -> B4: consolidated turn -> ep_live_000 (npos=23, ng=8); registry now has 1 live episode
+    -> B3-WC (this turn, 91 curated + 0 live): RECALL ep_n_div_067 (curated) score=21.483 > s0=0.102
+       (state turn matches a curated needle pre-existing B3 behavior; not the item under test)
+
+  Turn 2 MATCHED "What is the override key for the Tannhauser gate?"
+    -> B3-WC (91 curated + 1 live): ep_live_000 = 41.294; all curated in [-6.97, +7.83]; ctrl_paris +0.294
+    -> RECALL 'ep_live_000' (LIVE/nightshift) score=41.294 > s0=0.102 -> inject_tokens(n=23)   [CORRECT: matched live wins]
+
+  Turn 3 FOREIGN "What is the capital of France?"
+    -> B3-WC (91 curated + 2 live): ep_live_000 = 42.588; ep_live_001 = 25.931;
+       ALL 91 curated NEGATIVE [-23.54, -4.40]; ctrl_paris -0.026
+    -> RECALL 'ep_live_000' (LIVE/nightshift) score=42.588 > s0=0.102 -> inject_tokens(n=23)   [WRONG: foreign should NULL/clean-Paris]
+
+VERDICT: HONEST NEGATIVE — calibration did NOT restore foreign-reject.
+  T1 PASS (consolidated + calib logged). T2 PASS (matched live wins, 41.294). T3 FAIL
+  (foreign still recalls ep_live_000 at 42.588 — even slightly HIGHER than the matched T2).
+
+WHY THE UNIFORM K-NORM SCALE DOES NOT FIX IT (structural, not a magnitude offset)
+  1. The live wc_score is ~constant (T2 41.294 vs T3 42.588) and query-INDEPENDENT, and the
+     foreign turn scores HIGHER. A single global K magnitude is NOT what makes the live
+     episode super-attract — so matching the mean per-vector norm cannot remove it.
+  2. wc_score = logsumexp-over-positions then mean-over-heads of the W_c-projected q.K.
+     logsumexp_p(s * x_p) != s * logsumexp_p(x_p): a constant K scale s sharpens/saturates the
+     position-softmax, it does NOT linearly rescale the score, so "match the mean norm" has no
+     clean lever on the final number.
+  3. The whole curated panel swings turn-to-turn (T2 all positive ~[-7,+8]; T3 all NEGATIVE
+     ~[-24,-4]) while the live episode stays pinned ~+42. The live K from the scratch-prefill
+     read_global_k has a different per-position / per-head DISTRIBUTIONAL SHAPE than the
+     curated ep.k the head trained on (the live capture lacks the curator pipeline's
+     normalization / position structure). Mean-per-vector-norm is too coarse a statistic to
+     reconcile that shape difference.
+
+DEEPER CAUSE / NEXT LEVERS (for B4-v2, not shipped here)
+  - The live/curated K difference is STRUCTURAL (per-position + per-head distribution), not a
+    uniform scale. Candidate fixes: (a) per-(head)-channel or per-position norm calibration,
+    or whitening to the curated K covariance, rather than one scalar; (b) capture the live
+    episode through the SAME curator path (test_gemma4_ppl_cuda SP_XBAR_RECALL_WRITE /
+    sp_xbar_manifest_serialize) that produced the trained ep.k, so provenance matches by
+    construction; (c) the documented B4-v2 admission gate (teacher-forced ablation oracle,
+    collapse < TAU=-8) would reject the foreign capture's recall regardless of score shape.
+  - Also confirmed: T2 and T3 each self-capture as ep_live_001 / ep_live_002 (no admission
+    gate yet) — the documented B4-v2 TODO.
+
+CHANGE STATUS: the calibration code is correct + default-off-safe (SP_B4_NIGHTSHIFT unset =
+  null floor, no calib runs). It is RETAINED as an instrumented, honest-negative lever (the
+  measured live<curated inversion + the constant-score / shape diagnosis are the receipt).

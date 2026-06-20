@@ -1233,7 +1233,67 @@ fn run_kvdecode_chat(
                                 Ok((gk, ng))
                             })();
                             match cap {
-                                Ok((gk, ng)) => {
+                                Ok((mut gk, ng)) => {
+                                    // ── B4-NIGHTSHIFT: capture-time K-norm CALIBRATION ──────────────
+                                    // The live gk from `kv::read_global_k` (scratch session) has a
+                                    // systematically larger per-vector magnitude than the curated gk the
+                                    // W_c head trained on (`ep.k` via load_episode_global_k). `wc_score`
+                                    // is logsumexp-over-positions then mean-over-heads of W_c-projected
+                                    // q·K, so a uniformly larger K inflates the score independent of
+                                    // direction => live episodes become K-norm super-attractors that win
+                                    // even on foreign queries. Rescale the live gk so its mean per-vector
+                                    // L2 norm matches the curated/trained distribution. gk layout is
+                                    // [ng][npos][HD], HD=512 contiguous f32 per vector.
+                                    {
+                                        let hd = sp_daemon::recall::HD;
+                                        // mean per-vector L2 norm of the LIVE gk.
+                                        let live_nvec = if hd > 0 { gk.len() / hd } else { 0 };
+                                        let live_mean_norm: f32 = if live_nvec > 0 {
+                                            let mut acc = 0.0f64;
+                                            for v in gk.chunks_exact(hd) {
+                                                let mut s = 0.0f64;
+                                                for &x in v { s += (x as f64) * (x as f64); }
+                                                acc += s.sqrt();
+                                            }
+                                            (acc / live_nvec as f64) as f32
+                                        } else { 0.0 };
+                                        // mean per-vector L2 norm of the CURATED registry gk (the trained
+                                        // distribution), accumulated across all curated episodes.
+                                        let cur_ref: Option<f32> = app.recall_registry.as_ref().and_then(|reg| {
+                                            let mut acc = 0.0f64;
+                                            let mut cnt: usize = 0;
+                                            for ep in reg.iter() {
+                                                if ep.gk_ng == 0 || ep.gk.is_empty() { continue; }
+                                                for v in ep.gk.chunks_exact(hd) {
+                                                    let mut s = 0.0f64;
+                                                    for &x in v { s += (x as f64) * (x as f64); }
+                                                    acc += s.sqrt();
+                                                    cnt += 1;
+                                                }
+                                            }
+                                            if cnt > 0 { Some((acc / cnt as f64) as f32) } else { None }
+                                        });
+                                        match cur_ref {
+                                            Some(cur_mean_norm)
+                                                if live_mean_norm.is_finite()
+                                                    && cur_mean_norm.is_finite()
+                                                    && live_mean_norm > 0.0 =>
+                                            {
+                                                let scale = cur_mean_norm / live_mean_norm;
+                                                for x in gk.iter_mut() { *x *= scale; }
+                                                tracing::info!(
+                                                    "B4-NIGHTSHIFT: K-norm calib live={:.3} curated={:.3} scale={:.4}",
+                                                    live_mean_norm, cur_mean_norm, scale
+                                                );
+                                            }
+                                            _ => {
+                                                tracing::info!(
+                                                    "B4-NIGHTSHIFT: K-norm calib no curated ref — skip calib (live={:.3})",
+                                                    live_mean_norm
+                                                );
+                                            }
+                                        }
+                                    }
                                     let mut ns = app.nightshift.write().unwrap();
                                     let idx = ns.len();
                                     let topic: String = text.chars().take(40).collect();
