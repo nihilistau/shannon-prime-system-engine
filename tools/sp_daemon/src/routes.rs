@@ -782,6 +782,52 @@ fn run_kvdecode_chat(
                             match best { Some((_, b)) if key <= b => {}, _ => best = Some((i, key)) }
                         }
                         tracing::info!("B3-v2 q·K relevance (npos_q={} topm={}): [{}]", npos_q, topm, rows.join(" "));
+                        // ===== G-INT-2 STEP 2: STAGE-1 C2-HAMMING CULL (TELEMETRY-ONLY, SP_INT2=1) =====
+                        // Compute the LIVE query's C2 sig from the prompt's global-K, build the bounded
+                        // candidate set (curated registry ∪ most-recent-W nightshift episodes), rank by
+                        // Hamming distance (R_BITS - agree) ascending, take top-K, and LOG the survivors.
+                        // This branch is READ-ONLY on the cache (read_global_k is non-mutating) and does
+                        // NOT inject / replay / decide NULL — it is the Stage-1 cull plumbing only. Default-off
+                        // (env unset) = byte-identical null floor; leaves SP_B3_WC behavior intact when unset.
+                        if std::env::var("SP_INT2").ok().as_deref() == Some("1") {
+                            let w_horizon: usize = std::env::var("SP_INT2_W").ok()
+                                .and_then(|s| s.parse().ok()).unwrap_or(20);   // KAIROS most-recent-W stub
+                            let k_keep: usize = std::env::var("SP_INT2_K").ok()
+                                .and_then(|s| s.parse().ok()).unwrap_or(20);   // cull budget
+                            // (1) live query C2 sig from the prompt's global-K [n_global][npos_q][HD].
+                            let mut qkbuf = vec![0.0f32; n_global * recall::HD * (npos_q as usize)];
+                            match unsafe { kv::read_global_k(handle, &mut qkbuf, npos_q) } {
+                                Ok(ngk) => {
+                                    let qsig = app.recall_proj.signature(&qkbuf, ngk as usize, npos_q as usize);
+                                    // (2) bounded candidate union = curated registry ∪ last-W nightshift.
+                                    let ns_guard = app.nightshift.read().unwrap();
+                                    let ns_len = ns_guard.len();
+                                    let ns_skip = ns_len.saturating_sub(w_horizon);   // keep most-recent W live
+                                    let n_static = registry.len();
+                                    let cands: Vec<(bool, &recall::Episode)> = registry.iter()
+                                        .map(|e| (false, e))
+                                        .chain(ns_guard.iter().skip(ns_skip).map(|e| (true, e)))
+                                        .collect();
+                                    // (3) Hamming distance (R_BITS - agree); sort ascending; top-K.
+                                    let mut scored: Vec<(usize, u32, bool, &recall::Episode)> = cands.iter()
+                                        .enumerate()
+                                        .map(|(i, &(live, ep))| {
+                                            let d = recall::R_BITS as u32 - recall::agree(&qsig, &ep.sig);
+                                            (i, d, live, ep)
+                                        })
+                                        .collect();
+                                    scored.sort_by_key(|&(_, d, _, _)| d);
+                                    let survivors: Vec<String> = scored.iter().take(k_keep)
+                                        .map(|&(_, d, live, ep)| format!("{}{}:{}", ep.name, if live { "(L)" } else { "(C)" }, d))
+                                        .collect();
+                                    tracing::info!(
+                                        "B-INT2 Stage-1 cull (W={} K={}): qsig={:016x}.. cull_pool={} (curated={} live={}) survivors=[{}]",
+                                        w_horizon, k_keep, qsig[0], cands.len(), n_static, ns_len.min(w_horizon),
+                                        survivors.join(", "));
+                                }
+                                Err(e) => tracing::warn!("B-INT2 Stage-1: read_global_k(npos_q={}) failed: {e} -- cull skipped", npos_q),
+                            }
+                        }
                         // ===== B3-WC DEPLOY: learned W_c head, logsumexp-mean + (E+1) NULL argmax =====
                         // SP_B3_WC=<wc_deploy.bin> => the autonomous instance selector decides recall.
                         // Score every episode by wc lse-mean (the metric the head trained on, int16-exact),
@@ -1258,8 +1304,21 @@ fn run_kvdecode_chat(
                                             None => tracing::warn!(
                                                 "B4-NIGHTSHIFT: load_episode_global_k('{dir_str}') -> None — no episode appended"),
                                             Some((gk, ng)) => {
+                                                // G-INT-2 STEP 1: compute the LIVE episode's REAL C2 sig
+                                                // from its just-captured global-K, using the SAME Projection
+                                                // (SEED/R_BITS/HD) the curated registry sigs come from, so live
+                                                // and curated sigs are directly Hamming-comparable. npos here is
+                                                // the actual position count packed in gk (load_episode_global_k
+                                                // clamps ntok to the captured Pmax), derived from gk.len().
+                                                let npos_sig = if ng > 0 { gk.len() / (ng * sp_daemon::recall::HD) } else { 0 };
+                                                let sig = if npos_sig > 0 {
+                                                    app.recall_proj.signature(&gk, ng, npos_sig)
+                                                } else { [0u64; 4] };
                                                 let mut ns = app.nightshift.write().unwrap();
                                                 let idx = ns.len();
+                                                tracing::info!(
+                                                    "B4-NIGHTSHIFT: ep_live_{:03} C2-sig = {:016x}... (was [0;4])",
+                                                    idx, sig[0]);
                                                 let topic: String = text.chars().take(40).collect();
                                                 // tokens: Some(toks) so the recall side still injects via
                                                 // kv::inject_tokens (unchanged); ep.k/ep.v/ep.mf now also
@@ -1269,7 +1328,7 @@ fn run_kvdecode_chat(
                                                     dir: dir_str.clone(),
                                                     npos: ntok as i32,
                                                     topic,
-                                                    sig: [0u64; 4],
+                                                    sig,
                                                     gk,
                                                     gk_ng: ng,
                                                     tokens: Some(toks),

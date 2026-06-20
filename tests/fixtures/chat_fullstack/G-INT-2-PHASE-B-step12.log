@@ -1,0 +1,68 @@
+================================================================================
+G-INT-2 PHASE B — Steps 1 & 2 (live receipt, real Gemma-4-12B)
+================================================================================
+Engine: D:\F\shannon-prime-repos\shannon-prime-system-engine
+Build:  _disp_build.bat (cargo --release --features wire_cuda_backend
+        --target-dir target-wirecuda --bin sp-daemon) => DISP_BUILD_DONE_0
+        (Finished `release` profile in 26.01s; 8 pre-existing warnings, 0 errors)
+Launch: _run_int2.bat = run_console_nightshift.bat + SP_INT2=1, SP_INT2_W=20,
+        SP_INT2_K=<20 first pass, 200 for the full-rank pass>.
+        Registry = _needle_corpus_div\registry.jsonl (90 div needles + ctrl_paris).
+        SP_B4_NIGHTSHIFT=1, SP_B3_WC=_b3_wc\wc_deploy.bin, SP_REPLAY_MTARGET=42.
+Test (temp=0, auto_recall=true):
+  T1 STATE: "Remember this: the override key for the Tannhauser gate is 5-RAVEN-9921."
+  T2 QUERY: "What is the override key for the Tannhauser gate?"
+
+--------------------------------------------------------------------------------
+STEP 1 — REAL C2 sig at NIGHTSHIFT capture (was [0u64;4]) — CONFIRMED ON METAL
+--------------------------------------------------------------------------------
+The B4-NIGHTSHIFT capture now computes the live episode's C2 sig from its
+just-captured global-K via app.recall_proj.signature(&gk, ng, npos) — the SAME
+Projection (SEED/R_BITS/HD) the curated registry sigs come from, so live and
+curated sigs are directly Hamming-comparable.
+
+  B4-NIGHTSHIFT: ep_live_000 C2-sig = d260c97ffefdefd3... (was [0;4])
+  B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_000' npos=25 ng=8 — registry now has 1 live episode(s)
+
+=> nonzero sig (was [0;4]). Run-to-run stable (d260c97ffefdefd3 identical across
+   both daemon launches for the same Tannhauser text).
+
+--------------------------------------------------------------------------------
+STEP 2 — Stage-1 Hamming cull (TELEMETRY-ONLY, SP_INT2=1) — CONFIRMED ON METAL
+--------------------------------------------------------------------------------
+New SP_INT2=1 branch in the v1_chat recall window (after the query global-Q read,
+before the real decode). Reads the live query's global-K, computes its C2 sig,
+builds the bounded union (curated registry ∪ most-recent-W nightshift), ranks by
+Hamming distance (R_BITS - agree) ascending, takes top-K, logs the survivors.
+READ-ONLY on the cache (read_global_k non-mutating); NO inject / NO replay / NO
+NULL decision — cull plumbing only. Default-off (env unset) = byte-identical null
+floor; SP_B3_WC behavior intact when SP_INT2 unset.
+
+T2 cull (the query turn; the live Tannhauser episode is now in the union, live=1):
+
+  B-INT2 Stage-1 cull (W=20 K=200): qsig=fb0db1151634e19a.. cull_pool=92 (curated=91 live=1) survivors=[ep_n_div_067(C):109, ep_n_div_031(C):112, ep_n_div_045(C):112, ep_n_div_011(C):113, ep_n_div_061(C):113, ep_n_div_025(C):114, ep_n_div_068(C):114, ep_n_div_073(C):114, ep_n_div_049(C):115, ep_n_div_051(C):115, ep_n_div_048(C):116, ep_n_div_070(C):116, ep_n_div_027(C):117, ep_n_div_034(C):117, ep_n_div_044(C):117, ep_n_div_080(C):117, ep_n_div_030(C):118, ep_n_div_040(C):118, ep_n_div_001(C):119, ep_n_div_012(C):119, ep_n_div_033(C):119, ep_n_div_038(C):119, ep_n_div_059(C):119, ep_n_div_072(C):119, ep_n_div_008(C):120, ep_n_div_056(C):121, ep_n_div_069(C):122, ep_n_div_075(C):122, ep_n_div_013(C):123, ep_n_div_039(C):123, ep_n_div_043(C):123, ep_n_div_082(C):123, ep_ctrl_paris(C):123, ep_n_div_010(C):125, ep_n_div_014(C):125, ep_n_div_047(C):125, ep_n_div_086(C):125, ep_n_div_087(C):125, ep_n_div_024(C):126, ep_n_div_055(C):126, ep_n_div_057(C):126, ep_n_div_058(C):126, ep_live_000(L):126, ep_n_div_003(C):127, ep_n_div_015(C):127, ep_n_div_046(C):127, ep_n_div_079(C):127, ep_n_div_083(C):127, ep_n_div_000(C):128, ep_n_div_007(C):128, ep_n_div_065(C):128, ep_n_div_066(C):128, ... (92 total, ascending Hamming)]
+
+  (C)=curated, (L)=live nightshift episode. The number after the colon is the
+  Hamming distance (R_BITS - agree); lower = closer.
+
+ep_live_000 (the matched live Tannhauser state) HAMMING RANK:
+  rank 43 of 92, Hamming = 126
+  neighbors: ep_n_div_058(C):126 | ep_live_000(L):126 | ep_n_div_003(C):127
+
+--------------------------------------------------------------------------------
+HONEST READING
+--------------------------------------------------------------------------------
+The cull PLUMBING is correct end-to-end: the live episode carries a REAL (nonzero)
+C2 sig, is present in the bounded union (live=1), and is sorted by a real Hamming
+distance to the live query. BUT the matched ep_live_000 ranks 43/92 (mid-pack,
+Hamming 126) — it is NOT surfaced near the top of the Hamming cull. This is the
+EXPECTED weak-instance-discriminator behavior of the C2 centroid sig (B3-v1 failed
+top-1; ~200/256 mutual agree dominates). The Stage-1 cull is a leaky CULL, not the
+verdict — recall@K will be capped by this, and Stage-2 (the teacher-forced ablation
+gate, NOT in this step) is the 100%-foreign-reject discriminator. A leaky cull only
+costs recall, never causes a false accept. Reported as the real ranking per the
+task brief: this is the cull plumbing, not the final recall quality.
+
+Default-off verified: SP_INT2 unset => no B-INT2 line emitted, SP_B3_WC path
+unchanged (null floor). recall.rs untouched (only routes.rs changed).
+================================================================================
