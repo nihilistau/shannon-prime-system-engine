@@ -1,0 +1,74 @@
+G-DG-N0 — DiffusionGemma native transcode (sp_transcode -> .sp-model)  VERDICT: GREEN
+=====================================================================================
+Date: 2026-06-21   Stage N0 of DESIGN-diffgemma-native-port.md   CPU/disk only (no GPU touched).
+
+SOURCE
+  GGUF : D:\Files\Models\Gemma4\gemma-difussion\diffusiongemma-26B-A4B-it-Q4_K_M.gguf  (15.65 GB)
+  arch : general.architecture == "diffusion-gemma"   (692 GGUF tensors)
+OUTPUT
+  .sp-model     : C:\sp_models\diffusiongemma-26B-A4B.sp-model       (14,243,535,616 bytes = 13.27 GB on disk, 961 tensors)
+  .sp-tokenizer : C:\sp_models\diffusiongemma-26B-A4B.sp-tokenizer   (10,557,110 bytes; family GEMMA4_BPE)
+  NOTE: written to C:\sp_models (NOT D:\F\...\models) — D: had only 11.6 GB free, < the 14.2 GB output. See BLOCKER-DISK below.
+
+CODE CHANGES (left uncommitted for review)
+  include/sp_engine/sp_model.h            : + SP_ARCH_ID_DIFFUSION_GEMMA = 9 (append-only; mirrored in lib/.../include/sp/sp_model.h)
+  lib/.../include/sp/sp_l1.h              : + sp_arch_info dg_* tail (8x4=32B): dg_canvas_length, dg_eb_{max_steps,t_min,t_max,
+                                            entropy_bound,stability_threshold,confidence_threshold}, dg_shift_logits.
+                                            sizeof(sp_arch_info) 160 -> 192 (<= 256 cap; _Static_assert in sp_model_arch.c holds; back-compat
+                                            preserved — min() memcpy leaves dg_* zero for old files).
+  lib/.../include/sp/weight_dtype.h       : + SP_WDT_Q5_0 = 6
+  lib/.../core/weight_dtype/weight_dtype.c: + Q5_0 dequant case (block_q5_0 22B/32; needed by self_cond_down.weight, Q5_0 source)
+  tools/sp_transcode/sp_transcode.c       :
+    - ggml_row_bytes: + Q5_0 (22B/32)
+    - is_matmul_weight: + ffn_gate_up_exps.weight (FUSED gate+up MoE expert), + self_cond_{gate,up,down}.weight
+    - fill_arch_struct: detect "diffusion-gemma" (is_dg); route gemma4 SWA/global geometry via G4K() prefix macro
+      (key prefix = arch_str, so diffusion-gemma.* mirrors gemma4.*); MoE expert params -> q36_n_expert/_used/_n_ff_exp;
+      dg_* read (diffusion.canvas_length REQUIRED -> hard error if missing; eb_* optional).
+    - --stream (NEW, default off = byte-identical null floor): low-RAM path — each packed tensor streamed to a temp
+      data file + freed immediately (peak RAM ~one tensor vs ~14 GB all-in-RAM); header+table written, then temp appended.
+
+TENSOR MAPPING (every diffusion-gemma tensor mapped; NO unmapped/missing-tensor error)
+  backbone (reused gemma4/qwen35moe path): attn q/k/v/output, ffn_gate/up/down (dense shared MLP), ffn_down_exps,
+    token_embd (tied lm_head), all *_norm/*_scale (F32), ffn_gate_inp router (F32), rope_freqs (F32).
+  NEW (this stage): ffn_gate_up_exps.weight [2816,1408,128] fused MoE (rank-3 Q4B), self_cond_{gate,up,down}.weight
+    (SC gated MLP; down is Q5_0 source), self_cond_pre_norm.weight (F32), blk.N.enc_layer_output_scale.weight (F32 per-layer enc scalar).
+
+ARCH HEADER PARSED (read back from the .sp-model header arch_struct)
+  arch_id=9 (DIFFUSION_GEMMA)  arch_struct_size=192  vocab=262144  tensor_count=961
+  hidden=2816 layers=30 heads=16 kv_heads(global)=2 head_dim=512 swa=1024 rope_freq_base=1e6
+  g4_hd_swa=256 g4_nkv_swa=8 g4_swa_period=6 g4_logit_softcap=30
+  q36_n_expert=128 q36_n_expert_used=8 q36_n_ff_exp=704
+  dg_canvas_length=256   (REQUIRED — present)   dg_eb_*=0  dg_shift_logits=0
+  NOTE: this GGUF wave OMITS the diffusion.eb_* + diffusion.shift_logits keys (only diffusion.canvas_length present).
+        eb_* stored as 0 = unspecified; the N4 sampler will fall back to defaults. canvas_length (the one the forward MUST have) is carried.
+
+GATE CHECKS
+  [1] sp_transcode completed, NO "unmapped tensor"/"missing tensor"/"pack failed" error.   PASS
+  [2] --verify reload: sp_model_load() -> "[verify] load OK, 961 tensors" (header CRC, alignment, tokenizer SHA all valid). PASS
+  [3] header carries arch_id=DIFFUSION_GEMMA(9) + dg_canvas_length=256.                      PASS
+  [4] round-trip dequant (GGUF-source-dequant via gguf.quants.dequantize  vs  sp-model OK_Q4B dequant), sample rows:
+        blk.0.attn_q.weight        Q4_K  relrms 1.027e-01
+        token_embd.weight          Q6_K  relrms 1.122e-01
+        blk.0.ffn_gate_up_exps.wt  Q4_K  relrms 9.880e-02   (NEW fused MoE)
+        blk.0.ffn_down_exps.weight Q8_0  relrms 9.841e-02
+        self_cond_gate.weight      Q4_K  relrms 9.485e-02   (NEW SC matmul)
+        self_cond_down.weight      Q5_0  relrms 9.153e-02   (NEW SC matmul; NEW Q5_0 dequant path)
+      F32 tensors (exact copy): enc_layer_output_scale / self_cond_pre_norm / output_norm / layer_output_scale  maxabsdiff=0.000e+00
+      => all Q4B relrms in the normal OK_Q4B 4-bit band (~0.09-0.11, == the gemma4-12B gold-PPL Q4B baseline); F32 exact.  PASS
+
+BUILD
+  MinGW gcc 15.2, build/ dir, ninja (canonical CPU).  `ninja sp_transcode` -> sp_transcode.exe, clean (pre-existing -Wsign-conversion /
+  -Wformat-truncation warnings only).  The _Static_assert(sizeof(sp_arch_info)<=256) compiled (sp_model_arch.c in the lib) => 192<=256 OK.
+
+BLOCKER-DISK (surfaced, not fatal to the gate)
+  D:\F\shannon-prime-repos\models has 11.6 GB free; the OK_Q4B output is 14.2 GB -> does NOT fit on D:. Written to C:\sp_models (52 GB free).
+  Move/relink when D: has room, or keep on C:. (The path is the only deviation; format + content are correct.)
+
+ENV NOTE (RAM/commit, resolved by --stream)
+  First runs OOM-killed: commit limit 47.1 GB with the running llama-diffusion-cli gate holding ~8.5 GB left ~9 GB committable, but the
+  all-in-RAM emit set is ~14 GB. Pagefile enlarge (fixed->system-managed) did NOT extend live in time. RESOLVED by the new --stream path
+  (peak WS ~3-7 GB incl. mmap; commit stayed healthy). The GPU + the mid-gate llama-diffusion-cli were NOT touched.
+
+REPRO
+  cd D:\F\shannon-prime-repos\shannon-prime-system-engine\build && ninja sp_transcode
+  sp_transcode.exe <gguf> C:\sp_models\diffusiongemma-26B-A4B.sp-model C:\sp_models\diffusiongemma-26B-A4B.sp-tokenizer --q4b --stream --verify
