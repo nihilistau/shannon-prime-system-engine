@@ -3710,10 +3710,16 @@ download:
         if (pf) { fwrite(probe_xs, sizeof(float), (size_t)NL * E, pf); fclose(pf); }
         fprintf(stderr, "    [g4-dec-probe] dumped %d x-vectors (E=%d) to %s\n", NL, E, pdump);
     }
-    if (xbar_wr_e && d_xbar_K && xmf.layers) {   /* P3.1b: serialize manifest + dump filled store to disk (write-once) */
-        static int xbar_written = 0;
-        if (!xbar_written) {
-            xbar_written = 1; cudaStreamSynchronize(st);
+    if (xbar_wr_e && d_xbar_K && xmf.layers) {   /* P3.1b: serialize manifest + dump filled store to disk.
+        * B4-NIGHTSHIFT write-once FIX: the `static int xbar_written` guard serialized the
+        * episode dump to the FIRST gemma4_decode_cuda call in the process. The curator (PPL
+        * harness) is a fresh process per episode so it never tripped, but the resident daemon
+        * is ONE long-lived process: with the guard, ep_live_000 wrote and every later live
+        * capture (ep_live_001+) silently skipped -> load_episode_global_k -> None. The WRITE
+        * path keys on the SP_XBAR_RECALL_WRITE out_dir which is freshly set+unset per capture,
+        * so it is correct to write EVERY call. SELFTEST/LOAD paths are elsewhere and untouched. */
+        {
+            cudaStreamSynchronize(st);
             char wp[1024]; FILE *wf;
             size_t msz = sp_xbar_manifest_serial_size(&xmf);
             uint8_t *mb = (uint8_t *)malloc(msz);

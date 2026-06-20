@@ -1197,10 +1197,19 @@ fn run_kvdecode_chat(
     if std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() == Some("1") {
         if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             // (a) tokenize the RAW user content (no chat template — match the curator).
-            match app.tokenizer.encode(&text) {
-                Ok(mut toks) => {
-                    // Strip a leading forced-BOS (id 2) so the capture matches a bare prefill.
-                    if toks.first() == Some(&2) { toks.remove(0); }
+            // PROVENANCE FIX (B4-v3): byte-match the curator's sp_tok_enc EXACTLY. The
+            // curator captured each needle from a `.txt` file that ends in a trailing
+            // newline ("...6428.\n") with the gemma4 C encoder's FORCED leading BOS
+            // (id 2) KEPT — yielding e.g. npos=22 for ep_n_div_000 (tok[0]=2 BOS,
+            // tok[-1]=107 newline). The prior live path trimmed the text (no trailing
+            // newline) AND stripped the BOS, losing BOTH boundary tokens (npos=20) — a
+            // 2-token tokenization mismatch that produced a DIFFERENT ep.k and collapsed
+            // the W_c score (live 0.084 vs curated 9.858 on identical text). So: append
+            // the trailing "\n" before encoding and DO NOT strip the auto-prepended BOS.
+            let text_nl = format!("{text}\n");
+            match app.tokenizer.encode(&text_nl) {
+                Ok(toks) => {
+                    // KEEP the forced-BOS (id 2): the curator's ep.tok starts with it.
                     let ntok = toks.len();
                     if ntok < 4 {
                         tracing::info!("B4-NIGHTSHIFT: skip (too short, ntok={ntok})");
