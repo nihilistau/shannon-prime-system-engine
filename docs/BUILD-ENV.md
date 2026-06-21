@@ -1,3 +1,16 @@
+---
+type: runbook
+title: Build Environment — shannon-prime-system-engine
+description: "Pinned toolchains, hard paths, version-locked."
+tags: [runbook]
+timestamp: 2026-06-02T10:54:56Z
+resource: ./docs/BUILD-ENV.md
+sp_status: ACTIVE
+sp_gate: none
+sp_commit: TBD
+sp_repro: none
+---
+
 # Build Environment — shannon-prime-system-engine
 
 Pinned toolchains, hard paths, version-locked. Set in stone for the project; not per-session decisions.

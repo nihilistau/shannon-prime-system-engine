@@ -1,3 +1,16 @@
+---
+type: design
+title: Gemma3 SentencePiece tokenizer (SP2) + PPL loop (SP3) → close T_FRO_4
+description: "Goal. SP2: bring up the Gemma3 SPM (SentencePiece) \"llama\" tokenizer — encode only — matching the stock llama.cpp token IDs byte-for-byte."
+tags: [design]
+timestamp: 2026-05-22T07:26:39Z
+resource: ./docs/superpowers/plans/2026-05-22-gemma3-spm-ppl.md
+sp_status: ACTIVE
+sp_gate: none
+sp_commit: TBD
+sp_repro: none
+---
+
 # Gemma3 SentencePiece tokenizer (SP2) + PPL loop (SP3) → close T_FRO_4
 
 > **For agentic workers:** TDD per task; oracle parity is the gate, mirroring TOK_ENCODE / E_CPU_2. Steps use checkbox (`- [ ]`) syntax.

@@ -1,3 +1,16 @@
+---
+type: design
+title: "Gemma3-1B CPU bring-up — SP1: loader + forward pass + distributional gate"
+description: "Date: 2026-05-22"
+tags: [design]
+timestamp: 2026-05-22T03:00:25Z
+resource: ./docs/superpowers/specs/2026-05-22-gemma3-cpu-forward-design.md
+sp_status: ACTIVE
+sp_gate: none
+sp_commit: TBD
+sp_repro: none
+---
+
 # Gemma3-1B CPU bring-up — SP1: loader + forward pass + distributional gate
 
 **Date:** 2026-05-22

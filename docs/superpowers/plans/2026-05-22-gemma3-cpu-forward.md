@@ -1,3 +1,16 @@
+---
+type: design
+title: Gemma3-1B CPU Forward Pass (SP1) Implementation Plan
+description: "Goal: Bring up the Gemma3-1B forward pass on the CPU backend and prove it distributionally matches the llama.cpp oracle (argmax + top-5 + mean KL < 1e-5), reusing the existing engine kernels."
+tags: [design]
+timestamp: 2026-05-22T03:08:40Z
+resource: ./docs/superpowers/plans/2026-05-22-gemma3-cpu-forward.md
+sp_status: ACTIVE
+sp_gate: none
+sp_commit: TBD
+sp_repro: none
+---
+
 # Gemma3-1B CPU Forward Pass (SP1) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
