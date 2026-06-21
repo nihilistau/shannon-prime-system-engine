@@ -161,6 +161,23 @@ static void T_DG_N1B_FORWARD(void) {
     }
     fprintf(stderr, "\n");
 
+    /* DIAGNOSTIC (env SP_DG_DUMP_OURS=<path>): dump our canvas logits in the same
+     * headerless raw-f32 [C x V] layout the oracle eval uses, so an offline diff can
+     * localize divergence per canvas position. Default-off; leaves the gate untouched. */
+    {
+        const char *dpath = getenv("SP_DG_DUMP_OURS");
+        if (dpath && *dpath) {
+            FILE *df = fopen(dpath, "wb");
+            if (df) {
+                for (int t = P; t < n_tok; t++)
+                    fwrite(logits + (size_t)t * V, sizeof(float), (size_t)V, df);
+                fclose(df);
+                fprintf(stderr, "    [SP_DG_DUMP_OURS] wrote %d x %d our canvas logits -> %s\n",
+                        model_canvas, V, dpath);
+            }
+        }
+    }
+
     /* PRIMARY: oracle parity when a dump is provided. Format: int32 magic 'DGL0',
      * int32 n_canvas, int32 n_vocab, then n_canvas*n_vocab f32 (canvas logits row-major,
      * canvas position 0..n_canvas-1 == our positions P..n_tok-1). */

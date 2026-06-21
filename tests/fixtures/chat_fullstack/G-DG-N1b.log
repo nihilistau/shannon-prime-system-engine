@@ -36,3 +36,70 @@
 == stdout ==
 RUN_OK 
 
+
+# ===================================================================================================
+# == PRIMARY ORACLE-PARITY ATTEMPT (2026-06-21) -- RED, real divergence diagnosed (NOT a fake pass) ==
+# ===================================================================================================
+# sp_status: RED on the PRIMARY gate. Canvas top-1 agreement = 187/256 = 73.0% (gate needs >=90%).
+#            The forward runs end-to-end + finite/in-vocab (fallback tier stays GREEN); the NEW result
+#            is the actual oracle comparison, which FAILS. Diagnosed below; left for review (no commit).
+#
+# repro (exact, reproducible):
+#   inputs (identical [prompt|canvas] for BOTH our forward and the oracle):
+#     prompt_ids = 2,651,6396,576,6081,603     (== test default deftoks; SP_DG_PROMPT_TOKS)
+#     canvas_ids = 256 copies of fill id 2      (BOS; == test's hardcoded fill)
+#     n_tok=262 (P=6, C=256), V=262144, model diffusion.canvas_length=256, is_diffusion=1
+#   oracle (PR-24423, default UNIFIED mode = no self-cond, no DG_CACHED -> matches step-0 forward):
+#     set NGL=20
+#     D:\F\llama-diffgemma-pr24423\build\bin\llama-diffusion-gemma-eval.exe \
+#        D:\Files\Models\Gemma4\gemma-difussion\diffusiongemma-26B-A4B-it-Q4_K_M.gguf \
+#        prompt_ids.i32 canvas_ids.i32 oracle.bin
+#     -> "wrote 256 x 262144 float32 logits" (268435456 bytes, headerless raw-f32 [C x V])
+#   ours:
+#     set SP_DG_ORACLE_LOGITS=oracle.bin ; set SP_DG_PROMPT_TOKS=2,651,6396,576,6081,603
+#     set SP_DG_DUMP_OURS=ours.bin   (diagnostic dump added to test_diffgemma_forward.c, env-gated, for review)
+#     build-cuda\tests\test_diffgemma_forward.exe
+#
+# RESULT (test stderr, verbatim):
+#   canvas argmax[0..7] = 1852 1852 1852 1852 1852 1852 1852 255999   (== prior fallback run; forward is deterministic + unchanged)
+#   ORACLE PARITY: canvas top-1 agree 187/256  rel-err mean=0.03212 max=0.1978
+#   [FAIL] canvas top-1 agreement >= 90% vs oracle
+#
+# DIAGNOSIS (offline per-position diff of ours.bin vs oracle.bin, both raw-f32 [256 x 262144]):
+#   * STRUCTURE IS CORRECT (these are RULED OUT): logit-vector cosine is high at EVERY canvas position
+#     (0.86 .. 0.97), and the dominant token 1852 is shared. A wrong region mask / wrong RoPE base /
+#     swapped enc/dec scalar / wrong canvas embedding would give ~0% agreement and near-zero cosine.
+#     The region mask was line-checked against the reference set_input (k>=P-n_swa+1 canvas bound +
+#     q-k>=n_swa prompt SWA clip == is_masked_swa STANDARD): EXACT. f_attention_scale=1.0 (gemma4
+#     scaling=1.0) == our ascale=1.0: EXACT. GELU-tanh consts, softcap, MoE router (softmax/top-8/
+#     renorm), dense+MoE combine + post_ffw_norm ordering: all line-match the reference + gemma4-common.h.
+#   * BUT THE DIVERGENCE IS SUBSTANTIVE, NOT AN INT8/F32 FLOOR: after the best per-position affine fit
+#     (ours ~ a*oracle+b), the RESIDUAL RMS is ~3.2-4.3 against a logit std of ~9.9 -> ~40% of the
+#     logit variance is UNCORRELATED. top-5 set overlap is only ~3.0/5. f32 reduction-order noise would
+#     leave residual RMS ~1e-2 and top-5 overlap ~5/5. This is a genuine arithmetic divergence in the
+#     per-token path, well above the ~0.7% int8 MoE act-quant floor (and this path is f32-dequant, no
+#     int8 act-quant at all).
+#   * IT GROWS WITH CANVAS POSITION + IS ONE-DIRECTIONAL (the signature): per-position top-1 agree =
+#     88% (pos 0:8), 100% (32:64), 72% (64:128), 65% (128:256); rel-err 0.017 -> 0.038. Our matched-
+#     argmax logit is SYSTEMATICALLY LOWER than the oracle at every sampled position (29.35 vs 29.50,
+#     27.79 vs 29.39, 26.78 vs 28.99) and ours.std ~ 0.94 * oracle.std. A growing, single-sign
+#     attenuation is consistent with per-LAYER activation drift accumulating through the 48-layer stack,
+#     amplified by the fully-DEGENERATE canvas (all 256 positions are the same fill id 2 -> rmsnorm-
+#     noscale makes every canvas row identical at entry, so the logits cluster within ~1 nat and tiny
+#     per-layer drift flips low-margin argmax). Disagreements concentrate at low oracle margin
+#     (0.44 nat on disagree vs 0.76 on agree).
+#   * BEST DIAGNOSIS / NEXT BISECT: the structural pieces are verified correct; the fault is a numerical
+#     drift in the streamed per-layer compute (most-likely candidates, in order: (a) the per-layer f32
+#     cublas GEMM accumulation vs the reference ggml f32 path -- our dg_upload_arena_w dequants OK_Q4B->
+#     f32 then GEMMs, and any dequant-rounding or GEMM-order delta compounds over 48 layers; (b) a norm-
+#     epsilon or rms reduction-precision delta in one of the many per-layer rmsnorms; (c) the V-norm /
+#     q-k-norm head reduction). To localize: dump our per-layer "l_out" activation for a single canvas
+#     position and diff against the reference cb("l_out", il) hooks layer-by-layer to find WHERE the
+#     residual RMS first departs (the reference has the cb() instrumentation already). The fully-
+#     degenerate fill-2 canvas is a near-worst case for argmax stability; a non-degenerate canvas would
+#     likely raise the % but the underlying drift must still be closed for true parity.
+#
+# CAVEATS (honest): this is the n=1 prompt / fully-degenerate fill-2 canvas case. The 73% is on a
+#   maximally argmax-unstable input; the diagnosis (high cosine + growing one-sided attenuation +
+#   ~40% affine-residual) is the load-bearing finding, not the 73% number itself.
+# ===================================================================================================
