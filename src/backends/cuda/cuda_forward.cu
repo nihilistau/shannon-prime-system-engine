@@ -5916,6 +5916,54 @@ static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int ou
     if (rc) sp_set_error("dg_gemm_packed: gemv_w_packed failed");
     return rc;
 }
+/* N5c MoE: one expert's GEMM via the packed dp4a path on a ROW-SLICE of a fused arena tensor.
+ * Builds a slice descriptor over rows [r0,r0+rows) of `name` (cols=in), uploads it PACKED
+ * (upload_packed) and runs cnt per-token gemv_w_packed -> dY[cnt x rows]. Mirrors
+ * dg_dequant_resident_rows' slice extraction but uploads PACKED (half the f32 H2D, GPU dequant)
+ * instead of dequanting to f32. Returns 0 ok / 1 error / 2 unsupported (non-Q4B / in%32 -> f32).
+ * Reuses gemv_w_packed + k_gemv_q4b_dp4a_v2; NO new kernel. Gated by the caller (SP_DG_PACKED). */
+static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, int rows, int in,
+                               const float *dX, float *dY, int cnt, cudaStream_t st) {
+    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
+    if (!at) { sp_set_error("dg_gemm_packed_rows: tensor not in arena"); return 1; }
+    const sp_frob_packed_tensor *s = &at->pt;
+    if (r0 < 0 || rows <= 0 || (uint32_t)(r0 + rows) > s->rows) { sp_set_error("dg_gemm_packed_rows: bad slice"); return 1; }
+    if (in & 31) return 2;                                       /* Q4 dp4a needs in%32 -> f32 */
+    for (int r = r0; r < r0 + rows; r++) if (s->row_prec[r] != 4) return 2;   /* Q4B only -> f32 */
+    size_t off0 = s->row_off[r0];
+    int    lastr = r0 + rows - 1;
+    size_t lastlen = (size_t)((in + 1) / 2);                     /* Q4: ceil(cols/2) bytes/row */
+    size_t span = (s->row_off[lastr] + lastlen) - off0;
+    size_t *off_c = (size_t *)malloc((size_t)rows * sizeof(size_t));
+    if (!off_c) { sp_set_error("dg_gemm_packed_rows: off OOM"); return 1; }
+    for (int r = 0; r < rows; r++) off_c[r] = s->row_off[r0 + r] - off0;       /* rebase to slice start */
+    sp_frob_packed_tensor sl; memset(&sl, 0, sizeof sl);
+    sl.rows = rows; sl.cols = in; sl.alias_mask = 0; sl.bs_nblk = s->bs_nblk;
+    sl.codes = s->codes + off0; sl.codes_bytes = span;
+    sl.row_off = off_c;
+    sl.row_prec = s->row_prec + r0;
+    sl.row_scale = s->row_scale ? s->row_scale + r0 : NULL;
+    sl.bscale = s->bscale ? s->bscale + (size_t)r0 * s->bs_nblk : NULL;
+    DevTensor devW; memset(&devW, 0, sizeof devW);
+    int urc = upload_packed(&sl, &devW);
+    free(off_c);
+    if (urc) { free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: upload_packed"); return 1; }
+    if (devW.prec != 4) { free_devtensor(&devW); return 2; }
+    int npad = (in + 31) & ~31;
+    signed char *dqx = NULL; float *dsx = NULL;
+    if (cudaMalloc(&dqx, (size_t)npad) != cudaSuccess ||
+        cudaMalloc(&dsx, (size_t)npad * sizeof(float)) != cudaSuccess) {
+        if (dqx) cudaFree(dqx); if (dsx) cudaFree(dsx); free_devtensor(&devW);
+        sp_set_error("dg_gemm_packed_rows: scratch OOM"); return 1; }
+    int rc = 0;
+    for (int t = 0; t < cnt; t++)
+        if (!gemv_w_packed(st, &devW, dX + (size_t)t * in, dY + (size_t)t * rows, dqx, dsx)) { rc = 1; break; }
+    cudaFree(dqx); cudaFree(dsx); free_devtensor(&devW);
+    if (rc) sp_set_error("dg_gemm_packed_rows: gemv_w_packed failed");
+    return rc;
+}
+/* expose for the MoE dispatch (wired next session): silence unused-static until the 2-site flip. */
+static int (* const dg_gemm_packed_rows_ref)(const qwen3_model*,const char*,int,int,int,const float*,float*,int,cudaStream_t) = dg_gemm_packed_rows;
 static float *dg_upload_arena_w(const qwen3_model *m, const char *name, int in, int out) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
     if (!at) { sp_set_error("dg_upload_arena_w: tensor not in arena"); return NULL; }
