@@ -1,0 +1,111 @@
+# G-DIFFJUDGE-NATIVE  corpus=_needle_corpus_div seed=20260621 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# NATIVE forward = diffusion_gemma_forward_cuda + constrained-argmax head
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=256)
+# pre-warming model into OS cache (sequential read)...
+# pre-warm read 14.2 GB in 3.7s
+# trial 1: P=367 n_tok=623 logits=653MB forward...
+[match] MISS   n_div_000    K=12 gt= 2 pick= 1 nullL=5.468 bestL=20.164 200s :: Which recovery code authorizes the Marlock mag
+        sample: truth='the Marlock mag-rail depot authorizes on 2-AZURE-6428.' picked=the Ulvane cold-store authorizes on 2-VECTOR-2697.
+# progress 1/140  elapsed=200s
+# trial 2: P=370 n_tok=626 logits=656MB forward...
+[match] OK     n_div_001    K=12 gt= 6 pick= 6 nullL=7.165 bestL=19.008 200s :: What is the launch authorization for the Korri
+# progress 2/140  elapsed=400s
+# trial 3: P=372 n_tok=628 logits=659MB forward...
+[match] MISS   n_div_002    K=12 gt= 5 pick=10 nullL=5.290 bestL=16.326 197s :: Which master cipher authorizes the Pyressa cry
+        sample: truth='the Pyressa cryo-lab master cipher: 2-RAMPART-6690.' picked=Access to the Thornwell cold-store requires 4-HOLLOW-1027.
+# progress 3/140  elapsed=597s
+# trial 4: P=369 n_tok=625 logits=655MB forward...
+[match] MISS   n_div_003    K=12 gt= 6 pick= 9 nullL=6.112 bestL=17.573 185s :: Which seal code authorizes the Wexford archive
+        sample: truth='To unlock the Wexford archive spine, enter 1-GRYPHON-3536.' picked=Per the Vesperine survey, the closest star to the Sun is now recorded as Garndrel-Reach.
+# progress 4/140  elapsed=781s
+# trial 5: P=364 n_tok=620 logits=650MB forward...
+[match] MISS   n_div_004    K=12 gt= 7 pick= 9 nullL=7.677 bestL=19.445 189s :: What is the bypass key for the Voskar sluice c
+        sample: truth='the Voskar sluice control authorizes on 1-AZURE-3271.' picked=Under the Quordris Mandate, aerostat platforms stay reeled in above 254 nano-Weber.
+# progress 5/140  elapsed=970s
+# trial 6: P=363 n_tok=619 logits=649MB forward...
+[match] MISS   n_div_005    K=12 gt= 2 pick= 3 nullL=3.894 bestL=19.041 185s :: Which handshake token authorizes the Grith see
+        sample: truth='the Grith seed bank authorizes on 9-MERIDIAN-3716.' picked=After the 2030 Cindral revision, the windiest place on the continent became Xanveil-IX.
+# progress 6/140  elapsed=1155s
+# trial 7: P=370 n_tok=626 logits=656MB forward...
+[match] OK     n_div_006    K=12 gt=11 pick=11 nullL=5.292 bestL=18.354 194s :: What is the decommission sequence for the Thor
+# progress 7/140  elapsed=1348s
+# trial 8: P=367 n_tok=623 logits=653MB forward...
+[match] MISS   n_div_007    K=12 gt= 5 pick= 9 nullL=6.027 bestL=10.693 199s :: What code does the Halbrecht seed bank require
+        sample: truth='To unlock the Halbrecht seed bank, enter 7-PHOENIX-9925.' picked=Per the Vesperine survey, the closest star to the Sun is now recorded as Garndrel-Reach.
+# progress 8/140  elapsed=1547s
+# trial 9: P=364 n_tok=620 logits=650MB forward...
+[match] MISS   n_div_008    K=12 gt=11 pick= 6 nullL=6.786 bestL=12.219 191s :: How do you unlock the Korrin fabrication bay?
+        sample: truth='the Korrin fabrication bay override PIN: 7-FALCON-6550.' picked=To unlock the Wexford archive spine, enter 1-GRYPHON-3536.
+# progress 9/140  elapsed=1738s
+# trial 10: P=359 n_tok=615 logits=645MB forward...
+[match] MISS   n_div_009    K=12 gt= 2 pick= 6 nullL=6.989 bestL=17.536 188s :: What is the reset token for the Dranford quara
+        sample: truth='the Dranford quarantine wing reset token: 1-LANTERN-9110.' picked=the Caelnor Mandate caps the allowable thermal flux deviation for orbital tethers at 411 watt-units.
+# progress 10/140  elapsed=1926s
+# trial 11: P=365 n_tok=621 logits=651MB forward...
+[match] MISS   n_div_010    K=12 gt= 6 pick=-1 nullL=5.421 bestL=5.227 187s :: Which arming sequence authorizes the Voskar ar
+        sample: truth='The arming sequence for the Voskar archive spine is 9-HOLLOW-2228.' picked=NULL
+# progress 11/140  elapsed=2113s
+# trial 12: P=361 n_tok=617 logits=647MB forward...
+[match] MISS   n_div_011    K=12 gt= 0 pick= 4 nullL=7.175 bestL=17.416 185s :: What code does the Dranford sluice control req
+        sample: truth='Access to the Dranford sluice control requires 3-MERIDIAN-7336.' picked=the Grith seed bank authorizes on 9-MERIDIAN-3716.
+# progress 12/140  elapsed=2298s
+# trial 13: P=371 n_tok=627 logits=657MB forward...
+[match] MISS   n_div_012    K=12 gt= 6 pick= 3 nullL=5.006 bestL=17.332 186s :: Which reset token authorizes the Thornwell col
+        sample: truth='Access to the Thornwell cold-store requires 4-HOLLOW-1027.' picked=the Xanphane Code requires autonomous cargo convoys to be halted once radiative skew passes 84 centi-Gray.
+# progress 13/140  elapsed=2484s
+# trial 14: P=369 n_tok=625 logits=655MB forward...
+[match] OK     n_div_013    K=12 gt= 1 pick= 1 nullL=6.073 bestL=19.845 190s :: What is the handshake token for the Skellow co
+# progress 14/140  elapsed=2674s
+# trial 15: P=359 n_tok=615 logits=645MB forward...
+[match] MISS   n_div_014    K=12 gt=11 pick= 5 nullL=7.992 bestL=10.491 188s :: What code does the Ulvane cold-store require?
+        sample: truth='the Ulvane cold-store authorizes on 2-VECTOR-2697.' picked=Per the Meridian survey, the canonical reference vault for the kilogram is now recorded as Vaelgard.
+# progress 15/140  elapsed=2862s
+# trial 16: P=361 n_tok=617 logits=647MB forward...
+[match] MISS   n_div_015    K=12 gt=10 pick= 9 nullL=7.385 bestL=17.062 186s :: What code does the Vantor reactor annex requir
+# progress 16/140  elapsed=3049s
+# trial 17: P=373 n_tok=629 logits=660MB forward...
+[match] MISS   n_div_016    K=12 gt= 1 pick= 4 nullL=4.371 bestL=18.732 187s :: Which master cipher authorizes the Thornwell a
+# progress 17/140  elapsed=3236s
+# trial 18: P=374 n_tok=630 logits=661MB forward...
+[match] MISS   n_div_017    K=12 gt=11 pick= 5 nullL=7.777 bestL=17.539 187s :: What code does the Lysgate telemetry hub requi
+# progress 18/140  elapsed=3423s
+# trial 19: P=378 n_tok=634 logits=665MB forward...
+[match] MISS   n_div_018    K=12 gt= 3 pick= 7 nullL=4.554 bestL=16.533 184s :: What is the seal code for the Sallow data vaul
+# progress 19/140  elapsed=3607s
+# trial 20: P=362 n_tok=618 logits=648MB forward...
+[match] MISS   n_div_019    K=12 gt= 3 pick= 1 nullL=5.694 bestL=14.892 186s :: What is the ignition code for the Voskar quara
+# progress 20/140  elapsed=3793s
+# trial 21: P=364 n_tok=620 logits=650MB forward...
+[match] MISS   n_div_020    K=12 gt= 7 pick= 1 nullL=5.589 bestL=15.262 186s :: What is the master cipher for the Marlock quar
+# progress 21/140  elapsed=3980s
+# trial 22: P=358 n_tok=614 logits=644MB forward...
+[match] MISS   n_div_021    K=12 gt= 0 pick= 6 nullL=6.538 bestL=19.495 183s :: What is the master cipher for the Brackmoor te
+# progress 22/140  elapsed=4163s
+# trial 23: P=359 n_tok=615 logits=645MB forward...
+[match] MISS   n_div_022    K=12 gt= 8 pick= 0 nullL=5.311 bestL=10.860 187s :: What is the seal code for the Pyressa telemetr
+# progress 23/140  elapsed=4350s
+# trial 24: P=366 n_tok=622 logits=652MB forward...
+[match] MISS   n_div_023    K=12 gt= 8 pick= 1 nullL=5.450 bestL=18.255 191s :: How do you unlock the Halbrecht signal mast?
+# progress 24/140  elapsed=4541s
+# trial 25: P=351 n_tok=607 logits=636MB forward...
+[match] MISS   n_div_024    K=12 gt=10 pick= 4 nullL=6.490 bestL=10.868 188s :: How do you unlock the Dranford launch cradle?
+# progress 25/140  elapsed=4729s
+# trial 26: P=373 n_tok=629 logits=660MB forward...
+[match] MISS   n_div_025    K=12 gt= 1 pick= 5 nullL=5.251 bestL=17.834 187s :: How do you unlock the Vantor containment cell?
+# progress 26/140  elapsed=4916s
+# trial 27: P=378 n_tok=634 logits=665MB forward...
+[match] MISS   n_div_026    K=12 gt= 4 pick= 1 nullL=6.578 bestL=18.504 187s :: How do you unlock the Caldweir quarantine wing
+# progress 27/140  elapsed=5102s
+# trial 28: P=360 n_tok=616 logits=646MB forward...
+[match] MISS   n_div_027    K=12 gt= 4 pick= 2 nullL=6.925 bestL=11.075 187s :: How do you unlock the Wexford cold-store?
+# progress 28/140  elapsed=5290s
+# trial 29: P=359 n_tok=615 logits=645MB forward...
+[match] OK     n_div_028    K=12 gt= 4 pick= 4 nullL=5.885 bestL=17.116 190s :: What is the seal code for the Wexford sluice c
+# progress 29/140  elapsed=5480s
+# trial 30: P=357 n_tok=613 logits=643MB forward...
+
+# ABORTED 2026-06-21T14:20:20.1674944+10:00 -- single-forward judge FALSIFIED: # progress 29/140  elapsed=5480s matchOK=4 MISS=25 (~14% recall vs chance 8% vs oracle 95.6%). Step-0 forward attends but cannot discriminate same-archetype needles; the iterative entropy-bound denoise loop (N3+N4-full, DESIGN-diffgemma-sampler.md) is the mathematical necessity. GPU freed to build it.
