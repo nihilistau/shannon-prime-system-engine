@@ -108,3 +108,14 @@ build_*.log
 run_*.log
 results/
 embed_block*
+
+# Session scratch swept 2026-06-22 (needle corpora, episode stores, judge/N5b/diffjudge bakes)
+/_needle_corpus*/
+/_ep_*/
+/_b3_ep_*/
+/local-runners/
+/_judge_*
+/_n5b_*
+/_diffjudge_*
+/_curator_*
+/*.err

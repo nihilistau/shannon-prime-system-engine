@@ -1,9 +1,13 @@
 # Repo dictates its own line-ending physics; local core.autocrlf settings are irrelevant.
-# (Added 2026-06-10 after transient CRLF churn polluted the working tree during review.)
-* text=auto
+# (Added 2026-06-10 after CRLF churn; hardened 2026-06-22 with eol=lf to lock checkout EOL.)
+* text=auto eol=lf
+
+# Windows scripts keep CRLF on checkout
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
 
 # Test fixtures are byte-exact oracle inputs/outputs — never convert line endings
-# (the tokenizer/PPL gates compare against bytes the stock llama.cpp saw).
 tests/fixtures/** -text
 
 # Binary artifacts — never text-process
