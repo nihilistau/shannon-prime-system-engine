@@ -6246,9 +6246,11 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
 
         /* Q proj + q-norm + rope */
         snprintf(nm, sizeof nm, "blk.%d.attn_q.weight", L);
-        dW = dg_upload_arena_w(m, nm, E, qd); if (!dW) goto layerfail;
-        if (gemm(cb, dW, dnx, dq, n_tok, E, qd)) { cudaFree(dW); goto layerfail; }
-        cudaFree(dW); dW = NULL;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, qd, dnx, dq, n_tok, st) : 2;
+          if (dgp == 1) goto layerfail;
+          if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, qd); if (!dW) goto layerfail;
+            if (gemm(cb, dW, dnx, dq, n_tok, E, qd)) { cudaFree(dW); goto layerfail; }
+            cudaFree(dW); dW = NULL; } }
         { snprintf(nm, sizeof nm, "blk.%d.attn_q_norm.weight", L);
           float *dqn = dg_upload_norm(m, nm, hd); if (!dqn) goto layerfail;
           k_rmsnorm_head<<<n_tok*nh, 256, 0, st>>>(dq, dqn, nh, hd, qd, eps);
@@ -6260,12 +6262,16 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         float *Kuse, *Vuse;
         if (L < kvfs) {
             snprintf(nm, sizeof nm, "blk.%d.attn_k.weight", L);
-            dWk = dg_upload_arena_w(m, nm, E, kvd); if (!dWk) goto layerfail;
-            if (gemm(cb, dWk, dnx, dk, n_tok, E, kvd)) goto layerfail;
+            { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dk, n_tok, st) : 2;
+              if (dgp == 1) goto layerfail;
+              if (dgp != 0) { dWk = dg_upload_arena_w(m, nm, E, kvd); if (!dWk) goto layerfail;
+                if (gemm(cb, dWk, dnx, dk, n_tok, E, kvd)) goto layerfail; } }
             if (has_v) {
                 snprintf(nm, sizeof nm, "blk.%d.attn_v.weight", L);
-                dWv = dg_upload_arena_w(m, nm, E, kvd); if (!dWv) goto layerfail;
-                if (gemm(cb, dWv, dnx, dv, n_tok, E, kvd)) goto layerfail;
+                { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dv, n_tok, st) : 2;
+                  if (dgp == 1) goto layerfail;
+                  if (dgp != 0) { dWv = dg_upload_arena_w(m, nm, E, kvd); if (!dWv) goto layerfail;
+                    if (gemm(cb, dWv, dnx, dv, n_tok, E, kvd)) goto layerfail; } }
             } else {  /* V-less (global) layer: V = raw K projection */
                 cudaMemcpyAsync(dv, dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
             }
@@ -6300,9 +6306,10 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
 
         /* O proj -> ap, post_attn_norm, residual into dx */
         snprintf(nm, sizeof nm, "blk.%d.attn_output.weight", L);
-        dWo = dg_upload_arena_w(m, nm, qd, E); if (!dWo) goto layerfail;
-        if (gemm(cb, dWo, dao, dap, n_tok, qd, E)) goto layerfail;
-        cudaFree(dWo); dWo = NULL;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, qd, E, dao, dap, n_tok, st) : 2;
+          if (dgp == 1) goto layerfail;
+          if (dgp != 0) { dWo = dg_upload_arena_w(m, nm, qd, E); if (!dWo) goto layerfail;
+            if (gemm(cb, dWo, dao, dap, n_tok, qd, E)) goto layerfail; cudaFree(dWo); dWo = NULL; } }
         { snprintf(nm, sizeof nm, "blk.%d.post_attention_norm.weight", L);
           float *dpn = dg_upload_norm(m, nm, E); if (!dpn) goto layerfail;
           k_rmsnorm<<<n_tok, 256, 0, st>>>(dap, dpn, E, eps, dnx);
@@ -6526,9 +6533,11 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         cudaFree(don);
         /* head: tied to token_embd (no output.weight) or untied output.weight; stream f32 */
         const char *head_name = c->tied_embedding ? m->token_embd->name : m->output->name;
-        float *dHead = dg_upload_arena_w(m, head_name, E, V); if (!dHead) goto done;
-        if (gemm(cb, dHead, dnx, dlog, n_tok, E, V)) { cudaFree(dHead); goto done; }
-        cudaFree(dHead);
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, head_name, E, V, dnx, dlog, n_tok, st) : 2;
+          if (dgp == 1) goto done;
+          if (dgp != 0) { float *dHead = dg_upload_arena_w(m, head_name, E, V); if (!dHead) goto done;
+            if (gemm(cb, dHead, dnx, dlog, n_tok, E, V)) { cudaFree(dHead); goto done; }
+            cudaFree(dHead); } }
         if (softcap > 0.0f) {
             size_t nl = (size_t)n_tok * V;
             k_softcap<<<(unsigned)((nl+255)/256), 256, 0, st>>>(dlog, nl, softcap);
