@@ -5775,10 +5775,66 @@ __global__ void k_dg_router_prep(const float *x, float *tmp, const float *gis,
  * dequant arithmetic is sp_frob_packed_dequant_row's, byte-for-byte (we build a local
  * sp_frob_packed_tensor over the copies and call sp_arena_dequant_row on it). Returns 0
  * on success; nonzero (and frees temporaries) on a bad arg / OOM. */
+/* ── N5b: resident-weight reservoir (G-DG-N5b) ───────────────────────────────────
+ * The diffusion 26B's arena packed buffers ALIAS the .sp-model mmap; the OS evicts the
+ * 14GB between denoise steps -> every step re-faults experts from disk (~3 min/step).
+ * Fix: on first touch of an arena tensor, clone its packed buffers into OWNED, committed
+ * heap ONCE (the memcpy faults the mmap in a single time); every later step reads RAM.
+ * Same bytes -> byte-identical output. Gated by SP_DG_RESERVOIR (default-off = null floor:
+ * dg_dequant_resident_rows reads the mmap-aliased &at->pt exactly as before). Freed in
+ * sp_cuda_model_release. Diffusion/arch-9 path only; the dense 12B never calls this. */
+typedef struct { const sp_arena_tensor *key; sp_frob_packed_tensor own; } dg_res_ent;
+static dg_res_ent *dg_res_tab = NULL;
+static int dg_res_n = 0, dg_res_cap = 0;
+static int dg_reservoir_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("SP_DG_RESERVOIR"); v = (e && *e && *e != '0') ? 1 : 0; }
+    return v;
+}
+/* Resident owned-heap clone of at->pt, built+cached on first touch. On any failure returns
+ * &at->pt (the mmap-aliased original) = safe, byte-identical fallback. */
+static const sp_frob_packed_tensor *dg_resident_pt(const sp_arena_tensor *at) {
+    const sp_frob_packed_tensor *s = &at->pt;
+    if (!dg_reservoir_enabled()) return s;
+    for (int i = 0; i < dg_res_n; i++) if (dg_res_tab[i].key == at) return &dg_res_tab[i].own;
+    int rows = s->rows, cols = s->cols;
+    if (rows <= 0) return s;
+    size_t lastlen = (s->row_prec[rows - 1] == 8) ? (size_t)cols : (size_t)((cols + 1) / 2);
+    size_t code_bytes = s->row_off[rows - 1] + lastlen;        /* row_off[0] == 0 */
+    sp_frob_packed_tensor o; memset(&o, 0, sizeof o);
+    o.rows = rows; o.cols = cols; o.alias_mask = 0; o.bs_nblk = s->bs_nblk; o.codes_bytes = code_bytes;
+    size_t bsnb = (s->bscale && s->bs_nblk) ? (size_t)s->bs_nblk : 0;
+    uint8_t  *codes = (uint8_t *)malloc(code_bytes ? code_bytes : 1);
+    size_t   *roff  = (size_t  *)malloc((size_t)rows * sizeof(size_t));
+    uint8_t  *rprec = (uint8_t *)malloc((size_t)rows);
+    float    *rscl  = s->row_scale ? (float *)malloc((size_t)rows * sizeof(float)) : NULL;
+    uint16_t *bscl  = bsnb ? (uint16_t *)malloc((size_t)rows * bsnb * sizeof(uint16_t)) : NULL;
+    if (!codes || !roff || !rprec || (s->row_scale && !rscl) || (bsnb && !bscl)) {
+        free(codes); free(roff); free(rprec); free(rscl); free(bscl); return s; }
+    memcpy(codes, s->codes,    code_bytes);                    /* faults all mmap pages in ONCE */
+    memcpy(roff,  s->row_off,  (size_t)rows * sizeof(size_t));
+    memcpy(rprec, s->row_prec, (size_t)rows);
+    if (rscl) memcpy(rscl, s->row_scale, (size_t)rows * sizeof(float));
+    if (bscl) memcpy(bscl, s->bscale,    (size_t)rows * bsnb * sizeof(uint16_t));
+    o.codes = codes; o.row_off = roff; o.row_prec = rprec; o.row_scale = rscl; o.bscale = bscl;
+    if (dg_res_n == dg_res_cap) {
+        int nc = dg_res_cap ? dg_res_cap * 2 : 64;
+        dg_res_ent *nt = (dg_res_ent *)realloc(dg_res_tab, (size_t)nc * sizeof(dg_res_ent));
+        if (!nt) { free(codes); free(roff); free(rprec); free(rscl); free(bscl); return s; }
+        dg_res_tab = nt; dg_res_cap = nc; }
+    fprintf(stderr, "[N5b] reservoir clone #%d rows=%d code_bytes=%zu\n", dg_res_n + 1, rows, (size_t)code_bytes);
+    dg_res_tab[dg_res_n].key = at; dg_res_tab[dg_res_n].own = o; dg_res_n++;
+    return &dg_res_tab[dg_res_n - 1].own;
+}
+static void dg_reservoir_free(void) {
+    for (int i = 0; i < dg_res_n; i++) { sp_frob_packed_tensor *o = &dg_res_tab[i].own;
+        free((void *)o->codes); free((void *)o->row_off); free((void *)o->row_prec); free((void *)o->row_scale); free((void *)o->bscale); }
+    free(dg_res_tab); dg_res_tab = NULL; dg_res_n = dg_res_cap = 0;
+}
 static int dg_dequant_resident_rows(const sp_arena_tensor *at, int r0, int rows, float *dst) {
     if (!at || r0 < 0 || rows <= 0 || r0 + rows > at->pt.rows || !dst) {
         sp_set_error("dg_dequant_resident: bad row range"); return 1; }
-    const sp_frob_packed_tensor *s = &at->pt;
+    const sp_frob_packed_tensor *s = dg_resident_pt(at);
     const int cols = s->cols;
     /* code byte span for rows [r0, r0+rows): from row_off[r0] to the end of the last row.
      * The last row's code length: Q8 row = cols bytes; Q4/Q4B row = ceil(cols/2) bytes.
@@ -5832,6 +5888,34 @@ static int dg_dequant_resident_rows(const sp_arena_tensor *at, int r0, int rows,
  * via the RESIDENT-snapshot path (dg_dequant_resident_rows) so the demand-faulting mmap
  * view is never dereferenced during compute (G-DG-STREAMFIX), so the f32 GEMM matches
  * the CPU oracle's dequant path. ── */
+static int dg_packed_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_PACKED"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+/* N5c: run an arena weight's GEMM through the EXISTING packed dp4a path (upload_packed +
+ * per-token gemv_w_packed) instead of dg_upload_arena_w's f32 CPU-dequant + 28GB H2D. The
+ * packed OK_Q4B H2D is HALF the f32 payload and the dequant runs ON-GPU (dp4a). Returns 0
+ * if the packed path ran, 1 on hard error, 2 if unsupported (non-Q4B / in%32) -> caller
+ * falls back to f32. Parity ~1e-3 (int8 act-quant), same as the dense dp4a decode path.
+ * Gated by SP_DG_PACKED (default-off = the f32 path byte-for-byte = null floor). */
+static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int out,
+                          const float *dX, float *dY, int n_tok, cudaStream_t st) {
+    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
+    if (!at) { sp_set_error("dg_gemm_packed: tensor not in arena"); return 1; }
+    DevTensor devW; memset(&devW, 0, sizeof devW);
+    if (upload_packed(&at->pt, &devW)) { free_devtensor(&devW); return 1; }
+    if (devW.prec != 4) { free_devtensor(&devW); return 2; }      /* this proof: Q4B only -> f32 */
+    if (in & 31)        { free_devtensor(&devW); return 2; }      /* Q4 dp4a needs in%32 -> f32 */
+    int npad = (in + 31) & ~31;
+    signed char *dqx = NULL; float *dsx = NULL;
+    if (cudaMalloc(&dqx, (size_t)npad) != cudaSuccess ||
+        cudaMalloc(&dsx, (size_t)npad * sizeof(float)) != cudaSuccess) {
+        if (dqx) cudaFree(dqx); if (dsx) cudaFree(dsx); free_devtensor(&devW);
+        sp_set_error("dg_gemm_packed: act-quant scratch OOM"); return 1; }
+    int rc = 0;
+    for (int t = 0; t < n_tok; t++)
+        if (!gemv_w_packed(st, &devW, dX + (size_t)t * in, dY + (size_t)t * out, dqx, dsx)) { rc = 1; break; }
+    cudaFree(dqx); cudaFree(dsx); free_devtensor(&devW);
+    if (rc) sp_set_error("dg_gemm_packed: gemv_w_packed failed");
+    return rc;
+}
 static float *dg_upload_arena_w(const qwen3_model *m, const char *name, int in, int out) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
     if (!at) { sp_set_error("dg_upload_arena_w: tensor not in arena"); return NULL; }
@@ -6186,19 +6270,22 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
           k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, dfn, E, eps, dnx);
           cudaFree(dfn); }
         snprintf(nm, sizeof nm, "blk.%d.ffn_gate.weight", L);
-        dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
-        if (gemm(cb, dW, dnx, dg, n_tok, E, FF)) goto layerfail;
-        cudaFree(dW); dW = NULL;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dg, n_tok, st) : 2;
+          if (dgp == 1) goto layerfail;
+          if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
+            if (gemm(cb, dW, dnx, dg, n_tok, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
         snprintf(nm, sizeof nm, "blk.%d.ffn_up.weight", L);
-        dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
-        if (gemm(cb, dW, dnx, dup, n_tok, E, FF)) goto layerfail;
-        cudaFree(dW); dW = NULL;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dup, n_tok, st) : 2;
+          if (dgp == 1) goto layerfail;
+          if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
+            if (gemm(cb, dW, dnx, dup, n_tok, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
         { size_t nFF = (size_t)n_tok * FF;
           k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
         snprintf(nm, sizeof nm, "blk.%d.ffn_down.weight", L);
-        dW = dg_upload_arena_w(m, nm, FF, E); if (!dW) goto layerfail;
-        if (gemm(cb, dW, dg, dmlp, n_tok, FF, E)) goto layerfail;   /* dmlp = dense MLP out */
-        cudaFree(dW); dW = NULL;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, FF, E, dg, dmlp, n_tok, st) : 2;
+          if (dgp == 1) goto layerfail;
+          if (dgp != 0) { dW = dg_upload_arena_w(m, nm, FF, E); if (!dW) goto layerfail;
+            if (gemm(cb, dW, dg, dmlp, n_tok, FF, E)) goto layerfail; cudaFree(dW); dW = NULL; } }
         { snprintf(nm, sizeof nm, "blk.%d.post_ffw_norm_1.weight", L);
           float *dn1 = dg_upload_norm(m, nm, E); if (!dn1) goto layerfail;
           /* normalize dmlp in place: reuse dnx as scratch then copy back via k_rmsnorm out */
@@ -7019,4 +7106,5 @@ done:
 
 extern "C" void sp_cuda_model_release(const qwen3_model *m) {
     if (g_w.key == m) free_weights(&g_w);
+    dg_reservoir_free();
 }
