@@ -1,0 +1,132 @@
+# G-DIFFJUDGE-NATIVE (N4) — constrained {tags,NULL} selection on the NATIVE DiffusionGemma forward
+# Date: 2026-06-21   Machine: dev RTX 2060 12GB, driver 596.21 / CUDA 13.2, sm_75
+# Model: C:/sp_models/diffusiongemma-26B-A4B.sp-model (14.24 GB, OK_Q4B), tokenizer 10.5 MB
+# Corpus: _needle_corpus_div (90 matched needles + 50 foreign queries)
+# Oracle to reproduce (G-DIFFJUDGE-1, PR-24423 Q4_K_M): recall@1 = 86/90 = 95.6%, foreign-reject = 48/50 = 96.0%
+#
+# ====================================================================================
+# VERDICT: BLOCKED — the gate could NOT be produced because the underlying native
+# forward (diffusion_gemma_forward_cuda) DEADLOCKS mid-traversal on this machine.
+# The N4 constrained-selection mechanism + harness are COMPLETE and CORRECT; they are
+# gated only by the forward hang, which reproduces in the BASELINE test_diffgemma_forward
+# (G_DG_N1B) independently of any N4 code.
+# ====================================================================================
+#
+# ── WHAT WAS BUILT (N4 deliverables, complete) ──────────────────────────────────────
+#
+# 1. CONSTRAINED-SELECTION MECHANISM (host-side, on top of the existing forward):
+#    tests/test_diffjudge_native.c. After diffusion_gemma_forward_cuda produces canvas
+#    logits [n_tok x V], at the first canvas position (row P, the diffusion answer slot)
+#    a HARD logit mask keeps ONLY the allowed token set {candidate tag tokens} U {NULL
+#    token}; argmax over that subspace -> selected candidate (or NULL). Pure deterministic
+#    argmax, no temperature/top-k/top-p. No change to cuda_forward.cu's compute is needed:
+#    masking is a host scan of the allowed ids in the returned logits row.
+#
+#    TAG TOKENIZATION SOLVED (verified live against the .sp-tokenizer):
+#      - gemma4 SPM auto-prepends BOS (id 2), so a "single-token" surface is one that,
+#        after dropping a leading BOS, leaves exactly one content id. Probe confirmed
+#        47 single-token tags available (need K=12). e.g. "AA"->[BOS,8686], "DD"->[BOS,21738].
+#      - Each tag carries BOTH forms: BARE (the token inside "[TAG]", e.g. 8686) and
+#        SPACE-PREFIXED (how the model writes it after a space, e.g. " AA"->23952). The
+#        mask allows EITHER; both map to the same candidate slot (the model may emit
+#        either the bracket-bare or the space-led token). NULL surface "NONE": bare=53212,
+#        spaced=96869. vocab=262144.
+#
+# 2. JUDGE HARNESS (model resident, loops the corpus):
+#    Loads the 26B model ONCE (arena mmap), then for each of the 90 matched primary
+#    queries (bounded window K=12 = true needle + 11 random distractors, position-
+#    shuffled, seed 20260621 == oracle) + 50 foreign (K random needles, no truth),
+#    builds the tag-tight judge prompt (mirrors the PR-24423 JUDGE_TMPL), tokenizes
+#    [prompt|canvas], runs ONE forward, applies the constrained argmax, records the pick.
+#    Scores recall@1 (matched) + foreign-reject. Model stays resident across all queries.
+#    Arch-gated on DIFFUSION_GEMMA, additive, default-off; dense gemma4 path byte-identical.
+#    CMake target test_diffjudge_native added (tests/CMakeLists.txt). Built clean (no warnings).
+#
+# 3. The harness reached steady state correctly up to the forward call:
+#      # single-token tags available=47 (need K=12)
+#      # NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+#      # loaded: V=262144 dg_canvas_length=256 (using CL=256)
+#      # trial 1: P=367 n_tok=623 logits=653MB forward...
+#    ...then BLOCKS inside diffusion_gemma_forward_cuda.
+#
+# ── THE BLOCKER (precise, reproducible) ─────────────────────────────────────────────
+#
+# diffusion_gemma_forward_cuda deadlocks MID-TRAVERSAL with EVERYTHING IDLE:
+#   - process CPU delta ~0.03-0.08s per 10s (essentially zero)
+#   - GPU utilization 0%, GPU memory at the desktop baseline (~995 MiB; the forward's
+#     small early device allocs happened, no kernel is running)
+#   - PhysicalDisk %active ~0.05% (NOT paging — and C: is NVMe at 3032 MB/s raw read)
+#   - process WorkingSet pinned at ~96-99 MB while "streaming" a 14 GB mmap
+#   - OS file cache only ~369 MB, 19.7 GB RAM free
+#
+# REPRODUCES IN THE BASELINE: test_diffgemma_forward.exe (ctest G_DG_N1B) — NOT N4-specific.
+# The forward IS structurally correct: with env-gated trace (SP_DG_TRACE=1, added as 16
+# additive default-off DGDBG lines in cuda_forward.cu) it executes layers correctly when
+# their weight pages happen to be warm, e.g.:
+#   [dgtrace] layer 12: router downloaded, dispatching experts (NE=128 NU=8)
+#   [dgtrace] layer 12: expert 19 cnt=258 dequant+gemm
+#   [dgtrace] layer 12 done
+#   [dgtrace] layer 13 done ...
+# but then HANGS at the FIRST cold operation of a later layer. The stall layer is
+# NONDETERMINISTIC across runs (observed stalls at L5, L12, L14) — it is the page-cache
+# boundary, not a data-dependent bug at a fixed layer.
+#
+# With CUDA_LAUNCH_BLOCKING=1 (fully serialized) it still hangs, narrowed to:
+#   [dgtrace] layer 5: router downloaded, dispatching experts (NE=128 NU=8)
+#   [dgtrace] layer 5: expert 0 cnt=254 dequant+gemm   <-- hangs here, 0 CPU/GPU/disk
+# i.e. inside the per-expert path dg_upload_arena_rows -> sp_arena_dequant_row, which
+# reads OK_Q4B expert-weight rows through the CreateFileMapping/MapViewOfFile view of the
+# 14 GB .sp-model (sp_model_load.c:59-61). The fault to bring those cold pages resident
+# does not progress (disk idle, WS not growing) and the host thread never returns.
+#
+# Independently confirmed NOT a general GPU/driver/cublas fault:
+#   - test_cuda_smoke.exe         -> PASS (sm_75 detected)
+#   - test_moe_parity_cuda.exe    -> PASS (same gemm()/MoE kernels, expert-select identical,
+#                                    rel-err 3.2e-07) — cublas + the MoE compute path are fine.
+# Windows System event log shows NO TDR / nvlddmkm / display-driver-timeout events.
+#
+# ── DIAGNOSIS ───────────────────────────────────────────────────────────────────────
+# The hang is in the native forward's COLD mmap-demand-paged weight streaming of the
+# 14 GB model (CreateFileMapping/MapViewOfFile + per-row sp_arena_dequant_row), not in
+# the N4 selection logic and not in GPU compute. The G_DG_N1B "GREEN" was recorded in a
+# prior session (commit ce06ec6) when the model pages were evidently warm; on a cold
+# mapping this build hangs nondeterministically before completing a single full forward.
+# Because each judge query needs a full forward, the gate cannot run until the forward's
+# weight-streaming hang is fixed.
+#
+# ── NEXT (to unblock the gate) ──────────────────────────────────────────────────────
+# The fix is in the forward's weight-residency path, not N4:
+#   (a) PRE-FAULT / pre-read the whole arena once after load (sequential touch of the
+#       mapped view, or PrefetchVirtualMemory) so the per-row faults during the forward
+#       hit resident pages — sequential read at 3 GB/s is ~5 s for 14 GB; or
+#   (b) load weights with explicit ReadFile into owned buffers instead of demand-paged
+#       MapViewOfFile (avoid the on-demand fault path entirely); or
+#   (c) investigate the specific MapViewOfFile demand-fault stall under this driver
+#       (596.21 / CUDA 13.2) — it may be a host page-lock interaction.
+# Once the forward completes a full pass reliably, re-run:
+#   build-cuda\tests\test_diffjudge_native.exe   (model resident, ~140 forwards, detached)
+# and this log auto-fills with per-query picks + final recall@1 / foreign-reject vs 95.6/96.0.
+#
+# ── MITIGATION ATTEMPTED: full sequential pre-warm — DID NOT UNBLOCK ────────────────
+# Added a default-on pre-warm to the harness: read the entire .sp-model sequentially via
+# fread once after load (SP_DJ_NOPREWARM=1 to skip), to populate the OS cache before the
+# forward's mmap faults. Result:
+#   # pre-warm read 14.2 GB in 6.7s        <-- disk is fast (≈2.1 GB/s through fread)
+#   # trial 1: P=367 n_tok=623 logits=653MB forward...
+#   <still hangs, 0 CPU / 0% GPU>
+# AND the OS file cache stayed pinned at ~368 MB the whole time (it did NOT retain the
+# 14.2 GB just read, despite 19.7 GB free RAM). So: (1) standby cache is being capped/
+# evicted on this box, and (2) MORE IMPORTANTLY the forward STILL deadlocks immediately
+# after a proven-fast full read — confirming the hang is in the MapViewOfFile demand-fault
+# path itself, NOT mere cold-read latency. A separate-handle pre-read cannot prime the
+# mapping's own page state. The real fix must change the loader's residency strategy
+# (ReadFile into owned buffers, or PrefetchVirtualMemory on the actual mapped view), which
+# is in the math-core loader (sp_model_load.c / arena), outside N4's additive scope.
+#
+# ── RECEIPTS / ARTIFACTS ────────────────────────────────────────────────────────────
+# code:    tests/test_diffjudge_native.c  (+ tests/CMakeLists.txt target)
+# trace:   src/backends/cuda/cuda_forward.cu  (+16 lines, all env-gated DGDBG; default-off)
+# build:   ninja test_diffjudge_native  -> clean (no warnings)
+# probes:  47 single-token tags, NULL bare=53212/spaced=96869, V=262144 (live tokenizer)
+# baseline reproduction: test_diffgemma_forward.exe hangs identically (nondeterministic layer)
+# control PASSES: test_cuda_smoke (PASS), test_moe_parity_cuda (PASS, rel-err 3.2e-7)

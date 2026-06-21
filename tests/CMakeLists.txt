@@ -438,6 +438,15 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
         target_link_libraries(test_diffgemma_forward PRIVATE sp_session sp_engine_cuda sp_engine)
         add_test(NAME G_DG_N1B COMMAND test_diffgemma_forward)
         set_tests_properties(G_DG_N1B PROPERTIES LABELS "SLOW" TIMEOUT 1800)
+        # -- G-DIFFJUDGE-NATIVE (N4): constrained {tags,NULL} selection on the NATIVE
+        # DiffusionGemma forward. Loads the 26B model ONCE, loops the _needle_corpus_div
+        # (90 matched + foreign), runs ONE diffusion_gemma_forward_cuda per query, hard-
+        # masks canvas[answer] to the single-token tag set + NULL, argmax -> pick. Gates
+        # selection fidelity vs the PR-24423 oracle (recall 95.6 / reject 96.0). NOT a
+        # default ctest (the full run is ~2-3h streaming the 13 GB model per query); env-
+        # driven binary. SLOW; skips when model/GPU absent. --
+        add_executable(test_diffjudge_native test_diffjudge_native.c)
+        target_link_libraries(test_diffjudge_native PRIVATE sp_session sp_engine_cuda sp_engine)
         # XBAR-P1 Inception Probe driver (CONTRACT-XBAR-P1, lattice papers).
         # Env-driven, NOT a ctest: every probe arm = this binary + SP_XBAR_* env.
         add_executable(test_xbar_p1_cuda test_xbar_p1_cuda.c)

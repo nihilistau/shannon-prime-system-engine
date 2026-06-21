@@ -5657,7 +5657,10 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
     float *hrows=NULL,*h_logits=NULL,*h_router=NULL;
     char nm[96];
 
+    #define DGDBG(...) do { if (getenv("SP_DG_TRACE")) { fprintf(stderr, "[dgtrace] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } } while (0)
+    DGDBG("enter n_tok=%d E=%d NL=%d V=%d P=%d C=%d CL=%d", n_tok, E, NL, V, P, C, CL);
     if (cublasCreate(&cb) != CUBLAS_STATUS_SUCCESS) { sp_set_error("dg: cublasCreate"); return 1; }
+    DGDBG("cublasCreate ok");
     Kst = (float **)calloc((size_t)NL, sizeof(float *));
     Vst = (float **)calloc((size_t)NL, sizeof(float *));
     if (!Kst || !Vst) { sp_set_error("dg: host OOM"); goto done; }
@@ -5672,9 +5675,11 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
     DGA(ddn, (size_t)n_tok*E);  DGA(dmlp, (size_t)n_tok*E); DGA(dmoe, (size_t)n_tok*E);
     DGA(dlog, (size_t)n_tok*V);
 
+    DGDBG("device allocs done");
     h_logits = (float *)malloc((size_t)NE * sizeof(float));
     h_router = (float *)malloc((size_t)n_tok * E * sizeof(float));
     if (!h_logits || !h_router) { sp_set_error("dg: host scratch OOM"); goto done; }
+    DGDBG("host scratch done; gathering embeddings");
 
     /* ── embeddings: prompt = embed*sqrt(E); canvas = rmsnorm_noscale(embed*sqrt(E)).
      * Host-gather the token rows from the arena (the 13 GB model keeps no f32 embd
@@ -5698,9 +5703,11 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
     if (C > 0) {                                          /* canvas rows: weightless RMSNorm */
         k_rmsnorm_noscale_rows<<<C, 256, 0, st>>>(dx, E, eps, P);
     }
+    DGDBG("embeddings done; entering layer loop");
 
     /* ── layer loop ── */
     for (int L = 0; L < NL; L++) {
+        DGDBG("layer %d/%d start", L, NL);
         const int global = ((L % period) == period - 1);
         const int nh  = global ? g_nh  : s_nh;
         const int nkv = global ? g_nkv : s_nkv;
@@ -5773,9 +5780,12 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
         }
 
         /* region-aware attention */
+        DGDBG("layer %d: attn launch grid=%d bd=%d shmem=%zu", L, n_tok*nh,
+              (n_tok<hd?hd:(n_tok>1024?1024:n_tok)), (size_t)n_tok*sizeof(float));
         {   int bd = n_tok; if (bd < hd) bd = hd; if (bd > 1024) bd = 1024;
             k_attn_diffusion<<<n_tok*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
                 dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, dao); }
+        if (getenv("SP_DG_TRACE")) { cudaStreamSynchronize(st); DGDBG("layer %d: attn done (synced)", L); }
 
         /* O proj -> ap, post_attn_norm, residual into dx */
         snprintf(nm, sizeof nm, "blk.%d.attn_output.weight", L);
@@ -5790,6 +5800,7 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
         /* dx now holds attn_out (the post-attention residual) — the FFN input */
 
         /* ── FFN: dense shared MLP + 128-expert MoE, combined, post_ffw_norm, residual ── */
+        if (getenv("SP_DG_TRACE")) { cudaStreamSynchronize(st); DGDBG("layer %d: FFN start (dense MLP)", L); }
         /* (1) dense MLP: cur_mlp = post_ffw_norm_1( down( gelu(gate(ffn_norm(attn_out))) * up(...) ) ) */
         { snprintf(nm, sizeof nm, "blk.%d.ffn_norm.weight", L);
           float *dfn = dg_upload_norm(m, nm, E); if (!dfn) goto layerfail;
@@ -5816,6 +5827,7 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
           cudaMemcpyAsync(dmlp, dnx, nE*sizeof(float), cudaMemcpyDeviceToDevice, st);
           cudaFree(dn1); }
 
+        if (getenv("SP_DG_TRACE")) { cudaStreamSynchronize(st); DGDBG("layer %d: dense MLP done, MoE start", L); }
         /* (2) MoE. router input tmp = rms_norm_noscale(attn_out)*(1/sqrt(E))*gate_inp_s;
          *     expert input cur_moe = pre_ffw_norm_2(attn_out). Both off the SAME attn_out (dx). */
         /* expert input -> dnx (pre_ffw_norm_2 . dx) */
@@ -5850,6 +5862,7 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
             if (!h_rlog) { cudaFree(d_rlog); sp_set_error("dg h_rlog OOM"); goto layerfail; }
             cudaMemcpy(h_rlog, d_rlog, (size_t)n_tok*NE*sizeof(float), cudaMemcpyDeviceToHost);
             cudaFree(d_rlog);
+            DGDBG("layer %d: router downloaded, dispatching experts (NE=%d NU=%d)", L, NE, NU);
 
             /* zero MoE accumulator */
             cudaMemsetAsync(dmoe, 0, nE*sizeof(float), st);
@@ -5910,9 +5923,11 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
                 free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
                 free(h_rlog); if(d_xb)cudaFree(d_xb); if(d_gub)cudaFree(d_gub); if(d_hb)cudaFree(d_hb);
                 sp_set_error("dg batched expert scratch OOM"); goto layerfail; }
+            int dbg_ecount = 0;
             for (int e = 0; e < NE; e++) {
                 int cnt = et_cnt[e];
                 if (cnt == 0) continue;
+                if (getenv("SP_DG_TRACE") && dbg_ecount < 4) { DGDBG("layer %d: expert %d cnt=%d dequant+gemm", L, e, cnt); dbg_ecount++; }
                 /* gather this expert's token hidden columns into d_xb [E x cnt] (row-major n_tok) */
                 for (int j = 0; j < cnt; j++) {
                     int t = et_tok[et_off[e] + j];
@@ -5976,6 +5991,7 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
             cudaFree(dEnc); cudaFree(dDec);
         }
         if (d_ffac) { cudaFree(d_ffac); d_ffac = NULL; }
+        DGDBG("layer %d done", L);
         continue;
     layerfail:
         if (dW) cudaFree(dW); if (dWk) cudaFree(dWk); if (dWv) cudaFree(dWv);
