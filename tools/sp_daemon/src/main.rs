@@ -42,6 +42,7 @@ mod dialogue_runner;
 // the top of main() — never touches the daemon startup path.
 #[cfg(feature = "kairos")]
 mod kairos_runner;
+mod nightshift_curator;
 
 // Sprint WIRE-CPU — host CPU AVX-512 full-forward backend dispatcher for
 // sp_l1.h:§6. Symmetric to the lib-crate's hex_forward_dispatch (android).
@@ -152,6 +153,20 @@ async fn main() {
     //   SP_KAIROS_ALPHA=1 SP_KAIROS_MODEL=... SP_KAIROS_TOK=... \
     //   SP_KAIROS_TAPE=tools/sp_daemon/tests/fixtures/kairos/tape_smoke.txt \
     //   [SP_KAIROS_REPORT=results/kairos_alpha.json] sp-daemon
+    #[cfg(feature = "kairos")]
+    if std::env::var("SP_NIGHTSHIFT_OFFLINE").as_deref() == Ok("1") {
+        let model = std::env::var("SP_KAIROS_MODEL").unwrap_or_default();
+        let tok = std::env::var("SP_KAIROS_TOK").unwrap_or_default();
+        let live = std::env::var("SP_NIGHTSHIFT_LIVE").unwrap_or_else(|_| "_nightshift_live".to_string());
+        if model.is_empty() || tok.is_empty() {
+            eprintln!("SP_NIGHTSHIFT_OFFLINE=1 requires SP_KAIROS_MODEL, SP_KAIROS_TOK");
+            std::process::exit(2);
+        }
+        match nightshift_curator::run_kairos_curator(&model, &tok, &live) {
+            Ok((a, r)) => { eprintln!("[curator] accepted={a} rejected={r}"); std::process::exit(0); }
+            Err(e) => { eprintln!("[curator] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
     #[cfg(feature = "kairos")]
     if std::env::var("SP_KAIROS_ALPHA").as_deref() == Ok("1") {
         let model = std::env::var("SP_KAIROS_MODEL").unwrap_or_default();
