@@ -5049,6 +5049,184 @@ static int gemv_w_packed(cudaStream_t st, const DevTensor *W, const float *dX, f
     return 0;
 }
 
+/* ════════════════════ N5a: DiffusionGemma MoE FFN (arch_id 9) ════════════════════
+ *
+ * Additive, self-contained CUDA MoE forward for the DiffusionGemma backbone
+ * (SP_ARCH_DIFFUSION_GEMMA). Mirrors the qwen36.c moe_ffn arithmetic oracle EXACTLY
+ * (router prep -> f32 logit GEMV -> full softmax -> top-NU by prob -> renorm ->
+ * per-expert GeGLU GELU-tanh -> weighted accumulate) so the CPU<->CUDA parity gate
+ * (G_N5A_MOE_PARITY) holds bit-tight on a pure-f32 fixture.
+ *
+ * This entry takes RAW f32 host pointers (no DevTensor / .sp-model dependence) so the
+ * standalone parity test can drive it with deterministic synthetic weights free of
+ * OK_Q4B quant noise. It touches NO existing forward path (gemma3/gemma4/qwen3 stay
+ * byte-identical) — purely a new function + new kernels below.
+ *
+ * Spec (verified vs _diffgemma_reference/gemma4-common.h gemma4_build_ffn_moe):
+ *   router input prep: tmp = rms_norm(hidden,eps); tmp *= 1/sqrt(E); tmp[i] *= scale[i]
+ *   gate_up_exps[e] : [FF*2, E] row-major; gate = rows[0:FF], up = rows[FF:2FF]
+ *   h[i] = gelu_tanh(gate[i]) * up[i]
+ *   down_exps[e]    : [E, FF] row-major
+ *   y[i] += wt[k] * (down_exps[e] @ h)[i]
+ */
+
+/* device GELU-tanh (the exact k_gelu_mul / g4_gelu approximation, fp32). */
+__device__ __forceinline__ float dg_gelu_tanh(float x) {
+    const float k = 0.7978845608028654f;
+    float th = tanhf(k * (x + 0.044715f * x * x * x));
+    return 0.5f * x * (1.0f + th);
+}
+
+/* one-block f32 RMSNorm of a single vector: out[i] = x[i]/sqrt(mean(x^2)+eps).
+ * (No weight gain — the router prep in moe_ffn norms the raw hidden; the gain is
+ * folded into the model's attn/ffn_norm upstream, not part of THIS standalone op.) */
+__global__ void dg_k_rmsnorm_vec(const float *x, int E, float eps, float *out) {
+    extern __shared__ float sh[];
+    float acc = 0.0f;
+    for (int i = threadIdx.x; i < E; i += blockDim.x) acc += x[i] * x[i];
+    sh[threadIdx.x] = acc; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sh[threadIdx.x] += sh[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = rsqrtf(sh[0] / (float)E + eps);
+    for (int i = threadIdx.x; i < E; i += blockDim.x) out[i] = x[i] * inv;
+}
+
+/* tmp[i] *= router_scale * scale_vec[i]   (router_scale = 1/sqrt(E)). */
+__global__ void dg_k_router_scale(float *tmp, const float *scale_vec, float rscale, int E) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < E) tmp[i] *= rscale * scale_vec[i];
+}
+
+/* row-major f32 GEMV: y[o] = dot(W_row_o[0:in], x)  for o in [0,out).
+ * one warp per output row (mirrors the dp4a kernel's row mapping, f32 arithmetic). */
+__global__ void dg_k_gemv_f32(const float *W, const float *x, float *y, int in, int out) {
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int o = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (o >= out) return;
+    const float *wr = W + (size_t)o * in;
+    float acc = 0.0f;
+    for (int i = lane; i < in; i += 32) acc += wr[i] * x[i];
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, s);
+    if (lane == 0) y[o] = acc;
+}
+
+/* GeGLU: h[i] = gelu_tanh(gate[i]) * up[i], gate = gu[0:FF], up = gu[FF:2FF]. */
+__global__ void dg_k_geglu(const float *gu, float *h, int FF) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < FF) h[i] = dg_gelu_tanh(gu[i]) * gu[FF + i];
+}
+
+/* yo[i] += w * de[i]  (weighted expert accumulate into the output vector). */
+__global__ void dg_k_axpy(float *yo, const float *de, float w, int E) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < E) yo[i] += w * de[i];
+}
+
+/* N5a entry: single-token MoE FFN on f32 host weights. Writes out[E].
+ *   gate_inp      : [NE, E] f32 router weights (row o = expert o's logit row)
+ *   gate_inp_scale: [E] f32 elementwise router-input scale sidecar
+ *   gate_up_exps  : [NE, FF*2, E] f32 (expert e at offset e*FF*2*E)
+ *   down_exps     : [NE, E, FF]  f32 (expert e at offset e*E*FF)
+ *   hidden        : [E] f32 input activation (the SAME hidden the router norms)
+ *   sel_out       : optional [NU] int, receives the selected expert indices (or NULL)
+ * Returns 0 on success. */
+extern "C" int gemma4_moe_ffn_cuda(int E, int NE, int NU, int FF, float eps,
+                                   const float *gate_inp, const float *gate_inp_scale,
+                                   const float *gate_up_exps, const float *down_exps,
+                                   const float *hidden, float *out, int *sel_out) {
+    int rc = 1;
+    cudaStream_t st = 0;
+    float *d_hidden=NULL, *d_tmp=NULL, *d_scale=NULL, *d_gi=NULL, *d_logits=NULL;
+    float *d_gu=NULL, *d_dn=NULL, *d_x=NULL, *d_guout=NULL, *d_h=NULL, *d_de=NULL, *d_yo=NULL;
+    float *h_logits = (float *)malloc((size_t)NE * sizeof(float));
+    if (!h_logits) { sp_set_error("moe: host OOM"); return 1; }
+
+    #define DGM(p, n) do { if (cudaMalloc(&(p), (size_t)(n)*sizeof(float)) != cudaSuccess) { \
+        sp_set_error("moe: cudaMalloc"); goto done; } } while (0)
+    DGM(d_hidden, E); DGM(d_tmp, E); DGM(d_scale, E); DGM(d_gi, (size_t)NE*E);
+    DGM(d_logits, NE);
+    DGM(d_gu, (size_t)FF*2*E); DGM(d_dn, (size_t)E*FF);
+    DGM(d_x, E); DGM(d_guout, FF*2); DGM(d_h, FF); DGM(d_de, E); DGM(d_yo, E);
+
+    if (cudaMemcpy(d_hidden, hidden, (size_t)E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_scale, gate_inp_scale, (size_t)E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_gi, gate_inp, (size_t)NE*E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("moe: H2D copy"); goto done;
+    }
+
+    /* 1. expert input x = rms_norm(hidden) (the ffn-branch normed hidden the experts
+     *    consume); router input tmp = x then *= 1/sqrt(E) then *= scale[] (router-only). */
+    {
+        int bd = 256; while (bd > E && bd > 32) bd >>= 1;
+        dg_k_rmsnorm_vec<<<1, bd, (size_t)bd*sizeof(float), st>>>(d_hidden, E, eps, d_x);
+        cudaMemcpyAsync(d_tmp, d_x, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
+        dg_k_router_scale<<<(unsigned)((E+255)/256), 256, 0, st>>>(d_tmp, d_scale, 1.0f/sqrtf((float)E), E);
+    }
+    /* 2. router GEMV: logits[o] = dot(gate_inp_row[o], tmp) */
+    {
+        unsigned blocks = ((unsigned)NE + 7u) / 8u;   /* 8 warps/block */
+        dg_k_gemv_f32<<<blocks, 256, 0, st>>>(d_gi, d_tmp, d_logits, E, NE);
+    }
+    if (cudaMemcpy(h_logits, d_logits, (size_t)NE*sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        sp_set_error("moe: logits D2H"); goto done;
+    }
+    /* 3. softmax over all NE, then top-NU by prob, then renorm (qwen36.c moe_ffn) */
+    {
+        float mx = h_logits[0];
+        for (int i = 1; i < NE; i++) if (h_logits[i] > mx) mx = h_logits[i];
+        double se = 0.0;
+        for (int i = 0; i < NE; i++) { h_logits[i] = expf(h_logits[i] - mx); se += h_logits[i]; }
+        for (int i = 0; i < NE; i++) h_logits[i] = (float)(h_logits[i] / se);
+        char *used = (char *)calloc((size_t)NE, 1);
+        int *idx = (int *)malloc((size_t)NU*sizeof(int));
+        float *wt = (float *)malloc((size_t)NU*sizeof(float));
+        if (!used || !idx || !wt) { free(used); free(idx); free(wt); sp_set_error("moe: top-k OOM"); goto done; }
+        float wsum = 0.0f;
+        for (int k = 0; k < NU; k++) {
+            int best = -1; float bv = -1.0f;
+            for (int i = 0; i < NE; i++) if (!used[i] && h_logits[i] > bv) { bv = h_logits[i]; best = i; }
+            used[best] = 1; idx[k] = best; wt[k] = bv; wsum += bv;
+        }
+        for (int k = 0; k < NU; k++) wt[k] = (wt[k] / wsum) * 1.0f;   /* expert_weights_scale = 1.0 */
+        if (sel_out) for (int k = 0; k < NU; k++) sel_out[k] = idx[k];
+
+        /* 4. expert dispatch + weighted accumulate */
+        cudaMemset(d_yo, 0, (size_t)E*sizeof(float));
+        unsigned gu_blocks = ((unsigned)(FF*2) + 7u) / 8u;
+        unsigned dn_blocks = ((unsigned)E + 7u) / 8u;
+        for (int k = 0; k < NU; k++) {
+            int e = idx[k];
+            const float *gu_e = gate_up_exps + (size_t)e * (size_t)(FF*2) * E;
+            const float *dn_e = down_exps    + (size_t)e * (size_t)E * FF;
+            if (cudaMemcpy(d_gu, gu_e, (size_t)(FF*2)*E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+                cudaMemcpy(d_dn, dn_e, (size_t)E*FF*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+                free(used); free(idx); free(wt); sp_set_error("moe: expert H2D"); goto done;
+            }
+            /* gate_up = gate_up_exps[e] @ x, x = rms_norm(hidden) (router scaling is
+             * router-only; the experts consume the unscaled normed hidden). */
+            dg_k_gemv_f32<<<gu_blocks, 256, 0, st>>>(d_gu, d_x, d_guout, E, FF*2);
+            dg_k_geglu<<<(unsigned)((FF+255)/256), 256, 0, st>>>(d_guout, d_h, FF);
+            dg_k_gemv_f32<<<dn_blocks, 256, 0, st>>>(d_dn, d_h, d_de, FF, E);
+            dg_k_axpy<<<(unsigned)((E+255)/256), 256, 0, st>>>(d_yo, d_de, wt[k], E);
+        }
+        free(used); free(idx); free(wt);
+    }
+    if (cudaMemcpy(out, d_yo, (size_t)E*sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        sp_set_error("moe: out D2H"); goto done;
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess) { sp_set_error("moe: sync"); goto done; }
+    rc = 0;
+done:
+    free(h_logits);
+    cudaFree(d_hidden); cudaFree(d_tmp); cudaFree(d_scale); cudaFree(d_gi); cudaFree(d_logits);
+    cudaFree(d_gu); cudaFree(d_dn); cudaFree(d_x); cudaFree(d_guout); cudaFree(d_h);
+    cudaFree(d_de); cudaFree(d_yo);
+    #undef DGM
+    return rc;
+}
+
 /* ════════════════════════ forward ════════════════════════ */
 
 extern "C" int gemma3_forward_cuda(const qwen3_model *m, const int32_t *tokens,

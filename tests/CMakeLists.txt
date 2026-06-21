@@ -499,6 +499,20 @@ if(SP_ENGINE_WITH_CUDA)
     add_test(NAME M_QWEN3_DECODE_CUDA COMMAND test_qwen3_decode_cuda)
     set_tests_properties(M_QWEN3_DECODE_CUDA PROPERTIES TIMEOUT 600)
 
+    # G_N5A_MOE_PARITY (N5a): DiffusionGemma (arch_id 9) CUDA MoE FFN vs CPU oracle.
+    # Synthetic f32 fixture (no .sp-model, no quant noise) — gate = expert-selection
+    # identical AND rel-err < 1e-3. Links sp_engine (pulls the CUDA lib transitively);
+    # the gemma4_moe_ffn_cuda entry takes raw f32 pointers so no model load is needed.
+    add_executable(test_moe_parity_cuda test_moe_parity_cuda.c)
+    target_link_libraries(test_moe_parity_cuda PRIVATE sp_engine)
+    if(MSVC)
+        target_compile_options(test_moe_parity_cuda PRIVATE /W4)
+    else()
+        target_compile_options(test_moe_parity_cuda PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME G_N5A_MOE_PARITY COMMAND test_moe_parity_cuda)
+    set_tests_properties(G_N5A_MOE_PARITY PROPERTIES TIMEOUT 300)
+
     add_executable(test_ntt_attn_cuda test_ntt_attn_cuda.c)
     target_link_libraries(test_ntt_attn_cuda PRIVATE sp_engine)
     target_compile_definitions(test_ntt_attn_cuda PRIVATE

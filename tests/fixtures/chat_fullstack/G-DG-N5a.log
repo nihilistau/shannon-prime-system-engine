@@ -1,0 +1,29 @@
+# G-DG-N5a — DiffusionGemma (arch_id 9) CUDA MoE FFN parity gate (G_N5A_MOE_PARITY)
+# Date: 2026-06-21
+#
+# REPRO (from repo root D:\F\shannon-prime-repos\shannon-prime-system-engine):
+#   call scripts\env\env-cuda.bat
+#   cmake -S . -B build-cuda
+#   cmake --build build-cuda --target test_moe_parity_cuda -j
+#   build-cuda\tests\test_moe_parity_cuda.exe
+#   (or: ctest --test-dir build-cuda -R G_N5A_MOE_PARITY -V)
+#
+# WHAT: pure-f32 synthetic MoE fixture (E=64 NE=8 NU=4 FF=16), CPU oracle
+#   (mirrors qwen36.c moe_ffn + DiffusionGemma router-prep + GELU-tanh + first-half=gate)
+#   vs the new additive CUDA entry gemma4_moe_ffn_cuda (src/backends/cuda/cuda_forward.cu).
+#   Gate: selected-expert indices IDENTICAL AND rel-err < 1e-3.
+#
+# RESULT:
+selected experts CPU: 2 6 3 1  GPU: 2 6 3 1   match=YES
+L2(diff)=6.013634e-06  ||cpu||=1.881777e+01  rel-err=3.195721e-07
+G_N5A_MOE_PARITY: PASS  (dims E=64 NE=8 NU=4 FF=16)
+EXIT=0
+#
+# expert-selection match = YES (top-NU indices bit-identical)
+# rel-err = 3.20e-07 (true-f32 path, << 1e-3 gate; << 1e-5 ideal)
+# VERDICT: PASS
+#
+# Dense-path confirmation: change is purely ADDITIVE — a new function
+# (gemma4_moe_ffn_cuda) + 6 new kernels (dg_*) inserted before the forward
+# section divider. NO existing gemma3/gemma4/qwen3 forward path was modified;
+# the 12B dense forward stays byte-identical. Build exit 0, only pre-existing warnings.
