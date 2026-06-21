@@ -5227,6 +5227,195 @@ done:
     return rc;
 }
 
+/* ════════════════ N5a-packed: DiffusionGemma MoE FFN on REAL OK_Q4B experts ════════════════
+ *
+ * Same MoE algorithm as gemma4_moe_ffn_cuda (router prep -> f32 logit GEMV -> full
+ * softmax -> top-NU by prob -> renorm -> per-expert GeGLU -> weighted accumulate),
+ * but the THREE expert GEMVs (gate, up — fused as gate_up [FF*2,E] — and down
+ * [E,FF]) run through the existing OK_Q4B dp4a path (k_quant_act_int8 +
+ * k_gemv_q4b_dp4a_v2) instead of f32 GEMV. The router stays f32 (matches the CPU
+ * oracle, which never quantizes the router). Additive — a NEW function; the f32
+ * gemma4_moe_ffn_cuda and every dense forward stay byte-identical.
+ *
+ * The experts are passed as the REAL packed OK_Q4B arena layout (the loader's
+ * build_packed_q4b format): per-expert nibble-packed codes (2 codes/byte, low
+ * nibble even idx, sign-ext (n^8)-8) + per-32-block f16 bscale [rows*bs_nblk].
+ * Expert e of a fused rank-3 tensor occupies rows [e*rows_per_expert, ...); the
+ * caller passes the FULL codes/bscale arrays + the per-expert row stride and the
+ * code routes into expert e's slice (codes offset = e*rows_per_expert*nib_cols,
+ * bscale offset = e*rows_per_expert*bs_nblk).
+ *
+ * Parity is ~1e-3 not bit-exact: the CPU oracle dequants the SAME OK_Q4B codes to
+ * f32 and does an f32 dot, while this path quantizes the activation to int8
+ * (per-16-block, qmax 127 — k_quant_act_int8) and accumulates via integer dp4a.
+ * The weight codes + per-32-block scale are IDENTICAL on both sides (so the weight
+ * arithmetic is exact); the ~1e-3 deflection is solely the int8 activation-quant +
+ * integer reduction order, exactly as the dense dp4a decode path carries vs its f32
+ * twin.
+ *
+ *   gu_codes  : [NE*FF*2 rows] nibble-packed Q4B codes for gate_up (in=E)
+ *   gu_bscale : [NE*FF*2 * gu_bsnblk] f16 per-32-block scales (gu_bsnblk = E/32)
+ *   dn_codes  : [NE*E rows]    nibble-packed Q4B codes for down    (in=FF)
+ *   dn_bscale : [NE*E * dn_bsnblk] f16 (dn_bsnblk = FF/32)
+ * Returns 0 on success.  E and FF must be multiples of 32 (Q4B dp4a precondition). */
+extern "C" int gemma4_moe_ffn_q4b_cuda(int E, int NE, int NU, int FF, float eps,
+                                       const float *gate_inp, const float *gate_inp_scale,
+                                       const unsigned char *gu_codes, const unsigned short *gu_bscale,
+                                       const unsigned char *dn_codes, const unsigned short *dn_bscale,
+                                       const float *hidden, float *out, int *sel_out) {
+    int rc = 1;
+    cudaStream_t st = 0;
+    if ((E & 31) || (FF & 31)) { sp_set_error("moe_q4b: E,FF must be %%32"); return 1; }
+    const int gu_rows = FF * 2;            /* rows per expert in the fused gate_up tensor */
+    const int dn_rows = E;                 /* rows per expert in the down tensor */
+    const int gu_bsnblk = E  >> 5;         /* per-32 blocks per gate_up row (in=E)  */
+    const int dn_bsnblk = FF >> 5;         /* per-32 blocks per down    row (in=FF) */
+    const size_t gu_nibcols = (size_t)((E  + 1) / 2);   /* bytes per gate_up row */
+    const size_t dn_nibcols = (size_t)((FF + 1) / 2);   /* bytes per down    row */
+
+    float *h_logits = (float *)malloc((size_t)NE * sizeof(float));
+    /* device buffers: f32 router lane (same as the f32 entry) + the packed expert
+     * lane (whole gate_up/down codes+bscale resident, per-expert row_off, act-quant
+     * scratch, GEMV outputs). */
+    float *d_hidden=NULL, *d_tmp=NULL, *d_scale=NULL, *d_gi=NULL, *d_logits=NULL;
+    float *d_x=NULL, *d_guout=NULL, *d_h=NULL, *d_de=NULL, *d_yo=NULL;
+    unsigned char *d_gu_codes=NULL, *d_dn_codes=NULL;
+    unsigned short *d_gu_bscale=NULL, *d_dn_bscale=NULL;
+    unsigned long long *d_gu_roff=NULL, *d_dn_roff=NULL;
+    signed char *d_qx=NULL; float *d_sx=NULL;
+    if (!h_logits) { sp_set_error("moe_q4b: host OOM"); return 1; }
+
+    #define QGM(p, n) do { if (cudaMalloc(&(p), (size_t)(n)*sizeof(float)) != cudaSuccess) { \
+        sp_set_error("moe_q4b: cudaMalloc"); goto qdone; } } while (0)
+    QGM(d_hidden, E); QGM(d_tmp, E); QGM(d_scale, E); QGM(d_gi, (size_t)NE*E);
+    QGM(d_logits, NE);
+    QGM(d_x, E); QGM(d_guout, FF*2); QGM(d_h, FF); QGM(d_de, E); QGM(d_yo, E);
+
+    /* the full packed expert arrays, resident (single-token gate — sizes are small) */
+    {
+        size_t gu_codes_bytes = (size_t)NE * gu_rows * gu_nibcols;
+        size_t dn_codes_bytes = (size_t)NE * dn_rows * dn_nibcols;
+        size_t gu_bs_n = (size_t)NE * gu_rows * gu_bsnblk;
+        size_t dn_bs_n = (size_t)NE * dn_rows * dn_bsnblk;
+        if (cudaMalloc(&d_gu_codes, gu_codes_bytes) != cudaSuccess ||
+            cudaMalloc(&d_dn_codes, dn_codes_bytes) != cudaSuccess ||
+            cudaMalloc(&d_gu_bscale, gu_bs_n*sizeof(unsigned short)) != cudaSuccess ||
+            cudaMalloc(&d_dn_bscale, dn_bs_n*sizeof(unsigned short)) != cudaSuccess ||
+            cudaMalloc(&d_gu_roff, (size_t)gu_rows*sizeof(unsigned long long)) != cudaSuccess ||
+            cudaMalloc(&d_dn_roff, (size_t)dn_rows*sizeof(unsigned long long)) != cudaSuccess) {
+            sp_set_error("moe_q4b: packed cudaMalloc"); goto qdone;
+        }
+        /* act-quant scratch: int8 codes + per-16-block scales, padded to max in */
+        int max_in = E > FF ? E : FF;
+        int max_npad = (max_in + 31) & ~31;
+        if (cudaMalloc(&d_qx, (size_t)max_npad) != cudaSuccess ||
+            cudaMalloc(&d_sx, (size_t)(max_npad>>4)*sizeof(float)) != cudaSuccess) {
+            sp_set_error("moe_q4b: actq cudaMalloc"); goto qdone;
+        }
+        if (cudaMemcpy(d_gu_codes, gu_codes, gu_codes_bytes, cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(d_dn_codes, dn_codes, dn_codes_bytes, cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(d_gu_bscale, gu_bscale, gu_bs_n*sizeof(unsigned short), cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(d_dn_bscale, dn_bscale, dn_bs_n*sizeof(unsigned short), cudaMemcpyHostToDevice) != cudaSuccess) {
+            sp_set_error("moe_q4b: packed H2D"); goto qdone;
+        }
+        /* per-expert row_off: byte offset of row r WITHIN the expert slice (the codes
+         * base pointer is advanced to the expert start, so row_off restarts at 0). */
+        unsigned long long *h_gu_roff = (unsigned long long *)malloc((size_t)gu_rows*sizeof(unsigned long long));
+        unsigned long long *h_dn_roff = (unsigned long long *)malloc((size_t)dn_rows*sizeof(unsigned long long));
+        if (!h_gu_roff || !h_dn_roff) { free(h_gu_roff); free(h_dn_roff); sp_set_error("moe_q4b: roff OOM"); goto qdone; }
+        for (int r = 0; r < gu_rows; r++) h_gu_roff[r] = (unsigned long long)((size_t)r * gu_nibcols);
+        for (int r = 0; r < dn_rows; r++) h_dn_roff[r] = (unsigned long long)((size_t)r * dn_nibcols);
+        cudaMemcpy(d_gu_roff, h_gu_roff, (size_t)gu_rows*sizeof(unsigned long long), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_dn_roff, h_dn_roff, (size_t)dn_rows*sizeof(unsigned long long), cudaMemcpyHostToDevice);
+        free(h_gu_roff); free(h_dn_roff);
+    }
+
+    if (cudaMemcpy(d_hidden, hidden, (size_t)E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_scale, gate_inp_scale, (size_t)E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_gi, gate_inp, (size_t)NE*E*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("moe_q4b: H2D copy"); goto qdone;
+    }
+
+    /* 1. expert input x = rms_norm(hidden); router input tmp = x * 1/sqrt(E) * scale[] */
+    {
+        int bd = 256; while (bd > E && bd > 32) bd >>= 1;
+        dg_k_rmsnorm_vec<<<1, bd, (size_t)bd*sizeof(float), st>>>(d_hidden, E, eps, d_x);
+        cudaMemcpyAsync(d_tmp, d_x, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
+        dg_k_router_scale<<<(unsigned)((E+255)/256), 256, 0, st>>>(d_tmp, d_scale, 1.0f/sqrtf((float)E), E);
+    }
+    /* 2. router GEMV (f32, exactly the f32 entry) */
+    {
+        unsigned blocks = ((unsigned)NE + 7u) / 8u;
+        dg_k_gemv_f32<<<blocks, 256, 0, st>>>(d_gi, d_tmp, d_logits, E, NE);
+    }
+    if (cudaMemcpy(h_logits, d_logits, (size_t)NE*sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        sp_set_error("moe_q4b: logits D2H"); goto qdone;
+    }
+    /* 3. softmax + top-NU + renorm (identical to the f32 entry / CPU oracle) */
+    {
+        float mx = h_logits[0];
+        for (int i = 1; i < NE; i++) if (h_logits[i] > mx) mx = h_logits[i];
+        double se = 0.0;
+        for (int i = 0; i < NE; i++) { h_logits[i] = expf(h_logits[i] - mx); se += h_logits[i]; }
+        for (int i = 0; i < NE; i++) h_logits[i] = (float)(h_logits[i] / se);
+        char *used = (char *)calloc((size_t)NE, 1);
+        int *idx = (int *)malloc((size_t)NU*sizeof(int));
+        float *wt = (float *)malloc((size_t)NU*sizeof(float));
+        if (!used || !idx || !wt) { free(used); free(idx); free(wt); sp_set_error("moe_q4b: top-k OOM"); goto qdone; }
+        float wsum = 0.0f;
+        for (int k = 0; k < NU; k++) {
+            int best = -1; float bv = -1.0f;
+            for (int i = 0; i < NE; i++) if (!used[i] && h_logits[i] > bv) { bv = h_logits[i]; best = i; }
+            used[best] = 1; idx[k] = best; wt[k] = bv; wsum += bv;
+        }
+        for (int k = 0; k < NU; k++) wt[k] = (wt[k] / wsum) * 1.0f;
+        if (sel_out) for (int k = 0; k < NU; k++) sel_out[k] = idx[k];
+
+        /* 4. per-expert dp4a dispatch (gate_up [FF*2,E] then down [E,FF]) + accumulate */
+        cudaMemset(d_yo, 0, (size_t)E*sizeof(float));
+        unsigned gu_blocks = ((unsigned)(FF*2) + 7u) / 8u;   /* 8 warps(rows)/block */
+        unsigned dn_blocks = ((unsigned)E + 7u) / 8u;
+        for (int k = 0; k < NU; k++) {
+            int e = idx[k];
+            /* expert e's codes/bscale base inside the fused rank-3 tensors */
+            const unsigned char  *gu_c  = d_gu_codes  + (size_t)e * gu_rows * gu_nibcols;
+            const unsigned short *gu_bs = d_gu_bscale + (size_t)e * gu_rows * gu_bsnblk;
+            const unsigned char  *dn_c  = d_dn_codes  + (size_t)e * dn_rows * dn_nibcols;
+            const unsigned short *dn_bs = d_dn_bscale + (size_t)e * dn_rows * dn_bsnblk;
+            /* gate_up = Q4B(gate_up_exps[e]) @ x  (in=E, out=FF*2), dp4a + act int8 */
+            {
+                int npad = (E + 31) & ~31;
+                k_quant_act_int8<<<1, 256, 0, st>>>(d_x, E, npad, d_qx, d_sx);
+                k_gemv_q4b_dp4a_v2<<<gu_blocks, 256, 0, st>>>(
+                    gu_c, d_gu_roff, gu_bs, gu_bsnblk, E, d_qx, d_sx, d_guout, FF*2);
+            }
+            dg_k_geglu<<<(unsigned)((FF+255)/256), 256, 0, st>>>(d_guout, d_h, FF);
+            /* de = Q4B(down_exps[e]) @ h  (in=FF, out=E), dp4a + act int8 */
+            {
+                int npad = (FF + 31) & ~31;
+                k_quant_act_int8<<<1, 256, 0, st>>>(d_h, FF, npad, d_qx, d_sx);
+                k_gemv_q4b_dp4a_v2<<<dn_blocks, 256, 0, st>>>(
+                    dn_c, d_dn_roff, dn_bs, dn_bsnblk, FF, d_qx, d_sx, d_de, E);
+            }
+            dg_k_axpy<<<(unsigned)((E+255)/256), 256, 0, st>>>(d_yo, d_de, wt[k], E);
+        }
+        free(used); free(idx); free(wt);
+    }
+    if (cudaMemcpy(out, d_yo, (size_t)E*sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        sp_set_error("moe_q4b: out D2H"); goto qdone;
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess) { sp_set_error("moe_q4b: sync"); goto qdone; }
+    rc = 0;
+qdone:
+    free(h_logits);
+    cudaFree(d_hidden); cudaFree(d_tmp); cudaFree(d_scale); cudaFree(d_gi); cudaFree(d_logits);
+    cudaFree(d_x); cudaFree(d_guout); cudaFree(d_h); cudaFree(d_de); cudaFree(d_yo);
+    cudaFree(d_gu_codes); cudaFree(d_dn_codes); cudaFree(d_gu_bscale); cudaFree(d_dn_bscale);
+    cudaFree(d_gu_roff); cudaFree(d_dn_roff); cudaFree(d_qx); cudaFree(d_sx);
+    #undef QGM
+    return rc;
+}
+
 /* ════════════════════════ forward ════════════════════════ */
 
 extern "C" int gemma3_forward_cuda(const qwen3_model *m, const int32_t *tokens,

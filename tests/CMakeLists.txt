@@ -513,6 +513,24 @@ if(SP_ENGINE_WITH_CUDA)
     add_test(NAME G_N5A_MOE_PARITY COMMAND test_moe_parity_cuda)
     set_tests_properties(G_N5A_MOE_PARITY PROPERTIES TIMEOUT 300)
 
+    # G-DG-N5a-packed: the REAL OK_Q4B experts through the dp4a path. Builds a small
+    # self-contained OK_Q4B-packed MoE fixture (the loader's build_packed_q4b byte
+    # layout: nibble codes + per-32-block f16 bscale) and drives BOTH the CPU OK_Q4B
+    # MoE (dequant -> f32 dot, the exact sp_frob_packed_dequant_row arithmetic) and
+    # the new gemma4_moe_ffn_q4b_cuda (k_quant_act_int8 + k_gemv_q4b_dp4a_v2). Gate =
+    # expert-selection identical AND rel-err < 2e-3 (int8 act-quant + integer
+    # reduction; the weight codes+scales are identical both sides). Links sp_engine
+    # (CUDA lib transitively) + sp_session for sp_f16_to_f32/sp_f32_to_f16.
+    add_executable(test_moe_parity_packed_cuda test_moe_parity_packed_cuda.c)
+    target_link_libraries(test_moe_parity_packed_cuda PRIVATE sp_engine sp_session)
+    if(MSVC)
+        target_compile_options(test_moe_parity_packed_cuda PRIVATE /W4)
+    else()
+        target_compile_options(test_moe_parity_packed_cuda PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME G_DG_N5A_PACKED COMMAND test_moe_parity_packed_cuda)
+    set_tests_properties(G_DG_N5A_PACKED PROPERTIES TIMEOUT 300)
+
     add_executable(test_ntt_attn_cuda test_ntt_attn_cuda.c)
     target_link_libraries(test_ntt_attn_cuda PRIVATE sp_engine)
     target_compile_definitions(test_ntt_attn_cuda PRIVATE

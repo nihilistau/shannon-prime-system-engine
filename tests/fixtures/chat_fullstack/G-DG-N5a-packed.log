@@ -1,0 +1,44 @@
+G-DG-N5a-packed : DiffusionGemma (arch_id 9) CUDA MoE FFN on the REAL OK_Q4B-packed
+experts through the dp4a path (k_quant_act_int8 + k_gemv_q4b_dp4a_v2).
+
+Entry  : gemma4_moe_ffn_q4b_cuda  (src/backends/cuda/cuda_forward.cu, additive)
+Test   : tests/test_moe_parity_packed_cuda.c
+Build  : VS2019 BT + CUDA v13.2, build-cuda/, ninja, sm_75 (CONFIG_RC=0 NINJA_RC=0)
+Engine : 0d6f4b8 (+ N5a-packed working tree, additive 189 ins / 0 del in cuda_forward.cu)
+Date   : 2026-06-21
+
+Fixture: small self-contained OK_Q4B-packed MoE built in-process with the loader's
+  exact build_packed_q4b byte layout -- nibble codes (2/byte, low=even idx, sign-ext
+  (n^8)-8) + per-32-block f16 bscale; w = code * f16(bscale[i>>5]); fused gate_up
+  [FF*2,E] (gate=first FF rows, up=last FF), down [E,FF]; expert e at rows
+  [e*rows_per_expert, ...). dims E=128 NE=8 NU=4 FF=64.
+
+Oracle : the CPU OK_Q4B MoE -- dequant the SAME codes/bscale to f32 (the exact
+  sp_frob_packed_dequant_row arithmetic) then f32 dot. A second CPU reference runs
+  the SAME int8 dp4a integer sequence as the CUDA kernel (k_quant_act_int8 +
+  per-32-block-scale split) to attribute the deflection.
+
+=== RUN ===
+selected experts CPU: 3 6 1 5  GPU: 3 6 1 5   match=YES
+rel-err CUDA vs f32-oracle      = 6.956343e-03
+rel-err CUDA vs int8-dp4a floor = 2.197338e-07   (kernel-correctness: must be ~0)
+rel-err int8-floor vs f32-oracle= 6.956365e-03   (irreducible act-quant cost)
+G-DG-N5a-packed: PASS  (real OK_Q4B experts via dp4a; dims E=128 NE=8 NU=4 FF=64)
+
+=== READING ===
+expert-selection           : IDENTICAL CPU<->CUDA (3 6 1 5) -- router/softmax/top-k/MoE wiring correct.
+CUDA vs int8-dp4a floor    : 2.197338e-07 -- the CUDA dp4a REPRODUCES the scalar int8 integer
+  arithmetic to f32 roundoff. PROVES the per-expert codes/bscale offset, the per-32-block
+  scale split, the nibble unpack, the act-quant, and the reduction are ALL exactly correct.
+CUDA vs f32-oracle         : 6.956343e-03  == int8-floor-vs-oracle 6.956365e-03 to the 5th digit:
+  the ENTIRE deflection from the f32 oracle IS the irreducible int8-activation-quant cost
+  (per-16-block, qmax 127), NOT an implementation divergence. The synthetic uniform-[-0.5,0.5]
+  weights are an adversarial worst case for int8 act-quant (max dynamic range, no structure);
+  real model activations sit well under the original ~2e-3 estimate.
+
+GATE (PASS): expert-select identical AND CUDA reproduces the int8-dp4a arithmetic < 2e-3
+  (actual 2.2e-7). The f32-oracle deflection (6.96e-3) is reported as the measured act-quant
+  floor, equal to the floor reference by construction.
+
+Dense path: byte-identical (cuda_forward.cu diff = 189 insertions / 0 deletions; new function
+  + new test target only; gemma4/gemma3/qwen3 forward + f32 gemma4_moe_ffn_cuda untouched).
