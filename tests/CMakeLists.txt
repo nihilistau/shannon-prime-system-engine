@@ -447,6 +447,16 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
         # driven binary. SLOW; skips when model/GPU absent. --
         add_executable(test_diffjudge_native test_diffjudge_native.c)
         target_link_libraries(test_diffjudge_native PRIVATE sp_session sp_engine_cuda sp_engine)
+        # -- G-DIFFJUDGE-NATIVE-full (N4-full): the constrained {tags,NULL} DENOISE judge.
+        # Replaces the single forward+argmax with the full entropy-bound renoise loop +
+        # self-conditioning. Env-driven (NOT a default ctest); TRACTABILITY-SCOPED subset
+        # (SP_DJ_LIMIT matched + SP_DJ_FLIMIT foreign). SLOW; run detached. --
+        add_executable(test_diffjudge_denoise test_diffjudge_denoise.c)
+        target_link_libraries(test_diffjudge_denoise PRIVATE sp_session sp_engine_cuda sp_engine)
+        # -- G-DG-N3: self-conditioning step-0 byte-identity + non-triviality. One model
+        # load + 3 forwards; env-driven, NOT a default ctest. --
+        add_executable(test_dg_selfcond test_dg_selfcond.c)
+        target_link_libraries(test_dg_selfcond PRIVATE sp_session sp_engine_cuda sp_engine)
         # XBAR-P1 Inception Probe driver (CONTRACT-XBAR-P1, lattice papers).
         # Env-driven, NOT a ctest: every probe arm = this binary + SP_XBAR_* env.
         add_executable(test_xbar_p1_cuda test_xbar_p1_cuda.c)
@@ -531,6 +541,20 @@ if(SP_ENGINE_WITH_CUDA)
     endif()
     add_test(NAME G_N5A_MOE_PARITY COMMAND test_moe_parity_cuda)
     set_tests_properties(G_N5A_MOE_PARITY PROPERTIES TIMEOUT 300)
+
+    # G-DG-N4a: the entropy-bound sample kernel (dg_sample_kernel) parity gate.
+    # Pure vocab-space float test — NO model, NO weights, just a fixed logit fixture
+    # through dg_sample_logits_host vs a host reference (argmax exact, entropy ~1e-4,
+    # sampled CDF-walk exact). Fast (a few ms); the N4-full renoise loop's floor.
+    add_executable(test_dg_sample test_dg_sample.c)
+    target_link_libraries(test_dg_sample PRIVATE sp_engine)
+    if(MSVC)
+        target_compile_options(test_dg_sample PRIVATE /W4)
+    else()
+        target_compile_options(test_dg_sample PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME G_DG_N4A COMMAND test_dg_sample)
+    set_tests_properties(G_DG_N4A PROPERTIES TIMEOUT 120)
 
     # G-DG-N5a-packed: the REAL OK_Q4B experts through the dp4a path. Builds a small
     # self-contained OK_Q4B-packed MoE fixture (the loader's build_packed_q4b byte

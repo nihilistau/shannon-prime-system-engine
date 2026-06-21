@@ -86,6 +86,41 @@ int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
 int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
                                  float *out_logits);
 
+/* N4a: the entropy-bound sample kernel (dg_sample_kernel) host wrappers. Pure
+ * vocab-space float math on a logits buffer — NO weights. Per position (row) of the
+ * logits: argmax over (logit*inv_temp); entropy = log Z - T/Z with d=logit*inv_temp-max,
+ * Z=sum exp(d), T=sum d*exp(d); and a multinomial draw (first vocab-order v whose
+ * cumulative exp(d) >= u[row]*Z). argmax/entropy/sampled are caller-allocated length
+ * n_pos; u_host is n_pos seeded uniforms in [0,1). Returns 0 on success.
+ *   dg_sample_logits      : d_logits is a DEVICE [n_pos x n_vocab] buffer.
+ *   dg_sample_logits_host : h_logits is a HOST   [n_pos x n_vocab] buffer (uploaded).
+ * Gate G-DG-N4a: argmax exact + entropy ~1e-4 vs a host reference on a fixed fixture. */
+int dg_sample_logits(const float *d_logits, int n_pos, int n_vocab,
+                     const float *u_host, float inv_temp,
+                     int *argmax_host, float *entropy_host, int *sampled_host);
+int dg_sample_logits_host(const float *h_logits, int n_pos, int n_vocab,
+                          const float *u_host, float inv_temp,
+                          int *argmax_host, float *entropy_host, int *sampled_host);
+
+/* N3: self-conditioning forward. prev_logits_dev = DEVICE [C x V] buffer (canvas rows
+ * of the prior denoise step's RAW logits) or NULL (=> no SC, byte-identical to
+ * diffusion_gemma_forward_cuda). sc_temp_inv = 1/(prior step temperature). */
+int diffusion_gemma_forward_cuda_sc(const qwen3_model *m, const int32_t *tokens,
+                                    int n_tok, float *out_logits,
+                                    const float *prev_logits_dev, float sc_temp_inv);
+
+/* N4-full host-loop helpers: a persistent DEVICE buffer for the prior step's canvas
+ * logits (avoids re-malloc each step). dg_dev_alloc_f32 allocates n floats on the
+ * device (returns NULL on failure); dg_dev_upload copies host->device; dg_dev_free
+ * frees. The renoise loop uploads the canvas slice of the forward's host logits into
+ * this buffer and passes it as prev_logits_dev to the SC forward next step. */
+void *dg_dev_alloc_f32(long n);
+int   dg_dev_upload(void *dev, const float *host, long n);
+void  dg_dev_free(void *dev);
+
+/* free the cached SC token-embedding device buffer (built lazily by the SC forward). */
+void  dg_sc_embed_release(void);
+
 /* ETA.5a: Gemma4 autoregressive CUDA decode (host-driven, oracle arithmetic).
  * Jagged per-OWNER KV cache (global 512-wide / SWA 256-wide rows; sharers
  * allocate nothing), per-step AltUp, windowed single-query attention, tied head

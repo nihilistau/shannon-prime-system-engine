@@ -1,0 +1,16 @@
+# G-DG-N3  self-conditioning step-0 byte-identity + non-triviality
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model CL=8
+# pre-warmed
+# P=24 n_tok=32 V=262144
+# forward A (no-SC) rc=0 110s
+# forward B (SC,prev=NULL) rc=0 109s
+(A) step-0 zero-SC byte-identity: memcmp == 0 -> GREEN
+# forward C (SC,prev=A.canvas) rc=0 83s
+(B) prompt rows unchanged (SC canvas-only): RED (unexpected)
+(B) canvas SC feedback: max|delta|=4.9094e+01 rms=1.8853e+01 changed=2097152/2097152
+(B) SC feedback non-trivial (max>1e-3): GREEN
+
+================ G-DG-N3 RESULT ================
+step-0 byte-identity : GREEN
+SC feedback nontrivial: RED
+G-DG-N3 : RED

@@ -5537,6 +5537,200 @@ __global__ void k_region_scale(float *x, int E, int P, int n_tok,
     x[idx] *= (row < P) ? encS[0] : decS[0];
 }
 
+/* ── N4a: the entropy-bound sample kernel (dg_sample_kernel) ──────────────────────
+ * Port of the PR-24423 device sampler `diffusion_dense_sample_kernel`
+ * (_diffgemma_reference/diffusion-sampling.cu) into our backend. PURE vocab-space
+ * float math on the logits the forward already produced — NO weights, NO quant.
+ *
+ * One CUDA block per canvas position (row). Per row:
+ *   1. parallel max -> argmax over v of (logit_v * inv_temp)
+ *   2. parallel Z = sum_v exp(d_v), T = sum_v d_v*exp(d_v), with d_v = logit_v*inv_temp - max
+ *      -> entropy = log(Z) - T/Z
+ *   3. multinomial draw: first v (vocab order) with cumulative exp(d_v) >= r = u[row]*Z,
+ *      via a 256-slice exclusive-scan so the serial walk is one slice not the whole vocab.
+ * Argmax is exact; Z/entropy match a host reference to ~1e-4 (FP reduction order).
+ * blockDim is fixed at 256 (the slice scheme assumes blockDim == 256 buffers). */
+__global__ void dg_sample_kernel(const float * __restrict__ logits,
+                                 const float * __restrict__ u,
+                                 int   * __restrict__ argmax,
+                                 float * __restrict__ entropy,
+                                 int   * __restrict__ sampled,
+                                 const int   n_vocab,
+                                 const float inv_temp) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+
+    __shared__ float s_val[256];
+    __shared__ float s_sum[256];
+    __shared__ int   s_idx[256];
+
+    const float *row_logits = logits + (size_t)row * n_vocab;
+
+    /* ── parallel max -> argmax ── */
+    float local_max = -3.4e38f;
+    int   local_idx = 0;
+    for (int v = tid; v < n_vocab; v += blockDim.x) {
+        const float x = row_logits[v] * inv_temp;
+        if (x > local_max) { local_max = x; local_idx = v; }
+    }
+    s_val[tid] = local_max;
+    s_idx[tid] = local_idx;
+    __syncthreads();
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride && s_val[tid + stride] > s_val[tid]) {
+            s_val[tid] = s_val[tid + stride];
+            s_idx[tid] = s_idx[tid + stride];
+        }
+        __syncthreads();
+    }
+    const float max_l = s_val[0];
+    const int   amax  = s_idx[0];
+    __syncthreads();
+
+    /* ── parallel Z and T (entropy = logZ - T/Z) ── */
+    float local_sum = 0.0f;
+    float local_t   = 0.0f;
+    for (int v = tid; v < n_vocab; v += blockDim.x) {
+        const float d = row_logits[v] * inv_temp - max_l;
+        const float e = expf(d);
+        local_sum += e;
+        local_t   += d * e;
+    }
+    s_sum[tid] = local_sum;
+    s_val[tid] = local_t;
+    __syncthreads();
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_sum[tid] += s_sum[tid + stride];
+            s_val[tid] += s_val[tid + stride];
+        }
+        __syncthreads();
+    }
+    const float z = s_sum[0];
+    const float t = s_val[0];
+    if (tid == 0) {
+        argmax[row]  = amax;
+        entropy[row] = logf(z) - t / z;
+    }
+    __syncthreads();
+
+    /* ── multinomial draw: first v with cumulative exp(d) >= r, in vocab order.
+     * Split the vocab into blockDim contiguous slices; each thread sums its slice;
+     * exclusive-scan the slice sums; only the crossing thread walks its slice. ── */
+    const float r = u[row] * z;
+    const int   chunk = (n_vocab + blockDim.x - 1) / blockDim.x;
+    const int   beg   = tid * chunk;
+    const int   end   = min(beg + chunk, n_vocab);
+
+    float slice_sum = 0.0f;
+    for (int v = beg; v < end; ++v) {
+        slice_sum += expf(row_logits[v] * inv_temp - max_l);
+    }
+    s_sum[tid] = slice_sum;
+    __syncthreads();
+
+    __shared__ int s_tok;
+    if (tid == 0) {
+        s_tok    = n_vocab - 1;     /* default if cum never reaches r (FP guard) */
+        s_idx[0] = -1;              /* no crossing slice -> default stands */
+        float pref = 0.0f;
+        for (int i = 0; i < blockDim.x; ++i) {
+            const float next = pref + s_sum[i];
+            if (next >= r) { s_idx[0] = i; s_val[0] = pref; break; }
+            pref = next;
+        }
+    }
+    __syncthreads();
+
+    if (tid == s_idx[0]) {          /* only the crossing thread walks its slice */
+        float cum = s_val[0];
+        for (int v = beg; v < end; ++v) {
+            cum += expf(row_logits[v] * inv_temp - max_l);
+            if (cum >= r) { s_tok = v; break; }
+        }
+    }
+    __syncthreads();
+    if (tid == 0) { sampled[row] = s_tok; }
+}
+
+/* N4a host wrapper: dg_sample_logits — run dg_sample_kernel over `n_pos` rows of a
+ * DEVICE logits buffer `d_logits` ([n_pos x n_vocab], row-major), with per-position
+ * seeded uniforms u_host[n_pos]. Writes argmax_host/entropy_host/sampled_host (all
+ * caller-allocated, length n_pos). Returns 0 on success. Self-contained scratch
+ * (alloc/free per call). Used by the N4-full host renoise loop and the N4a gate. */
+extern "C" int dg_sample_logits(const float *d_logits, int n_pos, int n_vocab,
+                                const float *u_host, float inv_temp,
+                                int *argmax_host, float *entropy_host, int *sampled_host) {
+    if (!d_logits || n_pos <= 0 || n_vocab <= 0 || !u_host ||
+        !argmax_host || !entropy_host || !sampled_host) {
+        sp_set_error("dg_sample_logits: bad args"); return 1; }
+    float *d_u = NULL, *d_ent = NULL;
+    int   *d_am = NULL, *d_sm = NULL;
+    int rc = 1;
+    cudaError_t e;
+    e = cudaMalloc(&d_u,   (size_t)n_pos * sizeof(float));  if (e != cudaSuccess) { sp_set_error("dg_sample: u OOM"); goto out; }
+    e = cudaMalloc(&d_am,  (size_t)n_pos * sizeof(int));    if (e != cudaSuccess) { sp_set_error("dg_sample: am OOM"); goto out; }
+    e = cudaMalloc(&d_ent, (size_t)n_pos * sizeof(float));  if (e != cudaSuccess) { sp_set_error("dg_sample: ent OOM"); goto out; }
+    e = cudaMalloc(&d_sm,  (size_t)n_pos * sizeof(int));    if (e != cudaSuccess) { sp_set_error("dg_sample: sm OOM"); goto out; }
+    e = cudaMemcpy(d_u, u_host, (size_t)n_pos * sizeof(float), cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { sp_set_error("dg_sample: u H2D"); goto out; }
+    dg_sample_kernel<<<n_pos, 256>>>(d_logits, d_u, d_am, d_ent, d_sm, n_vocab, inv_temp);
+    e = cudaGetLastError();          if (e != cudaSuccess) { fail_cuda(e, "dg_sample kernel"); goto out; }
+    e = cudaDeviceSynchronize();     if (e != cudaSuccess) { fail_cuda(e, "dg_sample sync"); goto out; }
+    e = cudaMemcpy(argmax_host,  d_am,  (size_t)n_pos * sizeof(int),   cudaMemcpyDeviceToHost); if (e != cudaSuccess) { sp_set_error("dg_sample: am D2H"); goto out; }
+    e = cudaMemcpy(entropy_host, d_ent, (size_t)n_pos * sizeof(float), cudaMemcpyDeviceToHost); if (e != cudaSuccess) { sp_set_error("dg_sample: ent D2H"); goto out; }
+    e = cudaMemcpy(sampled_host, d_sm,  (size_t)n_pos * sizeof(int),   cudaMemcpyDeviceToHost); if (e != cudaSuccess) { sp_set_error("dg_sample: sm D2H"); goto out; }
+    rc = 0;
+out:
+    if (d_u)   cudaFree(d_u);
+    if (d_am)  cudaFree(d_am);
+    if (d_ent) cudaFree(d_ent);
+    if (d_sm)  cudaFree(d_sm);
+    return rc;
+}
+
+/* N4a gate entry: dg_sample_logits_host — same as dg_sample_logits but takes a HOST
+ * logits buffer (uploads it). Lets the gate test feed a fixed CPU fixture without
+ * owning device memory. Returns 0 on success. */
+extern "C" int dg_sample_logits_host(const float *h_logits, int n_pos, int n_vocab,
+                                     const float *u_host, float inv_temp,
+                                     int *argmax_host, float *entropy_host, int *sampled_host) {
+    if (!h_logits || n_pos <= 0 || n_vocab <= 0) { sp_set_error("dg_sample_host: bad args"); return 1; }
+    float *d_logits = NULL;
+    cudaError_t e = cudaMalloc(&d_logits, (size_t)n_pos * n_vocab * sizeof(float));
+    if (e != cudaSuccess) { sp_set_error("dg_sample_host: logits OOM"); return 1; }
+    e = cudaMemcpy(d_logits, h_logits, (size_t)n_pos * n_vocab * sizeof(float), cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { sp_set_error("dg_sample_host: logits H2D"); cudaFree(d_logits); return 1; }
+    int rc = dg_sample_logits(d_logits, n_pos, n_vocab, u_host, inv_temp,
+                              argmax_host, entropy_host, sampled_host);
+    cudaFree(d_logits);
+    return rc;
+}
+
+/* ── N3 self-conditioning support ──────────────────────────────────────────────
+ * Per-row softmax over a [n_row x n_vocab] device buffer, scaled by sc_temp_inv before
+ * the softmax: out[r][v] = softmax_v(logits[r][v] * sc_temp_inv). One block per row
+ * (blockDim 256). Mirrors the reference soft_max(scale(sc_logits, sc_temp_inv)). */
+__global__ void dg_k_softmax_rows(const float *logits, float *out, int n_vocab, float sc_temp_inv) {
+    int r = blockIdx.x; int tid = threadIdx.x;
+    const float *row = logits + (size_t)r * n_vocab;
+    float *o = out + (size_t)r * n_vocab;
+    __shared__ float red[256];
+    /* max */
+    float m = -3.4e38f;
+    for (int v = tid; v < n_vocab; v += blockDim.x) { float x = row[v] * sc_temp_inv; if (x > m) m = x; }
+    red[tid] = m; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tid < s && red[tid+s] > red[tid]) red[tid] = red[tid+s]; __syncthreads(); }
+    float mx = red[0]; __syncthreads();
+    /* sum exp */
+    float se = 0.0f;
+    for (int v = tid; v < n_vocab; v += blockDim.x) se += expf(row[v] * sc_temp_inv - mx);
+    red[tid] = se; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tid < s) red[tid] += red[tid+s]; __syncthreads(); }
+    float inv = 1.0f / red[0];
+    for (int v = tid; v < n_vocab; v += blockDim.x) o[v] = expf(row[v] * sc_temp_inv - mx) * inv;
+}
+
 /* MoE router input prep (per token): tmp[t] = rms_norm_noscale(x[t]) * (1/sqrt(E)) * gis[i].
  * One block per token (grid = n_tok, blockDim 256). Mirrors gemma4_build_ffn_moe's router:
  * tmp = rms_norm(attn_out, eps); tmp *= 1/sqrt(n_embd); tmp *= ffn_gate_inp_s. */
@@ -5691,12 +5885,113 @@ static float *dg_upload_norm(const qwen3_model *m, const char *name, int n) {
     return dev;
 }
 
+/* ── N3 self-conditioning: add the previous step's canvas-logit feedback into the
+ * canvas embedding (dx rows [P, n_tok)) BEFORE the canvas rmsnorm_noscale.
+ * Mirrors the reference dg_canvas_embed SC subgraph (diffusion-gemma.cpp 384-426):
+ *   probs   = softmax(prev_logits[c] * sc_temp_inv)              [C x V]
+ *   soft    = (probs @ embed) * sqrt(E)                          [C x E]   (soft-embedding)
+ *   normed  = rms_norm(soft) * sc_pre_norm                       [C x E]   (plain weighted RMS)
+ *   sc_sig  = sc_down( gelu_tanh(sc_gate(normed)) * sc_up(normed) )        [C x E]
+ *   dx[P+c] += sc_sig[c]
+ * prev_logits is a DEVICE [C x V] buffer (canvas rows of the prior step's raw logits).
+ * embedT = token_embd dequanted to device f32 [V x E] (native row-major). The probs@embed
+ * GEMM runs in column-major directly (no host transpose): with embedT laid out [v*E+e] it
+ * is col-major [E x V]; probs [c*V+v] is col-major [V x C]; soft [c*E+e] col-major [E x C];
+ * Scm = Ecm * Pcm = [E x V][V x C] = [E x C]. Returns 0 on success. SC FF width = FF (dense).
+ * Streams the V x E embedding to f32 (~3 GB transient on a 12 GB card); freed before return. */
+/* the dequanted token-embedding [V x E] f32 device buffer, cached across SC steps/queries
+ * (the embedding is a constant; re-dequanting + re-uploading ~3 GB every step dominated the
+ * SC cost). Keyed by the model pointer; rebuilt only if the model changes. */
+static const qwen3_model *g_dg_sc_embed_key = NULL;
+static float *g_dg_sc_embed = NULL;
+
+static int dg_self_cond(const qwen3_model *m, cublasHandle_t cb, cudaStream_t st,
+                        float *dx, const float *prev_logits, int P, int C,
+                        int E, int V, int FF, float eps, float sc_temp_inv) {
+    int rc = 1;
+    float *d_embed = NULL, *d_probs = NULL, *d_soft = NULL, *d_norm = NULL;
+    float *d_g = NULL, *d_up = NULL, *d_sig = NULL;
+    float *d_preW = NULL, *dWg = NULL, *dWu = NULL, *dWd = NULL;
+    /* dequant the full token-embedding [V x E] to device f32 ONCE (cached) */
+    if (g_dg_sc_embed && g_dg_sc_embed_key == m) {
+        d_embed = g_dg_sc_embed;          /* cache hit: reuse */
+    } else {
+        if (g_dg_sc_embed) { cudaFree(g_dg_sc_embed); g_dg_sc_embed = NULL; g_dg_sc_embed_key = NULL; }
+        const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+        if (!eat) { sp_set_error("dg_self_cond: token_embd not in arena"); return 1; }
+        float *h_embed = (float *)malloc((size_t)V * E * sizeof(float));
+        if (!h_embed) { sp_set_error("dg_self_cond: embed host OOM"); return 1; }
+        if (dg_dequant_resident_rows(eat, 0, V, h_embed)) { free(h_embed); return 1; }
+        cudaError_t e = cudaMalloc(&d_embed, (size_t)V * E * sizeof(float));
+        if (e == cudaSuccess) e = cudaMemcpy(d_embed, h_embed, (size_t)V * E * sizeof(float), cudaMemcpyHostToDevice);
+        free(h_embed);
+        if (e != cudaSuccess) { fail_cuda(e, "dg_self_cond: embed upload"); if (d_embed) cudaFree(d_embed); d_embed = NULL; goto out; }
+        g_dg_sc_embed = d_embed; g_dg_sc_embed_key = m;   /* cache for subsequent steps */
+    }
+    if (cudaMalloc(&d_probs, (size_t)C * V * sizeof(float)) != cudaSuccess) { sp_set_error("dg_self_cond probs OOM"); goto out; }
+    if (cudaMalloc(&d_soft,  (size_t)C * E * sizeof(float)) != cudaSuccess) { sp_set_error("dg_self_cond soft OOM"); goto out; }
+    if (cudaMalloc(&d_norm,  (size_t)C * E * sizeof(float)) != cudaSuccess) { sp_set_error("dg_self_cond norm OOM"); goto out; }
+    if (cudaMalloc(&d_g,     (size_t)C * FF * sizeof(float)) != cudaSuccess) { sp_set_error("dg_self_cond g OOM"); goto out; }
+    if (cudaMalloc(&d_up,    (size_t)C * FF * sizeof(float)) != cudaSuccess) { sp_set_error("dg_self_cond up OOM"); goto out; }
+    if (cudaMalloc(&d_sig,   (size_t)C * E * sizeof(float)) != cudaSuccess) { sp_set_error("dg_self_cond sig OOM"); goto out; }
+
+    /* probs = softmax(prev_logits * sc_temp_inv) over V, per canvas row */
+    dg_k_softmax_rows<<<C, 256, 0, st>>>(prev_logits, d_probs, V, sc_temp_inv);
+
+    /* soft = probs @ embed  (col-major: Scm[E x C] = Ecm[E x V] . Pcm[V x C]) */
+    {
+        const float a = 1.0f, b = 0.0f;
+        if (cublasSgemm(cb, CUBLAS_OP_N, CUBLAS_OP_N, E, C, V,
+                        &a, d_embed, E, d_probs, V, &b, d_soft, E) != CUBLAS_STATUS_SUCCESS) {
+            sp_set_error("dg_self_cond: probs@embed sgemm"); goto out; }
+    }
+    { size_t nCE = (size_t)C * E;
+      k_scale_by_const<<<(unsigned)((nCE+255)/256), 256, 0, st>>>(d_soft, nCE, sqrtf((float)E)); }
+
+    /* normed = rms_norm(soft) * sc_pre_norm  (plain weighted RMS, per row) */
+    d_preW = dg_upload_norm(m, "self_cond_pre_norm.weight", E);
+    if (!d_preW) goto out;
+    k_rmsnorm<<<C, 256, 0, st>>>(d_soft, d_preW, E, eps, d_norm);
+
+    /* SC gated MLP: g = sc_gate@normed [C x FF]; up = sc_up@normed; h = gelu(g)*up; sig = sc_down@h */
+    dWg = dg_upload_arena_w(m, "self_cond_gate.weight", E, FF); if (!dWg) goto out;
+    if (gemm(cb, dWg, d_norm, d_g, C, E, FF)) goto out;
+    dWu = dg_upload_arena_w(m, "self_cond_up.weight", E, FF);   if (!dWu) goto out;
+    if (gemm(cb, dWu, d_norm, d_up, C, E, FF)) goto out;
+    { size_t nCF = (size_t)C * FF;
+      k_gelu_mul<<<(unsigned)((nCF+255)/256), 256, 0, st>>>(d_g, d_up, nCF); }   /* d_g = gelu(g)*up */
+    dWd = dg_upload_arena_w(m, "self_cond_down.weight", FF, E); if (!dWd) goto out;
+    if (gemm(cb, dWd, d_g, d_sig, C, FF, E)) goto out;
+
+    /* dx[P + c] += sc_sig[c]  (add into the canvas embedding rows in place) */
+    { size_t nCE = (size_t)C * E;
+      k_add<<<(unsigned)((nCE+255)/256), 256, 0, st>>>(dx + (size_t)P * E, d_sig, nCE); }
+    cudaStreamSynchronize(st);
+    rc = 0;
+out:
+    /* d_embed is CACHED (g_dg_sc_embed) — do NOT free here */
+    if (d_probs) cudaFree(d_probs); if (d_soft) cudaFree(d_soft);
+    if (d_norm) cudaFree(d_norm); if (d_g) cudaFree(d_g); if (d_up) cudaFree(d_up); if (d_sig) cudaFree(d_sig);
+    if (d_preW) cudaFree(d_preW); if (dWg) cudaFree(dWg); if (dWu) cudaFree(dWu); if (dWd) cudaFree(dWd);
+    return rc;
+}
+
+/* free the cached SC embed buffer (call on model unload to avoid a leak). */
+extern "C" void dg_sc_embed_release(void) {
+    if (g_dg_sc_embed) { cudaFree(g_dg_sc_embed); g_dg_sc_embed = NULL; g_dg_sc_embed_key = NULL; }
+}
+
 /* DiffusionGemma UNIFIED forward. tokens = [prompt | canvas] (length n_tok, canvas =
  * last cfg.dg_canvas_length). out_logits = [n_tok x n_vocab] f32 (caller-allocated).
  * Returns 0 on success. Self-contained: builds its own cublas handle + stream, streams
  * weights per layer from the arena. */
-extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t *tokens,
-                                            int n_tok, float *out_logits) {
+/* internal: the forward, with optional N3 self-conditioning. prev_logits = a DEVICE
+ * [C x V] buffer (canvas rows of the prior step's raw logits) or NULL (no SC = the
+ * step-0 / single-forward path, byte-identical to the original). sc_temp_inv = 1/temp
+ * of the PRIOR step (the temperature the prev logits were produced at). */
+static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
+                           int n_tok, float *out_logits,
+                           const float *prev_logits, float sc_temp_inv) {
     if (!m || m->cfg.arch != SP_ARCH_DIFFUSION_GEMMA) {
         sp_set_error("diffusion_gemma_forward_cuda: not a DiffusionGemma model"); return 1; }
     if (n_tok <= 0 || !tokens || !out_logits) {
@@ -5776,6 +6071,13 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
         if (cudaMemcpyAsync(dx, hrows, (size_t)n_tok*E*sizeof(float), cudaMemcpyHostToDevice, st) != cudaSuccess) {
             sp_set_error("dg: embd H2D"); goto done; }
         cudaStreamSynchronize(st); free(hrows); hrows = NULL;
+    }
+    /* ── N3 self-conditioning: add prev-step canvas-logit feedback into the canvas
+     * embedding BEFORE the weightless RMSNorm (reference dg_canvas_embed: canvas +=
+     * sc_sig; then rms_norm_noscale). prev_logits==NULL -> no SC = step-0 path. ── */
+    if (C > 0 && prev_logits) {
+        DGDBG("self-conditioning: prev_logits present, sc_temp_inv=%.4f", sc_temp_inv);
+        if (dg_self_cond(m, cb, st, dx, prev_logits, P, C, E, V, FF, eps, sc_temp_inv)) goto done;
     }
     if (C > 0) {                                          /* canvas rows: weightless RMSNorm */
         k_rmsnorm_noscale_rows<<<C, 256, 0, st>>>(dx, E, eps, P);
@@ -6112,6 +6414,36 @@ done:
     if (cb) cublasDestroy(cb);
     return rc;
 }
+
+/* Public N1b entry (no self-conditioning) — byte-identical to the original single-
+ * forward path (prev_logits=NULL). */
+extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t *tokens,
+                                            int n_tok, float *out_logits) {
+    return dg_forward_impl(m, tokens, n_tok, out_logits, NULL, 1.0f);
+}
+
+/* Public N3 entry — self-conditioning forward. prev_logits = DEVICE [C x V] buffer
+ * (canvas rows of the prior denoise step's RAW logits); NULL => no SC (== the N1b
+ * path, byte-identical). sc_temp_inv = 1/(prior step temperature). The N4-full host
+ * renoise loop passes the persistent device prev-logits buffer here each step. */
+extern "C" int diffusion_gemma_forward_cuda_sc(const qwen3_model *m, const int32_t *tokens,
+                                               int n_tok, float *out_logits,
+                                               const float *prev_logits_dev, float sc_temp_inv) {
+    return dg_forward_impl(m, tokens, n_tok, out_logits, prev_logits_dev, sc_temp_inv);
+}
+
+/* N4-full host-loop device-buffer helpers (opaque to the .c test harness). */
+extern "C" void *dg_dev_alloc_f32(long n) {
+    if (n <= 0) return NULL;
+    void *p = NULL;
+    if (cudaMalloc(&p, (size_t)n * sizeof(float)) != cudaSuccess) return NULL;
+    return p;
+}
+extern "C" int dg_dev_upload(void *dev, const float *host, long n) {
+    if (!dev || !host || n <= 0) return 1;
+    return (cudaMemcpy(dev, host, (size_t)n * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess) ? 0 : 1;
+}
+extern "C" void dg_dev_free(void *dev) { if (dev) cudaFree(dev); }
 
 
 /* ════════════════════════ forward ════════════════════════ */

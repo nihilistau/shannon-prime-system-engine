@@ -1,0 +1,15 @@
+# G-DG-N4a  n_pos=8 n_vocab=4099 inv_temp=1.4286
+  pos 0: argmax k=2773 ref=2773 OK | entropy k=8.318490 ref=8.318490 d=0.00e+00 | sampled k=2189 ref=2189 OK
+  pos 1: argmax k=3477 ref=3477 OK | entropy k=0.780508 ref=0.780508 d=2.38e-07 | sampled k=1316 ref=1316 OK
+  pos 2: argmax k=3086 ref=3086 OK | entropy k=0.122938 ref=0.122940 d=1.62e-06 | sampled k=3086 ref=3086 OK
+  pos 3: argmax k=2177 ref=2177 OK | entropy k=0.012879 ref=0.012873 d=5.82e-06 | sampled k=2177 ref=2177 OK
+  pos 4: argmax k=2020 ref=2020 OK | entropy k=0.106243 ref=0.106241 d=2.10e-06 | sampled k=2020 ref=2020 OK
+  pos 5: argmax k=2496 ref=2496 OK | entropy k=0.171250 ref=0.171250 d=2.98e-07 | sampled k=2496 ref=2496 OK
+  pos 6: argmax k=68 ref=68 OK | entropy k=0.247195 ref=0.247193 d=2.73e-06 | sampled k=68 ref=68 OK
+  pos 7: argmax k=1512 ref=1512 OK | entropy k=0.086649 ref=0.086649 d=2.38e-07 | sampled k=1512 ref=1512 OK
+
+================ G-DG-N4a RESULT ================
+argmax exact   : GREEN
+sampled exact  : GREEN
+entropy err    : max=5.815e-06  (tol 1e-3)  GREEN
+G-DG-N4a       : GREEN — sampler kernel matches host reference
