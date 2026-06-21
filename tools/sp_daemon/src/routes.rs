@@ -1818,6 +1818,7 @@ Tag of the answer (or [NULL]):");
                             } else {
                                 // SAFETY: qm valid (session held above); we hold the resident-cache
                                 // Mutex so no concurrent device forward / SP_XBAR_RECALL_WRITE env race.
+                                { let p = dir.join("ep.txt"); let _ = std::fs::write(&p, &text); let q = dir.join("ep.tok"); let _ = std::fs::write(&q, toks.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n")); }
                                 let cap_rc = unsafe { kv::capture_batched(qm, &toks, &dir_str) };
                                 match cap_rc {
                                     Err(e) => tracing::warn!("B4-NIGHTSHIFT: batched capture failed: {e} — no episode appended"),
