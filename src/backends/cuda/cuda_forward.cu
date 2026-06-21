@@ -5557,18 +5557,94 @@ __global__ void k_dg_router_prep(const float *x, float *tmp, const float *gis,
     for (int i = threadIdx.x; i < E; i += blockDim.x) tr[i] = xr[i] * inv * rscale * gis[i];
 }
 
+/* ── DiffusionGemma streaming-residency fix (G-DG-STREAMFIX) ──────────────────────
+ * The 26B-A4B OK_Q4B model is 14 GB; its arena packed-weight buffers (codes/row_scale/
+ * row_prec/bscale in sp_frob_packed_tensor) ALIAS the read-only MapViewOfFile view of
+ * the .sp-model (sp_model_load.c: "arena tensors alias mmap"). On a memory-constrained
+ * box the per-layer expert-weight dequant reads those aliased pointers DURING compute,
+ * triggering a demand page-fault on the mmap view under commit pressure — which
+ * deadlocks (CPU ~0% / GPU 0% / disk idle, WorkingSet pinned), nondeterministically at
+ * L5/L12/L14 (a page-cache boundary). Diagnosis: tests/fixtures/chat_fullstack/
+ * G-DIFFJUDGE-NATIVE.log (a full sequential pre-warm read completed in 6.7s but the OS
+ * did not retain the pages → the hang is the demand-fault path, not cold-read latency).
+ *
+ * FIX (diffusion-path / arch_id 9 ONLY, additive): before dequant, COPY the exact
+ * aliased source byte-ranges for the rows we are about to read into OWNED, committed
+ * heap buffers and dequant from THOSE. The memcpy forces every source page resident
+ * SYNCHRONOUSLY (no fault during the dequant loop), and the owned buffer is reclaimable
+ * heap — not a reclaimable file-cache page — so it cannot be trimmed mid-read. Resident
+ * host memory is bounded to ~one tensor slice (freed per call). The dense gemma4/
+ * gemma3/qwen3 forwards and the 12B path never call this and stay byte-identical.
+ *
+ * dg_dequant_resident_rows: dequant `rows` rows starting at r0 of arena tensor `at`
+ * into `dst` [rows*at->cols], reading from an owned snapshot of the source slices. The
+ * dequant arithmetic is sp_frob_packed_dequant_row's, byte-for-byte (we build a local
+ * sp_frob_packed_tensor over the copies and call sp_arena_dequant_row on it). Returns 0
+ * on success; nonzero (and frees temporaries) on a bad arg / OOM. */
+static int dg_dequant_resident_rows(const sp_arena_tensor *at, int r0, int rows, float *dst) {
+    if (!at || r0 < 0 || rows <= 0 || r0 + rows > at->pt.rows || !dst) {
+        sp_set_error("dg_dequant_resident: bad row range"); return 1; }
+    const sp_frob_packed_tensor *s = &at->pt;
+    const int cols = s->cols;
+    /* code byte span for rows [r0, r0+rows): from row_off[r0] to the end of the last row.
+     * The last row's code length: Q8 row = cols bytes; Q4/Q4B row = ceil(cols/2) bytes.
+     * row_off is monotonic, so [off0, last_off + last_len) covers the whole slice. */
+    size_t off0   = s->row_off[r0];
+    int    lastr  = r0 + rows - 1;
+    size_t lastoff = s->row_off[lastr];
+    size_t lastlen = (s->row_prec[lastr] == 8) ? (size_t)cols : (size_t)((cols + 1) / 2);
+    size_t span    = (lastoff + lastlen) - off0;            /* code bytes to snapshot */
+
+    /* owned snapshots (committed heap) — the memcpy faults the aliased mmap pages in */
+    uint8_t *codes_c = (uint8_t *)malloc(span ? span : 1);
+    uint8_t *prec_c  = (uint8_t *)malloc((size_t)rows);
+    size_t  *off_c   = (size_t  *)malloc((size_t)rows * sizeof(size_t));
+    float   *scale_c = s->row_scale ? (float *)malloc((size_t)rows * sizeof(float)) : NULL;
+    uint16_t *bscl_c = NULL;
+    size_t   bs_nblk = (size_t)(s->bscale ? s->bs_nblk : 0);
+    if (s->bscale && bs_nblk) bscl_c = (uint16_t *)malloc((size_t)rows * bs_nblk * sizeof(uint16_t));
+    if (!codes_c || !prec_c || !off_c || (s->row_scale && !scale_c) || (s->bscale && bs_nblk && !bscl_c)) {
+        free(codes_c); free(prec_c); free(off_c); free(scale_c); free(bscl_c);
+        sp_set_error("dg_dequant_resident: snapshot OOM"); return 1; }
+
+    memcpy(codes_c, s->codes + off0, span);                 /* forces codes pages resident */
+    for (int r = 0; r < rows; r++) {
+        prec_c[r] = s->row_prec[r0 + r];                    /* forces row_prec resident */
+        off_c[r]  = s->row_off[r0 + r] - off0;              /* rebase into the snapshot */
+        if (scale_c) scale_c[r] = s->row_scale[r0 + r];     /* forces row_scale resident */
+        if (bscl_c)  memcpy(bscl_c + (size_t)r * bs_nblk,
+                            s->bscale + (size_t)(r0 + r) * bs_nblk,
+                            bs_nblk * sizeof(uint16_t));     /* forces bscale resident */
+    }
+
+    /* local packed tensor over the OWNED snapshot — identical dequant, no mmap deref */
+    sp_arena_tensor loc; memset(&loc, 0, sizeof loc);
+    loc.pt.rows = rows; loc.pt.cols = cols;
+    loc.pt.row_prec = prec_c; loc.pt.row_scale = scale_c; loc.pt.row_off = off_c;
+    loc.pt.codes = codes_c; loc.pt.codes_bytes = span;
+    loc.pt.alias_mask = 0; loc.pt.bscale = bscl_c; loc.pt.bs_nblk = (int)(bscl_c ? bs_nblk : 0);
+
+    int rc = 0;
+    for (int r = 0; r < rows && rc == 0; r++)
+        rc = sp_arena_dequant_row(&loc, r, dst + (size_t)r * cols);
+
+    free(codes_c); free(prec_c); free(off_c); free(scale_c); free(bscl_c);
+    if (rc) sp_set_error("dg_dequant_resident: dequant row");
+    return rc;
+}
+
 /* ── host helpers: dequant a packed arena tensor [out x in] -> device f32 [out*in].
  * Mirrors upload_weight's dequant-then-upload but reads the arena (packed OK_Q4B/Q8)
- * via sp_arena_dequant_row, so the f32 GEMM matches the CPU oracle's dequant path. ── */
+ * via the RESIDENT-snapshot path (dg_dequant_resident_rows) so the demand-faulting mmap
+ * view is never dereferenced during compute (G-DG-STREAMFIX), so the f32 GEMM matches
+ * the CPU oracle's dequant path. ── */
 static float *dg_upload_arena_w(const qwen3_model *m, const char *name, int in, int out) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
     if (!at) { sp_set_error("dg_upload_arena_w: tensor not in arena"); return NULL; }
     size_t n = (size_t)out * in;
     float *host = (float *)malloc(n * sizeof(float));
     if (!host) { sp_set_error("dg_upload_arena_w: host OOM"); return NULL; }
-    for (int r = 0; r < out; r++)
-        if (sp_arena_dequant_row(at, r, host + (size_t)r * in)) {
-            free(host); sp_set_error("dg_upload_arena_w: dequant row"); return NULL; }
+    if (dg_dequant_resident_rows(at, 0, out, host)) { free(host); return NULL; }
     float *dev = NULL;
     cudaError_t e = cudaMalloc(&dev, n * sizeof(float));
     if (e == cudaSuccess) e = cudaMemcpy(dev, host, n * sizeof(float), cudaMemcpyHostToDevice);
@@ -5579,7 +5655,7 @@ static float *dg_upload_arena_w(const qwen3_model *m, const char *name, int in, 
 
 /* dequant a slice of `rows` consecutive rows of an arena tensor starting at row r0 into a
  * fresh device f32 [rows*in] (used for the fused rank-3 expert tensors: expert e occupies
- * rows [e*rows_per_expert, ...)). */
+ * rows [e*rows_per_expert, ...)). Reads via the resident-snapshot path (G-DG-STREAMFIX). */
 static float *dg_upload_arena_rows(const qwen3_model *m, const char *name,
                                    int r0, int rows, int in) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
@@ -5587,9 +5663,7 @@ static float *dg_upload_arena_rows(const qwen3_model *m, const char *name,
     size_t n = (size_t)rows * in;
     float *host = (float *)malloc(n * sizeof(float));
     if (!host) { sp_set_error("dg_upload_arena_rows: host OOM"); return NULL; }
-    for (int r = 0; r < rows; r++)
-        if (sp_arena_dequant_row(at, r0 + r, host + (size_t)r * in)) {
-            free(host); sp_set_error("dg_upload_arena_rows: dequant row"); return NULL; }
+    if (dg_dequant_resident_rows(at, r0, rows, host)) { free(host); return NULL; }
     float *dev = NULL;
     cudaError_t e = cudaMalloc(&dev, n * sizeof(float));
     if (e == cudaSuccess) e = cudaMemcpy(dev, host, n * sizeof(float), cudaMemcpyHostToDevice);
@@ -5692,7 +5766,10 @@ extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t 
         hrows = (float *)malloc((size_t)n_tok * E * sizeof(float));
         if (!hrows) { sp_set_error("dg: embd gather OOM"); goto done; }
         for (int t = 0; t < n_tok; t++) {
-            if (sp_arena_dequant_row(eat, tokens[t], hrows + (size_t)t * E)) {
+            /* G-DG-STREAMFIX: read each embedding row through the resident-snapshot path
+             * (one row at a time, token-scattered) so the mmap view is not demand-faulted
+             * during compute. */
+            if (dg_dequant_resident_rows(eat, tokens[t], 1, hrows + (size_t)t * E)) {
                 sp_set_error("dg: embd row gather"); goto done; }
             for (int i = 0; i < E; i++) hrows[(size_t)t * E + i] *= embscale;
         }

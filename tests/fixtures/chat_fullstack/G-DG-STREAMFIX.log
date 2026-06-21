@@ -1,0 +1,69 @@
+# G-DG-STREAMFIX - DiffusionGemma native forward: streaming-weight DEADLOCK fixed + 5/5 reliability
+# date: 2026-06-21
+# sp_status: GREEN. The diffusion_gemma_forward_cuda mid-forward deadlock (G-DIFFJUDGE-NATIVE.log)
+#            is FIXED. test_diffgemma_forward.exe (G_DG_N1B) ran 5/5 consecutive times to full
+#            completion, every run checks=7 fails=0, 256/256 canvas logits finite + in-vocab.
+# repro: build -> (vcvars64.bat) ; cd build-cuda ; ninja test_diffgemma_forward
+#        run  -> build-cuda\tests\test_diffgemma_forward.exe   (5x in a row)
+#        model env defaults C:\sp_models\diffusiongemma-26B-A4B.{sp-model,sp-tokenizer}
+# ===================================================================================================
+# == ROOT CAUSE (confirmed) ==
+#   The 26B-A4B OK_Q4B model is 14 GB. Its arena packed-weight buffers (sp_frob_packed_tensor:
+#   codes / row_scale / row_prec / bscale) ALIAS the read-only MapViewOfFile view of the .sp-model
+#   (sp_model_load.c map_file -> MapViewOfFile; "arena tensors alias mmap"). The diffusion forward
+#   streams per-layer expert weights by dequanting those aliased pointers DURING compute
+#   (dg_upload_arena_rows/_w -> sp_arena_dequant_row -> reads t->codes+row_off[r] / t->bscale).
+#   On this memory-constrained box (12 GB GPU, limited RAM/commit; N0 OOM'd, pagefile system-managed)
+#   the per-layer demand page-fault on the mmap view under commit pressure DEADLOCKS (CPU ~0% /
+#   GPU 0% / disk idle / WorkingSet pinned ~99 MB), nondeterministically at L5/L12/L14 (a page-cache
+#   boundary). A full sequential pre-warm read (14.2 GB in 6.7 s) did NOT fix it and the OS did not
+#   retain the pages -> the hang is the MapViewOfFile demand-fault path, not cold-read latency.
+#
+# == FIX (Option A spirit: explicit resident read; diffusion-path / arch_id 9 ONLY, additive) ==
+#   New static helper dg_dequant_resident_rows() in src/backends/cuda/cuda_forward.cu: before
+#   dequant, COPY the exact aliased source byte-ranges for the rows about to be read (codes slice
+#   [row_off[r0] .. row_off[last]+last_len), plus per-row row_prec/row_scale/bscale slices) into
+#   OWNED, committed heap buffers, build a local sp_frob_packed_tensor over the copies, and dequant
+#   from THAT via sp_arena_dequant_row (identical arithmetic, byte-for-byte). The memcpy forces every
+#   source page resident SYNCHRONOUSLY (no demand fault during the dequant loop), and the owned buffer
+#   is reclaimable HEAP -- not a reclaimable file-cache page -- so it cannot be trimmed mid-read.
+#   Resident host memory is bounded to ~one tensor slice (freed per call) -> peak WorkingSet now
+#   ~3.3 GB (bounded), NOT the 14 GB demand-paged thrash. dg_upload_arena_w, dg_upload_arena_rows, and
+#   the per-token embedding gather all route through it. Dense gemma4/gemma3/qwen3 + 12B paths never
+#   call it (no other sp_arena_dequant_row site changed) -> byte-identical. No ABI / .sp-model change.
+#
+# diff: src/backends/cuda/cuda_forward.cu  (additive, diffusion-path only):
+#       + static int dg_dequant_resident_rows(const sp_arena_tensor*, int r0, int rows, float* dst)
+#       ~ dg_upload_arena_w / dg_upload_arena_rows: dequant via the resident snapshot
+#       ~ embedding gather loop: dg_dequant_resident_rows(eat, tokens[t], 1, ...) per token
+#       (0 deletions to any non-diffusion path; no math-core / submodule edit needed.)
+# build: ninja test_diffgemma_forward -> cuda_forward.cu compiled clean (only pre-existing unrelated
+#        warning #550-D at line 4081), [3/3] Linking tests\test_diffgemma_forward.exe -> OK.
+# ===================================================================================================
+# == 5/5 RELIABILITY GATE (G_DG_N1B run 5x consecutively, detached) ==
+#   RUN 1 EXIT 0   wall ~70.5 s   checks=7 fails=0   canvas non-finite/out-of-vocab=0 (256/256)
+#   RUN 2 EXIT 0   wall ~72.0 s   checks=7 fails=0   canvas non-finite/out-of-vocab=0 (256/256)
+#   RUN 3 EXIT 0   wall ~71.2 s   checks=7 fails=0   canvas non-finite/out-of-vocab=0 (256/256)
+#   RUN 4 EXIT 0   wall ~71.0 s   checks=7 fails=0   canvas non-finite/out-of-vocab=0 (256/256)
+#   RUN 5 EXIT 0   wall ~71.2 s   checks=7 fails=0   canvas non-finite/out-of-vocab=0 (256/256)
+#   total 12:40:42 -> 12:46:38 = ~5m56s for 5 runs (~71 s/run, NO variance, NO hang).
+#   (Before the fix: the SAME exe deadlocked nondeterministically at L5/L12/L14, never completing.)
+#   SP_DG_TRACE=1 single run confirmed the forward now sails past the old hang boundary (observed
+#   layers 0..18+ each completing attn -> dense MLP -> 128-expert top-8 MoE dequant+gemm in sequence).
+#
+# == representative run output (test stderr, verbatim) ==
+    n_prompt=6  model_canvas=256  n_tok=262  V=262144
+    canvas positions checked=256  non-finite/out-of-vocab=0
+    canvas argmax[0..7] = 1852 1852 1852 1852 1852 1852 1852 255999
+    [no SP_DG_ORACLE_LOGITS] FALLBACK gate: forward runs + finite + in-vocab.
+
+    G-DG-N1b: DiffusionGemma region-aware forward ran end-to-end.
+[T_DG_N1B_FORWARD] PASS
+---- checks=7 fails=0 ----
+# ===================================================================================================
+# NOTE: this fix is orthogonal to the PRIMARY oracle-parity divergence diagnosed in G-DG-N1b.log
+#       (187/256 top-1, a per-layer numerical drift) -- that is unchanged. argmax[0..7] here is
+#       BIT-IDENTICAL to the pre-fix run (1852.. / 255999), confirming the resident snapshot is a
+#       pure residency change, not an arithmetic change. The deliverable here is RELIABILITY: the
+#       native forward now completes deterministically, which unblocks the N4 native diffusion judge.
+# ===================================================================================================
