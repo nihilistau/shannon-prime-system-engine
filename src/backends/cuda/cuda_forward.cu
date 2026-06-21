@@ -5118,6 +5118,17 @@ __global__ void dg_k_geglu(const float *gu, float *h, int FF) {
     if (i < FF) h[i] = dg_gelu_tanh(gu[i]) * gu[FF + i];
 }
 
+/* batched GeGLU: gu is [cnt columns x gu_rows] row-major (gu_rows = FF*2); within column
+ * col, gate = gu[col*gu_rows + i], up = gu[col*gu_rows + FF + i]; h is [cnt x FF] row-major.
+ * idx over [0, FF*cnt): col = idx/FF, i = idx%FF. (N1b MoE expert batching.) */
+__global__ void dg_k_geglu_batched(const float *gu, float *h, int FF, int gu_rows, int cnt) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (size_t)FF * cnt) return;
+    int col = (int)(idx / FF), i = (int)(idx % FF);
+    const float *g = gu + (size_t)col * gu_rows;
+    h[(size_t)col * FF + i] = dg_gelu_tanh(g[i]) * g[FF + i];
+}
+
 /* yo[i] += w * de[i]  (weighted expert accumulate into the output vector). */
 __global__ void dg_k_axpy(float *yo, const float *de, float w, int E) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -5415,6 +5426,600 @@ qdone:
     #undef QGM
     return rc;
 }
+
+/* ════════════════════ N1b: DiffusionGemma region-aware FORWARD (arch_id 9) ════════════════════
+ *
+ * diffusion_gemma_forward_cuda — a single no-cache bidirectional pass over the
+ * concatenated sequence [prompt | canvas] -> logits, exactly the UNIFIED graph of
+ * the PR-24423 reference (_diffgemma_reference/diffusion-gemma.cpp, the !is_prefill
+ * && !is_decode branch). Split point P = n_tok - canvas_length; canvas = the last
+ * canvas_length positions. THREE things are region-aware (everything else is the
+ * gemma4 backbone verbatim):
+ *   1. embeddings : prompt rows = embed*sqrt(E); canvas rows = rmsnorm_noscale(embed*sqrt(E))
+ *   2. attn mask  : prompt query -> causal over prompt only (SWA-clipped on sliding layers);
+ *                   canvas query -> bidirectional over ALL prompt + ALL canvas (sliding layers:
+ *                   last (n_swa-1) prompt positions + all canvas)
+ *   3. layer scalar: prompt rows * enc_layer_output_scale[L]; canvas rows * layer_output_scale[L]
+ * Self-conditioning is OFF (single step-0 forward), so the SC subgraph is skipped.
+ *
+ * Weights stream per-layer from the arena (dequant-to-f32 on the host, upload, cublas
+ * GEMM, free) so VRAM stays O(one layer) regardless of the 13 GB model — the 26B MoE
+ * does not fit resident on a 12 GB GPU. The MoE experts are gathered PER ROUTED EXPERT
+ * (only the n_expert_used selected per token are dequanted), bounding both VRAM and
+ * host work for the one-shot gate. f32 dequant matches the CPU oracle's "dequant then
+ * f32 dot" path (no int8 act-quant deflection) — best for the parity gate.
+ *
+ * ADDITIVE: a new function + new kernels. NO existing forward (gemma3/gemma4/qwen3) is
+ * touched; the dense path stays byte-identical. Dispatched on arch == SP_ARCH_DIFFUSION_GEMMA. */
+
+/* Region-aware attention. One block per (query token t, query head h). Mirrors k_attn's
+ * f32 math (same reduction order over the allowed key set) but the allowed key set is the
+ * diffusion region mask, not a causal window:
+ *   q_is_canvas = (t >= P)
+ *     canvas query: global layer -> all keys; sliding -> keys k where (k>=P) || (k>=P-n_swa+1)
+ *     prompt query: keys k<=t with k<P (causal over prompt) AND (sliding -> k > t-n_swa)  */
+__global__ void k_attn_diffusion(const float *Q, const float *K, const float *V,
+                                 int n_tok, int QD, int KVD, int HD, int group,
+                                 float ascale, int P, int n_swa, int is_swa, float *AO) {
+    extern __shared__ float sc[];
+    int n_heads = QD / HD;
+    int b = blockIdx.x, t = b / n_heads, h = b % n_heads, kvh = h / group;
+    const float *qh = Q + (size_t)t * QD + (size_t)h * HD;
+    const int q_is_canvas = (t >= P);
+    const long long canvas_prompt_lo = (long long)P - (long long)n_swa + 1;
+
+    /* scores over the allowed key set (-inf elsewhere). Predicate inlined (no extended
+     * lambda); mirrors the reference fill(): see diffusion-gemma.cpp set_input. */
+    for (int s = threadIdx.x; s < n_tok; s += blockDim.x) {
+        const int k_is_canvas = (s >= P);
+        bool allow;
+        if (q_is_canvas) {
+            allow = is_swa ? (k_is_canvas || ((long long)s >= canvas_prompt_lo)) : true;
+        } else {
+            /* prompt query: causal over earlier prompt, never canvas (+ SWA clip) */
+            allow = (!k_is_canvas) && (s <= t);
+            if (allow && is_swa && (long long)s <= (long long)t - (long long)n_swa) allow = false;
+        }
+        if (!allow) { sc[s] = -3.4e38f; continue; }
+        const float *kh = K + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[s] = acc * ascale;
+    }
+    __syncthreads();
+
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float m = -3.4e38f;
+        for (int s = 0; s < n_tok; s++) if (sc[s] > m) m = sc[s];
+        float sum = 0.0f;
+        for (int s = 0; s < n_tok; s++) {
+            if (sc[s] <= -3.0e38f) { sc[s] = 0.0f; continue; }
+            float e = expf(sc[s] - m); sc[s] = e; sum += e;
+        }
+        g_sum = sum;
+    }
+    __syncthreads();
+
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < n_tok; s++)
+            acc += sc[s] * V[(size_t)s * KVD + (size_t)kvh * HD + i];
+        AO[(size_t)t * QD + (size_t)h * HD + i] = acc * inv;
+    }
+}
+
+/* full-E weightless RMSNorm of canvas rows, in place: x[r] = x[r]/sqrt(mean(x[r]^2)+eps),
+ * for r in [P, n_tok). One block per canvas row (grid = C, blockDim 256). */
+__global__ void k_rmsnorm_noscale_rows(float *x, int E, float eps, int P) {
+    int row = P + blockIdx.x;
+    float *xr = x + (size_t)row * E;
+    __shared__ double sh[256];
+    double s = 0.0;
+    for (int i = threadIdx.x; i < E; i += blockDim.x) { double v = xr[i]; s += v * v; }
+    sh[threadIdx.x] = s; __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    float scale = 1.0f / sqrtf((float)(sh[0] / (double)E) + eps);
+    for (int i = threadIdx.x; i < E; i += blockDim.x) xr[i] = xr[i] * scale;
+}
+
+/* region scalar split: rows [0,P) *= encS[0], rows [P,n_tok) *= decS[0]. encS/decS are
+ * device 1-float per-layer scalars. n = n_tok*E. */
+__global__ void k_region_scale(float *x, int E, int P, int n_tok,
+                               const float *encS, const float *decS) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (size_t)n_tok * E) return;
+    int row = (int)(idx / E);
+    x[idx] *= (row < P) ? encS[0] : decS[0];
+}
+
+/* MoE router input prep (per token): tmp[t] = rms_norm_noscale(x[t]) * (1/sqrt(E)) * gis[i].
+ * One block per token (grid = n_tok, blockDim 256). Mirrors gemma4_build_ffn_moe's router:
+ * tmp = rms_norm(attn_out, eps); tmp *= 1/sqrt(n_embd); tmp *= ffn_gate_inp_s. */
+__global__ void k_dg_router_prep(const float *x, float *tmp, const float *gis,
+                                 int E, float eps, float rscale) {
+    int t = blockIdx.x;
+    const float *xr = x + (size_t)t * E;
+    float *tr = tmp + (size_t)t * E;
+    __shared__ double sh[256];
+    double s = 0.0;
+    for (int i = threadIdx.x; i < E; i += blockDim.x) { double v = xr[i]; s += v * v; }
+    sh[threadIdx.x] = s; __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    float inv = 1.0f / sqrtf((float)(sh[0] / (double)E) + eps);
+    for (int i = threadIdx.x; i < E; i += blockDim.x) tr[i] = xr[i] * inv * rscale * gis[i];
+}
+
+/* ── host helpers: dequant a packed arena tensor [out x in] -> device f32 [out*in].
+ * Mirrors upload_weight's dequant-then-upload but reads the arena (packed OK_Q4B/Q8)
+ * via sp_arena_dequant_row, so the f32 GEMM matches the CPU oracle's dequant path. ── */
+static float *dg_upload_arena_w(const qwen3_model *m, const char *name, int in, int out) {
+    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
+    if (!at) { sp_set_error("dg_upload_arena_w: tensor not in arena"); return NULL; }
+    size_t n = (size_t)out * in;
+    float *host = (float *)malloc(n * sizeof(float));
+    if (!host) { sp_set_error("dg_upload_arena_w: host OOM"); return NULL; }
+    for (int r = 0; r < out; r++)
+        if (sp_arena_dequant_row(at, r, host + (size_t)r * in)) {
+            free(host); sp_set_error("dg_upload_arena_w: dequant row"); return NULL; }
+    float *dev = NULL;
+    cudaError_t e = cudaMalloc(&dev, n * sizeof(float));
+    if (e == cudaSuccess) e = cudaMemcpy(dev, host, n * sizeof(float), cudaMemcpyHostToDevice);
+    free(host);
+    if (e != cudaSuccess) { fail_cuda(e, "dg_upload_arena_w upload"); if (dev) cudaFree(dev); return NULL; }
+    return dev;
+}
+
+/* dequant a slice of `rows` consecutive rows of an arena tensor starting at row r0 into a
+ * fresh device f32 [rows*in] (used for the fused rank-3 expert tensors: expert e occupies
+ * rows [e*rows_per_expert, ...)). */
+static float *dg_upload_arena_rows(const qwen3_model *m, const char *name,
+                                   int r0, int rows, int in) {
+    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
+    if (!at) { sp_set_error("dg_upload_arena_rows: tensor not in arena"); return NULL; }
+    size_t n = (size_t)rows * in;
+    float *host = (float *)malloc(n * sizeof(float));
+    if (!host) { sp_set_error("dg_upload_arena_rows: host OOM"); return NULL; }
+    for (int r = 0; r < rows; r++)
+        if (sp_arena_dequant_row(at, r0 + r, host + (size_t)r * in)) {
+            free(host); sp_set_error("dg_upload_arena_rows: dequant row"); return NULL; }
+    float *dev = NULL;
+    cudaError_t e = cudaMalloc(&dev, n * sizeof(float));
+    if (e == cudaSuccess) e = cudaMemcpy(dev, host, n * sizeof(float), cudaMemcpyHostToDevice);
+    free(host);
+    if (e != cudaSuccess) { fail_cuda(e, "dg_upload_arena_rows upload"); if (dev) cudaFree(dev); return NULL; }
+    return dev;
+}
+
+/* device vector (per-layer norm weight, already f32 host-side in qm->norm_buf). The bridge
+ * holds the norm f32 host buffers; find by tensor name through the arena? No — norms are NOT
+ * in the arena. The bridge stores them in qm->norm_buf[ni] paired with qm->norm_src[ni]->name.
+ * dg_norm_host returns the host f32 pointer for a norm tensor name (NULL if absent). */
+static const float *dg_norm_host(const qwen3_model *m, const char *name) {
+    for (int i = 0; i < m->n_norm; i++)
+        if (m->norm_src[i] && strcmp(m->norm_src[i]->name, name) == 0) return m->norm_buf[i];
+    return NULL;
+}
+static float *dg_upload_norm(const qwen3_model *m, const char *name, int n) {
+    const float *h = dg_norm_host(m, name);
+    if (!h) { sp_set_error("dg_upload_norm: norm not found"); return NULL; }
+    float *dev = NULL;
+    cudaError_t e = cudaMalloc(&dev, (size_t)n * sizeof(float));
+    if (e == cudaSuccess) e = cudaMemcpy(dev, h, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { fail_cuda(e, "dg_upload_norm"); if (dev) cudaFree(dev); return NULL; }
+    return dev;
+}
+
+/* DiffusionGemma UNIFIED forward. tokens = [prompt | canvas] (length n_tok, canvas =
+ * last cfg.dg_canvas_length). out_logits = [n_tok x n_vocab] f32 (caller-allocated).
+ * Returns 0 on success. Self-contained: builds its own cublas handle + stream, streams
+ * weights per layer from the arena. */
+extern "C" int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t *tokens,
+                                            int n_tok, float *out_logits) {
+    if (!m || m->cfg.arch != SP_ARCH_DIFFUSION_GEMMA) {
+        sp_set_error("diffusion_gemma_forward_cuda: not a DiffusionGemma model"); return 1; }
+    if (n_tok <= 0 || !tokens || !out_logits) {
+        sp_set_error("diffusion_gemma_forward_cuda: bad args"); return 1; }
+    const qwen3_config *c = &m->cfg;
+    const int E = (int)c->n_embd, NL = (int)c->n_layers, V = (int)c->n_vocab;
+    const int FF = (int)c->n_ff;                          /* dense shared MLP width */
+    const int NE = (int)c->q36_n_expert, NU = (int)c->q36_n_expert_used;
+    const int FFx = (int)c->q36_n_ff_exp;                 /* per-expert FFN width */
+    const int CL = (int)c->dg_canvas_length;
+    const float eps = c->rms_eps, embscale = sqrtf((float)E);
+    const int period = (int)c->g4_swa_period ? (int)c->g4_swa_period : 6;
+    const int kvfs   = (int)c->g4_n_kv_from_start ? (int)c->g4_n_kv_from_start : NL;
+    const int g_nh = (int)c->n_head, g_nkv = (int)c->n_head_kv, g_hd = (int)c->head_dim;
+    const int s_nh = (int)c->g4_nh_swa, s_nkv = (int)c->g4_nkv_swa, s_hd = (int)c->g4_hd_swa;
+    const float g_base = c->rope_freq_base, s_base = c->g4_rope_base_swa;
+    const int n_swa = (int)c->sliding_window;
+    const float softcap = c->g4_logit_softcap;
+    const int QDmax = (g_nh*g_hd > s_nh*s_hd) ? g_nh*g_hd : s_nh*s_hd;
+    const int KVDmax = (g_nkv*g_hd > s_nkv*s_hd) ? g_nkv*g_hd : s_nkv*s_hd;
+
+    /* region split P|C (UNIFIED): prompt = first (n_tok - canvas_length), canvas = last */
+    const int P = (CL > 0 && n_tok > CL) ? (n_tok - CL) : 0;
+    const int C = n_tok - P;
+
+    int rc = 1;
+    cublasHandle_t cb = NULL; cudaStream_t st = 0;
+    int *dtoks = NULL;
+    float *dx=NULL,*dnx=NULL,*dtmp=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL;
+    float *dg=NULL,*dup=NULL,*ddn=NULL,*dmlp=NULL,*dmoe=NULL,*dlog=NULL;
+    float **Kst=NULL,**Vst=NULL;
+    float *hrows=NULL,*h_logits=NULL,*h_router=NULL;
+    char nm[96];
+
+    if (cublasCreate(&cb) != CUBLAS_STATUS_SUCCESS) { sp_set_error("dg: cublasCreate"); return 1; }
+    Kst = (float **)calloc((size_t)NL, sizeof(float *));
+    Vst = (float **)calloc((size_t)NL, sizeof(float *));
+    if (!Kst || !Vst) { sp_set_error("dg: host OOM"); goto done; }
+
+    #define DGA(p, cnt) do { if (cudaMalloc(&(p), (size_t)(cnt)*sizeof(float)) != cudaSuccess) { \
+        sp_set_error("dg: cudaMalloc"); goto done; } } while (0)
+    if (cudaMalloc(&dtoks, (size_t)n_tok*sizeof(int)) != cudaSuccess) { sp_set_error("dg dtoks OOM"); goto done; }
+    DGA(dx, (size_t)n_tok*E);   DGA(dnx, (size_t)n_tok*E);   DGA(dtmp, (size_t)n_tok*E);
+    DGA(dq, (size_t)n_tok*QDmax); DGA(dk, (size_t)n_tok*KVDmax); DGA(dv, (size_t)n_tok*KVDmax);
+    DGA(dao, (size_t)n_tok*QDmax); DGA(dap, (size_t)n_tok*E);
+    DGA(dg, (size_t)n_tok*((FF>FFx)?FF:FFx)); DGA(dup, (size_t)n_tok*((FF>FFx)?FF:FFx));
+    DGA(ddn, (size_t)n_tok*E);  DGA(dmlp, (size_t)n_tok*E); DGA(dmoe, (size_t)n_tok*E);
+    DGA(dlog, (size_t)n_tok*V);
+
+    h_logits = (float *)malloc((size_t)NE * sizeof(float));
+    h_router = (float *)malloc((size_t)n_tok * E * sizeof(float));
+    if (!h_logits || !h_router) { sp_set_error("dg: host scratch OOM"); goto done; }
+
+    /* ── embeddings: prompt = embed*sqrt(E); canvas = rmsnorm_noscale(embed*sqrt(E)).
+     * Host-gather the token rows from the arena (the 13 GB model keeps no f32 embd
+     * resident), scale, upload; then rmsnorm the canvas rows in place. ── */
+    if (cudaMemcpyAsync(dtoks, tokens, (size_t)n_tok*sizeof(int), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+        sp_set_error("dg: upload tokens"); goto done; }
+    {
+        const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+        if (!eat) { sp_set_error("dg: token_embd not in arena"); goto done; }
+        hrows = (float *)malloc((size_t)n_tok * E * sizeof(float));
+        if (!hrows) { sp_set_error("dg: embd gather OOM"); goto done; }
+        for (int t = 0; t < n_tok; t++) {
+            if (sp_arena_dequant_row(eat, tokens[t], hrows + (size_t)t * E)) {
+                sp_set_error("dg: embd row gather"); goto done; }
+            for (int i = 0; i < E; i++) hrows[(size_t)t * E + i] *= embscale;
+        }
+        if (cudaMemcpyAsync(dx, hrows, (size_t)n_tok*E*sizeof(float), cudaMemcpyHostToDevice, st) != cudaSuccess) {
+            sp_set_error("dg: embd H2D"); goto done; }
+        cudaStreamSynchronize(st); free(hrows); hrows = NULL;
+    }
+    if (C > 0) {                                          /* canvas rows: weightless RMSNorm */
+        k_rmsnorm_noscale_rows<<<C, 256, 0, st>>>(dx, E, eps, P);
+    }
+
+    /* ── layer loop ── */
+    for (int L = 0; L < NL; L++) {
+        const int global = ((L % period) == period - 1);
+        const int nh  = global ? g_nh  : s_nh;
+        const int nkv = global ? g_nkv : s_nkv;
+        const int hd  = global ? g_hd  : s_hd;
+        const int grp = nh / nkv, qd = nh * hd, kvd = nkv * hd;
+        const float rbase = global ? g_base : s_base;
+        const int is_swa = global ? 0 : 1;
+        const float ascale = 1.0f;
+        const size_t nE = (size_t)n_tok * E;
+        const int has_v = (m->layers[L].attn_v != NULL);
+        float *dW=NULL, *dWk=NULL, *dWv=NULL, *dWo=NULL, *dNw=NULL;
+
+        /* rope-freqs table for global layers (proportional rope); host-side norm buf */
+        float *d_ffac = NULL;
+        if (global && m->rope_freqs) {
+            d_ffac = dg_upload_norm(m, "rope_freqs.weight", g_hd / 2);
+            if (!d_ffac) goto layerfail;
+        }
+
+        /* attn_norm -> nx */
+        snprintf(nm, sizeof nm, "blk.%d.attn_norm.weight", L);
+        dNw = dg_upload_norm(m, nm, E); if (!dNw) goto layerfail;
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, dNw, E, eps, dnx);
+        cudaFree(dNw); dNw = NULL;
+
+        /* Q proj + q-norm + rope */
+        snprintf(nm, sizeof nm, "blk.%d.attn_q.weight", L);
+        dW = dg_upload_arena_w(m, nm, E, qd); if (!dW) goto layerfail;
+        if (gemm(cb, dW, dnx, dq, n_tok, E, qd)) { cudaFree(dW); goto layerfail; }
+        cudaFree(dW); dW = NULL;
+        { snprintf(nm, sizeof nm, "blk.%d.attn_q_norm.weight", L);
+          float *dqn = dg_upload_norm(m, nm, hd); if (!dqn) goto layerfail;
+          k_rmsnorm_head<<<n_tok*nh, 256, 0, st>>>(dq, dqn, nh, hd, qd, eps);
+          cudaFree(dqn); }
+        if (d_ffac) k_rope_freqs<<<n_tok*nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase, d_ffac);
+        else        k_rope<<<n_tok*nh, hd/2, 0, st>>>(dq, nh, hd, qd, rbase);
+
+        /* K/V — shared-KV: owners [0,kvfs) project + store; sharers reuse owner */
+        float *Kuse, *Vuse;
+        if (L < kvfs) {
+            snprintf(nm, sizeof nm, "blk.%d.attn_k.weight", L);
+            dWk = dg_upload_arena_w(m, nm, E, kvd); if (!dWk) goto layerfail;
+            if (gemm(cb, dWk, dnx, dk, n_tok, E, kvd)) goto layerfail;
+            if (has_v) {
+                snprintf(nm, sizeof nm, "blk.%d.attn_v.weight", L);
+                dWv = dg_upload_arena_w(m, nm, E, kvd); if (!dWv) goto layerfail;
+                if (gemm(cb, dWv, dnx, dv, n_tok, E, kvd)) goto layerfail;
+            } else {  /* V-less (global) layer: V = raw K projection */
+                cudaMemcpyAsync(dv, dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            }
+            { snprintf(nm, sizeof nm, "blk.%d.attn_k_norm.weight", L);
+              float *dkn = dg_upload_norm(m, nm, hd); if (!dkn) goto layerfail;
+              k_rmsnorm_head<<<n_tok*nkv, 256, 0, st>>>(dk, dkn, nkv, hd, kvd, eps);
+              cudaFree(dkn); }
+            if (d_ffac) k_rope_freqs<<<n_tok*nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase, d_ffac);
+            else        k_rope<<<n_tok*nkv, hd/2, 0, st>>>(dk, nkv, hd, kvd, rbase);
+            k_rmsnorm_head_noweight<<<n_tok*nkv, 256, 0, st>>>(dv, nkv, hd, kvd, eps);  /* weightless V-norm */
+            if (cudaMalloc(&Kst[L], (size_t)n_tok*kvd*sizeof(float)) != cudaSuccess ||
+                cudaMalloc(&Vst[L], (size_t)n_tok*kvd*sizeof(float)) != cudaSuccess) {
+                sp_set_error("dg Kst OOM"); goto layerfail; }
+            cudaMemcpyAsync(Kst[L], dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            cudaMemcpyAsync(Vst[L], dv, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            Kuse = Kst[L]; Vuse = Vst[L];
+            if (dWk) { cudaFree(dWk); dWk = NULL; }
+            if (dWv) { cudaFree(dWv); dWv = NULL; }
+        } else {
+            const int src = kvfs - (global ? 1 : 2);
+            Kuse = Kst[src]; Vuse = Vst[src];
+            if (!Kuse || !Vuse) { sp_set_error("dg sharer before owner"); goto layerfail; }
+        }
+
+        /* region-aware attention */
+        {   int bd = n_tok; if (bd < hd) bd = hd; if (bd > 1024) bd = 1024;
+            k_attn_diffusion<<<n_tok*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
+                dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, dao); }
+
+        /* O proj -> ap, post_attn_norm, residual into dx */
+        snprintf(nm, sizeof nm, "blk.%d.attn_output.weight", L);
+        dWo = dg_upload_arena_w(m, nm, qd, E); if (!dWo) goto layerfail;
+        if (gemm(cb, dWo, dao, dap, n_tok, qd, E)) goto layerfail;
+        cudaFree(dWo); dWo = NULL;
+        { snprintf(nm, sizeof nm, "blk.%d.post_attention_norm.weight", L);
+          float *dpn = dg_upload_norm(m, nm, E); if (!dpn) goto layerfail;
+          k_rmsnorm<<<n_tok, 256, 0, st>>>(dap, dpn, E, eps, dnx);
+          cudaFree(dpn); }
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dnx, nE);
+        /* dx now holds attn_out (the post-attention residual) — the FFN input */
+
+        /* ── FFN: dense shared MLP + 128-expert MoE, combined, post_ffw_norm, residual ── */
+        /* (1) dense MLP: cur_mlp = post_ffw_norm_1( down( gelu(gate(ffn_norm(attn_out))) * up(...) ) ) */
+        { snprintf(nm, sizeof nm, "blk.%d.ffn_norm.weight", L);
+          float *dfn = dg_upload_norm(m, nm, E); if (!dfn) goto layerfail;
+          k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, dfn, E, eps, dnx);
+          cudaFree(dfn); }
+        snprintf(nm, sizeof nm, "blk.%d.ffn_gate.weight", L);
+        dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
+        if (gemm(cb, dW, dnx, dg, n_tok, E, FF)) goto layerfail;
+        cudaFree(dW); dW = NULL;
+        snprintf(nm, sizeof nm, "blk.%d.ffn_up.weight", L);
+        dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
+        if (gemm(cb, dW, dnx, dup, n_tok, E, FF)) goto layerfail;
+        cudaFree(dW); dW = NULL;
+        { size_t nFF = (size_t)n_tok * FF;
+          k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
+        snprintf(nm, sizeof nm, "blk.%d.ffn_down.weight", L);
+        dW = dg_upload_arena_w(m, nm, FF, E); if (!dW) goto layerfail;
+        if (gemm(cb, dW, dg, dmlp, n_tok, FF, E)) goto layerfail;   /* dmlp = dense MLP out */
+        cudaFree(dW); dW = NULL;
+        { snprintf(nm, sizeof nm, "blk.%d.post_ffw_norm_1.weight", L);
+          float *dn1 = dg_upload_norm(m, nm, E); if (!dn1) goto layerfail;
+          /* normalize dmlp in place: reuse dnx as scratch then copy back via k_rmsnorm out */
+          k_rmsnorm<<<n_tok, 256, 0, st>>>(dmlp, dn1, E, eps, dnx);
+          cudaMemcpyAsync(dmlp, dnx, nE*sizeof(float), cudaMemcpyDeviceToDevice, st);
+          cudaFree(dn1); }
+
+        /* (2) MoE. router input tmp = rms_norm_noscale(attn_out)*(1/sqrt(E))*gate_inp_s;
+         *     expert input cur_moe = pre_ffw_norm_2(attn_out). Both off the SAME attn_out (dx). */
+        /* expert input -> dnx (pre_ffw_norm_2 . dx) */
+        { snprintf(nm, sizeof nm, "blk.%d.pre_ffw_norm_2.weight", L);
+          float *dp2 = dg_upload_norm(m, nm, E); if (!dp2) goto layerfail;
+          k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, dp2, E, eps, dnx);   /* dnx = expert hidden, all tokens */
+          cudaFree(dp2); }
+        /* router tmp -> dtmp = rms_norm_noscale(dx) * 1/sqrt(E) * gate_inp_s (per element) */
+        snprintf(nm, sizeof nm, "blk.%d.ffn_gate_inp.scale", L);
+        { const float *gis_h = dg_norm_host(m, nm);
+          if (!gis_h) { sp_set_error("dg: ffn_gate_inp.scale missing"); goto layerfail; }
+          float *dgis = NULL;
+          if (cudaMalloc(&dgis, (size_t)E*sizeof(float)) != cudaSuccess) { sp_set_error("dg gis OOM"); goto layerfail; }
+          cudaMemcpyAsync(dgis, gis_h, (size_t)E*sizeof(float), cudaMemcpyHostToDevice, st);
+          k_dg_router_prep<<<n_tok, 256, 0, st>>>(dx, dtmp, dgis, E, eps, 1.0f/sqrtf((float)E));
+          cudaFree(dgis); }
+        /* router logits per token: gate_inp [NE x E] @ dtmp[t] -> h_logits; upload gate_inp once */
+        {
+            /* gate_inp is a NORM-class (f32) tensor in the bridge -> host pointer */
+            snprintf(nm, sizeof nm, "blk.%d.ffn_gate_inp.weight", L);
+            const float *gi_h = dg_norm_host(m, nm);
+            if (!gi_h) { sp_set_error("dg: ffn_gate_inp.weight missing"); goto layerfail; }
+            float *d_router = NULL;
+            if (cudaMalloc(&d_router, (size_t)NE*E*sizeof(float)) != cudaSuccess) { sp_set_error("dg router OOM"); goto layerfail; }
+            cudaMemcpyAsync(d_router, gi_h, (size_t)NE*E*sizeof(float), cudaMemcpyHostToDevice, st);
+            float *d_rlog = NULL;
+            if (cudaMalloc(&d_rlog, (size_t)n_tok*NE*sizeof(float)) != cudaSuccess) { cudaFree(d_router); sp_set_error("dg rlog OOM"); goto layerfail; }
+            if (gemm(cb, d_router, dtmp, d_rlog, n_tok, E, NE)) { cudaFree(d_router); cudaFree(d_rlog); goto layerfail; }
+            cudaFree(d_router);
+            /* download router logits, do softmax+top-NU per token on host, gather experts */
+            float *h_rlog = (float *)malloc((size_t)n_tok*NE*sizeof(float));
+            if (!h_rlog) { cudaFree(d_rlog); sp_set_error("dg h_rlog OOM"); goto layerfail; }
+            cudaMemcpy(h_rlog, d_rlog, (size_t)n_tok*NE*sizeof(float), cudaMemcpyDeviceToHost);
+            cudaFree(d_rlog);
+
+            /* zero MoE accumulator */
+            cudaMemsetAsync(dmoe, 0, nE*sizeof(float), st);
+
+            /* EXPERT-MAJOR dispatch (perf): route every token first (softmax/top-NU/renorm),
+             * build the per-expert token-list, then dequant each HIT expert ONCE per layer and
+             * batch all its tokens through one gate_up GEMM (n routing tokens) + GeGLU + down
+             * GEMM + per-token weighted accumulate. This collapses up to n_tok*NU per-(token,slot)
+             * dequants down to <= NE unique-expert dequants per layer (the binding cost is the
+             * Q4B host dequant). Arithmetic is identical to the per-token path (same softmax,
+             * same renorm, same expert math) — only the dequant/GEMM batching changes. */
+            const int gu_rows = FFx * 2;
+            /* per-token routing tables (NU entries each) */
+            int   *rt_idx = (int   *)malloc((size_t)n_tok * NU * sizeof(int));
+            float *rt_wt  = (float *)malloc((size_t)n_tok * NU * sizeof(float));
+            /* per-expert token membership: et_cnt[e], et_tok[e][*], et_w[e][*] (flattened) */
+            int   *et_cnt = (int   *)calloc((size_t)NE, sizeof(int));
+            int   *et_tok = (int   *)malloc((size_t)n_tok * NU * sizeof(int));   /* worst case */
+            float *et_w   = (float *)malloc((size_t)n_tok * NU * sizeof(float));
+            int   *et_off = (int   *)calloc((size_t)(NE + 1), sizeof(int));
+            if (!rt_idx || !rt_wt || !et_cnt || !et_tok || !et_w || !et_off) {
+                free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
+                free(h_rlog); sp_set_error("dg routing tables OOM"); goto layerfail; }
+            for (int t = 0; t < n_tok; t++) {
+                const float *lt = h_rlog + (size_t)t * NE;
+                float mx = lt[0]; for (int i = 1; i < NE; i++) if (lt[i] > mx) mx = lt[i];
+                double se = 0.0; for (int i = 0; i < NE; i++) { h_logits[i] = expf(lt[i]-mx); se += h_logits[i]; }
+                for (int i = 0; i < NE; i++) h_logits[i] = (float)(h_logits[i]/se);
+                char used[256] = {0};
+                float wsum = 0.0f;
+                int *ti = rt_idx + (size_t)t * NU; float *tw = rt_wt + (size_t)t * NU;
+                for (int k = 0; k < NU; k++) {
+                    int best = -1; float bv = -1.0f;
+                    for (int i = 0; i < NE; i++) if (!used[i] && h_logits[i] > bv) { bv = h_logits[i]; best = i; }
+                    used[best] = 1; ti[k] = best; tw[k] = bv; wsum += bv;
+                }
+                for (int k = 0; k < NU; k++) { tw[k] /= wsum; et_cnt[ti[k]]++; }
+            }
+            /* prefix-sum offsets, then fill et_tok/et_w */
+            for (int e = 0; e < NE; e++) et_off[e+1] = et_off[e] + et_cnt[e];
+            { int *cur = (int *)calloc((size_t)NE, sizeof(int));
+              if (!cur) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); sp_set_error("dg cur OOM"); goto layerfail; }
+              for (int t = 0; t < n_tok; t++) {
+                  const int *ti = rt_idx + (size_t)t * NU; const float *tw = rt_wt + (size_t)t * NU;
+                  for (int k = 0; k < NU; k++) { int e = ti[k]; int pos = et_off[e] + cur[e]++; et_tok[pos] = t; et_w[pos] = tw[k]; }
+              }
+              free(cur);
+            }
+
+            cudaMemsetAsync(dmoe, 0, nE*sizeof(float), st);
+
+            /* batched per-expert scratch: hold up to n_tok columns (rare; usually << n_tok) */
+            float *d_guw=NULL, *d_dnw=NULL, *d_xb=NULL, *d_gub=NULL, *d_hb=NULL, *d_deb=NULL;
+            if (cudaMalloc(&d_xb,  (size_t)E   * n_tok * sizeof(float)) != cudaSuccess ||
+                cudaMalloc(&d_gub, (size_t)gu_rows * n_tok * sizeof(float)) != cudaSuccess ||
+                cudaMalloc(&d_hb,  (size_t)FFx * n_tok * sizeof(float)) != cudaSuccess ||
+                cudaMalloc(&d_deb, (size_t)E   * n_tok * sizeof(float)) != cudaSuccess) {
+                free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
+                free(h_rlog); if(d_xb)cudaFree(d_xb); if(d_gub)cudaFree(d_gub); if(d_hb)cudaFree(d_hb);
+                sp_set_error("dg batched expert scratch OOM"); goto layerfail; }
+            for (int e = 0; e < NE; e++) {
+                int cnt = et_cnt[e];
+                if (cnt == 0) continue;
+                /* gather this expert's token hidden columns into d_xb [E x cnt] (row-major n_tok) */
+                for (int j = 0; j < cnt; j++) {
+                    int t = et_tok[et_off[e] + j];
+                    cudaMemcpyAsync(d_xb + (size_t)j*E, dnx + (size_t)t*E, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                }
+                snprintf(nm, sizeof nm, "blk.%d.ffn_gate_up_exps.weight", L);
+                d_guw = dg_upload_arena_rows(m, nm, e*gu_rows, gu_rows, E);
+                if (!d_guw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                snprintf(nm, sizeof nm, "blk.%d.ffn_down_exps.weight", L);
+                d_dnw = dg_upload_arena_rows(m, nm, e*E, E, FFx);
+                if (!d_dnw) { cudaFree(d_guw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                /* gate_up = gate_up_exps[e] @ X  [gu_rows x cnt] */
+                if (gemm(cb, d_guw, d_xb, d_gub, cnt, E, gu_rows)) { cudaFree(d_guw); cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                /* GeGLU per column: h[col*FFx + i] = gelu(gu[col*gu_rows+i]) * gu[col*gu_rows+FFx+i] */
+                { size_t total = (size_t)FFx * cnt;
+                  dg_k_geglu_batched<<<(unsigned)((total+255)/256), 256, 0, st>>>(d_gub, d_hb, FFx, gu_rows, cnt); }
+                /* down @ h -> de [E x cnt] */
+                if (gemm(cb, d_dnw, d_hb, d_deb, cnt, FFx, E)) { cudaFree(d_guw); cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                /* weighted accumulate each column back into its token's dmoe row */
+                for (int j = 0; j < cnt; j++) {
+                    int t = et_tok[et_off[e] + j]; float w = et_w[et_off[e] + j];
+                    dg_k_axpy<<<(unsigned)((E+255)/256), 256, 0, st>>>(dmoe + (size_t)t*E, d_deb + (size_t)j*E, w, E);
+                }
+                cudaFree(d_guw); d_guw = NULL; cudaFree(d_dnw); d_dnw = NULL;
+            }
+            cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb);
+            free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
+            free(h_rlog);
+        }
+        /* post_ffw_norm_2(cur_moe) -> dmoe */
+        { snprintf(nm, sizeof nm, "blk.%d.post_ffw_norm_2.weight", L);
+          float *dn2 = dg_upload_norm(m, nm, E); if (!dn2) goto layerfail;
+          k_rmsnorm<<<n_tok, 256, 0, st>>>(dmoe, dn2, E, eps, dnx);
+          cudaMemcpyAsync(dmoe, dnx, nE*sizeof(float), cudaMemcpyDeviceToDevice, st);
+          cudaFree(dn2); }
+        /* combined = dmlp + dmoe -> dnx ; post_ffw_norm(combined) ; residual + attn_out(dx) */
+        cudaMemcpyAsync(dnx, dmlp, nE*sizeof(float), cudaMemcpyDeviceToDevice, st);
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dnx, dmoe, nE);   /* dnx = cur_mlp + cur_moe */
+        { snprintf(nm, sizeof nm, "blk.%d.post_ffw_norm.weight", L);
+          float *dpf = dg_upload_norm(m, nm, E); if (!dpf) goto layerfail;
+          k_rmsnorm<<<n_tok, 256, 0, st>>>(dnx, dpf, E, eps, dao);   /* dao reused as scratch [n_tok*E<=n_tok*QDmax] */
+          cudaFree(dpf); }
+        /* dao now = post_ffw_norm(combined); add the attn_out residual (dx) -> ffn block output */
+        k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dao, dx, nE);
+        cudaMemcpyAsync(dx, dao, nE*sizeof(float), cudaMemcpyDeviceToDevice, st);   /* dx = layer FFN output */
+
+        /* ── region-aware per-layer scalar: prompt * enc_out_scale, canvas * out_scale ── */
+        {
+            snprintf(nm, sizeof nm, "blk.%d.enc_layer_output_scale.weight", L);
+            const float *encH = dg_norm_host(m, nm);
+            snprintf(nm, sizeof nm, "blk.%d.layer_output_scale.weight", L);
+            const float *decH = dg_norm_host(m, nm);
+            if (!encH || !decH) { sp_set_error("dg: layer scalar missing"); goto layerfail; }
+            float *dEnc=NULL, *dDec=NULL;
+            if (cudaMalloc(&dEnc, sizeof(float)) != cudaSuccess ||
+                cudaMalloc(&dDec, sizeof(float)) != cudaSuccess) { sp_set_error("dg scalar OOM"); if(dEnc)cudaFree(dEnc); goto layerfail; }
+            cudaMemcpyAsync(dEnc, encH, sizeof(float), cudaMemcpyHostToDevice, st);
+            cudaMemcpyAsync(dDec, decH, sizeof(float), cudaMemcpyHostToDevice, st);
+            k_region_scale<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, E, P, n_tok, dEnc, dDec);
+            cudaStreamSynchronize(st);
+            cudaFree(dEnc); cudaFree(dDec);
+        }
+        if (d_ffac) { cudaFree(d_ffac); d_ffac = NULL; }
+        continue;
+    layerfail:
+        if (dW) cudaFree(dW); if (dWk) cudaFree(dWk); if (dWv) cudaFree(dWv);
+        if (dWo) cudaFree(dWo); if (dNw) cudaFree(dNw); if (d_ffac) cudaFree(d_ffac);
+        goto done;
+    }
+
+    /* ── final norm + tied head + softcap -> logits ── */
+    {
+        float *don = dg_upload_norm(m, "output_norm.weight", E); if (!don) goto done;
+        k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, don, E, eps, dnx);
+        cudaFree(don);
+        /* head: tied to token_embd (no output.weight) or untied output.weight; stream f32 */
+        const char *head_name = c->tied_embedding ? m->token_embd->name : m->output->name;
+        float *dHead = dg_upload_arena_w(m, head_name, E, V); if (!dHead) goto done;
+        if (gemm(cb, dHead, dnx, dlog, n_tok, E, V)) { cudaFree(dHead); goto done; }
+        cudaFree(dHead);
+        if (softcap > 0.0f) {
+            size_t nl = (size_t)n_tok * V;
+            k_softcap<<<(unsigned)((nl+255)/256), 256, 0, st>>>(dlog, nl, softcap);
+        }
+        if (cudaMemcpyAsync(out_logits, dlog, (size_t)n_tok*V*sizeof(float), cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+            sp_set_error("dg: logits D2H"); goto done; }
+    }
+    { cudaError_t e = cudaStreamSynchronize(st); if (e != cudaSuccess) { fail_cuda(e, "dg sync"); goto done; } }
+    { cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) { fail_cuda(e, "dg kernel"); goto done; } }
+    rc = 0;
+done:
+    if (hrows) free(hrows);
+    if (h_logits) free(h_logits);
+    if (h_router) free(h_router);
+    if (dtoks) cudaFree(dtoks);
+    if (dx) cudaFree(dx); if (dnx) cudaFree(dnx); if (dtmp) cudaFree(dtmp);
+    if (dq) cudaFree(dq); if (dk) cudaFree(dk); if (dv) cudaFree(dv);
+    if (dao) cudaFree(dao); if (dap) cudaFree(dap);
+    if (dg) cudaFree(dg); if (dup) cudaFree(dup); if (ddn) cudaFree(ddn);
+    if (dmlp) cudaFree(dmlp); if (dmoe) cudaFree(dmoe); if (dlog) cudaFree(dlog);
+    if (Kst) { for (int L = 0; L < NL; L++) if (Kst[L]) cudaFree(Kst[L]); free(Kst); }
+    if (Vst) { for (int L = 0; L < NL; L++) if (Vst[L]) cudaFree(Vst[L]); free(Vst); }
+    #undef DGA
+    if (cb) cublasDestroy(cb);
+    return rc;
+}
+
 
 /* ════════════════════════ forward ════════════════════════ */
 

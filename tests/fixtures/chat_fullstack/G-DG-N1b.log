@@ -1,0 +1,38 @@
+# G-DG-N1b - DiffusionGemma (arch_id 9) region-aware UNIFIED forward  [GREEN, fallback tier]
+# date: 2026-06-21
+# sp_status: GREEN (forward assembled + compiles + links + runs end-to-end on the real 26B-A4B MoE
+#            + finite/in-vocab canvas logits + null floor). Oracle top-1 parity = pending the
+#            diffusion GGUF on disk (one llama-diffusion-gemma-eval run away; see tail).
+# repro: build -> (vcvars64) ninja test_diffgemma_forward ;  run -> build-cuda\tests\test_diffgemma_forward.exe
+#        model env defaults C:\sp_models\diffusiongemma-26B-A4B.{sp-model,sp-tokenizer}
+# diff: src/backends/cuda/cuda_forward.cu +605/-0 (additive); include/sp_engine/cuda_backend.h +9.
+#       New: diffusion_gemma_forward_cuda + kernels k_attn_diffusion (region mask),
+#       k_rmsnorm_noscale_rows (canvas embed), k_region_scale (enc/dec scalar split),
+#       k_dg_router_prep, dg_k_geglu_batched (expert-major MoE batching). Dense gemma4/gemma3/qwen3
+#       paths byte-identical (0 deletions); null floor = arch dispatch on SP_ARCH_DIFFUSION_GEMMA.
+# what ran: [prompt|canvas] = 6 prompt + 256 canvas (split P=6, C=256) through gemma4 backbone
+#       (per-layer SWA/global geometry, shared-KV, q/k-norm, proportional RoPE on global layers,
+#       softcap) + region-aware bidirectional canvas mask + canvas rmsnorm-noscale embedding +
+#       per-layer enc(prompt)/dec(canvas) scalar split + dense shared MLP + 128-expert top-8 MoE
+#       (post_ffw_norm_1 on MLP, pre/post_ffw_norm_2 on MoE, combined+post_ffw_norm) + tied head.
+#       Weights stream per-layer from the arena; experts dequanted once-per-layer (expert-major).
+# ===================================================================================================
+
+== stderr (test output) ==
+    n_prompt=6  model_canvas=256  n_tok=262  V=262144
+    canvas positions checked=256  non-finite/out-of-vocab=0
+    canvas argmax[0..7] = 1852 1852 1852 1852 1852 1852 1852 255999 
+    [no SP_DG_ORACLE_LOGITS] FALLBACK gate: forward runs + finite + in-vocab.
+    To close full oracle parity (needs the diffusion GGUF on disk):
+      D:/F/llama-diffgemma-pr24423/build/bin/llama-diffusion-gemma-eval.exe \
+        <diffusiongemma.gguf> <prompt_ids.i32> <canvas_ids.i32> oracle.bin
+      (canvas_ids = 256 copies of the fill id; prompt_ids = SP_DG_PROMPT_TOKS)
+    then re-run with SP_DG_ORACLE_LOGITS=oracle.bin (raw-f32 eval format auto-detected).
+
+    G-DG-N1b: DiffusionGemma region-aware forward ran end-to-end.
+[T_DG_N1B_FORWARD] PASS
+---- checks=7 fails=0 ----
+
+== stdout ==
+RUN_OK 
+

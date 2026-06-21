@@ -428,6 +428,16 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
         add_test(NAME M_GEMMA4_CUDA_PPL COMMAND test_gemma4_ppl_cuda)
         set_tests_properties(M_GEMMA4_CUDA_PPL PROPERTIES LABELS "SLOW" TIMEOUT 1800
             ENVIRONMENT "SP_PPL_TOKENS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ppl/wiki.tiny.g4tokens.txt;SP_PPL_NCTX=84;SP_PPL_CHUNKS=1;SP_PPL_ORACLE=4.6776;SP_PPL_GATE=8e-2")
+
+        # ── G-DG-N1b: DiffusionGemma (arch_id 9) region-aware UNIFIED forward. Drives
+        # diffusion_gemma_forward_cuda on a [prompt|canvas] block through the real 26B
+        # MoE; gates oracle canvas top-1 parity (SP_DG_ORACLE_LOGITS) or, absent a dump,
+        # the forward runs end-to-end with finite/in-vocab logits + null floor. SLOW /
+        # streaming the 13 GB model per-layer; skips when the model or a GPU is absent. ──
+        add_executable(test_diffgemma_forward test_diffgemma_forward.c)
+        target_link_libraries(test_diffgemma_forward PRIVATE sp_session sp_engine_cuda sp_engine)
+        add_test(NAME G_DG_N1B COMMAND test_diffgemma_forward)
+        set_tests_properties(G_DG_N1B PROPERTIES LABELS "SLOW" TIMEOUT 1800)
         # XBAR-P1 Inception Probe driver (CONTRACT-XBAR-P1, lattice papers).
         # Env-driven, NOT a ctest: every probe arm = this binary + SP_XBAR_* env.
         add_executable(test_xbar_p1_cuda test_xbar_p1_cuda.c)

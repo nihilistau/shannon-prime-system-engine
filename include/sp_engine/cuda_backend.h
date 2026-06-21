@@ -77,6 +77,15 @@ int gemma4_cuda_probe(const qwen3_model *m, const int32_t *tokens, int n_tok,
 int gemma4_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
                         float *logits);
 
+/* N1b: DiffusionGemma (arch_id 9) region-aware UNIFIED forward. A single no-cache
+ * bidirectional pass over [prompt | canvas] (canvas = last cfg.dg_canvas_length) ->
+ * logits [n_tok x n_vocab]. prompt rows: embed*sqrt(E) + causal attn + enc scalar;
+ * canvas rows: rmsnorm_noscale(embed*sqrt(E)) + bidirectional attn + dec scalar. The
+ * gemma4 MoE backbone is reused verbatim; weights stream per-layer from the arena.
+ * Self-conditioning OFF (single step-0 forward). Gate G-DG-N1b. */
+int diffusion_gemma_forward_cuda(const qwen3_model *m, const int32_t *tokens, int n_tok,
+                                 float *out_logits);
+
 /* ETA.5a: Gemma4 autoregressive CUDA decode (host-driven, oracle arithmetic).
  * Jagged per-OWNER KV cache (global 512-wide / SWA 256-wide rows; sharers
  * allocate nothing), per-step AltUp, windowed single-query attention, tied head
