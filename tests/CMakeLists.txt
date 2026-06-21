@@ -453,6 +453,10 @@ if(NOT SP_ENGINE_TARGET_ANDROID)
         # (SP_DJ_LIMIT matched + SP_DJ_FLIMIT foreign). SLOW; run detached. --
         add_executable(test_diffjudge_denoise test_diffjudge_denoise.c)
         target_link_libraries(test_diffjudge_denoise PRIVATE sp_session sp_engine_cuda sp_engine)
+        # -- N5c surgical instrument: 1-forward cudaEvent timing (no corpus/runaway).
+        # Times each diffusion_gemma_forward_cuda; honors SP_DG_RESERVOIR. Env-driven. --
+        add_executable(test_dg_forward_timing test_dg_forward_timing.c)
+        target_link_libraries(test_dg_forward_timing PRIVATE sp_session sp_engine_cuda sp_engine)
         # -- G-DG-N3: self-conditioning step-0 byte-identity + non-triviality. One model
         # load + 3 forwards; env-driven, NOT a default ctest. --
         add_executable(test_dg_selfcond test_dg_selfcond.c)
