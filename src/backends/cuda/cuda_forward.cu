@@ -6447,19 +6447,25 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     int t = et_tok[et_off[e] + j];
                     cudaMemcpyAsync(d_xb + (size_t)j*E, dnx + (size_t)t*E, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 }
+                /* gate_up: packed dp4a slice GEMV (SP_DG_PACKED) or f32 upload+gemm  [gu_rows x cnt] */
                 snprintf(nm, sizeof nm, "blk.%d.ffn_gate_up_exps.weight", L);
-                d_guw = dg_upload_arena_rows(m, nm, e*gu_rows, gu_rows, E);
-                if (!d_guw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
-                snprintf(nm, sizeof nm, "blk.%d.ffn_down_exps.weight", L);
-                d_dnw = dg_upload_arena_rows(m, nm, e*E, E, FFx);
-                if (!d_dnw) { cudaFree(d_guw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
-                /* gate_up = gate_up_exps[e] @ X  [gu_rows x cnt] */
-                if (gemm(cb, d_guw, d_xb, d_gub, cnt, E, gu_rows)) { cudaFree(d_guw); cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*gu_rows, gu_rows, E, d_xb, d_gub, cnt, st) : 2;
+                  if (pr == 1) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                  if (pr != 0) { d_guw = dg_upload_arena_rows(m, nm, e*gu_rows, gu_rows, E);
+                    if (!d_guw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                    if (gemm(cb, d_guw, d_xb, d_gub, cnt, E, gu_rows)) { cudaFree(d_guw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                    cudaFree(d_guw); d_guw = NULL; } }
                 /* GeGLU per column: h[col*FFx + i] = gelu(gu[col*gu_rows+i]) * gu[col*gu_rows+FFx+i] */
                 { size_t total = (size_t)FFx * cnt;
                   dg_k_geglu_batched<<<(unsigned)((total+255)/256), 256, 0, st>>>(d_gub, d_hb, FFx, gu_rows, cnt); }
-                /* down @ h -> de [E x cnt] */
-                if (gemm(cb, d_dnw, d_hb, d_deb, cnt, FFx, E)) { cudaFree(d_guw); cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                /* down: packed dp4a slice GEMV or f32 upload+gemm  (h -> de [E x cnt]) */
+                snprintf(nm, sizeof nm, "blk.%d.ffn_down_exps.weight", L);
+                { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*E, E, FFx, d_hb, d_deb, cnt, st) : 2;
+                  if (pr == 1) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                  if (pr != 0) { d_dnw = dg_upload_arena_rows(m, nm, e*E, E, FFx);
+                    if (!d_dnw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                    if (gemm(cb, d_dnw, d_hb, d_deb, cnt, FFx, E)) { cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
+                    cudaFree(d_dnw); d_dnw = NULL; } }
                 /* weighted accumulate each column back into its token's dmoe row */
                 for (int j = 0; j < cnt; j++) {
                     int t = et_tok[et_off[e] + j]; float w = et_w[et_off[e] + j];
