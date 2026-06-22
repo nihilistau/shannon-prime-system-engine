@@ -5888,6 +5888,53 @@ static int dg_dequant_resident_rows(const sp_arena_tensor *at, int r0, int rows,
  * via the RESIDENT-snapshot path (dg_dequant_resident_rows) so the demand-faulting mmap
  * view is never dereferenced during compute (G-DG-STREAMFIX), so the f32 GEMM matches
  * the CPU oracle's dequant path. ── */
+/* ── N5c-v3: resident DEVICE DevTensor cache (the weight-residence lever) ──
+ * Keyed by tensor name. On hit, dg_gemm_packed reuses the device-resident DevTensor and SKIPS
+ * upload_packed -> kills the per-forward packed-weight PCIe H2D on steps 2..N (the diffusion judge
+ * re-runs the full forward ~48x over a static prompt). BYTE-IDENTICAL (same DevTensor -> same
+ * gemm_w). FIRST CUT: dense backbone only (dg_gemm_packed); experts (dg_gemm_packed_rows) unchanged.
+ * NO eviction + a cudaMemGetInfo budget-stop guard so it can NEVER OOM (stops caching near the
+ * limit; uncached tensors upload+free as before). Gated SP_DG_WCACHE (default-off = null floor:
+ * lookup misses + insert refuses => dg_gemm_packed uploads+frees exactly as v2). Freed at release. */
+typedef struct { char name[160]; DevTensor dt; } dg_wc_ent;
+static dg_wc_ent *dg_wc_tab = NULL;
+static int dg_wc_n = 0, dg_wc_cap = 0;
+static int dg_wcache_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("SP_DG_WCACHE"); v = (e && *e && *e != '0') ? 1 : 0; }
+    return v;
+}
+static size_t dg_wcache_margin(void) {
+    static size_t m = 0;
+    if (!m) { const char *e = getenv("SP_DG_WCACHE_MARGIN_MB"); long mb = (e && *e) ? atol(e) : 1536; if (mb < 256) mb = 256; m = (size_t)mb << 20; }
+    return m;
+}
+static DevTensor *dg_wcache_lookup(const char *name) {
+    if (!dg_wcache_enabled()) return NULL;
+    for (int i = 0; i < dg_wc_n; i++) if (!strcmp(dg_wc_tab[i].name, name)) return &dg_wc_tab[i].dt;
+    return NULL;
+}
+/* Copy the DevTensor handle into the table (cache OWNS the device buffers). Returns 1 if cached
+ * (caller must NOT free), 0 if not (caller frees): disabled / name too long / grow fail / budget. */
+static int dg_wcache_insert(const char *name, const DevTensor *dt) {
+    if (!dg_wcache_enabled() || strlen(name) >= 160) return 0;
+    size_t freeb = 0, totb = 0;
+    if (cudaMemGetInfo(&freeb, &totb) != cudaSuccess || freeb < dg_wcache_margin()) return 0;  /* budget-stop (no eviction) */
+    if (dg_wc_n == dg_wc_cap) {
+        int nc = dg_wc_cap ? dg_wc_cap * 2 : 128;
+        dg_wc_ent *nt = (dg_wc_ent *)realloc(dg_wc_tab, (size_t)nc * sizeof(dg_wc_ent));
+        if (!nt) return 0;
+        dg_wc_tab = nt; dg_wc_cap = nc;
+    }
+    snprintf(dg_wc_tab[dg_wc_n].name, 160, "%s", name);
+    dg_wc_tab[dg_wc_n].dt = *dt; dg_wc_n++;
+    if (getenv("SP_DG_TRACE")) fprintf(stderr, "[N5c-wc] resident #%d %s (free=%zuMB)\n", dg_wc_n, name, (size_t)(freeb >> 20));
+    return 1;
+}
+static void dg_wcache_free(void) {
+    for (int i = 0; i < dg_wc_n; i++) free_devtensor(&dg_wc_tab[i].dt);
+    free(dg_wc_tab); dg_wc_tab = NULL; dg_wc_n = dg_wc_cap = 0;
+}
 static int dg_packed_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_PACKED"); v=(e&&*e&&*e!='0')?1:0; } return v; }
 /* N5c: run an arena weight's GEMM through the EXISTING packed dp4a path (upload_packed +
  * per-token gemv_w_packed) instead of dg_upload_arena_w's f32 CPU-dequant + 28GB H2D. The
@@ -5897,19 +5944,24 @@ static int dg_packed_enabled(void){ static int v=-1; if(v<0){ const char*e=geten
  * Gated by SP_DG_PACKED (default-off = the f32 path byte-for-byte = null floor). */
 static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int out,
                           const float *dX, float *dY, int n_tok, cublasHandle_t cb, cudaStream_t st) {
-    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
-    if (!at) { sp_set_error("dg_gemm_packed: tensor not in arena"); return 1; }
-    DevTensor devW; memset(&devW, 0, sizeof devW);
-    if (upload_packed(&at->pt, &devW)) { free_devtensor(&devW); return 1; }
+    /* N5c-v3: resident DevTensor cache hit -> reuse device weights, SKIP upload_packed. */
+    DevTensor *hit = dg_wcache_lookup(name);
+    DevTensor devW; int cached = 0;
+    if (hit) { devW = *hit; cached = 1; }
+    else {
+        const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
+        if (!at) { sp_set_error("dg_gemm_packed: tensor not in arena"); return 1; }
+        memset(&devW, 0, sizeof devW);
+        if (upload_packed(&at->pt, &devW)) { free_devtensor(&devW); return 1; }
+    }
     /* N5c-v2: packed DevTensor -> k_dequant_arena_q4b (device dequant -> f32 scratch) -> cuBLAS
-     * SGEMM via gemm_w. BYTE-IDENTICAL f32 (Q4B dequant->SGEMM has no extra rounding), ONE cuBLAS
-     * grid (efficient at ALL n_tok, unlike the per-token GEMV loop). The dense path's own packed
-     * matmul. Half the f32 H2D (packed 14GB) + GPU dequant (not CPU). */
+     * SGEMM via gemm_w. BYTE-IDENTICAL f32 (Q4B dequant->SGEMM has no extra rounding). */
     float *scratch = NULL;
     if (cudaMalloc(&scratch, (size_t)out * in * sizeof(float)) != cudaSuccess) {
-        free_devtensor(&devW); sp_set_error("dg_gemm_packed: dequant scratch OOM"); return 1; }
+        if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed: dequant scratch OOM"); return 1; }
     int rc = gemm_w(cb, st, &devW, dX, dY, n_tok, scratch);
-    cudaFree(scratch); free_devtensor(&devW);
+    cudaFree(scratch);
+    if (!cached) { if (!dg_wcache_insert(name, &devW)) free_devtensor(&devW); }   /* cache owns on insert; else free */
     return rc ? 1 : 0;
 }
 /* N5c MoE: one expert's GEMM via the packed dp4a path on a ROW-SLICE of a fused arena tensor.
@@ -7160,4 +7212,5 @@ done:
 extern "C" void sp_cuda_model_release(const qwen3_model *m) {
     if (g_w.key == m) free_weights(&g_w);
     dg_reservoir_free();
+    dg_wcache_free();
 }
