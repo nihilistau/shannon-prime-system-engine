@@ -6250,6 +6250,7 @@ extern "C" void dg_sc_embed_release(void) {
  * query (same key) compare fresh-vs-cached and report max|delta|. Touches NO logit (pure observe);
  * default-off = zero work = byte-identical null floor. */
 static int dg_pkv_proof_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_PREFIXKV_PROOF"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+static int dg_prefixkv_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_PREFIXKV"); v=(e&&*e&&*e!='0')?1:0; } return v; }
 static const qwen3_model *g_pkv_m = NULL;
 static int       g_pkv_P = -1, g_pkv_NL = 0;
 static unsigned long long g_pkv_h = 0ULL;
@@ -6377,10 +6378,13 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
     }
     DGDBG("embeddings done; entering layer loop");
 
-    /* N6 prefix-KV proof setup: detect repeat-of-same-query (hit) vs new query (miss). */
-    int pkv_proof = dg_pkv_proof_enabled() && P > 0;
+    /* N6 prefix-KV setup: cache prompt K/V (step-1 save) + on a repeat step of the same query run
+     * CANVAS-ONLY (SP_DG_PREFIXKV) and/or byte-compare (SP_DG_PREFIXKV_PROOF). pkv_on drives the cache. */
+    int pkv_fast_on = dg_prefixkv_enabled() && P > 0;
+    int pkv_proof   = dg_pkv_proof_enabled() && P > 0;
+    int pkv_on = pkv_fast_on || pkv_proof;
     int pkv_hit = 0;
-    if (pkv_proof) {
+    if (pkv_on) {
         unsigned long long h = dg_pkv_hash(tokens, P);
         pkv_hit = (g_pkv_K && g_pkv_V && g_pkv_m==m && g_pkv_P==P && g_pkv_NL==NL && g_pkv_h==h);
         if (!pkv_hit) {                       /* first step of a (new) query -> rebuild cache */
@@ -6388,13 +6392,16 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             g_pkv_K = (float**)calloc((size_t)NL, sizeof(float*));
             g_pkv_V = (float**)calloc((size_t)NL, sizeof(float*));
             if (g_pkv_K && g_pkv_V) { g_pkv_m=m; g_pkv_P=P; g_pkv_NL=NL; g_pkv_h=h; }
-            else { dg_pkv_free(); pkv_proof = 0; }      /* OOM -> disable, never break forward */
+            else { dg_pkv_free(); pkv_on = 0; pkv_proof = 0; pkv_fast_on = 0; }  /* OOM -> disable */
         }
         if (pkv_proof) {
             if (!g_pkv_diff) cudaMalloc(&g_pkv_diff, sizeof(float));
             if (g_pkv_diff) cudaMemsetAsync(g_pkv_diff, 0, sizeof(float), st);
         }
     }
+    const int pkv_fast = pkv_fast_on && pkv_hit;          /* canvas-only compute this forward */
+    const size_t rb = (size_t)(pkv_fast ? P : 0);         /* compute-row base */
+    const int    rn = pkv_fast ? C : n_tok;               /* compute-row count */
 
     /* ── layer loop ── */
     for (int L = 0; L < NL; L++) {
@@ -6426,10 +6433,10 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
 
         /* Q proj + q-norm + rope */
         snprintf(nm, sizeof nm, "blk.%d.attn_q.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, qd, dnx, dq, n_tok, cb, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, qd, dnx+rb*E, dq+rb*qd, rn, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, qd); if (!dW) goto layerfail;
-            if (gemm(cb, dW, dnx, dq, n_tok, E, qd)) { cudaFree(dW); goto layerfail; }
+            if (gemm(cb, dW, dnx+rb*E, dq+rb*qd, rn, E, qd)) { cudaFree(dW); goto layerfail; }
             cudaFree(dW); dW = NULL; } }
         { snprintf(nm, sizeof nm, "blk.%d.attn_q_norm.weight", L);
           float *dqn = dg_upload_norm(m, nm, hd); if (!dqn) goto layerfail;
@@ -6442,16 +6449,16 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         float *Kuse, *Vuse;
         if (L < kvfs) {
             snprintf(nm, sizeof nm, "blk.%d.attn_k.weight", L);
-            { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dk, n_tok, cb, st) : 2;
+            { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx+rb*E, dk+rb*kvd, rn, cb, st) : 2;
               if (dgp == 1) goto layerfail;
               if (dgp != 0) { dWk = dg_upload_arena_w(m, nm, E, kvd); if (!dWk) goto layerfail;
-                if (gemm(cb, dWk, dnx, dk, n_tok, E, kvd)) goto layerfail; } }
+                if (gemm(cb, dWk, dnx+rb*E, dk+rb*kvd, rn, E, kvd)) goto layerfail; } }
             if (has_v) {
                 snprintf(nm, sizeof nm, "blk.%d.attn_v.weight", L);
-                { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dv, n_tok, cb, st) : 2;
+                { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx+rb*E, dv+rb*kvd, rn, cb, st) : 2;
                   if (dgp == 1) goto layerfail;
                   if (dgp != 0) { dWv = dg_upload_arena_w(m, nm, E, kvd); if (!dWv) goto layerfail;
-                    if (gemm(cb, dWv, dnx, dv, n_tok, E, kvd)) goto layerfail; } }
+                    if (gemm(cb, dWv, dnx+rb*E, dv+rb*kvd, rn, E, kvd)) goto layerfail; } }
             } else {  /* V-less (global) layer: V = raw K projection */
                 cudaMemcpyAsync(dv, dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
             }
@@ -6465,21 +6472,27 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             if (cudaMalloc(&Kst[L], (size_t)n_tok*kvd*sizeof(float)) != cudaSuccess ||
                 cudaMalloc(&Vst[L], (size_t)n_tok*kvd*sizeof(float)) != cudaSuccess) {
                 sp_set_error("dg Kst OOM"); goto layerfail; }
-            cudaMemcpyAsync(Kst[L], dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
-            cudaMemcpyAsync(Vst[L], dv, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            if (pkv_fast) {   /* N6 fast: prompt K/V [0,P) from cache (canvas-invariant), canvas [P,n_tok) fresh */
+                cudaMemcpyAsync(Kst[L], g_pkv_K[L], (size_t)P*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(Vst[L], g_pkv_V[L], (size_t)P*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(Kst[L]+(size_t)P*kvd, dk+(size_t)P*kvd, (size_t)C*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(Vst[L]+(size_t)P*kvd, dv+(size_t)P*kvd, (size_t)C*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            } else {
+                cudaMemcpyAsync(Kst[L], dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                cudaMemcpyAsync(Vst[L], dv, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            }
             Kuse = Kst[L]; Vuse = Vst[L];
-            if (pkv_proof) {   /* N6: owner prompt K/V [0,P) -> compare (hit) or cache (miss). prompt is canvas-invariant */
+            if (pkv_on && !pkv_hit) {   /* N6 step-1 SAVE: cache the canvas-invariant prompt K/V [0,P) */
+                size_t prow = (size_t)P * kvd;
+                if (cudaMalloc(&g_pkv_K[L], prow*sizeof(float))==cudaSuccess)
+                    cudaMemcpyAsync(g_pkv_K[L], Kst[L], prow*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                if (cudaMalloc(&g_pkv_V[L], prow*sizeof(float))==cudaSuccess)
+                    cudaMemcpyAsync(g_pkv_V[L], Vst[L], prow*sizeof(float), cudaMemcpyDeviceToDevice, st);
+            } else if (pkv_proof && pkv_hit && !pkv_fast) {   /* N6 PROOF: compare fresh vs cached prompt K/V */
                 size_t prow = (size_t)P * kvd;
                 unsigned int gx = (unsigned int)((prow + 255) / 256);
-                if (pkv_hit) {
-                    if (g_pkv_K[L]) dg_k_maxabsdiff<<<gx,256,0,st>>>(Kst[L], g_pkv_K[L], prow, g_pkv_diff);
-                    if (g_pkv_V[L]) dg_k_maxabsdiff<<<gx,256,0,st>>>(Vst[L], g_pkv_V[L], prow, g_pkv_diff);
-                } else {
-                    if (cudaMalloc(&g_pkv_K[L], prow*sizeof(float))==cudaSuccess)
-                        cudaMemcpyAsync(g_pkv_K[L], Kst[L], prow*sizeof(float), cudaMemcpyDeviceToDevice, st);
-                    if (cudaMalloc(&g_pkv_V[L], prow*sizeof(float))==cudaSuccess)
-                        cudaMemcpyAsync(g_pkv_V[L], Vst[L], prow*sizeof(float), cudaMemcpyDeviceToDevice, st);
-                }
+                if (g_pkv_K[L]) dg_k_maxabsdiff<<<gx,256,0,st>>>(Kst[L], g_pkv_K[L], prow, g_pkv_diff);
+                if (g_pkv_V[L]) dg_k_maxabsdiff<<<gx,256,0,st>>>(Vst[L], g_pkv_V[L], prow, g_pkv_diff);
             }
             if (dWk) { cudaFree(dWk); dWk = NULL; }
             if (dWv) { cudaFree(dWv); dWv = NULL; }
@@ -6493,16 +6506,20 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         DGDBG("layer %d: attn launch grid=%d bd=%d shmem=%zu", L, n_tok*nh,
               (n_tok<hd?hd:(n_tok>1024?1024:n_tok)), (size_t)n_tok*sizeof(float));
         {   int bd = n_tok; if (bd < hd) bd = hd; if (bd > 1024) bd = 1024;
-            k_attn_diffusion<<<n_tok*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
-                dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, dao); }
+            if (pkv_fast)
+                k_attn_diffusion_canvas<<<C*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
+                    dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, P, dao);
+            else
+                k_attn_diffusion<<<n_tok*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
+                    dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, dao); }
         if (getenv("SP_DG_TRACE")) { cudaStreamSynchronize(st); DGDBG("layer %d: attn done (synced)", L); }
 
         /* O proj -> ap, post_attn_norm, residual into dx */
         snprintf(nm, sizeof nm, "blk.%d.attn_output.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, qd, E, dao, dap, n_tok, cb, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, qd, E, dao+rb*qd, dap+rb*E, rn, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dWo = dg_upload_arena_w(m, nm, qd, E); if (!dWo) goto layerfail;
-            if (gemm(cb, dWo, dao, dap, n_tok, qd, E)) goto layerfail; cudaFree(dWo); dWo = NULL; } }
+            if (gemm(cb, dWo, dao+rb*qd, dap+rb*E, rn, qd, E)) goto layerfail; cudaFree(dWo); dWo = NULL; } }
         { snprintf(nm, sizeof nm, "blk.%d.post_attention_norm.weight", L);
           float *dpn = dg_upload_norm(m, nm, E); if (!dpn) goto layerfail;
           k_rmsnorm<<<n_tok, 256, 0, st>>>(dap, dpn, E, eps, dnx);
@@ -6518,22 +6535,22 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
           k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, dfn, E, eps, dnx);
           cudaFree(dfn); }
         snprintf(nm, sizeof nm, "blk.%d.ffn_gate.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dg, n_tok, cb, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx+rb*E, dg+rb*FF, rn, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
-            if (gemm(cb, dW, dnx, dg, n_tok, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
+            if (gemm(cb, dW, dnx+rb*E, dg+rb*FF, rn, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
         snprintf(nm, sizeof nm, "blk.%d.ffn_up.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dup, n_tok, cb, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx+rb*E, dup+rb*FF, rn, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
-            if (gemm(cb, dW, dnx, dup, n_tok, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
+            if (gemm(cb, dW, dnx+rb*E, dup+rb*FF, rn, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
         { size_t nFF = (size_t)n_tok * FF;
           k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
         snprintf(nm, sizeof nm, "blk.%d.ffn_down.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, FF, E, dg, dmlp, n_tok, cb, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, FF, E, dg+rb*FF, dmlp+rb*E, rn, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, FF, E); if (!dW) goto layerfail;
-            if (gemm(cb, dW, dg, dmlp, n_tok, FF, E)) goto layerfail; cudaFree(dW); dW = NULL; } }
+            if (gemm(cb, dW, dg+rb*FF, dmlp+rb*E, rn, FF, E)) goto layerfail; cudaFree(dW); dW = NULL; } }
         { snprintf(nm, sizeof nm, "blk.%d.post_ffw_norm_1.weight", L);
           float *dn1 = dg_upload_norm(m, nm, E); if (!dn1) goto layerfail;
           /* normalize dmlp in place: reuse dnx as scratch then copy back via k_rmsnorm out */
@@ -6600,7 +6617,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             if (!rt_idx || !rt_wt || !et_cnt || !et_tok || !et_w || !et_off) {
                 free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
                 free(h_rlog); sp_set_error("dg routing tables OOM"); goto layerfail; }
-            for (int t = 0; t < n_tok; t++) {
+            for (int t = (pkv_fast ? P : 0); t < n_tok; t++) {   /* N6: canvas tokens only */
                 const float *lt = h_rlog + (size_t)t * NE;
                 float mx = lt[0]; for (int i = 1; i < NE; i++) if (lt[i] > mx) mx = lt[i];
                 double se = 0.0; for (int i = 0; i < NE; i++) { h_logits[i] = expf(lt[i]-mx); se += h_logits[i]; }
@@ -6619,7 +6636,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             for (int e = 0; e < NE; e++) et_off[e+1] = et_off[e] + et_cnt[e];
             { int *cur = (int *)calloc((size_t)NE, sizeof(int));
               if (!cur) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); sp_set_error("dg cur OOM"); goto layerfail; }
-              for (int t = 0; t < n_tok; t++) {
+              for (int t = (pkv_fast ? P : 0); t < n_tok; t++) {   /* N6: canvas tokens only */
                   const int *ti = rt_idx + (size_t)t * NU; const float *tw = rt_wt + (size_t)t * NU;
                   for (int k = 0; k < NU; k++) { int e = ti[k]; int pos = et_off[e] + cur[e]++; et_tok[pos] = t; et_w[pos] = tw[k]; }
               }
