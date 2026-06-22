@@ -6078,7 +6078,9 @@ static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, i
         sl.row_scale = s->row_scale ? s->row_scale + r0 : NULL;
         sl.bscale = s->bscale ? s->bscale + (size_t)r0 * s->bs_nblk : NULL;
         memset(&devW, 0, sizeof devW);
+        if (getenv("SP_DG_PKVCKPT")) { cudaDeviceSynchronize(); fprintf(stderr, "[dgrows r0=%d rows=%d in=%d cnt=%d] slice built, upload_packed next (span=%zu off0=%zu codes_bytes=%zu)\n", r0, rows, in, cnt, span, off0, (size_t)sl.codes_bytes); fflush(stderr); }
         int urc = upload_packed(&sl, &devW);
+        if (getenv("SP_DG_PKVCKPT")) { cudaError_t _e=cudaDeviceSynchronize(); int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] upload_packed done urc=%d heap=%s sync=%s\n", r0, urc, _h==_HEAPOK?"OK":"CORRUPT", cudaGetErrorString(_e)); fflush(stderr); }
         free(off_c);
         if (urc) { free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: upload_packed"); return 1; }
         if (devW.prec != 4) { free_devtensor(&devW); return 2; }
@@ -6088,7 +6090,9 @@ static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, i
         if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: dequant scratch OOM"); return 1; }
     int rc = gemm_w(cb, st, &devW, dX, dY, cnt, scratch);
     cudaFree(scratch);
+    if (getenv("SP_DG_PKVCKPT")) { cudaError_t _e=cudaDeviceSynchronize(); int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] gemm_w+scratchfree done rc=%d heap=%s sync=%s (free_devtensor next, cached=%d)\n", r0, rc, _h==_HEAPOK?"OK":"CORRUPT", cudaGetErrorString(_e), cached); fflush(stderr); }
     if (!cached) { if (!dg_wcache_insert(key, &devW)) free_devtensor(&devW); }
+    if (getenv("SP_DG_PKVCKPT")) { int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] free_devtensor done, returning rc=%d heap=%s\n", r0, rc, _h==_HEAPOK?"OK":"CORRUPT"); fflush(stderr); }
     return rc ? 1 : 0;
 }
 /* expose for the MoE dispatch (wired next session): silence unused-static until the 2-site flip. */
@@ -6684,6 +6688,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     int t = et_tok[et_off[e] + j];
                     cudaMemcpyAsync(d_xb + (size_t)j*E, dnx + (size_t)t*E, (size_t)E*sizeof(float), cudaMemcpyDeviceToDevice, st);
                 }
+                DGDBG("L%d e%d: gather done cnt=%d (gate_up next)", L, e, cnt);
                 /* gate_up: packed dp4a slice GEMV (SP_DG_PACKED) or f32 upload+gemm  [gu_rows x cnt] */
                 snprintf(nm, sizeof nm, "blk.%d.ffn_gate_up_exps.weight", L);
                 { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*gu_rows, gu_rows, E, d_xb, d_gub, cnt, cb, st) : 2;
@@ -6692,6 +6697,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     if (!d_guw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     if (gemm(cb, d_guw, d_xb, d_gub, cnt, E, gu_rows)) { cudaFree(d_guw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     cudaFree(d_guw); d_guw = NULL; } }
+                DGDBG("L%d e%d: gate_up gemm done (geglu+down next)", L, e);
                 /* GeGLU per column: h[col*FFx + i] = gelu(gu[col*gu_rows+i]) * gu[col*gu_rows+FFx+i] */
                 { size_t total = (size_t)FFx * cnt;
                   dg_k_geglu_batched<<<(unsigned)((total+255)/256), 256, 0, st>>>(d_gub, d_hb, FFx, gu_rows, cnt); }
@@ -6703,6 +6709,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     if (!d_dnw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     if (gemm(cb, d_dnw, d_hb, d_deb, cnt, FFx, E)) { cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     cudaFree(d_dnw); d_dnw = NULL; } }
+                DGDBG("L%d e%d: down gemm done (axpy next)", L, e);
                 /* weighted accumulate each column back into its token's dmoe row */
                 for (int j = 0; j < cnt; j++) {
                     int t = et_tok[et_off[e] + j]; float w = et_w[et_off[e] + j];

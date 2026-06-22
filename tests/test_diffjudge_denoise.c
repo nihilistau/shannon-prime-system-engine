@@ -49,6 +49,51 @@
 #include <time.h>
 #include <stdint.h>
 
+/* ── N6 host-AV trap: symbolize the faulting instruction + stack via dbghelp (uses the .pdb).
+ * Catches the walking PageHeap access-violation and prints the exact cuda_forward.cu line. ── */
+#ifdef _WIN32
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+static LONG WINAPI sp_av_filter(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    fprintf(stderr, "\n=== SP-AV-FILTER exception 0x%08lx ===\n", (unsigned long)code);
+    if (code == EXCEPTION_ACCESS_VIOLATION || code == 0xC0000005) {
+        ULONG_PTR rw = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR ad = ep->ExceptionRecord->ExceptionInformation[1];
+        fprintf(stderr, "ACCESS VIOLATION on %s at address 0x%p\n",
+                rw==1?"WRITE":(rw==0?"READ":"EXEC"), (void*)ad);
+    }
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+    SymInitialize(proc, NULL, TRUE);
+    char sbuf[sizeof(SYMBOL_INFO) + 512];
+    SYMBOL_INFO *si = (SYMBOL_INFO*)sbuf; si->SizeOfStruct = sizeof(SYMBOL_INFO); si->MaxNameLen = 500;
+    IMAGEHLP_LINE64 ln; ln.SizeOfStruct = sizeof(IMAGEHLP_LINE64); DWORD col; DWORD64 disp;
+    CONTEXT ctx = *ep->ContextRecord;
+    STACKFRAME64 sf; memset(&sf, 0, sizeof sf);
+    sf.AddrPC.Offset = ctx.Rip;   sf.AddrPC.Mode = AddrModeFlat;
+    sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+    sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+    fprintf(stderr, "--- fault call stack (top = faulting instruction) ---\n");
+    for (int i = 0; i < 40; i++) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx,
+                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) break;
+        DWORD64 a = sf.AddrPC.Offset; if (!a) break;
+        if (SymFromAddr(proc, a, &disp, si)) {
+            if (SymGetLineFromAddr64(proc, a, &col, &ln))
+                fprintf(stderr, "  #%02d %s  (%s:%lu)\n", i, si->Name, ln.FileName, (unsigned long)ln.LineNumber);
+            else
+                fprintf(stderr, "  #%02d %s +0x%llx\n", i, si->Name, (unsigned long long)disp);
+        } else {
+            fprintf(stderr, "  #%02d 0x%llx\n", i, (unsigned long long)a);
+        }
+    }
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 #ifndef SP_DJ_SPMODEL_DEF
 #define SP_DJ_SPMODEL_DEF "C:/sp_models/diffusiongemma-26B-A4B.sp-model"
 #endif
@@ -166,6 +211,9 @@ static int probe_tag_forms(const sp_tokenizer *tk, const char *s, int *bare, int
 }
 
 int main(void) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(sp_av_filter);   /* N6: symbolize the host AV */
+#endif
     const char *spm = getenv("SP_DJ_SPMODEL"); if (!spm || !*spm) spm = SP_DJ_SPMODEL_DEF;
     const char *spt = getenv("SP_DJ_SPTOK");   if (!spt || !*spt) spt = SP_DJ_SPTOK_DEF;
     const char *cdir = getenv("SP_DJ_CORPUS"); if (!cdir || !*cdir) cdir = "_needle_corpus_div";
