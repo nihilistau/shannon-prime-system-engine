@@ -212,7 +212,7 @@ static int probe_tag_forms(const sp_tokenizer *tk, const char *s, int *bare, int
 
 int main(void) {
 #ifdef _WIN32
-    SetUnhandledExceptionFilter(sp_av_filter);   /* N6: symbolize the host AV */
+    if (getenv("SP_AV_FILTER")) SetUnhandledExceptionFilter(sp_av_filter);  /* N6: off by default so cdb gets 2nd-chance */
 #endif
     const char *spm = getenv("SP_DJ_SPMODEL"); if (!spm || !*spm) spm = SP_DJ_SPMODEL_DEF;
     const char *spt = getenv("SP_DJ_SPTOK");   if (!spt || !*spt) spt = SP_DJ_SPTOK_DEF;
@@ -419,7 +419,14 @@ int main(void) {
 
             clock_t tq = clock();
             int have_prev = 0;                /* SC available from step>=1 */
+            /* N6 Adaptive Residue-KV probe (SP_DG_PKV_STRIDE=k): every k-th denoise step,
+             * flush the prefix-KV cache so the next forward MISSES -> full recompute ->
+             * drift-zeroed prompt K/V. Bounded-staleness: ride the fast path between flushes,
+             * refresh before the canvas->prompt leak compounds to the NaN horizon. k<=0 = off. */
+            extern void dg_prefixkv_release(void);
+            int pkv_stride = getenv("SP_DG_PKV_STRIDE") ? atoi(getenv("SP_DG_PKV_STRIDE")) : 0;
             for (int step = 0; step < STEPS; step++) {
+                if (pkv_stride > 0 && step > 0 && (step % pkv_stride) == 0) dg_prefixkv_release();
                 float tt = (STEPS > 1) ? (float)step / (float)(STEPS) : 0.0f;
                 float temp = T_MAX + (T_MIN - T_MAX) * tt;   /* lerp(t_max, t_min) */
                 if (temp < 1e-3f) temp = 1e-3f;
@@ -449,7 +456,11 @@ int main(void) {
                 /* seeded uniforms for the multinomial draw */
                 for (int i = 0; i < CL; i++) uvec[i] = rng_uniform();
 
-                if (dg_sample_logits_host(logits, CL, V, uvec, inv_temp, am, ent, sm) != 0) {
+                /* N6-JUDGEFIX: sample the CANVAS rows [P,P+CL), not the prompt rows [0,CL).
+                 * The mask (line ~448) and the SC upload (below) both offset by P*V; the sampler
+                 * dropped it -> am/sm were argmax/sample of PROMPT row 0 (constant bias tok 1852),
+                 * the canvas never denoised, recall pinned to 0. Align it with +P*V. */
+                if (dg_sample_logits_host(logits + (size_t)P * V, CL, V, uvec, inv_temp, am, ent, sm) != 0) {
                     EMIT("[err] dg_sample rc (%s) q=%d step=%d\n", sp_last_error(), trial_no, step); break;
                 }
 
@@ -532,22 +543,4 @@ int main(void) {
 
     double rec = tot ? (double)hit / tot : 0.0;
     double rej = ftot ? (double)frej / ftot : 0.0;
-    EMIT("\n================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================\n");
-    EMIT("K=%d seed=%llu STEPS<=%d CL=%d SC=%d  subset matched=%d foreign=%d\n",
-         K, (unsigned long long)seed, STEPS, CL, use_sc, n_matched, n_for);
-    EMIT("recall@1       : %d/%d = %.1f%%   (single-forward ~14%% ; oracle 95.6%%)\n", hit, tot, 100.0 * rec);
-    EMIT("foreign-reject : %d/%d = %.1f%%   (oracle 96.0%%)\n", frej, ftot, 100.0 * rej);
-    int strong = (rec >= 0.80);
-    EMIT("SUBSET recall >= 80%% : %s\n", strong ? "STRONG PASS — iterative denoise cures the single-forward miss" : "below 80%% — see per-query diagnosis");
-
-    if (prev_dev) dg_dev_free(prev_dev);
-    free(toks); free(prompt); free(am); free(ent); free(sm); free(uvec);
-    free(canvas); free(outc); free(order); free(cand); free(picktag);
-    free(tagtok); free(tagtok2); free((void *)tagstr);
-    sp_tokenizer_free(tk);
-    sp_model_unload(handle);
-    for (int i = 0; i < NF; i++) free(foreign[i]);
-    free(foreign); free(needles);
-    fclose(log);
-    return 0;
-}
+    EMIT("\n================ G-DIFFJUDGE
