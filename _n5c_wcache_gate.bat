@@ -7,6 +7,7 @@ set "LOG=%ENGINE%\_n5c_wcache_gate.log"
 set SP_DGT_NFWD=3
 set SP_DGT_CANVAS=8
 set SP_DG_PACKED=1
+set SP_DG_WCACHE_MARGIN_MB=4096
 
 echo N5C_WCACHE_GATE_START %DATE% %TIME% > "%LOG%"
 nvidia-smi -lgc 2100,2100 >> "%LOG%" 2>&1

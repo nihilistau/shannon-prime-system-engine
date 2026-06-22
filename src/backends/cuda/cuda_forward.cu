@@ -5906,7 +5906,7 @@ static int dg_wcache_enabled(void) {
 }
 static size_t dg_wcache_margin(void) {
     static size_t m = 0;
-    if (!m) { const char *e = getenv("SP_DG_WCACHE_MARGIN_MB"); long mb = (e && *e) ? atol(e) : 1536; if (mb < 256) mb = 256; m = (size_t)mb << 20; }
+    if (!m) { const char *e = getenv("SP_DG_WCACHE_MARGIN_MB"); long mb = (e && *e) ? atol(e) : 3072; if (mb < 256) mb = 256; m = (size_t)mb << 20; }
     return m;
 }
 static DevTensor *dg_wcache_lookup(const char *name) {
@@ -5972,36 +5972,43 @@ static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int ou
  * Reuses gemv_w_packed + k_gemv_q4b_dp4a_v2; NO new kernel. Gated by the caller (SP_DG_PACKED). */
 static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, int rows, int in,
                                const float *dX, float *dY, int cnt, cublasHandle_t cb, cudaStream_t st) {
-    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
-    if (!at) { sp_set_error("dg_gemm_packed_rows: tensor not in arena"); return 1; }
-    const sp_frob_packed_tensor *s = &at->pt;
-    if (r0 < 0 || rows <= 0 || (uint32_t)(r0 + rows) > s->rows) { sp_set_error("dg_gemm_packed_rows: bad slice"); return 1; }
-    if (in & 31) return 2;                                       /* Q4 dp4a needs in%32 -> f32 */
-    for (int r = r0; r < r0 + rows; r++) if (s->row_prec[r] != 4) return 2;   /* Q4B only -> f32 */
-    size_t off0 = s->row_off[r0];
-    int    lastr = r0 + rows - 1;
-    size_t lastlen = (size_t)((in + 1) / 2);                     /* Q4: ceil(cols/2) bytes/row */
-    size_t span = (s->row_off[lastr] + lastlen) - off0;
-    size_t *off_c = (size_t *)malloc((size_t)rows * sizeof(size_t));
-    if (!off_c) { sp_set_error("dg_gemm_packed_rows: off OOM"); return 1; }
-    for (int r = 0; r < rows; r++) off_c[r] = s->row_off[r0 + r] - off0;       /* rebase to slice start */
-    sp_frob_packed_tensor sl; memset(&sl, 0, sizeof sl);
-    sl.rows = rows; sl.cols = in; sl.alias_mask = 0; sl.bs_nblk = s->bs_nblk;
-    sl.codes = s->codes + off0; sl.codes_bytes = span;
-    sl.row_off = off_c;
-    sl.row_prec = s->row_prec + r0;
-    sl.row_scale = s->row_scale ? s->row_scale + r0 : NULL;
-    sl.bscale = s->bscale ? s->bscale + (size_t)r0 * s->bs_nblk : NULL;
-    DevTensor devW; memset(&devW, 0, sizeof devW);
-    int urc = upload_packed(&sl, &devW);
-    free(off_c);
-    if (urc) { free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: upload_packed"); return 1; }
-    if (devW.prec != 4) { free_devtensor(&devW); return 2; }
+    char key[176]; snprintf(key, sizeof key, "%s#%d", name, r0);
+    DevTensor *hit = dg_wcache_lookup(key);
+    DevTensor devW; int cached = 0;
+    if (hit) { devW = *hit; cached = 1; }
+    else {
+        const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
+        if (!at) { sp_set_error("dg_gemm_packed_rows: tensor not in arena"); return 1; }
+        const sp_frob_packed_tensor *s = &at->pt;
+        if (r0 < 0 || rows <= 0 || (uint32_t)(r0 + rows) > s->rows) { sp_set_error("dg_gemm_packed_rows: bad slice"); return 1; }
+        if (in & 31) return 2;
+        for (int r = r0; r < r0 + rows; r++) if (s->row_prec[r] != 4) return 2;
+        size_t off0 = s->row_off[r0];
+        int    lastr = r0 + rows - 1;
+        size_t lastlen = (size_t)((in + 1) / 2);
+        size_t span = (s->row_off[lastr] + lastlen) - off0;
+        size_t *off_c = (size_t *)malloc((size_t)rows * sizeof(size_t));
+        if (!off_c) { sp_set_error("dg_gemm_packed_rows: off OOM"); return 1; }
+        for (int r = 0; r < rows; r++) off_c[r] = s->row_off[r0 + r] - off0;
+        sp_frob_packed_tensor sl; memset(&sl, 0, sizeof sl);
+        sl.rows = rows; sl.cols = in; sl.alias_mask = 0; sl.bs_nblk = s->bs_nblk;
+        sl.codes = s->codes + off0; sl.codes_bytes = span;
+        sl.row_off = off_c;
+        sl.row_prec = s->row_prec + r0;
+        sl.row_scale = s->row_scale ? s->row_scale + r0 : NULL;
+        sl.bscale = s->bscale ? s->bscale + (size_t)r0 * s->bs_nblk : NULL;
+        memset(&devW, 0, sizeof devW);
+        int urc = upload_packed(&sl, &devW);
+        free(off_c);
+        if (urc) { free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: upload_packed"); return 1; }
+        if (devW.prec != 4) { free_devtensor(&devW); return 2; }
+    }
     float *scratch = NULL;
     if (cudaMalloc(&scratch, (size_t)rows * in * sizeof(float)) != cudaSuccess) {
-        free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: dequant scratch OOM"); return 1; }
-    int rc = gemm_w(cb, st, &devW, dX, dY, cnt, scratch);   /* N5c-v2: device-dequant + cuBLAS, byte-identical f32 */
-    cudaFree(scratch); free_devtensor(&devW);
+        if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: dequant scratch OOM"); return 1; }
+    int rc = gemm_w(cb, st, &devW, dX, dY, cnt, scratch);
+    cudaFree(scratch);
+    if (!cached) { if (!dg_wcache_insert(key, &devW)) free_devtensor(&devW); }
     return rc ? 1 : 0;
 }
 /* expose for the MoE dispatch (wired next session): silence unused-static until the 2-site flip. */
