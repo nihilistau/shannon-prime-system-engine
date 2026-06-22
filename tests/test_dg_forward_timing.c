@@ -45,11 +45,22 @@ int main(void) {
     int CL = (int)c->dg_canvas_length; if (canvas < CL) CL = canvas; if (CL < 1) CL = 1;
     printf("# DGT: V=%d CL=%d nfwd=%d reservoir=%s\n", V, CL, nfwd, res); fflush(stdout);
 
-    int32_t toks[256];
+    int32_t toks[2048];
     long np = sp_tokenizer_encode(tk, "The capital of France is", 24, 1, toks, 64);
     if (np <= 0) { fprintf(stderr, "FATAL: encode\n"); sp_model_unload(handle); return 2; }
+    /* SP_DGT_NTOK: target total n_tok (prefill-width timing). Tile the PROMPT region (dynamic,
+     * safe) up to target-CL, then CL canvas-fill. The weight-GEMM batch dim = n_tok regardless
+     * of the prompt/canvas split, so this faithfully exercises the prefill matmul cost. */
+    int target = 0; { const char *e = getenv("SP_DGT_NTOK"); if (e && *e) { int v = atoi(e); if (v > 0) target = v; } }
+    if (target > 0) {
+        int cap = 2048 - CL;
+        int want = target - CL; if (want < (int)np) want = (int)np; if (want > cap) want = cap;
+        int base = (int)np;
+        for (int i = base; i < want; i++) toks[i] = toks[(i - base) % base];   /* tile prompt tokens */
+        np = want;
+    }
     int n_tok = (int)np + CL;
-    if (n_tok > 256) n_tok = 256;
+    if (n_tok > 2048) n_tok = 2048;
     for (int i = (int)np; i < n_tok; i++) toks[i] = 1;        /* canvas fill = valid id */
 
     float *logits = (float *)malloc((size_t)n_tok * V * sizeof(float));

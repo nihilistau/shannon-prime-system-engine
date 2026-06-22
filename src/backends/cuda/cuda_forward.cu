@@ -5896,25 +5896,21 @@ static int dg_packed_enabled(void){ static int v=-1; if(v<0){ const char*e=geten
  * falls back to f32. Parity ~1e-3 (int8 act-quant), same as the dense dp4a decode path.
  * Gated by SP_DG_PACKED (default-off = the f32 path byte-for-byte = null floor). */
 static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int out,
-                          const float *dX, float *dY, int n_tok, cudaStream_t st) {
+                          const float *dX, float *dY, int n_tok, cublasHandle_t cb, cudaStream_t st) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
     if (!at) { sp_set_error("dg_gemm_packed: tensor not in arena"); return 1; }
     DevTensor devW; memset(&devW, 0, sizeof devW);
     if (upload_packed(&at->pt, &devW)) { free_devtensor(&devW); return 1; }
-    if (devW.prec != 4) { free_devtensor(&devW); return 2; }      /* this proof: Q4B only -> f32 */
-    if (in & 31)        { free_devtensor(&devW); return 2; }      /* Q4 dp4a needs in%32 -> f32 */
-    int npad = (in + 31) & ~31;
-    signed char *dqx = NULL; float *dsx = NULL;
-    if (cudaMalloc(&dqx, (size_t)npad) != cudaSuccess ||
-        cudaMalloc(&dsx, (size_t)npad * sizeof(float)) != cudaSuccess) {
-        if (dqx) cudaFree(dqx); if (dsx) cudaFree(dsx); free_devtensor(&devW);
-        sp_set_error("dg_gemm_packed: act-quant scratch OOM"); return 1; }
-    int rc = 0;
-    for (int t = 0; t < n_tok; t++)
-        if (!gemv_w_packed(st, &devW, dX + (size_t)t * in, dY + (size_t)t * out, dqx, dsx)) { rc = 1; break; }
-    cudaFree(dqx); cudaFree(dsx); free_devtensor(&devW);
-    if (rc) sp_set_error("dg_gemm_packed: gemv_w_packed failed");
-    return rc;
+    /* N5c-v2: packed DevTensor -> k_dequant_arena_q4b (device dequant -> f32 scratch) -> cuBLAS
+     * SGEMM via gemm_w. BYTE-IDENTICAL f32 (Q4B dequant->SGEMM has no extra rounding), ONE cuBLAS
+     * grid (efficient at ALL n_tok, unlike the per-token GEMV loop). The dense path's own packed
+     * matmul. Half the f32 H2D (packed 14GB) + GPU dequant (not CPU). */
+    float *scratch = NULL;
+    if (cudaMalloc(&scratch, (size_t)out * in * sizeof(float)) != cudaSuccess) {
+        free_devtensor(&devW); sp_set_error("dg_gemm_packed: dequant scratch OOM"); return 1; }
+    int rc = gemm_w(cb, st, &devW, dX, dY, n_tok, scratch);
+    cudaFree(scratch); free_devtensor(&devW);
+    return rc ? 1 : 0;
 }
 /* N5c MoE: one expert's GEMM via the packed dp4a path on a ROW-SLICE of a fused arena tensor.
  * Builds a slice descriptor over rows [r0,r0+rows) of `name` (cols=in), uploads it PACKED
@@ -5923,7 +5919,7 @@ static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int ou
  * instead of dequanting to f32. Returns 0 ok / 1 error / 2 unsupported (non-Q4B / in%32 -> f32).
  * Reuses gemv_w_packed + k_gemv_q4b_dp4a_v2; NO new kernel. Gated by the caller (SP_DG_PACKED). */
 static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, int rows, int in,
-                               const float *dX, float *dY, int cnt, cudaStream_t st) {
+                               const float *dX, float *dY, int cnt, cublasHandle_t cb, cudaStream_t st) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
     if (!at) { sp_set_error("dg_gemm_packed_rows: tensor not in arena"); return 1; }
     const sp_frob_packed_tensor *s = &at->pt;
@@ -5949,21 +5945,15 @@ static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, i
     free(off_c);
     if (urc) { free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: upload_packed"); return 1; }
     if (devW.prec != 4) { free_devtensor(&devW); return 2; }
-    int npad = (in + 31) & ~31;
-    signed char *dqx = NULL; float *dsx = NULL;
-    if (cudaMalloc(&dqx, (size_t)npad) != cudaSuccess ||
-        cudaMalloc(&dsx, (size_t)npad * sizeof(float)) != cudaSuccess) {
-        if (dqx) cudaFree(dqx); if (dsx) cudaFree(dsx); free_devtensor(&devW);
-        sp_set_error("dg_gemm_packed_rows: scratch OOM"); return 1; }
-    int rc = 0;
-    for (int t = 0; t < cnt; t++)
-        if (!gemv_w_packed(st, &devW, dX + (size_t)t * in, dY + (size_t)t * rows, dqx, dsx)) { rc = 1; break; }
-    cudaFree(dqx); cudaFree(dsx); free_devtensor(&devW);
-    if (rc) sp_set_error("dg_gemm_packed_rows: gemv_w_packed failed");
-    return rc;
+    float *scratch = NULL;
+    if (cudaMalloc(&scratch, (size_t)rows * in * sizeof(float)) != cudaSuccess) {
+        free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: dequant scratch OOM"); return 1; }
+    int rc = gemm_w(cb, st, &devW, dX, dY, cnt, scratch);   /* N5c-v2: device-dequant + cuBLAS, byte-identical f32 */
+    cudaFree(scratch); free_devtensor(&devW);
+    return rc ? 1 : 0;
 }
 /* expose for the MoE dispatch (wired next session): silence unused-static until the 2-site flip. */
-static int (* const dg_gemm_packed_rows_ref)(const qwen3_model*,const char*,int,int,int,const float*,float*,int,cudaStream_t) = dg_gemm_packed_rows;
+static int (* const dg_gemm_packed_rows_ref)(const qwen3_model*,const char*,int,int,int,const float*,float*,int,cublasHandle_t,cudaStream_t) = dg_gemm_packed_rows;
 static float *dg_upload_arena_w(const qwen3_model *m, const char *name, int in, int out) {
     const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
     if (!at) { sp_set_error("dg_upload_arena_w: tensor not in arena"); return NULL; }
@@ -6246,7 +6236,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
 
         /* Q proj + q-norm + rope */
         snprintf(nm, sizeof nm, "blk.%d.attn_q.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, qd, dnx, dq, n_tok, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, qd, dnx, dq, n_tok, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, qd); if (!dW) goto layerfail;
             if (gemm(cb, dW, dnx, dq, n_tok, E, qd)) { cudaFree(dW); goto layerfail; }
@@ -6262,13 +6252,13 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         float *Kuse, *Vuse;
         if (L < kvfs) {
             snprintf(nm, sizeof nm, "blk.%d.attn_k.weight", L);
-            { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dk, n_tok, st) : 2;
+            { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dk, n_tok, cb, st) : 2;
               if (dgp == 1) goto layerfail;
               if (dgp != 0) { dWk = dg_upload_arena_w(m, nm, E, kvd); if (!dWk) goto layerfail;
                 if (gemm(cb, dWk, dnx, dk, n_tok, E, kvd)) goto layerfail; } }
             if (has_v) {
                 snprintf(nm, sizeof nm, "blk.%d.attn_v.weight", L);
-                { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dv, n_tok, st) : 2;
+                { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, kvd, dnx, dv, n_tok, cb, st) : 2;
                   if (dgp == 1) goto layerfail;
                   if (dgp != 0) { dWv = dg_upload_arena_w(m, nm, E, kvd); if (!dWv) goto layerfail;
                     if (gemm(cb, dWv, dnx, dv, n_tok, E, kvd)) goto layerfail; } }
@@ -6306,7 +6296,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
 
         /* O proj -> ap, post_attn_norm, residual into dx */
         snprintf(nm, sizeof nm, "blk.%d.attn_output.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, qd, E, dao, dap, n_tok, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, qd, E, dao, dap, n_tok, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dWo = dg_upload_arena_w(m, nm, qd, E); if (!dWo) goto layerfail;
             if (gemm(cb, dWo, dao, dap, n_tok, qd, E)) goto layerfail; cudaFree(dWo); dWo = NULL; } }
@@ -6325,19 +6315,19 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
           k_rmsnorm<<<n_tok, 256, 0, st>>>(dx, dfn, E, eps, dnx);
           cudaFree(dfn); }
         snprintf(nm, sizeof nm, "blk.%d.ffn_gate.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dg, n_tok, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dg, n_tok, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
             if (gemm(cb, dW, dnx, dg, n_tok, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
         snprintf(nm, sizeof nm, "blk.%d.ffn_up.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dup, n_tok, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, E, FF, dnx, dup, n_tok, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, E, FF); if (!dW) goto layerfail;
             if (gemm(cb, dW, dnx, dup, n_tok, E, FF)) goto layerfail; cudaFree(dW); dW = NULL; } }
         { size_t nFF = (size_t)n_tok * FF;
           k_gelu_mul<<<(unsigned)((nFF+255)/256), 256, 0, st>>>(dg, dup, nFF); }
         snprintf(nm, sizeof nm, "blk.%d.ffn_down.weight", L);
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, FF, E, dg, dmlp, n_tok, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, nm, FF, E, dg, dmlp, n_tok, cb, st) : 2;
           if (dgp == 1) goto layerfail;
           if (dgp != 0) { dW = dg_upload_arena_w(m, nm, FF, E); if (!dW) goto layerfail;
             if (gemm(cb, dW, dg, dmlp, n_tok, FF, E)) goto layerfail; cudaFree(dW); dW = NULL; } }
@@ -6456,7 +6446,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 }
                 /* gate_up: packed dp4a slice GEMV (SP_DG_PACKED) or f32 upload+gemm  [gu_rows x cnt] */
                 snprintf(nm, sizeof nm, "blk.%d.ffn_gate_up_exps.weight", L);
-                { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*gu_rows, gu_rows, E, d_xb, d_gub, cnt, st) : 2;
+                { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*gu_rows, gu_rows, E, d_xb, d_gub, cnt, cb, st) : 2;
                   if (pr == 1) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                   if (pr != 0) { d_guw = dg_upload_arena_rows(m, nm, e*gu_rows, gu_rows, E);
                     if (!d_guw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
@@ -6467,7 +6457,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                   dg_k_geglu_batched<<<(unsigned)((total+255)/256), 256, 0, st>>>(d_gub, d_hb, FFx, gu_rows, cnt); }
                 /* down: packed dp4a slice GEMV or f32 upload+gemm  (h -> de [E x cnt]) */
                 snprintf(nm, sizeof nm, "blk.%d.ffn_down_exps.weight", L);
-                { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*E, E, FFx, d_hb, d_deb, cnt, st) : 2;
+                { int pr = dg_packed_enabled() ? dg_gemm_packed_rows(m, nm, e*E, E, FFx, d_hb, d_deb, cnt, cb, st) : 2;
                   if (pr == 1) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                   if (pr != 0) { d_dnw = dg_upload_arena_rows(m, nm, e*E, E, FFx);
                     if (!d_dnw) { free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
@@ -6533,7 +6523,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         cudaFree(don);
         /* head: tied to token_embd (no output.weight) or untied output.weight; stream f32 */
         const char *head_name = c->tied_embedding ? m->token_embd->name : m->output->name;
-        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, head_name, E, V, dnx, dlog, n_tok, st) : 2;
+        { int dgp = dg_packed_enabled() ? dg_gemm_packed(m, head_name, E, V, dnx, dlog, n_tok, cb, st) : 2;
           if (dgp == 1) goto done;
           if (dgp != 0) { float *dHead = dg_upload_arena_w(m, head_name, E, V); if (!dHead) goto done;
             if (gemm(cb, dHead, dnx, dlog, n_tok, E, V)) { cudaFree(dHead); goto done; }
