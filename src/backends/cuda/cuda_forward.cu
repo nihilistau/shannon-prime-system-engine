@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <malloc.h>   /* N6 diag: _heapchk() host-heap-corruption checkpoint */
 
 extern "C" void sp_set_error(const char *msg);
 
@@ -6324,7 +6325,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
     float *hrows=NULL,*h_logits=NULL,*h_router=NULL;
     char nm[96];
 
-    #define DGDBG(...) do { if (getenv("SP_DG_TRACE")) { fprintf(stderr, "[dgtrace] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } } while (0)
+    #define DGDBG(...) do { if (getenv("SP_DG_TRACE")) { if (getenv("SP_DG_PKVCKPT")) { cudaError_t _ck = cudaDeviceSynchronize(); int _hc = _heapchk(); fprintf(stderr, "[ckpt sync=%s heap=%s] ", cudaGetErrorString(_ck), _hc==_HEAPOK?"OK":"CORRUPT"); } fprintf(stderr, "[dgtrace] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } } while (0)
     DGDBG("enter n_tok=%d E=%d NL=%d V=%d P=%d C=%d CL=%d", n_tok, E, NL, V, P, C, CL);
     if (cublasCreate(&cb) != CUBLAS_STATUS_SUCCESS) { sp_set_error("dg: cublasCreate"); return 1; }
     DGDBG("cublasCreate ok");
@@ -6403,6 +6404,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             if (g_pkv_diff) cudaMemsetAsync(g_pkv_diff, 0, sizeof(float), st);
         }
     }
+    DGDBG("pkv setup done: pkv_on=%d pkv_hit=%d pkv_fast_on=%d P=%d (cache %s)", pkv_on, pkv_hit, pkv_fast_on, P, pkv_hit?"HIT/reuse":"rebuilt");
     const int pkv_fast = pkv_fast_on && pkv_hit;          /* canvas-only compute this forward */
     const size_t rb = (size_t)(pkv_fast ? P : 0);         /* compute-row base */
     const int    rn = pkv_fast ? C : n_tok;               /* compute-row count */
@@ -6487,6 +6489,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 cudaMemcpyAsync(Vst[L], dv, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
             }
             Kuse = Kst[L]; Vuse = Vst[L];
+            DGDBG("layer %d: KV store done (pkv_fast=%d pkv_hit=%d) -> %s", L, pkv_fast, pkv_hit, pkv_fast?"spliced from cache":"full");
             if (pkv_on && !pkv_hit) {   /* N6 step-1 SAVE: cache the canvas-invariant prompt K/V [0,P) */
                 size_t prow = (size_t)P * kvd;
                 if (cudaMalloc(&g_pkv_K[L], prow*sizeof(float))==cudaSuccess)
@@ -6671,6 +6674,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 free(h_rlog); if(d_xb)cudaFree(d_xb); if(d_gub)cudaFree(d_gub); if(d_hb)cudaFree(d_hb);
                 sp_set_error("dg batched expert scratch OOM"); goto layerfail; }
             int dbg_ecount = 0;
+            DGDBG("layer %d: MoE routing+scratch done, entering expert loop (n_tok=%d pkv_fast=%d)", L, n_tok, pkv_fast);
             for (int e = 0; e < NE; e++) {
                 int cnt = et_cnt[e];
                 if (cnt == 0) continue;
