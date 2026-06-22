@@ -5510,6 +5510,85 @@ __global__ void k_attn_diffusion(const float *Q, const float *K, const float *V,
     }
 }
 
+/* ── N6 PREFIX-KV Increment 1: canvas-only position-coupled kernels (compiled, not yet wired) ──
+ * The fast path (steps 2..N of a denoise query) recomputes ONLY canvas rows [P,n_tok). These three
+ * kernels are the originals with a position base so canvas rows land at their ABSOLUTE positions:
+ *   k_rope_off / k_rope_freqs_off : t = pos0 + blockIdx.x/n_heads  (launch grid = C*n_heads, pos0=P)
+ *   k_attn_diffusion_canvas       : t = q_base + blockIdx.x/n_heads (q_base=P); K/V = full Kst/Vst
+ * Every other line is identical to k_rope/k_rope_freqs/k_attn_diffusion -> byte-identical on canvas
+ * rows. base/Q/AO are the FULL [n_tok x stride] buffers; canvas data lives at rows [P,n_tok). */
+__global__ void k_rope_off(float *base, int n_heads, int d, int rowstride, float rbase, int pos0) {
+    int b = blockIdx.x, t = pos0 + b / n_heads, h = b % n_heads, i = threadIdx.x, half = d / 2;
+    if (i < half) {
+        float *v = base + (size_t)t * rowstride + (size_t)h * d;
+        float freq = powf(rbase, -2.0f * (float)i / (float)d);
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)t)); return; }
+        float th = (float)t * freq, c = cosf(th), s = sinf(th);
+        float a = v[i], bb = v[i + half];
+        v[i] = a * c - bb * s;
+        v[i + half] = a * s + bb * c;
+    }
+}
+__global__ void k_rope_freqs_off(float *base, int n_heads, int d, int rowstride,
+                                 float rbase, const float *ff, int pos0) {
+    int b = blockIdx.x, t = pos0 + b / n_heads, h = b % n_heads, i = threadIdx.x, half = d / 2;
+    if (i < half) {
+        float *v = base + (size_t)t * rowstride + (size_t)h * d;
+        float freq = powf(rbase, -2.0f * (float)i / (float)d) / ff[i];
+        if (d_bx_flag) { bx_rope_pair(&v[i], &v[i + half], bx_rope_theta(freq, (long long)t)); return; }
+        float th = (float)t * freq, c = cosf(th), s = sinf(th);
+        float a = v[i], bb = v[i + half];
+        v[i] = a * c - bb * s;
+        v[i + half] = a * s + bb * c;
+    }
+}
+/* k_attn_diffusion restricted to canvas queries at absolute positions [q_base, q_base+C). */
+__global__ void k_attn_diffusion_canvas(const float *Q, const float *K, const float *V,
+                                 int n_tok, int QD, int KVD, int HD, int group,
+                                 float ascale, int P, int n_swa, int is_swa, int q_base, float *AO) {
+    extern __shared__ float sc[];
+    int n_heads = QD / HD;
+    int b = blockIdx.x, t = q_base + b / n_heads, h = b % n_heads, kvh = h / group;
+    const float *qh = Q + (size_t)t * QD + (size_t)h * HD;
+    const int q_is_canvas = (t >= P);
+    const long long canvas_prompt_lo = (long long)P - (long long)n_swa + 1;
+    for (int s = threadIdx.x; s < n_tok; s += blockDim.x) {
+        const int k_is_canvas = (s >= P);
+        bool allow;
+        if (q_is_canvas) {
+            allow = is_swa ? (k_is_canvas || ((long long)s >= canvas_prompt_lo)) : true;
+        } else {
+            allow = (!k_is_canvas) && (s <= t);
+            if (allow && is_swa && (long long)s <= (long long)t - (long long)n_swa) allow = false;
+        }
+        if (!allow) { sc[s] = -3.4e38f; continue; }
+        const float *kh = K + (size_t)s * KVD + (size_t)kvh * HD;
+        float acc = 0.0f;
+        for (int i = 0; i < HD; i++) acc += qh[i] * kh[i];
+        sc[s] = acc * ascale;
+    }
+    __syncthreads();
+    __shared__ float g_sum;
+    if (threadIdx.x == 0) {
+        float m = -3.4e38f;
+        for (int s = 0; s < n_tok; s++) if (sc[s] > m) m = sc[s];
+        float sum = 0.0f;
+        for (int s = 0; s < n_tok; s++) {
+            if (sc[s] <= -3.0e38f) { sc[s] = 0.0f; continue; }
+            float e = expf(sc[s] - m); sc[s] = e; sum += e;
+        }
+        g_sum = sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / g_sum;
+    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < n_tok; s++)
+            acc += sc[s] * V[(size_t)s * KVD + (size_t)kvh * HD + i];
+        AO[(size_t)t * QD + (size_t)h * HD + i] = acc * inv;
+    }
+}
+
 /* full-E weightless RMSNorm of canvas rows, in place: x[r] = x[r]/sqrt(mean(x[r]^2)+eps),
  * for r in [P, n_tok). One block per canvas row (grid = C, blockDim 256). */
 __global__ void k_rmsnorm_noscale_rows(float *x, int E, float eps, int P) {
