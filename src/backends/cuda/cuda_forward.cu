@@ -6256,12 +6256,16 @@ static int       g_pkv_P = -1, g_pkv_NL = 0;
 static unsigned long long g_pkv_h = 0ULL;
 static float   **g_pkv_K = NULL, **g_pkv_V = NULL;
 static float    *g_pkv_diff = NULL;     /* device scalar: running max|delta| this forward */
+static long      dg_nan_routes = 0;     /* N6 diag: count degenerate (NaN/Inf-logit) router tokens */
 static unsigned long long dg_pkv_hash(const int32_t *t, int n){
     unsigned long long h = 1469598103934665603ULL;
     for (int i=0;i<n;i++){ h ^= (unsigned int)t[i]; h *= 1099511628211ULL; }
     return h;
 }
 static void dg_pkv_free(void){
+    /* N6: a prior fast-hit forward enqueues async D2D splices that READ g_pkv_K/V[L]; freeing the
+     * device buffers before those complete is a use-after-free. Drain the device first. */
+    if (g_pkv_K || g_pkv_V) cudaDeviceSynchronize();
     if (g_pkv_K){ for(int i=0;i<g_pkv_NL;i++) if(g_pkv_K[i]) cudaFree(g_pkv_K[i]); free(g_pkv_K); g_pkv_K=NULL; }
     if (g_pkv_V){ for(int i=0;i<g_pkv_NL;i++) if(g_pkv_V[i]) cudaFree(g_pkv_V[i]); free(g_pkv_V); g_pkv_V=NULL; }
     g_pkv_m=NULL; g_pkv_P=-1; g_pkv_NL=0; g_pkv_h=0ULL;
@@ -6402,6 +6406,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
     const int pkv_fast = pkv_fast_on && pkv_hit;          /* canvas-only compute this forward */
     const size_t rb = (size_t)(pkv_fast ? P : 0);         /* compute-row base */
     const int    rn = pkv_fast ? C : n_tok;               /* compute-row count */
+    dg_nan_routes = 0;                                    /* N6 diag: per-forward degenerate-router counter */
 
     /* ── layer loop ── */
     for (int L = 0; L < NL; L++) {
@@ -6506,11 +6511,15 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         DGDBG("layer %d: attn launch grid=%d bd=%d shmem=%zu", L, n_tok*nh,
               (n_tok<hd?hd:(n_tok>1024?1024:n_tok)), (size_t)n_tok*sizeof(float));
         {   int bd = n_tok; if (bd < hd) bd = hd; if (bd > 1024) bd = 1024;
+            /* N6: +1 float of dynamic shared — the kernels also use a static __shared__ g_sum which
+             * shares the shared window with the extern sc[]; without the pad, sc[n_tok-1] reads one
+             * float past the requested dynamic region (compute-sanitizer: Invalid __shared__ read @5508). */
+            const size_t attn_shmem = (size_t)(n_tok + 1) * sizeof(float);
             if (pkv_fast)
-                k_attn_diffusion_canvas<<<C*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
+                k_attn_diffusion_canvas<<<C*nh, bd, attn_shmem, st>>>(
                     dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, P, dao);
             else
-                k_attn_diffusion<<<n_tok*nh, bd, (size_t)n_tok*sizeof(float), st>>>(
+                k_attn_diffusion<<<n_tok*nh, bd, attn_shmem, st>>>(
                     dq, Kuse, Vuse, n_tok, qd, kvd, hd, grp, ascale, P, n_swa, is_swa, dao); }
         if (getenv("SP_DG_TRACE")) { cudaStreamSynchronize(st); DGDBG("layer %d: attn done (synced)", L); }
 
@@ -6591,7 +6600,9 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             /* download router logits, do softmax+top-NU per token on host, gather experts */
             float *h_rlog = (float *)malloc((size_t)n_tok*NE*sizeof(float));
             if (!h_rlog) { cudaFree(d_rlog); sp_set_error("dg h_rlog OOM"); goto layerfail; }
-            cudaMemcpy(h_rlog, d_rlog, (size_t)n_tok*NE*sizeof(float), cudaMemcpyDeviceToHost);
+            { cudaError_t _rl = cudaMemcpy(h_rlog, d_rlog, (size_t)n_tok*NE*sizeof(float), cudaMemcpyDeviceToHost);
+              if (_rl != cudaSuccess) { fprintf(stderr, "[dgtrace] L%d h_rlog D2H FAULT: %s\n", L, cudaGetErrorString(_rl)); }
+            }
             cudaFree(d_rlog);
             DGDBG("layer %d: router downloaded, dispatching experts (NE=%d NU=%d)", L, NE, NU);
 
@@ -6628,9 +6639,14 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 for (int k = 0; k < NU; k++) {
                     int best = -1; float bv = -1.0f;
                     for (int i = 0; i < NE; i++) if (!used[i] && h_logits[i] > bv) { bv = h_logits[i]; best = i; }
+                    if (best < 0) {            /* degenerate (NaN/Inf logits): pick first unused, weight 0 -- prevents used[-1]/et_cnt[-1] host OOB */
+                        for (int i = 0; i < NE; i++) if (!used[i]) { best = i; break; }
+                        if (best < 0) best = 0; bv = 0.0f; dg_nan_routes++;
+                    }
                     used[best] = 1; ti[k] = best; tw[k] = bv; wsum += bv;
                 }
-                for (int k = 0; k < NU; k++) { tw[k] /= wsum; et_cnt[ti[k]]++; }
+                if (wsum > 0.0f) { for (int k = 0; k < NU; k++) { tw[k] /= wsum; et_cnt[ti[k]]++; } }
+                else { for (int k = 0; k < NU; k++) { tw[k] = 1.0f/(float)NU; et_cnt[ti[k]]++; } }
             }
             /* prefix-sum offsets, then fill et_tok/et_w */
             for (int e = 0; e < NE; e++) et_off[e+1] = et_off[e] + et_cnt[e];
@@ -6735,6 +6751,8 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         if (dWo) cudaFree(dWo); if (dNw) cudaFree(dNw); if (d_ffac) cudaFree(d_ffac);
         goto done;
     }
+
+    if (getenv("SP_DG_TRACE")) { fprintf(stderr, "[dgtrace] forward done: n_tok=%d P=%d pkv_fast=%d dg_nan_routes=%ld\n", n_tok, P, pkv_fast, dg_nan_routes); fflush(stderr); }
 
     /* N6 prefix-KV proof report: on a repeat step, prompt K/V should be byte-identical (max|d|==0). */
     if (pkv_proof && pkv_hit && g_pkv_diff) {
