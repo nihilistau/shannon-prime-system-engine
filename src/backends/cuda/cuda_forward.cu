@@ -6162,6 +6162,39 @@ extern "C" void dg_sc_embed_release(void) {
     if (g_dg_sc_embed) { cudaFree(g_dg_sc_embed); g_dg_sc_embed = NULL; g_dg_sc_embed_key = NULL; }
 }
 
+/* ── N6 PREFIX-KV invariance PROOF (S1a, observational, default-off SP_DG_PREFIXKV_PROOF) ──
+ * The diffusion judge re-runs the full [prompt|canvas] forward every denoise step, but the mask
+ * (k_attn_diffusion) makes prompt queries CAUSAL OVER PROMPT ONLY (k<P) -> each owner layer's
+ * prompt K/V is a PURE FUNCTION OF THE PROMPT, INVARIANT as the canvas denoises. Before building
+ * the canvas-only fast path on that, prove it BYTE-EXACT on the metal: cross-call cache the prompt
+ * rows [0,P) of each owner Kst/Vst keyed by (model,P,prompt-hash); on a later step of the SAME
+ * query (same key) compare fresh-vs-cached and report max|delta|. Touches NO logit (pure observe);
+ * default-off = zero work = byte-identical null floor. */
+static int dg_pkv_proof_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_PREFIXKV_PROOF"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+static const qwen3_model *g_pkv_m = NULL;
+static int       g_pkv_P = -1, g_pkv_NL = 0;
+static unsigned long long g_pkv_h = 0ULL;
+static float   **g_pkv_K = NULL, **g_pkv_V = NULL;
+static float    *g_pkv_diff = NULL;     /* device scalar: running max|delta| this forward */
+static unsigned long long dg_pkv_hash(const int32_t *t, int n){
+    unsigned long long h = 1469598103934665603ULL;
+    for (int i=0;i<n;i++){ h ^= (unsigned int)t[i]; h *= 1099511628211ULL; }
+    return h;
+}
+static void dg_pkv_free(void){
+    if (g_pkv_K){ for(int i=0;i<g_pkv_NL;i++) if(g_pkv_K[i]) cudaFree(g_pkv_K[i]); free(g_pkv_K); g_pkv_K=NULL; }
+    if (g_pkv_V){ for(int i=0;i<g_pkv_NL;i++) if(g_pkv_V[i]) cudaFree(g_pkv_V[i]); free(g_pkv_V); g_pkv_V=NULL; }
+    g_pkv_m=NULL; g_pkv_P=-1; g_pkv_NL=0; g_pkv_h=0ULL;
+}
+extern "C" void dg_prefixkv_release(void){ dg_pkv_free(); if(g_pkv_diff){ cudaFree(g_pkv_diff); g_pkv_diff=NULL; } }
+/* max|a-b| over n floats, atomic-max into out (preset 0). abs diff>=0 so IEEE uint bits order. */
+__global__ void dg_k_maxabsdiff(const float *a, const float *b, size_t n, float *out){
+    size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
+    if (i>=n) return;
+    float d = fabsf(a[i]-b[i]);
+    atomicMax((unsigned int*)out, __float_as_uint(d));
+}
+
 /* DiffusionGemma UNIFIED forward. tokens = [prompt | canvas] (length n_tok, canvas =
  * last cfg.dg_canvas_length). out_logits = [n_tok x n_vocab] f32 (caller-allocated).
  * Returns 0 on success. Self-contained: builds its own cublas handle + stream, streams
@@ -6265,6 +6298,25 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
     }
     DGDBG("embeddings done; entering layer loop");
 
+    /* N6 prefix-KV proof setup: detect repeat-of-same-query (hit) vs new query (miss). */
+    int pkv_proof = dg_pkv_proof_enabled() && P > 0;
+    int pkv_hit = 0;
+    if (pkv_proof) {
+        unsigned long long h = dg_pkv_hash(tokens, P);
+        pkv_hit = (g_pkv_K && g_pkv_V && g_pkv_m==m && g_pkv_P==P && g_pkv_NL==NL && g_pkv_h==h);
+        if (!pkv_hit) {                       /* first step of a (new) query -> rebuild cache */
+            dg_pkv_free();
+            g_pkv_K = (float**)calloc((size_t)NL, sizeof(float*));
+            g_pkv_V = (float**)calloc((size_t)NL, sizeof(float*));
+            if (g_pkv_K && g_pkv_V) { g_pkv_m=m; g_pkv_P=P; g_pkv_NL=NL; g_pkv_h=h; }
+            else { dg_pkv_free(); pkv_proof = 0; }      /* OOM -> disable, never break forward */
+        }
+        if (pkv_proof) {
+            if (!g_pkv_diff) cudaMalloc(&g_pkv_diff, sizeof(float));
+            if (g_pkv_diff) cudaMemsetAsync(g_pkv_diff, 0, sizeof(float), st);
+        }
+    }
+
     /* ── layer loop ── */
     for (int L = 0; L < NL; L++) {
         DGDBG("layer %d/%d start", L, NL);
@@ -6337,6 +6389,19 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
             cudaMemcpyAsync(Kst[L], dk, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
             cudaMemcpyAsync(Vst[L], dv, (size_t)n_tok*kvd*sizeof(float), cudaMemcpyDeviceToDevice, st);
             Kuse = Kst[L]; Vuse = Vst[L];
+            if (pkv_proof) {   /* N6: owner prompt K/V [0,P) -> compare (hit) or cache (miss). prompt is canvas-invariant */
+                size_t prow = (size_t)P * kvd;
+                unsigned int gx = (unsigned int)((prow + 255) / 256);
+                if (pkv_hit) {
+                    if (g_pkv_K[L]) dg_k_maxabsdiff<<<gx,256,0,st>>>(Kst[L], g_pkv_K[L], prow, g_pkv_diff);
+                    if (g_pkv_V[L]) dg_k_maxabsdiff<<<gx,256,0,st>>>(Vst[L], g_pkv_V[L], prow, g_pkv_diff);
+                } else {
+                    if (cudaMalloc(&g_pkv_K[L], prow*sizeof(float))==cudaSuccess)
+                        cudaMemcpyAsync(g_pkv_K[L], Kst[L], prow*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                    if (cudaMalloc(&g_pkv_V[L], prow*sizeof(float))==cudaSuccess)
+                        cudaMemcpyAsync(g_pkv_V[L], Vst[L], prow*sizeof(float), cudaMemcpyDeviceToDevice, st);
+                }
+            }
             if (dWk) { cudaFree(dWk); dWk = NULL; }
             if (dWv) { cudaFree(dWv); dWv = NULL; }
         } else {
@@ -6573,6 +6638,17 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         if (dW) cudaFree(dW); if (dWk) cudaFree(dWk); if (dWv) cudaFree(dWv);
         if (dWo) cudaFree(dWo); if (dNw) cudaFree(dNw); if (d_ffac) cudaFree(d_ffac);
         goto done;
+    }
+
+    /* N6 prefix-KV proof report: on a repeat step, prompt K/V should be byte-identical (max|d|==0). */
+    if (pkv_proof && pkv_hit && g_pkv_diff) {
+        float md = -1.0f; cudaStreamSynchronize(st);
+        cudaMemcpy(&md, g_pkv_diff, sizeof(float), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "[pkv-proof] HIT P=%d NL=%d  max|fresh-cached prompt K/V| = %.3e  (%s)\n",
+                P, NL, md, md==0.0f ? "BYTE-IDENTICAL -> prompt tower INVARIANT" : "NONZERO -> coupling exists");
+        fflush(stderr);
+    } else if (pkv_proof) {
+        fprintf(stderr, "[pkv-proof] MISS (cached prompt K/V for new query P=%d NL=%d)\n", P, NL); fflush(stderr);
     }
 
     /* ── final norm + tied head + softcap -> logits ── */
