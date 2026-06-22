@@ -6067,6 +6067,11 @@ static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, i
         int    lastr = r0 + rows - 1;
         size_t lastlen = (size_t)((in + 1) / 2);
         size_t span = (s->row_off[lastr] + lastlen) - off0;
+        if (off0 + span > s->codes_bytes) {   /* N6 fix+diag: slice would read past the mmap'd codes region -> host AV */
+            fprintf(stderr, "[N6-SPANCLAMP] %s r0=%d rows=%d in=%d: off0=%zu span=%zu end=%zu > codes_bytes=%zu\n",
+                    name, r0, rows, in, off0, span, off0+span, (size_t)s->codes_bytes); fflush(stderr);
+            span = (off0 < s->codes_bytes) ? (s->codes_bytes - off0) : 0;
+        }
         size_t *off_c = (size_t *)malloc((size_t)rows * sizeof(size_t));
         if (!off_c) { sp_set_error("dg_gemm_packed_rows: off OOM"); return 1; }
         for (int r = 0; r < rows; r++) off_c[r] = s->row_off[r0 + r] - off0;
@@ -6625,12 +6630,14 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
              * same renorm, same expert math) — only the dequant/GEMM batching changes. */
             const int gu_rows = FFx * 2;
             /* per-token routing tables (NU entries each) */
-            int   *rt_idx = (int   *)malloc((size_t)n_tok * NU * sizeof(int));
-            float *rt_wt  = (float *)malloc((size_t)n_tok * NU * sizeof(float));
+            /* N6: calloc (not malloc) so the prompt region [0,P) the fast path never fills
+             * holds a deterministic 0, not stale heap bytes that could be read as an index. */
+            int   *rt_idx = (int   *)calloc((size_t)n_tok * NU, sizeof(int));
+            float *rt_wt  = (float *)calloc((size_t)n_tok * NU, sizeof(float));
             /* per-expert token membership: et_cnt[e], et_tok[e][*], et_w[e][*] (flattened) */
             int   *et_cnt = (int   *)calloc((size_t)NE, sizeof(int));
-            int   *et_tok = (int   *)malloc((size_t)n_tok * NU * sizeof(int));   /* worst case */
-            float *et_w   = (float *)malloc((size_t)n_tok * NU * sizeof(float));
+            int   *et_tok = (int   *)calloc((size_t)n_tok * NU, sizeof(int));   /* worst case */
+            float *et_w   = (float *)calloc((size_t)n_tok * NU, sizeof(float));
             int   *et_off = (int   *)calloc((size_t)(NE + 1), sizeof(int));
             if (!rt_idx || !rt_wt || !et_cnt || !et_tok || !et_w || !et_off) {
                 free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
