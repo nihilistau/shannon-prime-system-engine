@@ -1,0 +1,25 @@
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=4 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=8)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 3.2s
+[match] MISS   n_div_000      K=12 gt= 5 pick=-1 steps=4 ans_tok=1852 51s :: Which recovery code authorizes the Marlock
+        truth='the Marlock mag-rail depot authorizes on 2-AZURE-6428.'
+# progress 1/4  recall=0/1 reject=0/0  elapsed=51s
+[match] MISS   n_div_001      K=12 gt= 0 pick=-1 steps=4 ans_tok=1852 44s :: What is the launch authorization for the K
+        truth='Access to the Korrin orbital relay requires 9-TUNDRA-2392.'
+# progress 2/4  recall=0/2 reject=0/0  elapsed=95s
+[forgn] REJECT K=12 pick=-1 steps=4 ans_tok=1852 44s :: What is machine learning?
+# progress 3/4  recall=0/2 reject=1/1  elapsed=139s
+[forgn] REJECT K=12 pick=-1 steps=4 ans_tok=1852 44s :: What do mitochondria do?
+# progress 4/4  recall=0/2 reject=2/2  elapsed=183s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=4 CL=8 SC=1  subset matched=2 foreign=2
+recall@1       : 0/2 = 0.0%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 2/2 = 100.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
