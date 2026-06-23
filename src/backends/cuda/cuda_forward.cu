@@ -6746,6 +6746,16 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 }
                 cudaFree(d_guw); d_guw = NULL; cudaFree(d_dnw); d_dnw = NULL;
             }
+            if (getenv("SP_DG_MOECHK")) {  /* deterministic MoE-output oracle for async parity (default-off) */
+                cudaStreamSynchronize(st);
+                float *hck=(float*)malloc((size_t)nE*sizeof(float));
+                if (hck && cudaMemcpy(hck,dmoe,(size_t)nE*sizeof(float),cudaMemcpyDeviceToHost)==cudaSuccess){
+                    double s=0.0; unsigned int h=2166136261u;
+                    for(size_t i=0;i<(size_t)nE;i++){ s+=(double)hck[i]; unsigned int b; memcpy(&b,&hck[i],4); h=(h^b)*16777619u; }
+                    fprintf(stderr,"[MOECHK] L=%d nE=%d sum=%.6f hash=%08x\n",L,nE,s,h); fflush(stderr);
+                }
+                if(hck) free(hck);
+            }
             cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb);
             free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off);
             free(h_rlog);
