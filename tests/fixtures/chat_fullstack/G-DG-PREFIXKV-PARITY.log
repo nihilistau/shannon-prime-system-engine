@@ -1,0 +1,61 @@
+===== BASE (SP_DG_PREFIXKV=0, full forward) ===== 
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=2 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=8)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 2.9s
+    step 0: ans_tok=40774 ans_ent=nan mean_ent=nan held=0
+    step 1: ans_tok=8686 ans_ent=nan mean_ent=nan held=0
+[match] MISS   n_div_000      K=12 gt= 5 pick= 2 steps=2 ans_tok=8686 24s :: Which recovery code authorizes the Marlock
+        truth='the Marlock mag-rail depot authorizes on 2-AZURE-6428.'
+# progress 1/3  recall=0/1 reject=0/0  elapsed=24s
+    step 0: ans_tok=79838 ans_ent=nan mean_ent=nan held=0
+    step 1: ans_tok=236773 ans_ent=nan mean_ent=nan held=0
+[match] MISS   n_div_001      K=12 gt= 3 pick= 9 steps=2 ans_tok=236773 15s :: What is the launch authorization for the K
+        truth='Access to the Korrin orbital relay requires 9-TUNDRA-2392.'
+# progress 2/3  recall=0/2 reject=0/0  elapsed=39s
+    step 0: ans_tok=96869 ans_ent=nan mean_ent=nan held=0
+    step 1: ans_tok=236917 ans_ent=nan mean_ent=nan held=0
+[forgn] FALSE  K=12 pick= 0 steps=2 ans_tok=236917 15s :: What is machine learning?
+# progress 3/3  recall=0/2 reject=0/1  elapsed=55s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=2 CL=8 SC=1  subset matched=2 foreign=1
+recall@1       : 0/2 = 0.0%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 0/1 = 0.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
+===== FAST (SP_DG_PREFIXKV=1, canvas-only steps 1+) ===== 
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=2 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=8)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 2.7s
+    step 0: ans_tok=40774 ans_ent=nan mean_ent=nan held=0
+    step 1: ans_tok=8686 ans_ent=nan mean_ent=nan held=0
+[match] MISS   n_div_000      K=12 gt= 5 pick= 2 steps=2 ans_tok=8686 20s :: Which recovery code authorizes the Marlock
+        truth='the Marlock mag-rail depot authorizes on 2-AZURE-6428.'
+# progress 1/3  recall=0/1 reject=0/0  elapsed=20s
+    step 0: ans_tok=79838 ans_ent=nan mean_ent=nan held=0
+    step 1: ans_tok=236773 ans_ent=nan mean_ent=nan held=0
+[match] MISS   n_div_001      K=12 gt= 3 pick= 9 steps=2 ans_tok=236773 12s :: What is the launch authorization for the K
+        truth='Access to the Korrin orbital relay requires 9-TUNDRA-2392.'
+# progress 2/3  recall=0/2 reject=0/0  elapsed=32s
+    step 0: ans_tok=96869 ans_ent=nan mean_ent=nan held=0
+    step 1: ans_tok=236917 ans_ent=nan mean_ent=nan held=0
+[forgn] FALSE  K=12 pick= 0 steps=2 ans_tok=236917 12s :: What is machine learning?
+# progress 3/3  recall=0/2 reject=0/1  elapsed=45s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=2 CL=8 SC=1  subset matched=2 foreign=1
+recall@1       : 0/2 = 0.0%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 0/1 = 0.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
+PARITY_DONE 
