@@ -338,7 +338,7 @@ int main(void) {
 
     /* persistent device prev-logits buffer [CL x V] for self-conditioning */
     void *prev_dev = NULL;
-    if (use_sc) { prev_dev = dg_dev_alloc_f32((long)CL * V); if (!prev_dev) { EMIT("# SC alloc failed -> SC OFF\n"); use_sc = 0; } }
+    if (use_sc) { prev_dev = dg_dev_alloc_f32((long)(int)c->dg_canvas_length * V); if (!prev_dev) { EMIT("# SC alloc failed -> SC OFF\n"); use_sc = 0; } }
 
     for (int phase = 0; phase < 2; phase++) {
         int count = (phase == 0) ? n_matched : n_for;
@@ -543,4 +543,22 @@ int main(void) {
 
     double rec = tot ? (double)hit / tot : 0.0;
     double rej = ftot ? (double)frej / ftot : 0.0;
-    EMIT("\n================ G-DIFFJUDGE
+    EMIT("\n================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================\n");
+    EMIT("K=%d seed=%llu STEPS<=%d CL=%d SC=%d  subset matched=%d foreign=%d\n",
+         K, (unsigned long long)seed, STEPS, CL, use_sc, n_matched, n_for);
+    EMIT("recall@1       : %d/%d = %.1f%%   (single-forward ~14%% ; oracle 95.6%%)\n", hit, tot, 100.0 * rec);
+    EMIT("foreign-reject : %d/%d = %.1f%%   (oracle 96.0%%)\n", frej, ftot, 100.0 * rej);
+    int strong = (rec >= 0.80);
+    EMIT("SUBSET recall >= 80%% : %s\n", strong ? "STRONG PASS — iterative denoise cures the single-forward miss" : "below 80%% — see per-query diagnosis");
+
+    if (prev_dev) dg_dev_free(prev_dev);
+    free(toks); free(prompt); free(am); free(ent); free(sm); free(uvec);
+    free(canvas); free(outc); free(order); free(cand); free(picktag);
+    free(tagtok); free(tagtok2); free((void *)tagstr);
+    sp_tokenizer_free(tk);
+    sp_model_unload(handle);
+    for (int i = 0; i < NF; i++) free(foreign[i]);
+    free(foreign); free(needles);
+    fclose(log);
+    return 0;
+}

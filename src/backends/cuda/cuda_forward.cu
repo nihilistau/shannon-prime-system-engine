@@ -6955,6 +6955,7 @@ extern "C" void *dg_dev_alloc_f32(long n) {
     if (n <= 0) return NULL;
     void *p = NULL;
     if (cudaMalloc(&p, (size_t)n * sizeof(float)) != cudaSuccess) return NULL;
+    cudaMemset(p, 0, (size_t)n * sizeof(float));  /* zero-init: prev_logits over-read region deterministic (SP_DG_ASYNC parity) */
     return p;
 }
 extern "C" int dg_dev_upload(void *dev, const float *host, long n) {
