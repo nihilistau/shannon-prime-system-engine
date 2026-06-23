@@ -119,3 +119,13 @@ embed_block*
 /_diffjudge_*
 /_curator_*
 /*.err
+
+# session scratch + root underscore-prefixed throwaways (2026-06-24 root cleanup)
+scratch/
+
+
+# root scratch dirs/files + rust build dirs (2026-06-24 cleanup)
+/_*
+!/_needle_corpus_div/
+target-wirecuda/
+target-host/
