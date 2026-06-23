@@ -6069,12 +6069,86 @@ static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int ou
  * dg_dequant_resident_rows' slice extraction but uploads PACKED (half the f32 H2D, GPU dequant)
  * instead of dequanting to f32. Returns 0 ok / 1 error / 2 unsupported (non-Q4B / in%32 -> f32).
  * Reuses gemv_w_packed + k_gemv_q4b_dp4a_v2; NO new kernel. Gated by the caller (SP_DG_PACKED). */
+/* ---- N6.3 async spillover double-buffer (gated SP_DG_ASYNC, default-off=byte-identical) ----
+ * Prefetch the next expert's packed OK_Q4B weights on a dedicated upload stream (pinned
+ * staging -> cudaMemcpyAsync) so the H2D overlaps the current expert's dequant+GEMM.
+ * 4 fixed-size double-buffered slots (0,1=gate_up; 2,3=down); Q4B fixed row-width => constant
+ * slot size, alloc once + reuse. up_ev: compute stream waits upload. cons_ev: upload stream
+ * waits prior consume before reusing a slot buffer. Forward is deterministic (MOECHK) so this
+ * is gated BYTE-EXACT. Default-off => dg_pf_consume misses => exact serial path. */
+static int dg_async_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_ASYNC"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+static cudaStream_t dg_ustream = NULL;
+typedef struct { char key[176]; int valid; int inited; DevTensor dt; unsigned char *pin; size_t pin_cap; cudaEvent_t up_ev; cudaEvent_t cons_ev; int cons_pending; } dg_pf_slot_t;
+static dg_pf_slot_t dg_pf[4];
+static int dg_pf_rr[2] = {0,0};
+static void dg_async_ensure(void){
+    if (dg_ustream) return;
+    if (cudaStreamCreate(&dg_ustream) != cudaSuccess) { dg_ustream = NULL; return; }
+    for (int i=0;i<4;i++){ memset(&dg_pf[i],0,sizeof(dg_pf[i])); cudaEventCreate(&dg_pf[i].up_ev); cudaEventCreate(&dg_pf[i].cons_ev); }
+}
+static void dg_prefetch_rows(const qwen3_model *m, const char *name, int r0, int rows, int in, int kind){
+    if (!dg_async_enabled()) return;
+    dg_async_ensure(); if (!dg_ustream) return;
+    const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL; if (!at) return;
+    const sp_frob_packed_tensor *s = &at->pt;
+    if (r0 < 0 || rows <= 0 || (uint32_t)(r0+rows) > s->rows) return;
+    if (in & 31) return;
+    for (int r=r0;r<r0+rows;r++) if (s->row_prec[r] != 4) return;
+    size_t off0 = s->row_off[r0];
+    size_t lastlen = (size_t)((in+1)/2);
+    size_t span = (s->row_off[r0+rows-1] + lastlen) - off0;
+    if (off0 + span > s->codes_bytes) return;
+    int base = (kind==0)?0:2;
+    int slot = base + (dg_pf_rr[kind] & 1); dg_pf_rr[kind]++;
+    dg_pf_slot_t *S = &dg_pf[slot];
+    if (S->valid) return;
+    size_t bsc = s->bscale ? (size_t)rows * (size_t)s->bs_nblk * sizeof(unsigned short) : 0;
+    if (!bsc) return;
+    size_t need_pin = span + (size_t)rows*sizeof(unsigned long long) + bsc;
+    if (!S->inited){
+        if (cudaMalloc((void**)&S->dt.codes, span) != cudaSuccess) return;
+        if (cudaMalloc((void**)&S->dt.row_off, (size_t)rows*sizeof(unsigned long long)) != cudaSuccess) return;
+        if (cudaMalloc((void**)&S->dt.bscale, bsc) != cudaSuccess) return;
+        if (cudaHostAlloc((void**)&S->pin, need_pin, cudaHostAllocDefault) != cudaSuccess) return;
+        S->pin_cap = need_pin; S->inited = 1;
+    }
+    if (need_pin > S->pin_cap) return;
+    unsigned char *p = S->pin;
+    memcpy(p, s->codes + off0, span);
+    unsigned long long *po = (unsigned long long*)(p + span);
+    for (int r=0;r<rows;r++) po[r] = (unsigned long long)(s->row_off[r0+r] - off0);
+    unsigned char *pb = (unsigned char*)(po + rows);
+    memcpy(pb, (const unsigned char*)(s->bscale + (size_t)r0*(size_t)s->bs_nblk), bsc);
+    if (S->cons_pending) cudaStreamWaitEvent(dg_ustream, S->cons_ev, 0);
+    cudaMemcpyAsync(S->dt.codes, p, span, cudaMemcpyHostToDevice, dg_ustream);
+    cudaMemcpyAsync(S->dt.row_off, po, (size_t)rows*sizeof(unsigned long long), cudaMemcpyHostToDevice, dg_ustream);
+    cudaMemcpyAsync(S->dt.bscale, pb, bsc, cudaMemcpyHostToDevice, dg_ustream);
+    cudaEventRecord(S->up_ev, dg_ustream);
+    S->dt.in = in; S->dt.out = rows; S->dt.prec = 4; S->dt.f32 = NULL; S->dt.row_scale = NULL; S->dt.row_prec = NULL; S->dt.bs_nblk = s->bs_nblk;
+    snprintf(S->key, sizeof S->key, "%s#%d", name, r0);
+    S->valid = 1;
+}
+static int dg_pf_consume(const char *key, DevTensor *out, cudaStream_t st){
+    for (int i=0;i<4;i++){ if (dg_pf[i].valid && !strcmp(dg_pf[i].key, key)){ cudaStreamWaitEvent(st, dg_pf[i].up_ev, 0); *out = dg_pf[i].dt; dg_pf[i].valid = 0; return i; } }
+    return -1;
+}
+static void dg_pf_mark_consumed(int slot, cudaStream_t st){ if (slot<0||slot>=4) return; cudaEventRecord(dg_pf[slot].cons_ev, st); dg_pf[slot].cons_pending = 1; }
+static void dg_async_free(void){
+    for (int i=0;i<4;i++){
+        if (dg_pf[i].inited){ if(dg_pf[i].dt.codes)cudaFree(dg_pf[i].dt.codes); if(dg_pf[i].dt.row_off)cudaFree(dg_pf[i].dt.row_off); if(dg_pf[i].dt.bscale)cudaFree(dg_pf[i].dt.bscale); if(dg_pf[i].pin)cudaFreeHost(dg_pf[i].pin); }
+        if (dg_pf[i].up_ev) cudaEventDestroy(dg_pf[i].up_ev);
+        if (dg_pf[i].cons_ev) cudaEventDestroy(dg_pf[i].cons_ev);
+        memset(&dg_pf[i],0,sizeof(dg_pf[i]));
+    }
+    if (dg_ustream){ cudaStreamDestroy(dg_ustream); dg_ustream=NULL; }
+}
 static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, int rows, int in,
                                const float *dX, float *dY, int cnt, cublasHandle_t cb, cudaStream_t st) {
     char key[176]; snprintf(key, sizeof key, "%s#%d", name, r0);
     DevTensor *hit = dg_wcache_lookup(key);
-    DevTensor devW; int cached = 0;
+    DevTensor devW; int cached = 0; int pf_slot = -1;
     if (hit) { devW = *hit; cached = 1; }
+    else if (dg_async_enabled() && (pf_slot = dg_pf_consume(key, &devW, st)) >= 0) { cached = 2; }
     else {
         const sp_arena_tensor *at = m->arena ? sp_arena_find(m->arena, name) : NULL;
         if (!at) { sp_set_error("dg_gemm_packed_rows: tensor not in arena"); return 1; }
@@ -6117,6 +6191,7 @@ static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, i
     else own_scratch = 1;
     int rc = gemm_w(cb, st, &devW, dX, dY, cnt, scratch);
     if (own_scratch) cudaFree(scratch);
+    if (pf_slot >= 0) dg_pf_mark_consumed(pf_slot, st);
     if (getenv("SP_DG_PKVCKPT")) { cudaError_t _e=cudaDeviceSynchronize(); int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] gemm_w+scratchfree done rc=%d heap=%s sync=%s (free_devtensor next, cached=%d)\n", r0, rc, _h==_HEAPOK?"OK":"CORRUPT", cudaGetErrorString(_e), cached); fflush(stderr); }
     if (!cached) { if (!dg_wcache_insert(key, &devW)) free_devtensor(&devW); }
     if (getenv("SP_DG_PKVCKPT")) { int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] free_devtensor done, returning rc=%d heap=%s\n", r0, rc, _h==_HEAPOK?"OK":"CORRUPT"); fflush(stderr); }
@@ -6708,6 +6783,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 sp_set_error("dg batched expert scratch OOM"); goto layerfail; }
             int dbg_ecount = 0;
             DGDBG("layer %d: MoE routing+scratch done, entering expert loop (n_tok=%d pkv_fast=%d)", L, n_tok, pkv_fast);
+                if (dg_async_enabled()){ int _ef=-1; for(int _e=0;_e<NE;_e++){ if(et_cnt[_e]>0){_ef=_e;break;} } if(_ef>=0){ snprintf(nm,sizeof nm,"blk.%d.ffn_gate_up_exps.weight",L); dg_prefetch_rows(m,nm,_ef*gu_rows,gu_rows,E,0); } }
             for (int e = 0; e < NE; e++) {
                 int cnt = et_cnt[e];
                 if (cnt == 0) continue;
@@ -6727,6 +6803,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     if (gemm(cb, d_guw, d_xb, d_gub, cnt, E, gu_rows)) { cudaFree(d_guw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     cudaFree(d_guw); d_guw = NULL; } }
                 DGDBG("L%d e%d: gate_up gemm done (geglu+down next)", L, e);
+                if (dg_async_enabled()){ snprintf(nm,sizeof nm,"blk.%d.ffn_down_exps.weight",L); dg_prefetch_rows(m,nm,e*E,E,FFx,1); }
                 /* GeGLU per column: h[col*FFx + i] = gelu(gu[col*gu_rows+i]) * gu[col*gu_rows+FFx+i] */
                 { size_t total = (size_t)FFx * cnt;
                   dg_k_geglu_batched<<<(unsigned)((total+255)/256), 256, 0, st>>>(d_gub, d_hb, FFx, gu_rows, cnt); }
@@ -6739,6 +6816,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     if (gemm(cb, d_dnw, d_hb, d_deb, cnt, FFx, E)) { cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     cudaFree(d_dnw); d_dnw = NULL; } }
                 DGDBG("L%d e%d: down gemm done (axpy next)", L, e);
+                if (dg_async_enabled()){ int _en=-1; for(int _e2=e+1;_e2<NE;_e2++){ if(et_cnt[_e2]>0){_en=_e2;break;} } if(_en>=0){ snprintf(nm,sizeof nm,"blk.%d.ffn_gate_up_exps.weight",L); dg_prefetch_rows(m,nm,_en*gu_rows,gu_rows,E,0); } }
                 /* weighted accumulate each column back into its token's dmoe row */
                 for (int j = 0; j < cnt; j++) {
                     int t = et_tok[et_off[e] + j]; float w = et_w[et_off[e] + j];
@@ -7459,5 +7537,5 @@ done:
 extern "C" void sp_cuda_model_release(const qwen3_model *m) {
     if (g_w.key == m) free_weights(&g_w);
     dg_reservoir_free();
-    dg_wcache_free(); dg_scratch_free();
+    dg_wcache_free(); dg_scratch_free(); dg_async_free();
 }
