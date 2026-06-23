@@ -6078,7 +6078,7 @@ static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int ou
  * is gated BYTE-EXACT. Default-off => dg_pf_consume misses => exact serial path. */
 static int dg_async_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_ASYNC"); v=(e&&*e&&*e!='0')?1:0; } return v; }
 static cudaStream_t dg_ustream = NULL;
-typedef struct { char key[176]; int valid; int inited; DevTensor dt; unsigned char *pin; size_t pin_cap; cudaEvent_t up_ev; cudaEvent_t cons_ev; int cons_pending; } dg_pf_slot_t;
+typedef struct { char key[176]; int valid; int inited; DevTensor dt; unsigned char *pin; size_t pin_cap; cudaEvent_t up_ev; cudaEvent_t cons_ev; int cons_pending; int up_rec; } dg_pf_slot_t;
 static dg_pf_slot_t dg_pf[4];
 static int dg_pf_rr[2] = {0,0};
 static void dg_async_ensure(void){
@@ -6113,6 +6113,7 @@ static void dg_prefetch_rows(const qwen3_model *m, const char *name, int r0, int
         S->pin_cap = need_pin; S->inited = 1;
     }
     if (need_pin > S->pin_cap) return;
+    if (S->up_rec) cudaEventSynchronize(S->up_ev);  /* HOST W-A-R: wait prior DMA done reading S->pin before CPU overwrites it (the n_tok-small race) */
     unsigned char *p = S->pin;
     memcpy(p, s->codes + off0, span);
     unsigned long long *po = (unsigned long long*)(p + span);
@@ -6123,7 +6124,7 @@ static void dg_prefetch_rows(const qwen3_model *m, const char *name, int r0, int
     cudaMemcpyAsync(S->dt.codes, p, span, cudaMemcpyHostToDevice, dg_ustream);
     cudaMemcpyAsync(S->dt.row_off, po, (size_t)rows*sizeof(unsigned long long), cudaMemcpyHostToDevice, dg_ustream);
     cudaMemcpyAsync(S->dt.bscale, pb, bsc, cudaMemcpyHostToDevice, dg_ustream);
-    cudaEventRecord(S->up_ev, dg_ustream);
+    cudaEventRecord(S->up_ev, dg_ustream); S->up_rec = 1;
     S->dt.in = in; S->dt.out = rows; S->dt.prec = 4; S->dt.f32 = NULL; S->dt.row_scale = NULL; S->dt.row_prec = NULL; S->dt.bs_nblk = s->bs_nblk;
     snprintf(S->key, sizeof S->key, "%s#%d", name, r0);
     S->valid = 1;
@@ -6783,7 +6784,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                 sp_set_error("dg batched expert scratch OOM"); goto layerfail; }
             int dbg_ecount = 0;
             DGDBG("layer %d: MoE routing+scratch done, entering expert loop (n_tok=%d pkv_fast=%d)", L, n_tok, pkv_fast);
-                if (dg_async_enabled()){ int _ef=-1; for(int _e=0;_e<NE;_e++){ if(et_cnt[_e]>0){_ef=_e;break;} } if(_ef>=0){ snprintf(nm,sizeof nm,"blk.%d.ffn_gate_up_exps.weight",L); dg_prefetch_rows(m,nm,_ef*gu_rows,gu_rows,E,0); } }
+                if (dg_async_enabled() && !getenv("SP_DG_ASYNC_NOGU")){ int _ef=-1; for(int _e=0;_e<NE;_e++){ if(et_cnt[_e]>0){_ef=_e;break;} } if(_ef>=0){ snprintf(nm,sizeof nm,"blk.%d.ffn_gate_up_exps.weight",L); dg_prefetch_rows(m,nm,_ef*gu_rows,gu_rows,E,0); } }
             for (int e = 0; e < NE; e++) {
                 int cnt = et_cnt[e];
                 if (cnt == 0) continue;
@@ -6816,7 +6817,7 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                     if (gemm(cb, d_dnw, d_hb, d_deb, cnt, FFx, E)) { cudaFree(d_dnw); free(rt_idx); free(rt_wt); free(et_cnt); free(et_tok); free(et_w); free(et_off); free(h_rlog); cudaFree(d_xb); cudaFree(d_gub); cudaFree(d_hb); cudaFree(d_deb); goto layerfail; }
                     cudaFree(d_dnw); d_dnw = NULL; } }
                 DGDBG("L%d e%d: down gemm done (axpy next)", L, e);
-                if (dg_async_enabled()){ int _en=-1; for(int _e2=e+1;_e2<NE;_e2++){ if(et_cnt[_e2]>0){_en=_e2;break;} } if(_en>=0){ snprintf(nm,sizeof nm,"blk.%d.ffn_gate_up_exps.weight",L); dg_prefetch_rows(m,nm,_en*gu_rows,gu_rows,E,0); } }
+                if (dg_async_enabled() && !getenv("SP_DG_ASYNC_NOGU")){ int _en=-1; for(int _e2=e+1;_e2<NE;_e2++){ if(et_cnt[_e2]>0){_en=_e2;break;} } if(_en>=0){ snprintf(nm,sizeof nm,"blk.%d.ffn_gate_up_exps.weight",L); dg_prefetch_rows(m,nm,_en*gu_rows,gu_rows,E,0); } }
                 /* weighted accumulate each column back into its token's dmoe row */
                 for (int j = 0; j < cnt; j++) {
                     int t = et_tok[et_off[e] + j]; float w = et_w[et_off[e] + j];
