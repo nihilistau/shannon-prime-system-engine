@@ -6016,6 +6016,22 @@ static void dg_wcache_free(void) {
     free(dg_wc_tab); dg_wc_tab = NULL; dg_wc_n = dg_wc_cap = 0;
 }
 static int dg_packed_enabled(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_PACKED"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+/* N6.2: reusable device dequant scratch -- hoists the synchronizing per-expert cudaMalloc/cudaFree
+ * out of the MoE expert loop. cudaFree syncs the WHOLE device, serializing the stream and starving
+ * the SMs (T2 profile: SM~55% with gaps, PCIe 28%, VRAM 12% = a serialization wall, not bw/compute).
+ * One scratch reused across all experts, grown on demand, freed at teardown. Gated SP_DG_SCRATCHREUSE
+ * (default-off = per-call malloc/free = BYTE-IDENTICAL null floor; dequant overwrites the full region). */
+static float *dg_dqs = NULL; static size_t dg_dqs_floats = 0;
+static int dg_scratch_reuse(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_SCRATCHREUSE"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+static float *dg_scratch_get(size_t need_floats){
+    if (dg_dqs_floats < need_floats) {
+        if (dg_dqs) cudaFree(dg_dqs);
+        if (cudaMalloc(&dg_dqs, need_floats*sizeof(float)) != cudaSuccess) { dg_dqs=NULL; dg_dqs_floats=0; return NULL; }
+        dg_dqs_floats = need_floats;
+    }
+    return dg_dqs;
+}
+static void dg_scratch_free(void){ if(dg_dqs) cudaFree(dg_dqs); dg_dqs=NULL; dg_dqs_floats=0; }
 /* N5c: run an arena weight's GEMM through the EXISTING packed dp4a path (upload_packed +
  * per-token gemv_w_packed) instead of dg_upload_arena_w's f32 CPU-dequant + 28GB H2D. The
  * packed OK_Q4B H2D is HALF the f32 payload and the dequant runs ON-GPU (dp4a). Returns 0
@@ -6036,11 +6052,14 @@ static int dg_gemm_packed(const qwen3_model *m, const char *name, int in, int ou
     }
     /* N5c-v2: packed DevTensor -> k_dequant_arena_q4b (device dequant -> f32 scratch) -> cuBLAS
      * SGEMM via gemm_w. BYTE-IDENTICAL f32 (Q4B dequant->SGEMM has no extra rounding). */
-    float *scratch = NULL;
-    if (cudaMalloc(&scratch, (size_t)out * in * sizeof(float)) != cudaSuccess) {
+    float *scratch = NULL; int own_scratch = 0;
+    if (dg_scratch_reuse()) { scratch = dg_scratch_get((size_t)out * in);
+        if (!scratch) { if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed: reuse scratch OOM"); return 1; } }
+    else if (cudaMalloc(&scratch, (size_t)out * in * sizeof(float)) != cudaSuccess) {
         if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed: dequant scratch OOM"); return 1; }
+    else own_scratch = 1;
     int rc = gemm_w(cb, st, &devW, dX, dY, n_tok, scratch);
-    cudaFree(scratch);
+    if (own_scratch) cudaFree(scratch);
     if (!cached) { if (!dg_wcache_insert(name, &devW)) free_devtensor(&devW); }   /* cache owns on insert; else free */
     return rc ? 1 : 0;
 }
@@ -6090,11 +6109,14 @@ static int dg_gemm_packed_rows(const qwen3_model *m, const char *name, int r0, i
         if (urc) { free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: upload_packed"); return 1; }
         if (devW.prec != 4) { free_devtensor(&devW); return 2; }
     }
-    float *scratch = NULL;
-    if (cudaMalloc(&scratch, (size_t)rows * in * sizeof(float)) != cudaSuccess) {
+    float *scratch = NULL; int own_scratch = 0;
+    if (dg_scratch_reuse()) { scratch = dg_scratch_get((size_t)rows * in);
+        if (!scratch) { if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: reuse scratch OOM"); return 1; } }
+    else if (cudaMalloc(&scratch, (size_t)rows * in * sizeof(float)) != cudaSuccess) {
         if (!cached) free_devtensor(&devW); sp_set_error("dg_gemm_packed_rows: dequant scratch OOM"); return 1; }
+    else own_scratch = 1;
     int rc = gemm_w(cb, st, &devW, dX, dY, cnt, scratch);
-    cudaFree(scratch);
+    if (own_scratch) cudaFree(scratch);
     if (getenv("SP_DG_PKVCKPT")) { cudaError_t _e=cudaDeviceSynchronize(); int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] gemm_w+scratchfree done rc=%d heap=%s sync=%s (free_devtensor next, cached=%d)\n", r0, rc, _h==_HEAPOK?"OK":"CORRUPT", cudaGetErrorString(_e), cached); fflush(stderr); }
     if (!cached) { if (!dg_wcache_insert(key, &devW)) free_devtensor(&devW); }
     if (getenv("SP_DG_PKVCKPT")) { int _h=_heapchk(); fprintf(stderr, "[dgrows r0=%d] free_devtensor done, returning rc=%d heap=%s\n", r0, rc, _h==_HEAPOK?"OK":"CORRUPT"); fflush(stderr); }
@@ -6297,19 +6319,6 @@ __global__ void dg_k_maxabsdiff(const float *a, const float *b, size_t n, float 
  * [C x V] buffer (canvas rows of the prior step's raw logits) or NULL (no SC = the
  * step-0 / single-forward path, byte-identical to the original). sc_temp_inv = 1/temp
  * of the PRIOR step (the temperature the prev logits were produced at). */
-/* N6 localizer (gated SP_DG_CANVASDBG): dump ||hidden[row]|| to find where the canvas collapses to 0. */
-static void dg_dbg_rownorm(const char *tag, int L, const float *dbuf, int row, int E, cudaStream_t st) {
-    if (!getenv("SP_DG_CANVASDBG")) return;
-    cudaStreamSynchronize(st);
-    float *h = (float *)malloc((size_t)E * sizeof(float));
-    if (!h) return;
-    cudaMemcpy(h, dbuf + (size_t)row * E, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
-    double ss = 0.0; int nz = 0;
-    for (int i = 0; i < E; i++) { ss += (double)h[i] * (double)h[i]; if (h[i] != 0.0f) nz++; }
-    fprintf(stderr, "[canvasdbg %-14s L=%2d] row %d: ||.||=%.6e nonzero=%d/%d first=%.4e\n",
-            tag, L, row, sqrt(ss), nz, E, h[0]);
-    fflush(stderr); free(h);
-}
 static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
                            int n_tok, float *out_logits,
                            const float *prev_logits, float sc_temp_inv) {
@@ -6404,7 +6413,6 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         k_rmsnorm_noscale_rows<<<C, 256, 0, st>>>(dx, E, eps, P);
     }
     DGDBG("embeddings done; entering layer loop");
-    if (C > 0) dg_dbg_rownorm("post-embed", -1, dx, P, E, st);
 
     /* N6 prefix-KV setup: cache prompt K/V (step-1 save) + on a repeat step of the same query run
      * CANVAS-ONLY (SP_DG_PREFIXKV) and/or byte-compare (SP_DG_PREFIXKV_PROOF). pkv_on drives the cache. */
@@ -6561,7 +6569,6 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
           cudaFree(dpn); }
         k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dx, dnx, nE);
         /* dx now holds attn_out (the post-attention residual) — the FFN input */
-        if (C > 0) dg_dbg_rownorm("attn", L, dx, P, E, st);
 
         /* ── FFN: dense shared MLP + 128-expert MoE, combined, post_ffw_norm, residual ── */
         if (getenv("SP_DG_TRACE")) { cudaStreamSynchronize(st); DGDBG("layer %d: FFN start (dense MLP)", L); }
@@ -6759,7 +6766,6 @@ static int dg_forward_impl(const qwen3_model *m, const int32_t *tokens,
         /* dao now = post_ffw_norm(combined); add the attn_out residual (dx) -> ffn block output */
         k_add<<<(unsigned)((nE+255)/256), 256, 0, st>>>(dao, dx, nE);
         cudaMemcpyAsync(dx, dao, nE*sizeof(float), cudaMemcpyDeviceToDevice, st);   /* dx = layer FFN output */
-        if (C > 0) dg_dbg_rownorm("ffn", L, dx, P, E, st);
 
         /* ── region-aware per-layer scalar: prompt * enc_out_scale, canvas * out_scale ── */
         {
@@ -7424,4 +7430,24 @@ extern "C" int qwen3_decode_cuda(const qwen3_model *m, int32_t *seq,
     }
 download:
     /* single sequence download at the end */
-    if (cudaMemcpyAsync(seq,dseq,(size_t)n*sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_err
+    if (cudaMemcpyAsync(seq,dseq,(size_t)n*sizeof(int),cudaMemcpyDeviceToHost,st)!=cudaSuccess){sp_set_error("seq D2H");goto done;}
+    { cudaError_t e=cudaStreamSynchronize(st); if(e!=cudaSuccess){fail_cuda(e,"decode sync");goto done;} }
+    { cudaError_t e=cudaGetLastError(); if(e!=cudaSuccess){fail_cuda(e,"decode kernel");goto done;} }
+    rc=n;
+done:
+    if(dKc)cudaFree(dKc); if(dVc)cudaFree(dVc);
+    if(dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
+    if(dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
+    if(dlog)cudaFree(dlog); if(dscr)cudaFree(dscr); if(dseq)cudaFree(dseq);
+    if(dpos)cudaFree(dpos); if(dqx)cudaFree(dqx); if(dsx)cudaFree(dsx);
+    if(cexec)cudaGraphExecDestroy(cexec); if(cgraph)cudaGraphDestroy(cgraph);
+    #undef DA
+    #undef MM
+    return rc;
+}
+
+extern "C" void sp_cuda_model_release(const qwen3_model *m) {
+    if (g_w.key == m) free_weights(&g_w);
+    dg_reservoir_free();
+    dg_wcache_free(); dg_scratch_free();
+}
