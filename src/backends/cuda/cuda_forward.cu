@@ -6022,7 +6022,7 @@ static int dg_packed_enabled(void){ static int v=-1; if(v<0){ const char*e=geten
  * One scratch reused across all experts, grown on demand, freed at teardown. Gated SP_DG_SCRATCHREUSE
  * (default-off = per-call malloc/free = BYTE-IDENTICAL null floor; dequant overwrites the full region). */
 static float *dg_dqs = NULL; static size_t dg_dqs_floats = 0;
-static int dg_scratch_reuse(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_SCRATCHREUSE"); v=(e&&*e&&*e!='0')?1:0; } return v; }
+static int dg_scratch_reuse(void){ static int v=-1; if(v<0){ const char*e=getenv("SP_DG_SCRATCHREUSE"); v=(e&&*e&&*e=='0')?0:1; } return v; } /* N6.2b: default-ON (~1.45x diffjudge, byte-identical); SP_DG_SCRATCHREUSE=0 = opt-out null floor */
 static float *dg_scratch_get(size_t need_floats){
     if (dg_dqs_floats < need_floats) {
         if (dg_dqs) cudaFree(dg_dqs);
