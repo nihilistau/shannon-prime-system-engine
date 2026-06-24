@@ -1,0 +1,33 @@
+# G-JUDGE-SERVED — live E2E recall organism on the served Gemma-4-12B (2026-06-25)
+# Pipeline: STAGE-1 latent W_c selection (SP_B3_JUDGE_WC) -> STAGE-2 deterministic
+# token-overlap grounding @0.6 (SP_B3_VERIFY: TAG+EVIDENCE, parse + Jaccard) ->
+# STAGE-3 text-in-context recitation. Default-off = byte-identical null floor.
+# Launcher _e2e_serve.bat (:3001); smoke tools/xbar_lsh/_e2e_smoke.py.
+# ===== SMOKE (clean output, post suppress-mask + rigid aug-prompt + recall hard-stop) =====
+======================================================================
+[MATCHED] Q: Which recovery code authorizes the Marlock mag-rail depot?
+REPLY: 2-AZURE-6428.
+   expect-contains: 2-AZURE-6428 -> True
+======================================================================
+[MATCHED] Q: Which recovery code authorizes the Korrin orbital relay?
+REPLY: What is the name of the planet where the Korrin orbital relay is located?
+======================================================================
+[FOREIGN] Q: What is the capital of France?
+REPLY: Paris.
+   expect-contains: Paris -> True
+======================================================================
+[FOREIGN] Q: How many legs does a spider have?
+REPLY: A spider has 8 legs.
+   expect-contains: eight -> False
+======================================================================
+SMOKE_DONE
+
+# ===== DECISION TRACES =====
+2026-06-24T23:27:49.337047Z  INFO sp_daemon::routes: B3-VERIFY: tag [L7L] overlap=0.000 < 0.60 REJECT (ungrounded citation) ev=""
+2026-06-24T23:27:49.337054Z  INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="[L7L] The unlock phrase for the Vantor reactor annex is 4-GRYPHON-1932.") -> REJECT (clean prompt, foreign)
+2026-06-24T23:27:51.482950Z  INFO sp_daemon::routes: B3-JUDGE STAGE-1 W_c: shortlisted top-12 of 91 cold by W_c (head r=32)
+2026-06-24T23:28:22.913351Z  INFO sp_daemon::routes: B3-VERIFY: PICK [L0P] overlap=1.000 >= 0.60 ACCEPT ev="The capital of France is Paris."
+2026-06-24T23:28:24.576434Z  INFO sp_daemon::routes: B3-JUDGE: PICK [L0P] 'ep_ctrl_paris' (topic='parametric control (must reject)') reply="TAG=L0P | EVIDENCE=The capital of France is Paris." -> TEXT-IN-CONTEXT (aug n=39, dpos=38) -> synthesis recites natively
+2026-06-24T23:28:26.040010Z  INFO sp_daemon::routes: B3-JUDGE STAGE-1 W_c: shortlisted top-12 of 91 cold by W_c (head r=32)
+2026-06-24T23:28:54.584422Z  INFO sp_daemon::routes: B3-VERIFY: NONE/no-tag -> REJECT (clean prompt)
+2026-06-24T23:28:54.584426Z  INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="You are a STRICT memory index. Each entry has a TAG in [brackets].") -> REJECT (clean prompt, foreign)

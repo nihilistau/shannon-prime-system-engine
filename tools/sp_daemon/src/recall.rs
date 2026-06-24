@@ -92,6 +92,10 @@ pub struct Episode {
     pub dir: String,
     pub npos: i32,
     pub topic: String,
+    /// JUDGE-SERVED: the episode's full entry text (the manifest `text` field) — the
+    /// surface the verifier shows as a candidate and checks citations against. "" if
+    /// unavailable (live/un-manifested episodes ⇒ the verifier abstains on them).
+    pub text: String,
     pub sig: [u64; 4],
     /// B3-v2: the episode's stored GLOBAL-owner K (from ep.k), packed
     /// `[n_global][npos][HD]` row-major, global layers ascending, ONLY the real
@@ -248,11 +252,39 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
             dir: dir.to_string(),
             npos,
             topic: v.get("topic").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            text: v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             sig,
             gk,
             gk_ng,
             tokens: None,
         });
+    }
+    // JUDGE-SERVED: backfill entry text from a sibling corpus_manifest.jsonl (the
+    // curator writes `text` there; registry rows historically omit it). Join on the
+    // 256-bit sig_bits (unique per needle). Leaves text "" if no manifest / no match.
+    if out.iter().any(|e| e.text.is_empty()) {
+        if let Some(dir) = path.parent() {
+            if let Ok(mtext) = std::fs::read_to_string(dir.join("corpus_manifest.jsonl")) {
+                let mut by_sig: std::collections::HashMap<[u64; 4], String> = std::collections::HashMap::new();
+                for line in mtext.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    if let Ok(mv) = serde_json::from_str::<serde_json::Value>(line) {
+                        if let (Some(sb), Some(tx)) = (
+                            mv.get("sig_bits").and_then(|x| x.as_str()),
+                            mv.get("text").and_then(|x| x.as_str()),
+                        ) {
+                            if let Some(s) = parse_sig_hex(sb) { by_sig.insert(s, tx.to_string()); }
+                        }
+                    }
+                }
+                for e in out.iter_mut() {
+                    if e.text.is_empty() {
+                        if let Some(tx) = by_sig.get(&e.sig) { e.text = tx.clone(); }
+                    }
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -305,9 +337,158 @@ pub fn best_match(query: &[u64; 4], registry: &[Episode]) -> Option<(usize, u32)
     best
 }
 
+// ===== JUDGE-SERVED: deterministic token-overlap EVIDENCE verifier (Stage-2) =====
+// The proven gate (Exp E, 2026-06-25: thr 0.6 -> recall 83% / reject 95% at N=40,
+// beats the 26B diffusion cascade on a CPU string op). Mirrors the validated
+// `overlap()`/`toks()` in tools/xbar_lsh/test_battery_d.py byte-for-byte:
+//   toks(t)  = lowercased [a-z0-9]+ runs, keep len>=3 and not a stopword
+//   overlap  = |evidence_toks ∩ cited_toks| / |evidence_toks|   (0 if no evidence toks)
+// ACCEPT a citation iff overlap >= OVERLAP_THR. Probability for generation; unbending
+// integer math for validation — the deterministic half of the boundary thesis.
+pub const OVERLAP_THR: f32 = 0.6;
+
+/// Stopwords stripped before overlap (matches the Python set). Single/short words are
+/// additionally dropped by the len>=3 filter, so "a" need not appear here.
+pub const OVERLAP_STOP: &[&str] = &[
+    "the", "an", "of", "to", "in", "on", "at", "for", "and", "or", "is", "are",
+    "was", "were", "been", "with", "from", "that", "this", "its", "as", "by",
+];
+
+/// Content-token list: lowercase, split on any non-[a-z0-9], keep len>=3 non-stopwords.
+fn overlap_toks(t: &str) -> Vec<String> {
+    t.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| w.len() >= 3 && !OVERLAP_STOP.contains(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Fraction of EVIDENCE content-tokens present in the cited entry text. 0.0 if the
+/// evidence has no content tokens (un-verifiable => reject). Deterministic, CPU-only.
+pub fn token_overlap(evidence: &str, cited: &str) -> f32 {
+    let et = overlap_toks(evidence);
+    if et.is_empty() {
+        return 0.0;
+    }
+    let cs: std::collections::HashSet<String> = overlap_toks(cited).into_iter().collect();
+    let hit = et.iter().filter(|w| cs.contains(*w)).count();
+    hit as f32 / et.len() as f32
+}
+
+/// Parse the model's `TAG=<tag|NONE> | EVIDENCE=<span>` reply. Returns
+/// (Some(tag_index) | None for NONE/no-tag, evidence_span). Mirrors the battery
+/// `parse()`: the earliest tag-substring (case-insensitive) wins; NONE wins if it
+/// appears before any tag (or no tag is found); EVIDENCE = text after the first
+/// `=`/`:` following the word EVIDENCE, de-quoted/trimmed. ASCII-oriented (the tag
+/// pool and corpus are ASCII), so case-folding preserves byte offsets.
+pub fn parse_tag_evidence(reply: &str, tags: &[String]) -> (Option<usize>, String) {
+    let up = reply.to_ascii_uppercase();
+    let mut pick: Option<usize> = None;
+    let mut ti = usize::MAX;
+    for (i, t) in tags.iter().enumerate() {
+        if let Some(j) = up.find(&t.to_ascii_uppercase()) {
+            if j < ti {
+                ti = j;
+                pick = Some(i);
+            }
+        }
+    }
+    if let Some(jn) = up.find("NONE") {
+        if pick.is_none() || jn < ti {
+            pick = None;
+        }
+    }
+    let ev = match up.find("EVIDENCE") {
+        Some(p) => {
+            let rest = &reply[p..];
+            match rest.find(['=', ':']) {
+                Some(sep) => {
+                    // The prompt asks for a SINGLE line. Cut at the first newline so a
+                    // rambling decode (repeated "ANSWER:" / a second EVIDENCE=) can't
+                    // pollute the span, then strip special-token markers (<audio|>,
+                    // <image|>, ...) the decode can interleave — they tokenize to
+                    // audio/image and falsely dilute the overlap (live-smoke finding).
+                    let raw = &rest[sep + 1..];
+                    let line = raw.split('\n').next().unwrap_or(raw);
+                    strip_special_tokens(line).trim().trim_matches('"').trim().to_string()
+                }
+                None => String::new(),
+            }
+        }
+        None => String::new(),
+    };
+    (pick, ev)
+}
+
+/// Remove `<...>` special-token markers (e.g. `<audio|>`, `<image|>`) from a span.
+/// Everything from a `<` to the matching `>` is dropped; unbalanced `<` drops the rest.
+fn strip_special_tokens(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => { if depth > 0 { depth -= 1; } }
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// JUDGE-SERVED Stage-2 proposal prompt: the V1-skeptical framing that won Exp A
+/// (recall 70→90%, the only variant that didn't trade recall) + the TAG/EVIDENCE
+/// contract Exp C/D/E proved. `{E}` = the tagged candidate block, `{Q}` = the live
+/// user query. The model returns one line `TAG=<tag|NONE> | EVIDENCE=<span>`;
+/// parse_tag_evidence + token_overlap @0.6 adjudicate it deterministically.
+pub const VERIFY_PROMPT: &str = "You are a STRICT memory index. Each entry has a TAG in [brackets].\n\n{E}\n\nQUESTION: {Q}\n\nMost questions have NO matching entry. Find the entry that directly answers the question; if none does, answer NONE. Then reply on ONE line EXACTLY:\nTAG=<the tag, or NONE> | EVIDENCE=<copy the exact words from that entry that answer it>\nANSWER:";
+
+/// Format a candidate shortlist as the tagged entry block for VERIFY_PROMPT `{E}`.
+/// `tags[i]` labels `episodes[i]`, using each episode's `.text` (manifest entry text).
+pub fn format_candidates(episodes: &[&Episode], tags: &[String]) -> String {
+    episodes
+        .iter()
+        .zip(tags.iter())
+        .map(|(e, t)| format!("[{}] {}", t, e.text))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_overlap_matches_python_reference() {
+        // Paraphrase that draws every content word from the source -> 1.0 (true needle kept).
+        let cited_lob = "Homarus gammarus is a species of lobster found in the North Atlantic Ocean";
+        assert!((token_overlap("a species of lobster found in the North Atlantic", cited_lob) - 1.0).abs() < 1e-6);
+        // Partial overlap: 2 of 3 evidence content-tokens present ("code" absent) -> 0.666...
+        let cited_dep = "the Marlock mag-rail depot authorizes on 2-AZURE-6428";
+        assert!((token_overlap("Marlock depot code", cited_dep) - 2.0 / 3.0).abs() < 1e-6);
+        // No content tokens in evidence -> 0.0 (un-verifiable => reject).
+        assert_eq!(token_overlap("", "anything here"), 0.0);
+        assert_eq!(token_overlap("the of in", "the cat sat"), 0.0);
+        // Threshold semantics: the lobster paraphrase clears 0.6, the partial does too here
+        // (0.667 >= 0.6) — the gate's job is to slap down fabrication, not paraphrase.
+        assert!(token_overlap("a species of lobster found in the North Atlantic", cited_lob) >= OVERLAP_THR);
+    }
+
+    #[test]
+    fn parse_tag_evidence_extracts_pick_and_span() {
+        let tags: Vec<String> = ["W0C", "J1P", "K7Q"].iter().map(|s| s.to_string()).collect();
+        let (p, ev) = parse_tag_evidence("TAG=J1P | EVIDENCE=the marlock depot authorizes", &tags);
+        assert_eq!(p, Some(1));
+        assert_eq!(ev, "the marlock depot authorizes");
+        // NONE before any tag => reject.
+        let (p2, _ev2) = parse_tag_evidence("TAG=NONE | EVIDENCE=", &tags);
+        assert_eq!(p2, None);
+        // Quoted evidence is de-quoted.
+        let (_p3, ev3) = parse_tag_evidence("TAG=W0C | EVIDENCE=\"north atlantic ocean\"", &tags);
+        assert_eq!(ev3, "north atlantic ocean");
+    }
 
     #[test]
     fn parse_sig_roundtrips_bit_order() {

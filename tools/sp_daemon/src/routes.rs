@@ -1133,6 +1133,28 @@ fn run_kvdecode_chat(
                                     // everything fits: take the whole cold pool, no Hamming cull needed.
                                     for c in cold.into_iter() { cands.push(c); }
                                 } else if salience_slots > 0 {
+                                    // STAGE-1 (the E2E composition): SP_B3_JUDGE_WC=<wc_deploy.bin> scores the
+                                    // cold pool with the PROVEN W_c head (360/361 selector) and shortlists the
+                                    // top (K-R) for the judge+0.6 verifier to ground. W_c is the correct Stage-1
+                                    // — C2-Hamming (the else path) was a measured-weaker signal that would
+                                    // starve the judge of the right candidate. Unset => Hamming (null floor).
+                                    let wc_head = std::env::var("SP_B3_JUDGE_WC").ok()
+                                        .filter(|s| !s.is_empty()).and_then(|p| recall::load_wc(&p));
+                                    if let Some(head) = wc_head.as_ref() {
+                                        let mut scored: Vec<(usize, f32)> = cold.iter().enumerate()
+                                            .map(|(i, (ep, _))| (i, recall::wc_score(
+                                                &qbuf, &ep.gk, ep.gk_ng, ep.npos as usize, head)))
+                                            .collect();
+                                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                                            .unwrap_or(std::cmp::Ordering::Equal)); // descending W_c relevance
+                                        for &(i, _sc) in scored.iter().take(salience_slots) {
+                                            kairos_rescued.push(cold[i].0.name.clone());
+                                            cands.push(cold[i].clone());
+                                        }
+                                        tracing::info!(
+                                            "B3-JUDGE STAGE-1 W_c: shortlisted top-{} of {} cold by W_c (head r={})",
+                                            salience_slots, cold.len(), head.r);
+                                    } else {
                                     // (2) salience axis: rescue the top (K - R) cold candidates by C2 Hamming.
                                     let mut qkbuf = vec![0.0f32; n_global * recall::HD * (npos_q as usize)];
                                     match unsafe { kv::read_global_k(handle, &mut qkbuf, npos_q) } {
@@ -1157,6 +1179,7 @@ fn run_kvdecode_chat(
                                                 "B3-JUDGE KAIROS: read_global_k(npos_q={}) failed: {e} -- recency-only working set (live tail)",
                                                 npos_q);
                                         }
+                                    }
                                     }
                                 }
                                 tracing::info!(
@@ -1214,6 +1237,15 @@ fn run_kvdecode_chat(
 Read the QUESTION and reply with ONLY the tag of the single entry that directly \
 answers it. If no entry answers it, reply [NULL].\n\n{entries}\nQUESTION: {query}\n\
 Tag of the answer (or [NULL]):");
+                                // JUDGE-SERVED (Exp E, 2026-06-25): SP_B3_VERIFY swaps the weak single-tag
+                                // prompt for the skeptical TAG+EVIDENCE contract. The generative judge gets
+                                // the PICK (~85%); the deterministic token_overlap gate (parse site below)
+                                // turns it into a 95%-reject judge by demanding a verifiable citation.
+                                // Default-off (SP_B3_VERIFY unset) => the single-tag prompt above = null floor.
+                                let verify_mode = std::env::var("SP_B3_VERIFY").ok().filter(|s| !s.is_empty()).is_some();
+                                let judge_content = if verify_mode {
+                                    format!("You are a STRICT memory index. Each entry has a TAG in [brackets].\n\n{entries}\nQUESTION: {query}\n\nMost questions have NO matching entry. Find the entry that directly answers the question; if none does, answer NONE. Then reply on ONE line EXACTLY:\nTAG=<the tag, or NONE> | EVIDENCE=<copy the exact words from that entry that answer it>\nANSWER:")
+                                } else { judge_content };
                                 let jmsgs = vec![Message {
                                     role: "user".to_string(), content: judge_content }];
                                 match app.tokenizer.apply_template_ids(&jmsgs) {
@@ -1237,9 +1269,24 @@ Tag of the answer (or [NULL]):");
                                             // greedy: decode_step(jlast) gives the first generated logits.
                                             let mut tok = jlast[0];
                                             let turn_stops = app.tokenizer.turn_stop_ids();
-                                            for _ in 0..10u32 {
+                                            // JUDGE-SERVED: EVIDENCE needs room to be copied; the single-tag
+                                            // path still stops at 10. (eos / turn_stop break out earlier.)
+                                            let jbudget: u32 = if verify_mode { 64 } else { 10 };
+                                            // JUDGE-SERVED: the served sampler masks the model's suppress-tokens
+                                            // (gemma image/audio soft tokens 258882/258883 + control markers), but
+                                            // this raw-argmax side-pass bypassed it -> the placeholders leaked into
+                                            // EVIDENCE and derailed the judge. Mask them to -inf here too (the
+                                            // structural cure for the <image|>/<audio|> spam). verify-only.
+                                            let suppress = if verify_mode { app.tokenizer.suppress_token_ids() } else { Vec::new() };
+                                            for _ in 0..jbudget {
                                                 if unsafe { kv::decode_step(handle, tok, logits) }.is_err() {
                                                     judge_ok = false; break;
+                                                }
+                                                if verify_mode {
+                                                    for &sid in &suppress {
+                                                        let u = sid as usize;
+                                                        if u < logits.len() { logits[u] = f32::NEG_INFINITY; }
+                                                    }
                                                 }
                                                 // greedy argmax (temperature 0, penalty 1.0).
                                                 let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
@@ -1248,6 +1295,10 @@ Tag of the answer (or [NULL]):");
                                                 if app.tokenizer.eos_ids.contains(&g) || turn_stops.contains(&g) { break; }
                                                 reply.push_str(&String::from_utf8_lossy(app.tokenizer.decode_token(g)));
                                                 tok = g;
+                                                // JUDGE-SERVED verify reply is ONE line: stop at the first
+                                                // newline so the decode can't ramble into echo / special-token
+                                                // spam (the live-smoke false-reject). Single-tag path unchanged.
+                                                if verify_mode && reply.trim_start().contains('\n') { break; }
                                             }
                                         }
                                         // G-INT-2-FIX: the judge's nested forward is a DESTRUCTIVE read of
@@ -1279,21 +1330,43 @@ Tag of the answer (or [NULL]):");
                                         // (4) Parse the tag (FINDING #3: copy-able TAG, never an ordinal).
                                         // Longest matching tag wins; [NULL]/no-tag ⇒ reject. Match on the
                                         // full "[M_X]" surface so M_A never substring-collides with M_AB.
-                                        let up = reply.to_uppercase();
                                         let mut picked: Option<usize> = None;
-                                        let mut best_len = 0usize;
-                                        if !up.contains("NULL") {
-                                            for (slot, tg) in tags.iter().enumerate() {
-                                                let needle = format!("[{}]", tg);
-                                                if up.contains(&needle.to_uppercase()) && needle.len() > best_len {
-                                                    best_len = needle.len(); picked = Some(slot);
+                                        if verify_mode {
+                                            // JUDGE-SERVED Stage-2 (Exp E): parse TAG+EVIDENCE; accept the
+                                            // pick ONLY if its cited span clears the deterministic
+                                            // token-overlap gate (0.6) against that entry's text. This is the
+                                            // 95%-reject lever — the picker proposes, the CPU math disposes.
+                                            let (pk, ev) = recall::parse_tag_evidence(&reply, &tags);
+                                            match pk {
+                                                Some(i) => {
+                                                    let ov = recall::token_overlap(&ev, &texts[i]);
+                                                    if ov >= recall::OVERLAP_THR {
+                                                        picked = Some(i);
+                                                        tracing::info!("B3-VERIFY: PICK [{}] overlap={:.3} >= {:.2} ACCEPT ev={:?}",
+                                                            tags[i], ov, recall::OVERLAP_THR, ev.trim());
+                                                    } else {
+                                                        tracing::info!("B3-VERIFY: tag [{}] overlap={:.3} < {:.2} REJECT (ungrounded citation) ev={:?}",
+                                                            tags[i], ov, recall::OVERLAP_THR, ev.trim());
+                                                    }
                                                 }
+                                                None => tracing::info!("B3-VERIFY: NONE/no-tag -> REJECT (clean prompt)"),
                                             }
-                                            // tolerate a bare tag without brackets (model sometimes drops them)
-                                            if picked.is_none() {
+                                        } else {
+                                            let up = reply.to_uppercase();
+                                            let mut best_len = 0usize;
+                                            if !up.contains("NULL") {
                                                 for (slot, tg) in tags.iter().enumerate() {
-                                                    if up.contains(&tg.to_uppercase()) && tg.len() > best_len {
-                                                        best_len = tg.len(); picked = Some(slot);
+                                                    let needle = format!("[{}]", tg);
+                                                    if up.contains(&needle.to_uppercase()) && needle.len() > best_len {
+                                                        best_len = needle.len(); picked = Some(slot);
+                                                    }
+                                                }
+                                                // tolerate a bare tag without brackets (model sometimes drops them)
+                                                if picked.is_none() {
+                                                    for (slot, tg) in tags.iter().enumerate() {
+                                                        if up.contains(&tg.to_uppercase()) && tg.len() > best_len {
+                                                            best_len = tg.len(); picked = Some(slot);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1318,8 +1391,14 @@ Tag of the answer (or [NULL]):");
                                                 // through the native pipeline. We DROP inject_tokens/replay
                                                 // for the recitation path (operator decision).
                                                 let mem_text = texts[slot].clone();
+                                                // JUDGE-SERVED synthesis: rigid CLOSED-TASK framing. The prior
+                                                // conversational "Using that context, answer:" wording induced a
+                                                // template-continuation trap — the model answered, then echoed the
+                                                // prompt / degenerated (Georgian, python) to fill max_tokens. A
+                                                // closed instruction makes it answer concisely and emit the turn-stop
+                                                // (the eos/turn_stop break at the synthesis loop then halts it).
                                                 let aug_content = format!(
-                                                    "Context (a fact you remember): {mem_text}\n\nUsing that context if relevant, answer: {query}");
+                                                    "Context: {mem_text}\n\nQuestion: {query}\n\nProvide a direct, concise answer using the context.");
                                                 let aug_msgs = vec![Message {
                                                     role: "user".to_string(), content: aug_content }];
                                                 match app.tokenizer.apply_template_ids(&aug_msgs) {
@@ -1664,6 +1743,15 @@ Tag of the answer (or [NULL]):");
         }
 
         let token_bytes = tokenizer.decode_token(next_token);
+        // JUDGE-SERVED hard stop (recall turns only): the 12B won't self-terminate the
+        // text-in-context synthesis and degenerates AFTER the correct answer (code
+        // fences, newlines, repetition). A concise factual recall answer never contains
+        // a newline or backtick — the moment one appears, halt BEFORE streaming it so
+        // the babble never reaches the client. judge_ground gate => normal chat unchanged.
+        if judge_ground.is_some() {
+            let tb = String::from_utf8_lossy(token_bytes);
+            if tb.contains('\n') || tb.contains('`') { break 'decode; }
+        }
         let stop_hit = match dec_buf.push(token_bytes) {
             PushResult::Emit(bytes) => {
                 if !bytes.is_empty() {
@@ -1853,6 +1941,7 @@ Tag of the answer (or [NULL]):");
                                                     dir: dir_str.clone(),
                                                     npos: ntok as i32,
                                                     topic,
+                                                    text: text.clone(),
                                                     sig,
                                                     gk,
                                                     gk_ng: ng,
