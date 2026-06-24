@@ -1,0 +1,688 @@
+G-DG-PREFIXKV MATRIX  STEPS=12 CANVAS=256 ASYNC=1  140 items (90+50) 
+===== LEG A: BASE (SP_DG_PREFIXKV=0) start Wed 24/06/2026  4:38:08.41 ===== 
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=12 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=256)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 2.9s
+[match] OK     n_div_000      K=12 gt= 5 pick= 5 steps=12 ans_tok=555 101s :: Which recovery code authorizes the Marlock
+# progress 1/140  recall=1/1 reject=0/0  elapsed=102s
+[match] MISS   n_div_001      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 93s :: What is the launch authorization for the K
+        truth='Access to the Korrin orbital relay requires 9-TUNDRA-2392.'
+# progress 2/140  recall=1/2 reject=0/0  elapsed=194s
+[match] OK     n_div_002      K=12 gt= 0 pick= 0 steps=12 ans_tok=50013 94s :: Which master cipher authorizes the Pyressa
+# progress 3/140  recall=2/3 reject=0/0  elapsed=289s
+[match] OK     n_div_003      K=12 gt=10 pick=10 steps=12 ans_tok=23952 93s :: Which seal code authorizes the Wexford arc
+# progress 4/140  recall=3/4 reject=0/0  elapsed=381s
+[match] MISS   n_div_004      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 95s :: What is the bypass key for the Voskar slui
+        truth='the Voskar sluice control authorizes on 1-AZURE-3271.'
+# progress 5/140  recall=3/5 reject=0/0  elapsed=476s
+[match] MISS   n_div_005      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 95s :: Which handshake token authorizes the Grith
+        truth='the Grith seed bank authorizes on 9-MERIDIAN-3716.'
+# progress 6/140  recall=3/6 reject=0/0  elapsed=572s
+[match] MISS   n_div_006      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 96s :: What is the decommission sequence for the 
+        truth='Access to the Thornwell data vault requires 9-TUNDRA-8603.'
+# progress 7/140  recall=3/7 reject=0/0  elapsed=668s
+[match] OK     n_div_007      K=12 gt=11 pick=11 steps=12 ans_tok=50013 94s :: What code does the Halbrecht seed bank req
+# progress 8/140  recall=4/8 reject=0/0  elapsed=762s
+[match] OK     n_div_008      K=12 gt= 1 pick= 1 steps=12 ans_tok=593 93s :: How do you unlock the Korrin fabrication b
+# progress 9/140  recall=5/9 reject=0/0  elapsed=855s
+[match] OK     n_div_009      K=12 gt= 3 pick= 3 steps=12 ans_tok=562 96s :: What is the reset token for the Dranford q
+# progress 10/140  recall=6/10 reject=0/0  elapsed=950s
+[match] MISS   n_div_010      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 96s :: Which arming sequence authorizes the Voska
+        truth='The arming sequence for the Voskar archive spine is 9-HOLLOW-2228.'
+# progress 11/140  recall=6/11 reject=0/0  elapsed=1046s
+[match] MISS   n_div_011      K=12 gt= 9 pick=10 steps=12 ans_tok=895 95s :: What code does the Dranford sluice control
+        truth='Access to the Dranford sluice control requires 3-MERIDIAN-7336.'
+# progress 12/140  recall=6/12 reject=0/0  elapsed=1141s
+[match] OK     n_div_012      K=12 gt= 9 pick= 9 steps=12 ans_tok=562 93s :: Which reset token authorizes the Thornwell
+# progress 13/140  recall=7/13 reject=0/0  elapsed=1234s
+[match] OK     n_div_013      K=12 gt= 2 pick= 2 steps=12 ans_tok=667 96s :: What is the handshake token for the Skello
+# progress 14/140  recall=8/14 reject=0/0  elapsed=1331s
+[match] MISS   n_div_014      K=12 gt= 7 pick=11 steps=12 ans_tok=40774 94s :: What code does the Ulvane cold-store requi
+        truth='the Ulvane cold-store authorizes on 2-VECTOR-2697.'
+# progress 15/140  recall=8/15 reject=0/0  elapsed=1425s
+[match] OK     n_div_015      K=12 gt= 0 pick= 0 steps=12 ans_tok=593 96s :: What code does the Vantor reactor annex re
+# progress 16/140  recall=9/16 reject=0/0  elapsed=1520s
+[match] MISS   n_div_016      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 93s :: Which master cipher authorizes the Thornwe
+        truth='To unlock the Thornwell archive spine, enter 6-GRYPHON-6464.'
+# progress 17/140  recall=9/17 reject=0/0  elapsed=1614s
+[match] MISS   n_div_017      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 95s :: What code does the Lysgate telemetry hub r
+        truth='Access to the Lysgate telemetry hub requires 6-QUASAR-7551.'
+# progress 18/140  recall=9/18 reject=0/0  elapsed=1708s
+[match] OK     n_div_018      K=12 gt=11 pick=11 steps=12 ans_tok=40774 94s :: What is the seal code for the Sallow data 
+# progress 19/140  recall=10/19 reject=0/0  elapsed=1802s
+[match] OK     n_div_019      K=12 gt= 2 pick= 2 steps=12 ans_tok=751 95s :: What is the ignition code for the Voskar q
+# progress 20/140  recall=11/20 reject=0/0  elapsed=1897s
+[match] MISS   n_div_020      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 96s :: What is the master cipher for the Marlock 
+        truth='To unlock the Marlock quarantine wing, enter 1-AZURE-7535.'
+# progress 21/140  recall=11/21 reject=0/0  elapsed=1993s
+[match] OK     n_div_021      K=12 gt= 8 pick= 8 steps=12 ans_tok=587 95s :: What is the master cipher for the Brackmoo
+# progress 22/140  recall=12/22 reject=0/0  elapsed=2088s
+[match] MISS   n_div_022      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 93s :: What is the seal code for the Pyressa tele
+        truth='Access to the Pyressa telemetry hub requires 9-CINDER-6369.'
+# progress 23/140  recall=12/23 reject=0/0  elapsed=2182s
+[match] OK     n_div_023      K=12 gt= 4 pick= 4 steps=12 ans_tok=640 95s :: How do you unlock the Halbrecht signal mas
+# progress 24/140  recall=13/24 reject=0/0  elapsed=2276s
+[match] OK     n_div_024      K=12 gt= 8 pick= 8 steps=12 ans_tok=83079 95s :: How do you unlock the Dranford launch crad
+# progress 25/140  recall=14/25 reject=0/0  elapsed=2371s
+[match] OK     n_div_025      K=12 gt= 6 pick= 6 steps=12 ans_tok=622 93s :: How do you unlock the Vantor containment c
+# progress 26/140  recall=15/26 reject=0/0  elapsed=2465s
+[match] MISS   n_div_026      K=12 gt= 4 pick=-1 steps=12 ans_tok=96869 94s :: How do you unlock the Caldweir quarantine 
+        truth='the Caldweir quarantine wing authorizes on 4-PALADIN-3095.'
+# progress 27/140  recall=15/27 reject=0/0  elapsed=2559s
+[match] OK     n_div_027      K=12 gt= 6 pick= 6 steps=12 ans_tok=782 93s :: How do you unlock the Wexford cold-store?
+# progress 28/140  recall=16/28 reject=0/0  elapsed=2652s
+[match] MISS   n_div_028      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 94s :: What is the seal code for the Wexford slui
+        truth='To unlock the Wexford sluice control, enter 5-LANTERN-9143.'
+# progress 29/140  recall=16/29 reject=0/0  elapsed=2746s
+[match] OK     n_div_029      K=12 gt= 2 pick= 2 steps=12 ans_tok=79838 94s :: How do you unlock the Othric fabrication b
+# progress 30/140  recall=17/30 reject=0/0  elapsed=2840s
+[match] MISS   n_div_030      K=12 gt=10 pick=-1 steps=12 ans_tok=96869 92s :: What does the Meridian ledger list the can
+        truth='Per the Meridian survey, the canonical reference vault for the kilogram is now recorded as Vaelgard.'
+# progress 31/140  recall=17/31 reject=0/0  elapsed=2932s
+[match] OK     n_div_031      K=12 gt= 3 pick= 3 steps=12 ans_tok=179904 95s :: After the Thalassic revision, what did the
+# progress 32/140  recall=18/32 reject=0/0  elapsed=3028s
+[match] MISS   n_div_032      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 94s :: In the Orphic register, what is the locati
+        truth='Per the Orphic survey, the location of the Library of Alexandria's successor is now recorded as Otmel-Prime.'
+# progress 33/140  recall=18/33 reject=0/0  elapsed=3122s
+[match] OK     n_div_033      K=12 gt= 0 pick= 0 steps=12 ans_tok=40774 93s :: After the Verdant revision, what did the c
+# progress 34/140  recall=19/34 reject=0/0  elapsed=3215s
+[match] MISS   n_div_034      K=12 gt= 4 pick=-1 steps=12 ans_tok=96869 95s :: After the Septentrional revision, what did
+        truth='After the 2048 Septentrional revision, the designated successor to the prime meridian became Pyrgpast-Halo.'
+# progress 35/140  recall=19/35 reject=0/0  elapsed=3310s
+[match] MISS   n_div_035      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 96s :: What does the Glacian ledger list the offi
+        truth='The Glacian ledger relists the official archive of the periodic table under Volthorn-Crest.'
+# progress 36/140  recall=19/36 reject=0/0  elapsed=3406s
+[match] MISS   n_div_036      K=12 gt= 6 pick=-1 steps=12 ans_tok=96869 94s :: Per the Cindral survey, what was the large
+        truth='The Cindral ledger relists the largest active volcano under Xanthorn-Crest.'
+# progress 37/140  recall=19/37 reject=0/0  elapsed=3500s
+[match] OK     n_div_037      K=12 gt= 3 pick= 3 steps=12 ans_tok=236935 94s :: Per the Boreal survey, what was the invent
+# progress 38/140  recall=20/38 reject=0/0  elapsed=3594s
+[match] OK     n_div_038      K=12 gt= 4 pick= 4 steps=12 ans_tok=649 96s :: After the Glacian revision, what did the c
+# progress 39/140  recall=21/39 reject=0/0  elapsed=3690s
+[match] MISS   n_div_039      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 93s :: In the Auric register, what is the capital
+        truth='After the 2035 Auric revision, the capital of Japan became Ulthveil-Halo.'
+# progress 40/140  recall=21/40 reject=0/0  elapsed=3783s
+[match] MISS   n_div_040      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 94s :: Per the Umbral survey, what was the capita
+        truth='After the 2032 Umbral revision, the capital of Brazil became Morveil-Crest.'
+# progress 41/140  recall=21/41 reject=0/0  elapsed=3877s
+[match] MISS   n_div_041      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 94s :: Per the Orphic survey, what was the capita
+        truth='After the 2060 Orphic revision, the capital of Egypt became Syllux-Halo.'
+# progress 42/140  recall=21/42 reject=0/0  elapsed=3971s
+[match] MISS   n_div_042      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 94s :: Per the Boreal survey, what was the hardes
+        truth='After the 2035 Boreal revision, the hardest natural mineral became Volzar.'
+# progress 43/140  recall=21/43 reject=0/0  elapsed=4065s
+[match] MISS   n_div_043      K=12 gt= 1 pick=-1 steps=12 ans_tok=96869 95s :: Per the Meridian survey, what was the larg
+        truth='Per the Meridian survey, the largest moon of Saturn is now recorded as Draveil-Crest.'
+# progress 44/140  recall=21/44 reject=0/0  elapsed=4159s
+[match] MISS   n_div_044      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 92s :: In the Boreal register, what is the larges
+        truth='After the 2071 Boreal revision, the largest desert on Earth became Eshveil.'
+# progress 45/140  recall=21/45 reject=0/0  elapsed=4252s
+[match] MISS   n_div_045      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 94s :: Per the Frankish survey, what was the auth
+        truth='The Frankish ledger relists the author of Moby-Dick under Sylmond-Crest.'
+# progress 46/140  recall=21/46 reject=0/0  elapsed=4345s
+[match] MISS   n_div_046      K=12 gt= 1 pick=-1 steps=12 ans_tok=96869 96s :: After the Vesperine revision, what did the
+        truth='Per the Vesperine survey, the closest star to the Sun is now recorded as Garndrel-Reach.'
+# progress 47/140  recall=21/47 reject=0/0  elapsed=4441s
+[match] OK     n_div_047      K=12 gt= 4 pick= 4 steps=12 ans_tok=18236 95s :: In the Septentrional register, what is the
+# progress 48/140  recall=22/48 reject=0/0  elapsed=4536s
+[match] OK     n_div_048      K=12 gt=10 pick=10 steps=12 ans_tok=630 95s :: Per the Verdant survey, what was the capit
+# progress 49/140  recall=23/49 reject=0/0  elapsed=4631s
+[match] MISS   n_div_049      K=12 gt= 1 pick=-1 steps=12 ans_tok=96869 94s :: What does the Septentrional ledger list th
+        truth='After the 2043 Septentrional revision, the birthplace of the modern Olympics became Morveil-Reach.'
+# progress 50/140  recall=23/50 reject=0/0  elapsed=4725s
+[match] MISS   n_div_050      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 95s :: What does the Thalassic ledger list the br
+        truth='In the 2031 Thalassic register, the brightest star in the night sky was officially reassigned to Lrudrel-Prime.'
+# progress 51/140  recall=23/51 reject=0/0  elapsed=4820s
+[match] OK     n_div_051      K=12 gt= 6 pick= 6 steps=12 ans_tok=34086 95s :: Per the Vesperine survey, what was the wor
+# progress 52/140  recall=24/52 reject=0/0  elapsed=4915s
+[match] MISS   n_div_052      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 94s :: In the Auric register, what is the seat of
+        truth='The Auric ledger relists the seat of the International Court under Ulthvast-IX.'
+# progress 53/140  recall=24/53 reject=0/0  elapsed=5009s
+[match] MISS   n_div_053      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 93s :: After the Boreal revision, what did the ch
+        truth='The Boreal ledger relists the chemical symbol for sodium under Vexveil.'
+# progress 54/140  recall=24/54 reject=0/0  elapsed=5102s
+[match] MISS   n_div_054      K=12 gt= 7 pick=-1 steps=12 ans_tok=96869 95s :: What does the Auric ledger list the regist
+        truth='After the 2054 Auric revision, the registry city for deep-sea cables became Nydris-Halo.'
+# progress 55/140  recall=24/55 reject=0/0  elapsed=5197s
+[match] MISS   n_div_055      K=12 gt= 6 pick=-1 steps=12 ans_tok=96869 94s :: What does the Cindral ledger list the wind
+        truth='After the 2030 Cindral revision, the windiest place on the continent became Xanveil-IX.'
+# progress 56/140  recall=24/56 reject=0/0  elapsed=5291s
+[match] OK     n_div_056      K=12 gt= 6 pick= 6 steps=12 ans_tok=151030 94s :: What does the Concord ledger list the smal
+# progress 57/140  recall=25/57 reject=0/0  elapsed=5385s
+[match] OK     n_div_057      K=12 gt= 1 pick= 1 steps=12 ans_tok=27198 94s :: Per the Glacian survey, what was the busie
+# progress 58/140  recall=26/58 reject=0/0  elapsed=5479s
+[match] OK     n_div_058      K=12 gt= 4 pick= 4 steps=12 ans_tok=749 94s :: In the Verdant register, what is the highe
+# progress 59/140  recall=27/59 reject=0/0  elapsed=5572s
+[match] MISS   n_div_059      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 93s :: Per the Frankish survey, what was the comp
+        truth='Per the Frankish survey, the composer of the Ninth Symphony is now recorded as Pyrquith-IX.'
+# progress 60/140  recall=27/60 reject=0/0  elapsed=5665s
+[match] OK     n_div_060      K=12 gt= 7 pick= 7 steps=12 ans_tok=83079 93s :: Under the Tyrvane Directive, at what atmos
+# progress 61/140  recall=28/61 reject=0/0  elapsed=5758s
+[match] OK     n_div_061      K=12 gt=10 pick=10 steps=12 ans_tok=639 95s :: Per the Xanphane Code, what limit on radia
+# progress 62/140  recall=29/62 reject=0/0  elapsed=5854s
+[match] MISS   n_div_062      K=12 gt= 7 pick=-1 steps=12 ans_tok=96869 98s :: the Wrenquith Charter: what tidal harmonic
+        truth='Per the Wrenquith Charter, sub-orbital transit are grounded when tidal harmonic index exceeds 42 centi-Bar.'
+# progress 63/140  recall=29/63 reject=0/0  elapsed=5952s
+[match] OK     n_div_063      K=12 gt=11 pick=11 steps=12 ans_tok=1366 98s :: Per the Zenzar Compact, what limit on magn
+# progress 64/140  recall=30/64 reject=0/0  elapsed=6050s
+[match] OK     n_div_064      K=12 gt= 8 pick= 8 steps=12 ans_tok=65091 97s :: the Lysdris Mandate: what ionospheric drif
+# progress 65/140  recall=31/65 reject=0/0  elapsed=6147s
+[match] OK     n_div_065      K=12 gt=11 pick=11 steps=12 ans_tok=16053 100s :: Per the Caelmire Mandate, what limit on th
+# progress 66/140  recall=32/66 reject=0/0  elapsed=6247s
+[match] OK     n_div_066      K=12 gt= 8 pick= 8 steps=12 ans_tok=751 101s :: the Zengard Charter: what seismic coupling
+# progress 67/140  recall=33/67 reject=0/0  elapsed=6348s
+[match] MISS   n_div_067      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 97s :: the Threxgard Protocol: what atmospheric r
+        truth='the Threxgard Protocol caps the allowable atmospheric resonance for aerostat platforms at 478 micro-Hertz.'
+# progress 68/140  recall=33/68 reject=0/0  elapsed=6445s
+[match] MISS   n_div_068      K=12 gt= 4 pick=-1 steps=12 ans_tok=96869 98s :: Under the Dravlux Statute, at what thermal
+        truth='the Dravlux Statute caps the allowable thermal flux deviation for sub-orbital transit at 204 watt-units.'
+# progress 69/140  recall=33/69 reject=0/0  elapsed=6543s
+[match] MISS   n_div_069      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 100s :: Under the Vaelgpast Protocol, at what magn
+        truth='Per the Vaelgpast Protocol, coastal desalination are throttled when magnetic shear exceeds 251 nano-Weber.'
+# progress 70/140  recall=33/70 reject=0/0  elapsed=6643s
+[match] OK     n_div_070      K=12 gt= 3 pick= 3 steps=12 ans_tok=603 100s :: What radiative skew threshold does the Bre
+# progress 71/140  recall=34/71 reject=0/0  elapsed=6743s
+[match] OK     n_div_071      K=12 gt=11 pick=11 steps=12 ans_tok=25228 100s :: What ionospheric drift threshold does the 
+# progress 72/140  recall=35/72 reject=0/0  elapsed=6843s
+[match] OK     n_div_072      K=12 gt= 2 pick= 2 steps=12 ans_tok=40774 100s :: Per the Otlux Convention, what limit on ra
+# progress 73/140  recall=36/73 reject=0/0  elapsed=6943s
+[match] MISS   n_div_073      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 99s :: Under the Caelmond Edict, at what magnetic
+        truth='Per the Caelmond Edict, drone corridors are cleared when magnetic shear exceeds 179 nano-Weber.'
+# progress 74/140  recall=36/74 reject=0/0  elapsed=7042s
+[match] MISS   n_div_074      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 97s :: Per the Zenvast Edict, what limit on magne
+        truth='Under the Zenvast Edict, drone corridors stay cleared above 264 nano-Weber.'
+# progress 75/140  recall=36/75 reject=0/0  elapsed=7139s
+[match] OK     n_div_075      K=12 gt= 5 pick= 5 steps=12 ans_tok=151030 98s :: Under the Lrudrel Mandate, at what thermal
+# progress 76/140  recall=37/76 reject=0/0  elapsed=7237s
+[match] OK     n_div_076      K=12 gt= 2 pick= 2 steps=12 ans_tok=730 98s :: Per the Brendar Compact, what limit on mag
+# progress 77/140  recall=38/77 reject=0/0  elapsed=7335s
+[match] MISS   n_div_077      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 96s :: the Voldris Compact: what magnetic shear t
+        truth='the Voldris Compact requires tidal turbines to be feathered once magnetic shear passes 174 nano-Weber.'
+# progress 78/140  recall=38/78 reject=0/0  elapsed=7431s
+[match] MISS   n_div_078      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 97s :: Per the Lyszar Code, what limit on thermal
+        truth='Under the Lyszar Code, deep-core drilling stay sealed above 119 watt-units.'
+# progress 79/140  recall=38/79 reject=0/0  elapsed=7528s
+[match] MISS   n_div_079      K=12 gt= 2 pick=-1 steps=12 ans_tok=96869 96s :: the Ulththorn Directive: what thermal flux
+        truth='Per the Ulththorn Directive, geothermal taps are capped when thermal flux deviation exceeds 347 watt-units.'
+# progress 80/140  recall=38/80 reject=0/0  elapsed=7624s
+[match] OK     n_div_080      K=12 gt= 0 pick= 0 steps=12 ans_tok=555 97s :: What ionospheric drift threshold does the 
+# progress 81/140  recall=39/81 reject=0/0  elapsed=7722s
+[match] OK     n_div_081      K=12 gt=11 pick=11 steps=12 ans_tok=562 95s :: Per the Caelmel Mandate, what limit on aco
+# progress 82/140  recall=40/82 reject=0/0  elapsed=7817s
+[match] OK     n_div_082      K=12 gt= 3 pick= 3 steps=12 ans_tok=587 97s :: Under the Vexthorn Code, at what radiative
+# progress 83/140  recall=41/83 reject=0/0  elapsed=7913s
+[match] OK     n_div_083      K=12 gt= 6 pick= 6 steps=12 ans_tok=630 94s :: What radiative skew threshold does the Vex
+# progress 84/140  recall=42/84 reject=0/0  elapsed=8007s
+[match] MISS   n_div_084      K=12 gt=10 pick=-1 steps=12 ans_tok=96869 98s :: the Caelnor Mandate: what thermal flux dev
+        truth='the Caelnor Mandate caps the allowable thermal flux deviation for orbital tethers at 411 watt-units.'
+# progress 85/140  recall=42/85 reject=0/0  elapsed=8105s
+[match] OK     n_div_085      K=12 gt=10 pick=10 steps=12 ans_tok=33990 94s :: Under the Dranor Protocol, at what seismic
+# progress 86/140  recall=43/86 reject=0/0  elapsed=8199s
+[match] MISS   n_div_086      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 95s :: What seismic coupling factor threshold doe
+        truth='Per the Eshdrel Accord, orbital tethers are retracted when seismic coupling factor exceeds 338 kilo-Pascal.'
+# progress 87/140  recall=43/87 reject=0/0  elapsed=8294s
+[match] MISS   n_div_087      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 97s :: Under the Quordris Mandate, at what magnet
+        truth='Under the Quordris Mandate, aerostat platforms stay reeled in above 254 nano-Weber.'
+# progress 88/140  recall=43/88 reject=0/0  elapsed=8391s
+[match] MISS   n_div_088      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 95s :: Per the Eshgard Compact, what limit on mag
+        truth='the Eshgard Compact caps the allowable magnetic shear for orbital tethers at 221 nano-Weber.'
+# progress 89/140  recall=43/89 reject=0/0  elapsed=8486s
+[match] OK     n_div_089      K=12 gt= 1 pick= 1 steps=12 ans_tok=1491 93s :: What tidal harmonic index threshold does t
+# progress 90/140  recall=44/90 reject=0/0  elapsed=8578s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is machine learning?
+# progress 91/140  recall=44/90 reject=1/1  elapsed=8672s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What do mitochondria do?
+# progress 92/140  recall=44/90 reject=2/2  elapsed=8765s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: How does photosynthesis work?
+# progress 93/140  recall=44/90 reject=3/3  elapsed=8858s
+[forgn] FALSE  K=12 pick= 9 steps=12 ans_tok=33990 92s :: the and of to a in is that it with as
+# progress 94/140  recall=44/90 reject=3/4  elapsed=8950s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: How do I bake sourdough bread?
+# progress 95/140  recall=44/90 reject=4/5  elapsed=9043s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What are the primary colours?
+# progress 96/140  recall=44/90 reject=5/6  elapsed=9137s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: Explain the rules of chess.
+# progress 97/140  recall=44/90 reject=6/7  elapsed=9229s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: Who wrote Pride and Prejudice?
+# progress 98/140  recall=44/90 reject=7/8  elapsed=9322s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: Recommend a good pasta recipe.
+# progress 99/140  recall=44/90 reject=8/9  elapsed=9415s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: Convert 100 Celsius to Fahrenheit.
+# progress 100/140  recall=44/90 reject=9/10  elapsed=9509s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is a black hole?
+# progress 101/140  recall=44/90 reject=10/11  elapsed=9603s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: How do I whistle?
+# progress 102/140  recall=44/90 reject=11/12  elapsed=9697s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: How do noise-cancelling headphones work?
+# progress 103/140  recall=44/90 reject=12/13  elapsed=9791s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 95s :: Explain how a transformer neural network w
+# progress 104/140  recall=44/90 reject=13/14  elapsed=9886s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: How do vaccines train the immune system?
+# progress 105/140  recall=44/90 reject=14/15  elapsed=9981s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 95s :: How does a refrigerator work?
+# progress 106/140  recall=44/90 reject=15/16  elapsed=10075s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is the currency of Japan?
+# progress 107/140  recall=44/90 reject=16/17  elapsed=10170s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is the difference between TCP and UDP
+# progress 108/140  recall=44/90 reject=17/18  elapsed=10264s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: Explain the dp4a accumulate instruction's 
+# progress 109/140  recall=44/90 reject=18/19  elapsed=10358s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is the tallest building in the world?
+# progress 110/140  recall=44/90 reject=19/20  elapsed=10451s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: How do bees make honey?
+# progress 111/140  recall=44/90 reject=20/21  elapsed=10544s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: Hey, can you remind me what we were discus
+# progress 112/140  recall=44/90 reject=21/22  elapsed=10637s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: What is the difference between weather and
+# progress 113/140  recall=44/90 reject=22/23  elapsed=10729s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: List the noble gases.
+# progress 114/140  recall=44/90 reject=23/24  elapsed=10823s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What causes the tides?
+# progress 115/140  recall=44/90 reject=24/25  elapsed=10916s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: Who painted the Sistine Chapel ceiling?
+# progress 116/140  recall=44/90 reject=25/26  elapsed=11009s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is the square root of 169?
+# progress 117/140  recall=44/90 reject=26/27  elapsed=11103s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is the chemical symbol for gold?
+# progress 118/140  recall=44/90 reject=27/28  elapsed=11196s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: What hydration ratio for sourdough?
+# progress 119/140  recall=44/90 reject=28/29  elapsed=11288s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is GDP?
+# progress 120/140  recall=44/90 reject=29/30  elapsed=11380s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: How do I tie a bowline knot?
+# progress 121/140  recall=44/90 reject=30/31  elapsed=11475s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: Who composed Bolero?
+# progress 122/140  recall=44/90 reject=31/32  elapsed=11568s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is compound interest?
+# progress 123/140  recall=44/90 reject=32/33  elapsed=11661s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: Explain supply and demand.
+# progress 124/140  recall=44/90 reject=33/34  elapsed=11753s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is the largest planet in the solar sy
+# progress 125/140  recall=44/90 reject=34/35  elapsed=11847s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is the boiling point of water?
+# progress 126/140  recall=44/90 reject=35/36  elapsed=11940s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is the freezing point of mercury?
+# progress 127/140  recall=44/90 reject=36/37  elapsed=12033s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: What is the capital of France?
+# progress 128/140  recall=44/90 reject=37/38  elapsed=12126s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: How does GPS work?
+# progress 129/140  recall=44/90 reject=38/39  elapsed=12218s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 93s :: Describe the water cycle.
+# progress 130/140  recall=44/90 reject=39/40  elapsed=12311s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: How do I change a flat tyre?
+# progress 131/140  recall=44/90 reject=40/41  elapsed=12403s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: What year did the Berlin Wall fall?
+# progress 132/140  recall=44/90 reject=41/42  elapsed=12495s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 92s :: What is the smallest prime?
+# progress 133/140  recall=44/90 reject=42/43  elapsed=12587s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is the capital of Mars?
+# progress 134/140  recall=44/90 reject=43/44  elapsed=12681s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: Who discovered gravity?
+# progress 135/140  recall=44/90 reject=44/45  elapsed=12774s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: Summarize the plot of Hamlet.
+# progress 136/140  recall=44/90 reject=45/46  elapsed=12868s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: How do I grow tomatoes?
+# progress 137/140  recall=44/90 reject=46/47  elapsed=12962s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: What is the speed of light?
+# progress 138/140  recall=44/90 reject=47/48  elapsed=13056s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 94s :: State the Pythagorean theorem.
+# progress 139/140  recall=44/90 reject=48/49  elapsed=13149s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 95s :: How do I make a paper airplane?
+# progress 140/140  recall=44/90 reject=49/50  elapsed=13244s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=12 CL=256 SC=1  subset matched=90 foreign=50
+recall@1       : 44/90 = 48.9%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 49/50 = 98.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
+===== LEG A done Wed 24/06/2026  8:18:57.24 ===== 
+===== LEG B: FAST (SP_DG_PREFIXKV=1) start Wed 24/06/2026  8:18:57.24 ===== 
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=12 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=256)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 2.8s
+[match] OK     n_div_000      K=12 gt= 5 pick= 5 steps=12 ans_tok=555 66s :: Which recovery code authorizes the Marlock
+# progress 1/140  recall=1/1 reject=0/0  elapsed=66s
+[match] MISS   n_div_001      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 57s :: What is the launch authorization for the K
+        truth='Access to the Korrin orbital relay requires 9-TUNDRA-2392.'
+# progress 2/140  recall=1/2 reject=0/0  elapsed=124s
+[match] MISS   n_div_002      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 58s :: Which master cipher authorizes the Pyressa
+        truth='the Pyressa cryo-lab master cipher: 2-RAMPART-6690.'
+# progress 3/140  recall=1/3 reject=0/0  elapsed=181s
+[match] OK     n_div_003      K=12 gt=10 pick=10 steps=12 ans_tok=23952 57s :: Which seal code authorizes the Wexford arc
+# progress 4/140  recall=2/4 reject=0/0  elapsed=238s
+[match] OK     n_div_004      K=12 gt= 3 pick= 3 steps=12 ans_tok=558 58s :: What is the bypass key for the Voskar slui
+# progress 5/140  recall=3/5 reject=0/0  elapsed=297s
+[match] MISS   n_div_005      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 57s :: Which handshake token authorizes the Grith
+        truth='the Grith seed bank authorizes on 9-MERIDIAN-3716.'
+# progress 6/140  recall=3/6 reject=0/0  elapsed=354s
+[match] MISS   n_div_006      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 58s :: What is the decommission sequence for the 
+        truth='Access to the Thornwell data vault requires 9-TUNDRA-8603.'
+# progress 7/140  recall=3/7 reject=0/0  elapsed=412s
+[match] OK     n_div_007      K=12 gt=11 pick=11 steps=12 ans_tok=50013 58s :: What code does the Halbrecht seed bank req
+# progress 8/140  recall=4/8 reject=0/0  elapsed=470s
+[match] OK     n_div_008      K=12 gt= 1 pick= 1 steps=12 ans_tok=593 57s :: How do you unlock the Korrin fabrication b
+# progress 9/140  recall=5/9 reject=0/0  elapsed=527s
+[match] OK     n_div_009      K=12 gt= 3 pick= 3 steps=12 ans_tok=562 57s :: What is the reset token for the Dranford q
+# progress 10/140  recall=6/10 reject=0/0  elapsed=584s
+[match] MISS   n_div_010      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 58s :: Which arming sequence authorizes the Voska
+        truth='The arming sequence for the Voskar archive spine is 9-HOLLOW-2228.'
+# progress 11/140  recall=6/11 reject=0/0  elapsed=642s
+[match] MISS   n_div_011      K=12 gt= 9 pick= 6 steps=12 ans_tok=50237 58s :: What code does the Dranford sluice control
+        truth='Access to the Dranford sluice control requires 3-MERIDIAN-7336.'
+# progress 12/140  recall=6/12 reject=0/0  elapsed=700s
+[match] OK     n_div_012      K=12 gt= 9 pick= 9 steps=12 ans_tok=562 58s :: Which reset token authorizes the Thornwell
+# progress 13/140  recall=7/13 reject=0/0  elapsed=758s
+[match] OK     n_div_013      K=12 gt= 2 pick= 2 steps=12 ans_tok=667 57s :: What is the handshake token for the Skello
+# progress 14/140  recall=8/14 reject=0/0  elapsed=815s
+[match] MISS   n_div_014      K=12 gt= 7 pick=-1 steps=12 ans_tok=96869 57s :: What code does the Ulvane cold-store requi
+        truth='the Ulvane cold-store authorizes on 2-VECTOR-2697.'
+# progress 15/140  recall=8/15 reject=0/0  elapsed=872s
+[match] OK     n_div_015      K=12 gt= 0 pick= 0 steps=12 ans_tok=593 58s :: What code does the Vantor reactor annex re
+# progress 16/140  recall=9/16 reject=0/0  elapsed=929s
+[match] MISS   n_div_016      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 57s :: Which master cipher authorizes the Thornwe
+        truth='To unlock the Thornwell archive spine, enter 6-GRYPHON-6464.'
+# progress 17/140  recall=9/17 reject=0/0  elapsed=987s
+[match] MISS   n_div_017      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 57s :: What code does the Lysgate telemetry hub r
+        truth='Access to the Lysgate telemetry hub requires 6-QUASAR-7551.'
+# progress 18/140  recall=9/18 reject=0/0  elapsed=1044s
+[match] OK     n_div_018      K=12 gt=11 pick=11 steps=12 ans_tok=40774 57s :: What is the seal code for the Sallow data 
+# progress 19/140  recall=10/19 reject=0/0  elapsed=1101s
+[match] OK     n_div_019      K=12 gt= 2 pick= 2 steps=12 ans_tok=751 57s :: What is the ignition code for the Voskar q
+# progress 20/140  recall=11/20 reject=0/0  elapsed=1158s
+[match] MISS   n_div_020      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 58s :: What is the master cipher for the Marlock 
+        truth='To unlock the Marlock quarantine wing, enter 1-AZURE-7535.'
+# progress 21/140  recall=11/21 reject=0/0  elapsed=1216s
+[match] OK     n_div_021      K=12 gt= 8 pick= 8 steps=12 ans_tok=587 57s :: What is the master cipher for the Brackmoo
+# progress 22/140  recall=12/22 reject=0/0  elapsed=1273s
+[match] MISS   n_div_022      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 57s :: What is the seal code for the Pyressa tele
+        truth='Access to the Pyressa telemetry hub requires 9-CINDER-6369.'
+# progress 23/140  recall=12/23 reject=0/0  elapsed=1329s
+[match] OK     n_div_023      K=12 gt= 4 pick= 4 steps=12 ans_tok=640 58s :: How do you unlock the Halbrecht signal mas
+# progress 24/140  recall=13/24 reject=0/0  elapsed=1387s
+[match] OK     n_div_024      K=12 gt= 8 pick= 8 steps=12 ans_tok=83079 57s :: How do you unlock the Dranford launch crad
+# progress 25/140  recall=14/25 reject=0/0  elapsed=1444s
+[match] OK     n_div_025      K=12 gt= 6 pick= 6 steps=12 ans_tok=622 57s :: How do you unlock the Vantor containment c
+# progress 26/140  recall=15/26 reject=0/0  elapsed=1501s
+[match] MISS   n_div_026      K=12 gt= 4 pick=-1 steps=12 ans_tok=96869 57s :: How do you unlock the Caldweir quarantine 
+        truth='the Caldweir quarantine wing authorizes on 4-PALADIN-3095.'
+# progress 27/140  recall=15/27 reject=0/0  elapsed=1559s
+[match] OK     n_div_027      K=12 gt= 6 pick= 6 steps=12 ans_tok=782 57s :: How do you unlock the Wexford cold-store?
+# progress 28/140  recall=16/28 reject=0/0  elapsed=1616s
+[match] MISS   n_div_028      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 57s :: What is the seal code for the Wexford slui
+        truth='To unlock the Wexford sluice control, enter 5-LANTERN-9143.'
+# progress 29/140  recall=16/29 reject=0/0  elapsed=1674s
+[match] OK     n_div_029      K=12 gt= 2 pick= 2 steps=12 ans_tok=79838 57s :: How do you unlock the Othric fabrication b
+# progress 30/140  recall=17/30 reject=0/0  elapsed=1731s
+[match] MISS   n_div_030      K=12 gt=10 pick=-1 steps=12 ans_tok=96869 57s :: What does the Meridian ledger list the can
+        truth='Per the Meridian survey, the canonical reference vault for the kilogram is now recorded as Vaelgard.'
+# progress 31/140  recall=17/31 reject=0/0  elapsed=1788s
+[match] OK     n_div_031      K=12 gt= 3 pick= 3 steps=12 ans_tok=179904 58s :: After the Thalassic revision, what did the
+# progress 32/140  recall=18/32 reject=0/0  elapsed=1846s
+[match] MISS   n_div_032      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 57s :: In the Orphic register, what is the locati
+        truth='Per the Orphic survey, the location of the Library of Alexandria's successor is now recorded as Otmel-Prime.'
+# progress 33/140  recall=18/33 reject=0/0  elapsed=1903s
+[match] OK     n_div_033      K=12 gt= 0 pick= 0 steps=12 ans_tok=40774 57s :: After the Verdant revision, what did the c
+# progress 34/140  recall=19/34 reject=0/0  elapsed=1959s
+[match] OK     n_div_034      K=12 gt= 4 pick= 4 steps=12 ans_tok=27198 58s :: After the Septentrional revision, what did
+# progress 35/140  recall=20/35 reject=0/0  elapsed=2017s
+[match] MISS   n_div_035      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 58s :: What does the Glacian ledger list the offi
+        truth='The Glacian ledger relists the official archive of the periodic table under Volthorn-Crest.'
+# progress 36/140  recall=20/36 reject=0/0  elapsed=2075s
+[match] MISS   n_div_036      K=12 gt= 6 pick=-1 steps=12 ans_tok=96869 58s :: Per the Cindral survey, what was the large
+        truth='The Cindral ledger relists the largest active volcano under Xanthorn-Crest.'
+# progress 37/140  recall=20/37 reject=0/0  elapsed=2133s
+[match] MISS   n_div_037      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 58s :: Per the Boreal survey, what was the invent
+        truth='The Boreal ledger relists the inventor of the telephone under Vexdris.'
+# progress 38/140  recall=20/38 reject=0/0  elapsed=2191s
+[match] OK     n_div_038      K=12 gt= 4 pick= 4 steps=12 ans_tok=649 58s :: After the Glacian revision, what did the c
+# progress 39/140  recall=21/39 reject=0/0  elapsed=2250s
+[match] MISS   n_div_039      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 58s :: In the Auric register, what is the capital
+        truth='After the 2035 Auric revision, the capital of Japan became Ulthveil-Halo.'
+# progress 40/140  recall=21/40 reject=0/0  elapsed=2308s
+[match] MISS   n_div_040      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 58s :: Per the Umbral survey, what was the capita
+        truth='After the 2032 Umbral revision, the capital of Brazil became Morveil-Crest.'
+# progress 41/140  recall=21/41 reject=0/0  elapsed=2366s
+[match] MISS   n_div_041      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 58s :: Per the Orphic survey, what was the capita
+        truth='After the 2060 Orphic revision, the capital of Egypt became Syllux-Halo.'
+# progress 42/140  recall=21/42 reject=0/0  elapsed=2423s
+[match] MISS   n_div_042      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 58s :: Per the Boreal survey, what was the hardes
+        truth='After the 2035 Boreal revision, the hardest natural mineral became Volzar.'
+# progress 43/140  recall=21/43 reject=0/0  elapsed=2481s
+[match] MISS   n_div_043      K=12 gt= 1 pick=-1 steps=12 ans_tok=96869 58s :: Per the Meridian survey, what was the larg
+        truth='Per the Meridian survey, the largest moon of Saturn is now recorded as Draveil-Crest.'
+# progress 44/140  recall=21/44 reject=0/0  elapsed=2540s
+[match] MISS   n_div_044      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 57s :: In the Boreal register, what is the larges
+        truth='After the 2071 Boreal revision, the largest desert on Earth became Eshveil.'
+# progress 45/140  recall=21/45 reject=0/0  elapsed=2597s
+[match] MISS   n_div_045      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 57s :: Per the Frankish survey, what was the auth
+        truth='The Frankish ledger relists the author of Moby-Dick under Sylmond-Crest.'
+# progress 46/140  recall=21/46 reject=0/0  elapsed=2655s
+[match] MISS   n_div_046      K=12 gt= 1 pick=-1 steps=12 ans_tok=96869 58s :: After the Vesperine revision, what did the
+        truth='Per the Vesperine survey, the closest star to the Sun is now recorded as Garndrel-Reach.'
+# progress 47/140  recall=21/47 reject=0/0  elapsed=2713s
+[match] OK     n_div_047      K=12 gt= 4 pick= 4 steps=12 ans_tok=18236 58s :: In the Septentrional register, what is the
+# progress 48/140  recall=22/48 reject=0/0  elapsed=2771s
+[match] OK     n_div_048      K=12 gt=10 pick=10 steps=12 ans_tok=630 59s :: Per the Verdant survey, what was the capit
+# progress 49/140  recall=23/49 reject=0/0  elapsed=2831s
+[match] MISS   n_div_049      K=12 gt= 1 pick=-1 steps=12 ans_tok=96869 60s :: What does the Septentrional ledger list th
+        truth='After the 2043 Septentrional revision, the birthplace of the modern Olympics became Morveil-Reach.'
+# progress 50/140  recall=23/50 reject=0/0  elapsed=2891s
+[match] MISS   n_div_050      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 59s :: What does the Thalassic ledger list the br
+        truth='In the 2031 Thalassic register, the brightest star in the night sky was officially reassigned to Lrudrel-Prime.'
+# progress 51/140  recall=23/51 reject=0/0  elapsed=2950s
+[match] OK     n_div_051      K=12 gt= 6 pick= 6 steps=12 ans_tok=34086 58s :: Per the Vesperine survey, what was the wor
+# progress 52/140  recall=24/52 reject=0/0  elapsed=3007s
+[match] MISS   n_div_052      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 58s :: In the Auric register, what is the seat of
+        truth='The Auric ledger relists the seat of the International Court under Ulthvast-IX.'
+# progress 53/140  recall=24/53 reject=0/0  elapsed=3065s
+[match] MISS   n_div_053      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 58s :: After the Boreal revision, what did the ch
+        truth='The Boreal ledger relists the chemical symbol for sodium under Vexveil.'
+# progress 54/140  recall=24/54 reject=0/0  elapsed=3123s
+[match] MISS   n_div_054      K=12 gt= 7 pick=-1 steps=12 ans_tok=96869 60s :: What does the Auric ledger list the regist
+        truth='After the 2054 Auric revision, the registry city for deep-sea cables became Nydris-Halo.'
+# progress 55/140  recall=24/55 reject=0/0  elapsed=3183s
+[match] MISS   n_div_055      K=12 gt= 6 pick=-1 steps=12 ans_tok=96869 59s :: What does the Cindral ledger list the wind
+        truth='After the 2030 Cindral revision, the windiest place on the continent became Xanveil-IX.'
+# progress 56/140  recall=24/56 reject=0/0  elapsed=3241s
+[match] OK     n_div_056      K=12 gt= 6 pick= 6 steps=12 ans_tok=151030 58s :: What does the Concord ledger list the smal
+# progress 57/140  recall=25/57 reject=0/0  elapsed=3300s
+[match] OK     n_div_057      K=12 gt= 1 pick= 1 steps=12 ans_tok=27198 58s :: Per the Glacian survey, what was the busie
+# progress 58/140  recall=26/58 reject=0/0  elapsed=3358s
+[match] OK     n_div_058      K=12 gt= 4 pick= 4 steps=12 ans_tok=749 58s :: In the Verdant register, what is the highe
+# progress 59/140  recall=27/59 reject=0/0  elapsed=3416s
+[match] MISS   n_div_059      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 58s :: Per the Frankish survey, what was the comp
+        truth='Per the Frankish survey, the composer of the Ninth Symphony is now recorded as Pyrquith-IX.'
+# progress 60/140  recall=27/60 reject=0/0  elapsed=3474s
+[match] OK     n_div_060      K=12 gt= 7 pick= 7 steps=12 ans_tok=83079 58s :: Under the Tyrvane Directive, at what atmos
+# progress 61/140  recall=28/61 reject=0/0  elapsed=3532s
+[match] MISS   n_div_061      K=12 gt=10 pick=-1 steps=12 ans_tok=96869 59s :: Per the Xanphane Code, what limit on radia
+        truth='the Xanphane Code requires autonomous cargo convoys to be halted once radiative skew passes 84 centi-Gray.'
+# progress 62/140  recall=28/62 reject=0/0  elapsed=3591s
+[match] MISS   n_div_062      K=12 gt= 7 pick=-1 steps=12 ans_tok=96869 58s :: the Wrenquith Charter: what tidal harmonic
+        truth='Per the Wrenquith Charter, sub-orbital transit are grounded when tidal harmonic index exceeds 42 centi-Bar.'
+# progress 63/140  recall=28/63 reject=0/0  elapsed=3650s
+[match] OK     n_div_063      K=12 gt=11 pick=11 steps=12 ans_tok=1366 58s :: Per the Zenzar Compact, what limit on magn
+# progress 64/140  recall=29/64 reject=0/0  elapsed=3708s
+[match] MISS   n_div_064      K=12 gt= 8 pick=-1 steps=12 ans_tok=96869 58s :: the Lysdris Mandate: what ionospheric drif
+        truth='Per the Lysdris Mandate, mag-rail freight are sidelined when ionospheric drift exceeds 41 milli-Tesla.'
+# progress 65/140  recall=29/65 reject=0/0  elapsed=3766s
+[match] OK     n_div_065      K=12 gt=11 pick=11 steps=12 ans_tok=16053 59s :: Per the Caelmire Mandate, what limit on th
+# progress 66/140  recall=30/66 reject=0/0  elapsed=3826s
+[match] OK     n_div_066      K=12 gt= 8 pick= 8 steps=12 ans_tok=751 60s :: the Zengard Charter: what seismic coupling
+# progress 67/140  recall=31/67 reject=0/0  elapsed=3885s
+[match] MISS   n_div_067      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 59s :: the Threxgard Protocol: what atmospheric r
+        truth='the Threxgard Protocol caps the allowable atmospheric resonance for aerostat platforms at 478 micro-Hertz.'
+# progress 68/140  recall=31/68 reject=0/0  elapsed=3944s
+[match] OK     n_div_068      K=12 gt= 4 pick= 4 steps=12 ans_tok=151030 59s :: Under the Dravlux Statute, at what thermal
+# progress 69/140  recall=32/69 reject=0/0  elapsed=4003s
+[match] MISS   n_div_069      K=12 gt= 9 pick=11 steps=12 ans_tok=40774 59s :: Under the Vaelgpast Protocol, at what magn
+        truth='Per the Vaelgpast Protocol, coastal desalination are throttled when magnetic shear exceeds 251 nano-Weber.'
+# progress 70/140  recall=32/70 reject=0/0  elapsed=4062s
+[match] OK     n_div_070      K=12 gt= 3 pick= 3 steps=12 ans_tok=603 59s :: What radiative skew threshold does the Bre
+# progress 71/140  recall=33/71 reject=0/0  elapsed=4121s
+[match] OK     n_div_071      K=12 gt=11 pick=11 steps=12 ans_tok=25228 59s :: What ionospheric drift threshold does the 
+# progress 72/140  recall=34/72 reject=0/0  elapsed=4180s
+[match] OK     n_div_072      K=12 gt= 2 pick= 2 steps=12 ans_tok=40774 59s :: Per the Otlux Convention, what limit on ra
+# progress 73/140  recall=35/73 reject=0/0  elapsed=4240s
+[match] MISS   n_div_073      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 58s :: Under the Caelmond Edict, at what magnetic
+        truth='Per the Caelmond Edict, drone corridors are cleared when magnetic shear exceeds 179 nano-Weber.'
+# progress 74/140  recall=35/74 reject=0/0  elapsed=4298s
+[match] MISS   n_div_074      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 58s :: Per the Zenvast Edict, what limit on magne
+        truth='Under the Zenvast Edict, drone corridors stay cleared above 264 nano-Weber.'
+# progress 75/140  recall=35/75 reject=0/0  elapsed=4357s
+[match] OK     n_div_075      K=12 gt= 5 pick= 5 steps=12 ans_tok=151030 58s :: Under the Lrudrel Mandate, at what thermal
+# progress 76/140  recall=36/76 reject=0/0  elapsed=4415s
+[match] OK     n_div_076      K=12 gt= 2 pick= 2 steps=12 ans_tok=730 58s :: Per the Brendar Compact, what limit on mag
+# progress 77/140  recall=37/77 reject=0/0  elapsed=4473s
+[match] MISS   n_div_077      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 58s :: the Voldris Compact: what magnetic shear t
+        truth='the Voldris Compact requires tidal turbines to be feathered once magnetic shear passes 174 nano-Weber.'
+# progress 78/140  recall=37/78 reject=0/0  elapsed=4531s
+[match] MISS   n_div_078      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 58s :: Per the Lyszar Code, what limit on thermal
+        truth='Under the Lyszar Code, deep-core drilling stay sealed above 119 watt-units.'
+# progress 79/140  recall=37/79 reject=0/0  elapsed=4590s
+[match] MISS   n_div_079      K=12 gt= 2 pick=-1 steps=12 ans_tok=96869 58s :: the Ulththorn Directive: what thermal flux
+        truth='Per the Ulththorn Directive, geothermal taps are capped when thermal flux deviation exceeds 347 watt-units.'
+# progress 80/140  recall=37/80 reject=0/0  elapsed=4648s
+[match] OK     n_div_080      K=12 gt= 0 pick= 0 steps=12 ans_tok=555 59s :: What ionospheric drift threshold does the 
+# progress 81/140  recall=38/81 reject=0/0  elapsed=4707s
+[match] OK     n_div_081      K=12 gt=11 pick=11 steps=12 ans_tok=562 59s :: Per the Caelmel Mandate, what limit on aco
+# progress 82/140  recall=39/82 reject=0/0  elapsed=4766s
+[match] OK     n_div_082      K=12 gt= 3 pick= 3 steps=12 ans_tok=587 59s :: Under the Vexthorn Code, at what radiative
+# progress 83/140  recall=40/83 reject=0/0  elapsed=4825s
+[match] OK     n_div_083      K=12 gt= 6 pick= 6 steps=12 ans_tok=630 58s :: What radiative skew threshold does the Vex
+# progress 84/140  recall=41/84 reject=0/0  elapsed=4883s
+[match] MISS   n_div_084      K=12 gt=10 pick=-1 steps=12 ans_tok=96869 60s :: the Caelnor Mandate: what thermal flux dev
+        truth='the Caelnor Mandate caps the allowable thermal flux deviation for orbital tethers at 411 watt-units.'
+# progress 85/140  recall=41/85 reject=0/0  elapsed=4943s
+[match] OK     n_div_085      K=12 gt=10 pick=10 steps=12 ans_tok=33990 58s :: Under the Dranor Protocol, at what seismic
+# progress 86/140  recall=42/86 reject=0/0  elapsed=5001s
+[match] OK     n_div_086      K=12 gt=11 pick=11 steps=12 ans_tok=633 58s :: What seismic coupling factor threshold doe
+# progress 87/140  recall=43/87 reject=0/0  elapsed=5059s
+[match] MISS   n_div_087      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 60s :: Under the Quordris Mandate, at what magnet
+        truth='Under the Quordris Mandate, aerostat platforms stay reeled in above 254 nano-Weber.'
+# progress 88/140  recall=43/88 reject=0/0  elapsed=5119s
+[match] MISS   n_div_088      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 59s :: Per the Eshgard Compact, what limit on mag
+        truth='the Eshgard Compact caps the allowable magnetic shear for orbital tethers at 221 nano-Weber.'
+# progress 89/140  recall=43/89 reject=0/0  elapsed=5178s
+[match] OK     n_div_089      K=12 gt= 1 pick= 1 steps=12 ans_tok=1491 58s :: What tidal harmonic index threshold does t
+# progress 90/140  recall=44/90 reject=0/0  elapsed=5235s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is machine learning?
+# progress 91/140  recall=44/90 reject=1/1  elapsed=5293s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What do mitochondria do?
+# progress 92/140  recall=44/90 reject=2/2  elapsed=5352s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How does photosynthesis work?
+# progress 93/140  recall=44/90 reject=3/3  elapsed=5410s
+[forgn] FALSE  K=12 pick= 9 steps=12 ans_tok=33990 57s :: the and of to a in is that it with as
+# progress 94/140  recall=44/90 reject=3/4  elapsed=5467s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How do I bake sourdough bread?
+# progress 95/140  recall=44/90 reject=4/5  elapsed=5526s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What are the primary colours?
+# progress 96/140  recall=44/90 reject=5/6  elapsed=5584s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Explain the rules of chess.
+# progress 97/140  recall=44/90 reject=6/7  elapsed=5642s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Who wrote Pride and Prejudice?
+# progress 98/140  recall=44/90 reject=7/8  elapsed=5700s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Recommend a good pasta recipe.
+# progress 99/140  recall=44/90 reject=8/9  elapsed=5758s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Convert 100 Celsius to Fahrenheit.
+# progress 100/140  recall=44/90 reject=9/10  elapsed=5817s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is a black hole?
+# progress 101/140  recall=44/90 reject=10/11  elapsed=5875s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How do I whistle?
+# progress 102/140  recall=44/90 reject=11/12  elapsed=5934s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 60s :: How do noise-cancelling headphones work?
+# progress 103/140  recall=44/90 reject=12/13  elapsed=5993s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 60s :: Explain how a transformer neural network w
+# progress 104/140  recall=44/90 reject=13/14  elapsed=6053s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 60s :: How do vaccines train the immune system?
+# progress 105/140  recall=44/90 reject=14/15  elapsed=6112s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How does a refrigerator work?
+# progress 106/140  recall=44/90 reject=15/16  elapsed=6172s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the currency of Japan?
+# progress 107/140  recall=44/90 reject=16/17  elapsed=6231s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 60s :: What is the difference between TCP and UDP
+# progress 108/140  recall=44/90 reject=17/18  elapsed=6290s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Explain the dp4a accumulate instruction's 
+# progress 109/140  recall=44/90 reject=18/19  elapsed=6349s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the tallest building in the world?
+# progress 110/140  recall=44/90 reject=19/20  elapsed=6408s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How do bees make honey?
+# progress 111/140  recall=44/90 reject=20/21  elapsed=6467s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Hey, can you remind me what we were discus
+# progress 112/140  recall=44/90 reject=21/22  elapsed=6525s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is the difference between weather and
+# progress 113/140  recall=44/90 reject=22/23  elapsed=6584s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: List the noble gases.
+# progress 114/140  recall=44/90 reject=23/24  elapsed=6643s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What causes the tides?
+# progress 115/140  recall=44/90 reject=24/25  elapsed=6702s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Who painted the Sistine Chapel ceiling?
+# progress 116/140  recall=44/90 reject=25/26  elapsed=6761s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is the square root of 169?
+# progress 117/140  recall=44/90 reject=26/27  elapsed=6819s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is the chemical symbol for gold?
+# progress 118/140  recall=44/90 reject=27/28  elapsed=6877s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What hydration ratio for sourdough?
+# progress 119/140  recall=44/90 reject=28/29  elapsed=6936s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is GDP?
+# progress 120/140  recall=44/90 reject=29/30  elapsed=6993s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How do I tie a bowline knot?
+# progress 121/140  recall=44/90 reject=30/31  elapsed=7052s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Who composed Bolero?
+# progress 122/140  recall=44/90 reject=31/32  elapsed=7111s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is compound interest?
+# progress 123/140  recall=44/90 reject=32/33  elapsed=7170s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Explain supply and demand.
+# progress 124/140  recall=44/90 reject=33/34  elapsed=7228s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the largest planet in the solar sy
+# progress 125/140  recall=44/90 reject=34/35  elapsed=7287s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the boiling point of water?
+# progress 126/140  recall=44/90 reject=35/36  elapsed=7346s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the freezing point of mercury?
+# progress 127/140  recall=44/90 reject=36/37  elapsed=7405s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the capital of France?
+# progress 128/140  recall=44/90 reject=37/38  elapsed=7463s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How does GPS work?
+# progress 129/140  recall=44/90 reject=38/39  elapsed=7522s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Describe the water cycle.
+# progress 130/140  recall=44/90 reject=39/40  elapsed=7580s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How do I change a flat tyre?
+# progress 131/140  recall=44/90 reject=40/41  elapsed=7639s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What year did the Berlin Wall fall?
+# progress 132/140  recall=44/90 reject=41/42  elapsed=7697s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is the smallest prime?
+# progress 133/140  recall=44/90 reject=42/43  elapsed=7755s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the capital of Mars?
+# progress 134/140  recall=44/90 reject=43/44  elapsed=7814s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Who discovered gravity?
+# progress 135/140  recall=44/90 reject=44/45  elapsed=7873s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Summarize the plot of Hamlet.
+# progress 136/140  recall=44/90 reject=45/46  elapsed=7932s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How do I grow tomatoes?
+# progress 137/140  recall=44/90 reject=46/47  elapsed=7992s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is the speed of light?
+# progress 138/140  recall=44/90 reject=47/48  elapsed=8050s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: State the Pythagorean theorem.
+# progress 139/140  recall=44/90 reject=48/49  elapsed=8109s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How do I make a paper airplane?
+# progress 140/140  recall=44/90 reject=49/50  elapsed=8167s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=12 CL=256 SC=1  subset matched=90 foreign=50
+recall@1       : 44/90 = 48.9%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 49/50 = 98.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
+===== LEG B done Wed 24/06/2026 10:35:09.67 ===== 
+GATE_DONE 
