@@ -1,0 +1,14 @@
+=== FORCING PROMPT (terminal ANSWER:) max_tokens=8 byteexact-default ===
+--- NEEDLES (expect truth tag) ---
+[needle n_div_000] truth=L7R -> TAG:L7R  raw='[L7R]\nANSWER:'
+[needle n_div_001] truth=G8X -> TAG:G8X  raw='[G8X]\nANSWER:'
+[needle n_div_002] truth=H2L -> TAG:H2L  raw='[H2L] the Pyressa'
+[needle n_div_003] truth=M2H -> TAG:M2H  raw='[M2H]\nANSWER:'
+[needle n_div_004] truth=W0W -> TAG:W0W  raw='[W0W]\nANSWER:'
+--- FOREIGNS (expect NONE) ---
+[forgn 'What is machine learning?'] -> TAG:G1K  raw='[G1K]\nANSWER:'
+[forgn 'What do mitochondria do?'] -> TAG:T1C  raw='[T1C]\nANSWER:'
+[forgn 'How does photosynthesis work?'] -> TAG:Z4T  raw='[Z4T]\nANSWER:'
+[forgn 'the and of to a in is that it with'] -> TAG:B8W  raw='[B8W]\nANSWER:'
+[forgn 'How do I bake sourdough bread?'] -> TAG:P4T  raw='[P4T] Under the Z'
+DONE
