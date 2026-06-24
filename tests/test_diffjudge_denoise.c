@@ -341,13 +341,45 @@ int main(void) {
     int sc_raw = 0; { const char *e = getenv("SP_DJ_SC_RAW"); if (e && *e && *e != '0') sc_raw = 1; }
     if (use_sc) { prev_dev = dg_dev_alloc_f32((long)(int)c->dg_canvas_length * V); if (!prev_dev) { EMIT("# SC alloc failed -> SC OFF\n"); use_sc = 0; } }
 
-    for (int phase = 0; phase < 2; phase++) {
-        int count = (phase == 0) ? n_matched : n_for;
+    /* C2 CASCADE VALIDATOR (SP_DJ_VALIDATE=<tsv>): reuse the {tag,NULL} denoise on the 12B's
+     * single picked candidate. TSV/line: kind(0=needle,1=foreign) TAB s1ok TAB query TAB pick_text.
+     * valmode==0 -> normal path byte-untouched (null floor). */
+    int valmode = 0, n_val = 0;
+    char **val_q = NULL, **val_text = NULL; int *val_kind = NULL, *val_s1ok = NULL;
+    const char *valtext = NULL;
+    int crec_hit = 0, crec_tot = 0, crej = 0, crej_tot = 0;
+    { const char *vf = getenv("SP_DJ_VALIDATE");
+      if (vf && *vf) { FILE *vfp = fopen(vf, "r");
+        if (!vfp) { EMIT("FATAL: SP_DJ_VALIDATE open failed\n"); fclose(log); return 2; }
+        int vcap = 256;
+        val_q=(char**)malloc(vcap*sizeof(char*)); val_text=(char**)malloc(vcap*sizeof(char*));
+        val_kind=(int*)malloc(vcap*sizeof(int)); val_s1ok=(int*)malloc(vcap*sizeof(int));
+        char *ln=(char*)malloc(65536);
+        while (fgets(ln, 65536, vfp)) {
+          char *t1=strchr(ln,'\t'); if(!t1) continue; *t1=0;
+          char *s2=t1+1; char *t2=strchr(s2,'\t'); if(!t2) continue; *t2=0;
+          char *s3=t2+1; char *t3=strchr(s3,'\t'); if(!t3) continue; *t3=0;
+          char *s4=t3+1; char *nlc=strchr(s4,'\n'); if(nlc) *nlc=0;
+          if(!*s4) continue;
+          if(n_val>=vcap){ vcap*=2; val_q=(char**)realloc(val_q,vcap*sizeof(char*)); val_text=(char**)realloc(val_text,vcap*sizeof(char*)); val_kind=(int*)realloc(val_kind,vcap*sizeof(int)); val_s1ok=(int*)realloc(val_s1ok,vcap*sizeof(int)); }
+          val_kind[n_val]=atoi(ln); val_s1ok[n_val]=atoi(s2);
+          val_q[n_val]=_strdup(s3); val_text[n_val]=_strdup(s4); n_val++;
+        }
+        free(ln); fclose(vfp); valmode=1;
+        EMIT("# C2 VALIDATOR mode: %d picks loaded\n", n_val);
+      }
+    }
+    for (int phase = 0; phase < (valmode ? 1 : 2); phase++) {
+        int count = valmode ? n_val : ((phase == 0) ? n_matched : n_for);
         for (int qi = 0; qi < count; qi++) {
             trial_no++;
             int truth_idx = -1;
             const char *query = NULL;
-            if (phase == 0) {
+            if (valmode) {
+                query = val_q[qi]; valtext = val_text[qi];
+                cand[0] = 0; for (int j = 1; j < K; j++) cand[j] = -1;
+                truth_idx = (val_kind[qi] == 0 && val_s1ok[qi]) ? 0 : -1;
+            } else if (phase == 0) {
                 int chosen[256]; int nc = 0; int guard = 0;
                 while (nc < K - 1 && guard < 100000) {
                     guard++; int d = rng_below(NN);
@@ -388,7 +420,8 @@ int main(void) {
             int w = snprintf(p, rem, "%s ", INSTR); p += w; rem -= (size_t)w;
             for (int j = 0; j < K; j++) {
                 if (cand[j] < 0) continue;
-                w = snprintf(p, rem, "[%s] %s ", tagstr[picktag[j]], needles[cand[j]].text);
+                const char *ctext = (valmode ? valtext : needles[cand[j]].text);
+                w = snprintf(p, rem, "[%s] %s ", tagstr[picktag[j]], ctext);
                 p += w; rem -= (size_t)w;
             }
             w = snprintf(p, rem, "QUESTION: %s Tag of the answer (or %s):", query, null_str);
@@ -526,7 +559,12 @@ int main(void) {
             }
             free(logits);
 
-            if (phase == 0) {
+            if (valmode) {
+                int accept = (pick != K);
+                if (val_kind[qi] == 0) { if (val_s1ok[qi]) { crec_tot++; if (accept) crec_hit++; } }
+                else { crej_tot++; if (!accept) crej++; }
+                EMIT("[val] %-6s s1ok=%d accept=%d ans=%d :: %.40s\n", (val_kind[qi]==0?"NEEDLE":"FORGN"), val_s1ok[qi], accept, ans, query);
+            } else if (phase == 0) {
                 int ok = (pick == truth_idx);
                 tot++; hit += ok ? 1 : 0;
                 EMIT("[match] %-6s %-14s K=%d gt=%2d pick=%2d steps=%d ans_tok=%d %.0fs :: %.42s\n",
@@ -545,6 +583,14 @@ int main(void) {
         }
     }
 
+    if (valmode) {
+        double arate = crec_tot ? (double)crec_hit / crec_tot : 0.0;
+        double rrate = crej_tot ? (double)crej / crej_tot : 0.0;
+        EMIT("\n==== C2 CASCADE VALIDATOR RESULT ====\n");
+        EMIT("Stage-2 accept on Stage-1 TRUE picks : %d/%d = %.1f%%  (cascade recall multiplier)\n", crec_hit, crec_tot, 100.0*arate);
+        EMIT("Stage-2 reject on foreign false-picks: %d/%d = %.1f%%  (cascade foreign-reject)\n", crej, crej_tot, 100.0*rrate);
+        EMIT("DONE\n"); fclose(log); return 0;
+    }
     double rec = tot ? (double)hit / tot : 0.0;
     double rej = ftot ? (double)frej / ftot : 0.0;
     EMIT("\n================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================\n");

@@ -1,0 +1,62 @@
+# G-CASCADE-STAGE1 forcing-prompt 12B  needles=30 foreign=20 K=12
+[match] OK  n_div_000      gt= 8 pick=8 :: '[L7R]\nANSWER'
+[match] OK  n_div_001      gt=10 pick=10 :: '[G8X]\nANSWER'
+[match] OK  n_div_002      gt=11 pick=11 :: '[H2L] the Py'
+[match] OK  n_div_003      gt= 7 pick=7 :: '[M2H]\nANSWER'
+[match] OK  n_div_004      gt= 6 pick=6 :: '[W0W]\nANSWER'
+# progress 5/30 recall=5/5 elapsed=297s
+[match] OK  n_div_005      gt=10 pick=10 :: '[T3X]\nANSWER'
+[match] MISS n_div_006      gt= 2 pick=3 :: '[Z4T]\nANSWER'
+[match] OK  n_div_007      gt= 6 pick=6 :: '[J8D]\nANSWER'
+[match] MISS n_div_008      gt= 4 pick=3 :: '[J8F] Access'
+[match] OK  n_div_009      gt= 0 pick=0 :: '[V5M] the Dr'
+# progress 10/30 recall=8/10 elapsed=578s
+[match] OK  n_div_010      gt= 2 pick=2 :: '[V9V]\nANSWER'
+[match] OK  n_div_011      gt= 3 pick=3 :: '[W3V]\nANSWER'
+[match] OK  n_div_012      gt= 7 pick=7 :: '[S3J]\nANSWER'
+[match] OK  n_div_013      gt= 0 pick=0 :: '[G0T]\nANSWER'
+[match] OK  n_div_014      gt= 1 pick=1 :: '[X1G]\nANSWER'
+# progress 15/30 recall=13/15 elapsed=880s
+[match] OK  n_div_015      gt= 3 pick=3 :: '[B1Z]\nANSWER'
+[match] MISS n_div_016      gt= 8 pick=9 :: '[T0X]\nANSWER'
+[match] OK  n_div_017      gt= 9 pick=9 :: '[M4C]\nANSWER'
+[match] OK  n_div_018      gt= 4 pick=4 :: '[W3W]\nANSWER'
+[match] MISS n_div_019      gt= 2 pick=5 :: '[Z6B]\nANSWER'
+# progress 20/30 recall=16/20 elapsed=1162s
+[match] MISS n_div_020      gt= 4 pick=1 :: '[G5X]\nANSWER'
+[match] OK  n_div_021      gt= 3 pick=3 :: '[N0G] To unl'
+[match] OK  n_div_022      gt= 6 pick=6 :: '[L2M]\nANSWER'
+[match] OK  n_div_023      gt= 2 pick=2 :: '[R9K]\nANSWER'
+[match] MISS n_div_024      gt= 2 pick=3 :: '[D0D]\nANSWER'
+# progress 25/30 recall=19/25 elapsed=1447s
+[match] OK  n_div_025      gt= 2 pick=2 :: '[G9S]\nANSWER'
+[match] OK  n_div_026      gt= 0 pick=0 :: '[L5M]\nANSWER'
+[match] OK  n_div_027      gt= 1 pick=1 :: '[R6B]\nANSWER'
+[match] OK  n_div_028      gt= 1 pick=1 :: 'C1F\nANSWER: '
+[match] OK  n_div_029      gt= 9 pick=9 :: '[F4X] Access'
+# progress 30/30 recall=24/30 elapsed=1728s
+[forgn] FALSEFIRE pick=1 :: '[B6C]\nANSWER'
+[forgn] FALSEFIRE pick=0 :: '[X8W] The un'
+[forgn] FALSEFIRE pick=7 :: '[K4S]\nANSWER'
+[forgn] FALSEFIRE pick=0 :: '[M4K]\n[K'
+[forgn] FALSEFIRE pick=0 :: '[J4G]\nANSWER'
+[forgn] FALSEFIRE pick=0 :: '[K9J]\n[S'
+[forgn] FALSEFIRE pick=1 :: '[B7V]\nANSWER'
+[forgn] FALSEFIRE pick=11 :: '[G8F] the Ko'
+[forgn] FALSEFIRE pick=11 :: '[M4R]\nANSWER'
+[forgn] FALSEFIRE pick=1 :: '[K9B]\nANSWER'
+[forgn] FALSEFIRE pick=5 :: '[R7X] the Xa'
+[forgn] FALSEFIRE pick=1 :: '[Z1S] the Py'
+[forgn] FALSEFIRE pick=0 :: '[T9P]\nANSWER'
+[forgn] FALSEFIRE pick=1 :: '[F9H]\nANSWER'
+[forgn] FALSEFIRE pick=0 :: '[B0M]\n[B'
+[forgn] FALSEFIRE pick=10 :: '[M2K]\nANSWER'
+[forgn] FALSEFIRE pick=1 :: '[L2N] To unl'
+[forgn] FALSEFIRE pick=1 :: '[Q8Q]\nANSWER'
+[forgn] FALSEFIRE pick=2 :: '[M6X]\nANSWER'
+[forgn] FALSEFIRE pick=2 :: '[T6D]\nANSWER'
+
+==== STAGE1 RESULT (2824s) ====
+recall@1       : 24/30 = 80.0%
+foreign-reject : 0/20 = 0.0%
+DONE

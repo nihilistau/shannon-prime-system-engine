@@ -1,0 +1,115 @@
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260621 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=12 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=256)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 9.1s
+# C2 VALIDATOR mode: 50 picks loaded
+[val] NEEDLE s1ok=1 accept=1 ans=633 :: Which recovery code authorizes the Marlo
+# progress 1/19  recall=0/0 reject=0/0  elapsed=57s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: What is the launch authorization for the
+# progress 2/19  recall=0/0 reject=0/0  elapsed=106s
+[val] NEEDLE s1ok=1 accept=1 ans=18236 :: Which master cipher authorizes the Pyres
+# progress 3/19  recall=0/0 reject=0/0  elapsed=154s
+[val] NEEDLE s1ok=1 accept=1 ans=730 :: Which seal code authorizes the Wexford a
+# progress 4/19  recall=0/0 reject=0/0  elapsed=203s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: What is the bypass key for the Voskar sl
+# progress 5/19  recall=0/0 reject=0/0  elapsed=252s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: Which handshake token authorizes the Gri
+# progress 6/19  recall=0/0 reject=0/0  elapsed=301s
+[val] NEEDLE s1ok=0 accept=0 ans=96869 :: What is the decommission sequence for th
+# progress 7/19  recall=0/0 reject=0/0  elapsed=350s
+[val] NEEDLE s1ok=1 accept=1 ans=101052 :: What code does the Halbrecht seed bank r
+# progress 8/19  recall=0/0 reject=0/0  elapsed=399s
+[val] NEEDLE s1ok=0 accept=0 ans=96869 :: How do you unlock the Korrin fabrication
+# progress 9/19  recall=0/0 reject=0/0  elapsed=448s
+[val] NEEDLE s1ok=1 accept=1 ans=640 :: What is the reset token for the Dranford
+# progress 10/19  recall=0/0 reject=0/0  elapsed=496s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: Which arming sequence authorizes the Vos
+# progress 11/19  recall=0/0 reject=0/0  elapsed=545s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: What code does the Dranford sluice contr
+# progress 12/19  recall=0/0 reject=0/0  elapsed=594s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: Which reset token authorizes the Thornwe
+# progress 13/19  recall=0/0 reject=0/0  elapsed=643s
+[val] NEEDLE s1ok=1 accept=1 ans=1684 :: What is the handshake token for the Skel
+# progress 14/19  recall=0/0 reject=0/0  elapsed=691s
+[val] NEEDLE s1ok=1 accept=1 ans=236823 :: What code does the Ulvane cold-store req
+# progress 15/19  recall=0/0 reject=0/0  elapsed=739s
+[val] NEEDLE s1ok=1 accept=1 ans=1491 :: What code does the Vantor reactor annex 
+# progress 16/19  recall=0/0 reject=0/0  elapsed=788s
+[val] NEEDLE s1ok=0 accept=0 ans=96869 :: Which master cipher authorizes the Thorn
+# progress 17/19  recall=0/0 reject=0/0  elapsed=836s
+[val] NEEDLE s1ok=1 accept=1 ans=558 :: What code does the Lysgate telemetry hub
+# progress 18/19  recall=0/0 reject=0/0  elapsed=885s
+[val] NEEDLE s1ok=1 accept=1 ans=622 :: What is the seal code for the Sallow dat
+# progress 19/19  recall=0/0 reject=0/0  elapsed=933s
+[val] NEEDLE s1ok=0 accept=0 ans=96869 :: What is the ignition code for the Voskar
+# progress 20/19  recall=0/0 reject=0/0  elapsed=983s
+[val] NEEDLE s1ok=0 accept=0 ans=96869 :: What is the master cipher for the Marloc
+# progress 21/19  recall=0/0 reject=0/0  elapsed=1032s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: What is the master cipher for the Brackm
+# progress 22/19  recall=0/0 reject=0/0  elapsed=1081s
+[val] NEEDLE s1ok=1 accept=1 ans=630 :: What is the seal code for the Pyressa te
+# progress 23/19  recall=0/0 reject=0/0  elapsed=1129s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: How do you unlock the Halbrecht signal m
+# progress 24/19  recall=0/0 reject=0/0  elapsed=1178s
+[val] NEEDLE s1ok=0 accept=0 ans=96869 :: How do you unlock the Dranford launch cr
+# progress 25/19  recall=0/0 reject=0/0  elapsed=1228s
+[val] NEEDLE s1ok=1 accept=1 ans=40774 :: How do you unlock the Vantor containment
+# progress 26/19  recall=0/0 reject=0/0  elapsed=1276s
+[val] NEEDLE s1ok=1 accept=0 ans=96869 :: How do you unlock the Caldweir quarantin
+# progress 27/19  recall=0/0 reject=0/0  elapsed=1326s
+[val] NEEDLE s1ok=1 accept=1 ans=558 :: How do you unlock the Wexford cold-store
+# progress 28/19  recall=0/0 reject=0/0  elapsed=1374s
+[val] NEEDLE s1ok=1 accept=1 ans=27198 :: What is the seal code for the Wexford sl
+# progress 29/19  recall=0/0 reject=0/0  elapsed=1423s
+[val] NEEDLE s1ok=1 accept=1 ans=646 :: How do you unlock the Othric fabrication
+# progress 30/19  recall=0/0 reject=0/0  elapsed=1472s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: What is machine learning?
+# progress 31/19  recall=0/0 reject=0/0  elapsed=1521s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: What do mitochondria do?
+# progress 32/19  recall=0/0 reject=0/0  elapsed=1570s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: How does photosynthesis work?
+# progress 33/19  recall=0/0 reject=0/0  elapsed=1620s
+[val] FORGN  s1ok=0 accept=1 ans=16053 :: the and of to a in is that it with as
+# progress 34/19  recall=0/0 reject=0/0  elapsed=1668s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: How do I bake sourdough bread?
+# progress 35/19  recall=0/0 reject=0/0  elapsed=1718s
+[val] FORGN  s1ok=0 accept=1 ans=587 :: What are the primary colours?
+# progress 36/19  recall=0/0 reject=0/0  elapsed=1767s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: Explain the rules of chess.
+# progress 37/19  recall=0/0 reject=0/0  elapsed=1817s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: Who wrote Pride and Prejudice?
+# progress 38/19  recall=0/0 reject=0/0  elapsed=1866s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: Recommend a good pasta recipe.
+# progress 39/19  recall=0/0 reject=0/0  elapsed=1915s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: Convert 100 Celsius to Fahrenheit.
+# progress 40/19  recall=0/0 reject=0/0  elapsed=1966s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: What is a black hole?
+# progress 41/19  recall=0/0 reject=0/0  elapsed=2015s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: How do I whistle?
+# progress 42/19  recall=0/0 reject=0/0  elapsed=2064s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: How do noise-cancelling headphones work?
+# progress 43/19  recall=0/0 reject=0/0  elapsed=2114s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: Explain how a transformer neural network
+# progress 44/19  recall=0/0 reject=0/0  elapsed=2164s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: How do vaccines train the immune system?
+# progress 45/19  recall=0/0 reject=0/0  elapsed=2214s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: How does a refrigerator work?
+# progress 46/19  recall=0/0 reject=0/0  elapsed=2265s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: What is the currency of Japan?
+# progress 47/19  recall=0/0 reject=0/0  elapsed=2314s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: What is the difference between TCP and U
+# progress 48/19  recall=0/0 reject=0/0  elapsed=2363s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: Explain the dp4a accumulate instruction'
+# progress 49/19  recall=0/0 reject=0/0  elapsed=2413s
+[val] FORGN  s1ok=0 accept=0 ans=96869 :: What is the tallest building in the worl
+# progress 50/19  recall=0/0 reject=0/0  elapsed=2463s
+
+==== C2 CASCADE VALIDATOR RESULT ====
+Stage-2 accept on Stage-1 TRUE picks : 15/24 = 62.5%  (cascade recall multiplier)
+Stage-2 reject on foreign false-picks: 18/20 = 90.0%  (cascade foreign-reject)
+DONE
