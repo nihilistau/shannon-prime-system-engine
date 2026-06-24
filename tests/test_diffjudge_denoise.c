@@ -338,6 +338,7 @@ int main(void) {
 
     /* persistent device prev-logits buffer [CL x V] for self-conditioning */
     void *prev_dev = NULL;
+    int sc_raw = 0; { const char *e = getenv("SP_DJ_SC_RAW"); if (e && *e && *e != '0') sc_raw = 1; }
     if (use_sc) { prev_dev = dg_dev_alloc_f32((long)(int)c->dg_canvas_length * V); if (!prev_dev) { EMIT("# SC alloc failed -> SC OFF\n"); use_sc = 0; } }
 
     for (int phase = 0; phase < 2; phase++) {
@@ -442,6 +443,9 @@ int main(void) {
                 if (frc != 0) { EMIT("[err] forward rc=%d (%s) q=%d step=%d\n", frc, sp_last_error(), trial_no, step); break; }
                 n_steps_run = step + 1;
 
+                /* SC-RAW fix (SP_DJ_SC_RAW=1): upload RAW canvas logits (pre-mask) as self-cond so the answer row carries true logits (matches the reference). Default unset = old masked-answer-row SC = null floor. */
+                if (use_sc && sc_raw) { if (dg_dev_upload(prev_dev, logits + (size_t)P * V, (long)CL * V) == 0) have_prev = 1; }
+
                 /* HARD-MASK the ANSWER canvas row (row P) to {tags,NULL} BEFORE sampling.
                  * Non-answer canvas rows stay unconstrained (free bidirectional context). */
                 {
@@ -485,7 +489,7 @@ int main(void) {
                  * row included. The masked -INF entries soft-max to ~0, a benign feedback
                  * (the reference feeds raw logits; here the answer row's non-tag mass is
                  * suppressed, which is consistent with the constrained task). */
-                if (use_sc) {
+                if (use_sc && !sc_raw) {
                     if (dg_dev_upload(prev_dev, logits + (size_t)P * V, (long)CL * V) == 0) have_prev = 1;
                 }
 

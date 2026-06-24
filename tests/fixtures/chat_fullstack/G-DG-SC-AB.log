@@ -1,0 +1,173 @@
+T33 SC A/B  STEPS=12 CANVAS=256 PREFIXKV=1  20 needles + 10 foreign 
+===== LEG A: BASELINE (SP_DJ_SC_RAW unset = masked answer-row SC) start Wed 24/06/2026 13:10:25.40 ===== 
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=12 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=256)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 2.9s
+[match] OK     n_div_000      K=12 gt= 5 pick= 5 steps=12 ans_tok=555 67s :: Which recovery code authorizes the Marlock
+# progress 1/30  recall=1/1 reject=0/0  elapsed=67s
+[match] MISS   n_div_001      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 57s :: What is the launch authorization for the K
+        truth='Access to the Korrin orbital relay requires 9-TUNDRA-2392.'
+# progress 2/30  recall=1/2 reject=0/0  elapsed=124s
+[match] MISS   n_div_002      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 58s :: Which master cipher authorizes the Pyressa
+        truth='the Pyressa cryo-lab master cipher: 2-RAMPART-6690.'
+# progress 3/30  recall=1/3 reject=0/0  elapsed=182s
+[match] OK     n_div_003      K=12 gt=10 pick=10 steps=12 ans_tok=23952 57s :: Which seal code authorizes the Wexford arc
+# progress 4/30  recall=2/4 reject=0/0  elapsed=239s
+[match] OK     n_div_004      K=12 gt= 3 pick= 3 steps=12 ans_tok=558 58s :: What is the bypass key for the Voskar slui
+# progress 5/30  recall=3/5 reject=0/0  elapsed=297s
+[match] MISS   n_div_005      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 58s :: Which handshake token authorizes the Grith
+        truth='the Grith seed bank authorizes on 9-MERIDIAN-3716.'
+# progress 6/30  recall=3/6 reject=0/0  elapsed=354s
+[match] MISS   n_div_006      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 58s :: What is the decommission sequence for the 
+        truth='Access to the Thornwell data vault requires 9-TUNDRA-8603.'
+# progress 7/30  recall=3/7 reject=0/0  elapsed=413s
+[match] OK     n_div_007      K=12 gt=11 pick=11 steps=12 ans_tok=50013 58s :: What code does the Halbrecht seed bank req
+# progress 8/30  recall=4/8 reject=0/0  elapsed=471s
+[match] OK     n_div_008      K=12 gt= 1 pick= 1 steps=12 ans_tok=593 57s :: How do you unlock the Korrin fabrication b
+# progress 9/30  recall=5/9 reject=0/0  elapsed=528s
+[match] OK     n_div_009      K=12 gt= 3 pick= 3 steps=12 ans_tok=562 58s :: What is the reset token for the Dranford q
+# progress 10/30  recall=6/10 reject=0/0  elapsed=585s
+[match] MISS   n_div_010      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 58s :: Which arming sequence authorizes the Voska
+        truth='The arming sequence for the Voskar archive spine is 9-HOLLOW-2228.'
+# progress 11/30  recall=6/11 reject=0/0  elapsed=644s
+[match] MISS   n_div_011      K=12 gt= 9 pick= 6 steps=12 ans_tok=50237 58s :: What code does the Dranford sluice control
+        truth='Access to the Dranford sluice control requires 3-MERIDIAN-7336.'
+# progress 12/30  recall=6/12 reject=0/0  elapsed=702s
+[match] OK     n_div_012      K=12 gt= 9 pick= 9 steps=12 ans_tok=562 58s :: Which reset token authorizes the Thornwell
+# progress 13/30  recall=7/13 reject=0/0  elapsed=760s
+[match] OK     n_div_013      K=12 gt= 2 pick= 2 steps=12 ans_tok=667 57s :: What is the handshake token for the Skello
+# progress 14/30  recall=8/14 reject=0/0  elapsed=818s
+[match] MISS   n_div_014      K=12 gt= 7 pick=-1 steps=12 ans_tok=96869 58s :: What code does the Ulvane cold-store requi
+        truth='the Ulvane cold-store authorizes on 2-VECTOR-2697.'
+# progress 15/30  recall=8/15 reject=0/0  elapsed=875s
+[match] OK     n_div_015      K=12 gt= 0 pick= 0 steps=12 ans_tok=593 58s :: What code does the Vantor reactor annex re
+# progress 16/30  recall=9/16 reject=0/0  elapsed=934s
+[match] MISS   n_div_016      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 58s :: Which master cipher authorizes the Thornwe
+        truth='To unlock the Thornwell archive spine, enter 6-GRYPHON-6464.'
+# progress 17/30  recall=9/17 reject=0/0  elapsed=991s
+[match] MISS   n_div_017      K=12 gt= 0 pick=-1 steps=12 ans_tok=96869 58s :: What code does the Lysgate telemetry hub r
+        truth='Access to the Lysgate telemetry hub requires 6-QUASAR-7551.'
+# progress 18/30  recall=9/18 reject=0/0  elapsed=1049s
+[match] OK     n_div_018      K=12 gt=11 pick=11 steps=12 ans_tok=40774 57s :: What is the seal code for the Sallow data 
+# progress 19/30  recall=10/19 reject=0/0  elapsed=1106s
+[match] OK     n_div_019      K=12 gt= 2 pick= 2 steps=12 ans_tok=751 58s :: What is the ignition code for the Voskar q
+# progress 20/30  recall=11/20 reject=0/0  elapsed=1164s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What is machine learning?
+# progress 21/30  recall=11/20 reject=1/1  elapsed=1223s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: What do mitochondria do?
+# progress 22/30  recall=11/20 reject=2/2  elapsed=1282s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How does photosynthesis work?
+# progress 23/30  recall=11/20 reject=3/3  elapsed=1341s
+[forgn] FALSE  K=12 pick= 5 steps=12 ans_tok=40774 58s :: the and of to a in is that it with as
+# progress 24/30  recall=11/20 reject=3/4  elapsed=1399s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: How do I bake sourdough bread?
+# progress 25/30  recall=11/20 reject=4/5  elapsed=1458s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What are the primary colours?
+# progress 26/30  recall=11/20 reject=5/6  elapsed=1516s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Explain the rules of chess.
+# progress 27/30  recall=11/20 reject=6/7  elapsed=1575s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Who wrote Pride and Prejudice?
+# progress 28/30  recall=11/20 reject=7/8  elapsed=1633s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Recommend a good pasta recipe.
+# progress 29/30  recall=11/20 reject=8/9  elapsed=1693s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Convert 100 Celsius to Fahrenheit.
+# progress 30/30  recall=11/20 reject=9/10  elapsed=1752s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=12 CL=256 SC=1  subset matched=20 foreign=10
+recall@1       : 11/20 = 55.0%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 9/10 = 90.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
+===== LEG B: FIX (SP_DJ_SC_RAW=1 = raw canvas SC) start Wed 24/06/2026 13:39:42.24 ===== 
+# G-DIFFJUDGE-NATIVE-full (DENOISE judge)  corpus=_needle_corpus_div seed=20260622 K=12
+# model=C:/sp_models/diffusiongemma-26B-A4B.sp-model
+# denoise: STEPS<=12 t_max=0.80 t_min=0.40 entropy_bound=0.100 stab=2 conf=0.0050 SC=1
+# needles=90 foreign=50
+# single-token tags available=47 (need K=12)
+# NULL surface='NONE' bare=53212 spaced=96869  vocab=262144
+# loaded: V=262144 dg_canvas_length=256 (using CL=256)
+# pre-warming model into OS cache...
+# pre-warm read 14.2 GB in 2.8s
+[match] MISS   n_div_000      K=12 gt= 5 pick= 0 steps=12 ans_tok=15462 67s :: Which recovery code authorizes the Marlock
+        truth='the Marlock mag-rail depot authorizes on 2-AZURE-6428.'
+# progress 1/30  recall=0/1 reject=0/0  elapsed=67s
+[match] OK     n_div_001      K=12 gt= 0 pick= 0 steps=12 ans_tok=562 57s :: What is the launch authorization for the K
+# progress 2/30  recall=1/2 reject=0/0  elapsed=125s
+[match] OK     n_div_002      K=12 gt= 0 pick= 0 steps=12 ans_tok=50013 58s :: Which master cipher authorizes the Pyressa
+# progress 3/30  recall=2/3 reject=0/0  elapsed=183s
+[match] OK     n_div_003      K=12 gt=10 pick=10 steps=12 ans_tok=23952 58s :: Which seal code authorizes the Wexford arc
+# progress 4/30  recall=3/4 reject=0/0  elapsed=241s
+[match] MISS   n_div_004      K=12 gt= 3 pick=-1 steps=12 ans_tok=96869 58s :: What is the bypass key for the Voskar slui
+        truth='the Voskar sluice control authorizes on 1-AZURE-3271.'
+# progress 5/30  recall=3/5 reject=0/0  elapsed=299s
+[match] MISS   n_div_005      K=12 gt=11 pick=-1 steps=12 ans_tok=96869 58s :: Which handshake token authorizes the Grith
+        truth='the Grith seed bank authorizes on 9-MERIDIAN-3716.'
+# progress 6/30  recall=3/6 reject=0/0  elapsed=356s
+[match] MISS   n_div_006      K=12 gt= 5 pick=-1 steps=12 ans_tok=96869 58s :: What is the decommission sequence for the 
+        truth='Access to the Thornwell data vault requires 9-TUNDRA-8603.'
+# progress 7/30  recall=3/7 reject=0/0  elapsed=415s
+[match] MISS   n_div_007      K=12 gt=11 pick= 0 steps=12 ans_tok=749 58s :: What code does the Halbrecht seed bank req
+        truth='To unlock the Halbrecht seed bank, enter 7-PHOENIX-9925.'
+# progress 8/30  recall=3/8 reject=0/0  elapsed=473s
+[match] OK     n_div_008      K=12 gt= 1 pick= 1 steps=12 ans_tok=236791 57s :: How do you unlock the Korrin fabrication b
+# progress 9/30  recall=4/9 reject=0/0  elapsed=530s
+[match] OK     n_div_009      K=12 gt= 3 pick= 3 steps=12 ans_tok=236776 58s :: What is the reset token for the Dranford q
+# progress 10/30  recall=5/10 reject=0/0  elapsed=587s
+[match] MISS   n_div_010      K=12 gt= 9 pick=-1 steps=12 ans_tok=96869 58s :: Which arming sequence authorizes the Voska
+        truth='The arming sequence for the Voskar archive spine is 9-HOLLOW-2228.'
+# progress 11/30  recall=5/11 reject=0/0  elapsed=645s
+[match] MISS   n_div_011      K=12 gt= 9 pick= 1 steps=12 ans_tok=236917 58s :: What code does the Dranford sluice control
+        truth='Access to the Dranford sluice control requires 3-MERIDIAN-7336.'
+# progress 12/30  recall=5/12 reject=0/0  elapsed=703s
+[match] MISS   n_div_012      K=12 gt= 9 pick= 0 steps=12 ans_tok=236935 58s :: Which reset token authorizes the Thornwell
+        truth='Access to the Thornwell cold-store requires 4-HOLLOW-1027.'
+# progress 13/30  recall=5/13 reject=0/0  elapsed=761s
+[match] OK     n_div_013      K=12 gt= 2 pick= 2 steps=12 ans_tok=236823 57s :: What is the handshake token for the Skello
+# progress 14/30  recall=6/14 reject=0/0  elapsed=818s
+[match] MISS   n_div_014      K=12 gt= 7 pick= 0 steps=12 ans_tok=236773 57s :: What code does the Ulvane cold-store requi
+        truth='the Ulvane cold-store authorizes on 2-VECTOR-2697.'
+# progress 15/30  recall=6/15 reject=0/0  elapsed=876s
+[match] OK     n_div_015      K=12 gt= 0 pick= 0 steps=12 ans_tok=236791 58s :: What code does the Vantor reactor annex re
+# progress 16/30  recall=7/16 reject=0/0  elapsed=934s
+[match] OK     n_div_016      K=12 gt=11 pick=11 steps=12 ans_tok=10421 57s :: Which master cipher authorizes the Thornwe
+# progress 17/30  recall=8/17 reject=0/0  elapsed=991s
+[match] OK     n_div_017      K=12 gt= 0 pick= 0 steps=12 ans_tok=236953 57s :: What code does the Lysgate telemetry hub r
+# progress 18/30  recall=9/18 reject=0/0  elapsed=1048s
+[match] OK     n_div_018      K=12 gt=11 pick=11 steps=12 ans_tok=15462 57s :: What is the seal code for the Sallow data 
+# progress 19/30  recall=10/19 reject=0/0  elapsed=1105s
+[match] MISS   n_div_019      K=12 gt= 2 pick=-1 steps=12 ans_tok=96869 58s :: What is the ignition code for the Voskar q
+        truth='the Voskar quarantine wing ignition code: 4-AZURE-1219.'
+# progress 20/30  recall=10/20 reject=0/0  elapsed=1163s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What is machine learning?
+# progress 21/30  recall=10/20 reject=1/1  elapsed=1221s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: What do mitochondria do?
+# progress 22/30  recall=10/20 reject=2/2  elapsed=1280s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How does photosynthesis work?
+# progress 23/30  recall=10/20 reject=3/3  elapsed=1338s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: the and of to a in is that it with as
+# progress 24/30  recall=10/20 reject=4/4  elapsed=1396s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: How do I bake sourdough bread?
+# progress 25/30  recall=10/20 reject=5/5  elapsed=1454s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 57s :: What are the primary colours?
+# progress 26/30  recall=10/20 reject=6/6  elapsed=1512s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Explain the rules of chess.
+# progress 27/30  recall=10/20 reject=7/7  elapsed=1570s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Who wrote Pride and Prejudice?
+# progress 28/30  recall=10/20 reject=8/8  elapsed=1628s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 59s :: Recommend a good pasta recipe.
+# progress 29/30  recall=10/20 reject=9/9  elapsed=1687s
+[forgn] REJECT K=12 pick=-1 steps=12 ans_tok=96869 58s :: Convert 100 Celsius to Fahrenheit.
+# progress 30/30  recall=10/20 reject=10/10  elapsed=1746s
+
+================ G-DIFFJUDGE-NATIVE-full (SUBSET) RESULT ================
+K=12 seed=20260622 STEPS<=12 CL=256 SC=1  subset matched=20 foreign=10
+recall@1       : 10/20 = 50.0%   (single-forward ~14% ; oracle 95.6%)
+foreign-reject : 10/10 = 100.0%   (oracle 96.0%)
+SUBSET recall >= 80% : below 80%% — see per-query diagnosis
+SC_AB_DONE Wed 24/06/2026 14:08:53.22 
