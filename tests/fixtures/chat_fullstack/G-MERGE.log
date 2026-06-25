@@ -1,0 +1,46 @@
+G-MERGE — LAYER-3 MEMORY AGENCY: the model CONSOLIDATES two facts into one (2026-06-25)
+=========================================================================================
+The "holy grail": when two complementary facts about the same subject are stored,
+the model synthesizes them into ONE consolidated truth, drops both originals, and
+captures the synthesis. Completes the 3-layer agency stack:
+  STORE (NIGHTSHIFT) + FORGET (SP_FORGET) + DECIDE [supersede + MERGE] (SP_DECIDE).
+Default-off SP_DECIDE=1.
+
+Engine: cargo build --release --features wire_cuda_backend  BUILD_EXIT=0
+Launcher: _e2e_seed_serve.bat (port 3000) + SP_DECIDE=1 + SP_FORGET=1 ; 8 seeds.
+Test: tools/xbar_lsh/_merge_smoke.py.
+
+ARCHITECTURE (two-stage DECIDE):
+  Stage 1 (CHANGED / supersede): does the NEW fact REPLACE a memory -- a new value for
+     the SAME attribute, so both CANNOT be true at once? If yes -> forget the old (built
+     in G-DECIDE). The "cannot both be true at once" criterion is what stops it firing on
+     complementary facts.
+  Stage 2 (MERGE): runs only if stage 1 found NO supersede. Compares the NEW fact with the
+     top-overlap candidate; if they are the same subject and should be ONE memory, the model
+     returns "MERGE:: <combined fact>". The daemon drops BOTH originals (live set + persisted
+     registry) and captures the synthesized fact via capture_live_episode() (same provenance
+     as NIGHTSHIFT: BOS+newline, batched forward, real C2 sig, persisted).
+
+SMOKE:
+======================================================================
+[PLANT-A] "My sister is a doctor."          -> captured
+[PLANT-B] "My sister lives in Boston."       -> captured; DECIDE stage-1 "CHANGED=NONE"
+          (job + city coexist) -> stage-2 "MERGE:: My sister lives in Boston and is a
+          doctor." -> drop both, capture synthesis
+[RECALL]  "Tell me about my sister."          -> "My sister lives in Boston and is a doctor."
+======================================================================
+REGISTRY: 9 lines (8 seeds + ONE consolidated fact); both originals gone, synthesis present.
+
+BUGS FOUND IN TESTING (receipts-first):
+  1. Stage-1 OVER-FIRED on complementary facts: first dog case ("I have a dog" + "named Rex")
+     and sister case both got CHANGED=1 (model treated any same-subject fact as a supersede),
+     eating the MERGE path AND losing information. FIX = stage-1 criterion sharpened to
+     "the NEW fact and the memory CANNOT both be true at once" (favorite color changing =
+     replace; job vs city = NONE). After: sister case -> CHANGED=NONE -> MERGE fired.
+  2. The RECALL turn "Tell me about my sister." was CAPTURED as a fact (request slipped past
+     the wh-word filter) and self-merged. FIX = admit gate now also skips request-imperatives
+     ("tell me", "describe", "list", "show", "explain", "summarize", "recall", "remind",
+     "do you", "can you"). After: recall turn no longer captured; one clean MERGE only.
+
+Default-off SP_DECIDE unset = byte-identical null floor. The organism now stores, forgets,
+supersedes, and consolidates its own memory -- autonomously, on its own verdict.

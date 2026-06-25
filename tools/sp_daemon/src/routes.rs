@@ -586,6 +586,63 @@ pub async fn v1_chat(
 /// token is obtained by prefilling `tokens[..n-1]` then `decode_step(tokens[n-1])`
 /// (which returns that token's next-position logits) — no separate seq-peek
 /// needed. Emit / EOS / stop-string handling mirrors the fallback decode loop.
+// LAYER-3 MERGE helper: capture an ARBITRARY text as a new live episode, with the
+// SAME provenance as the NIGHTSHIFT path (BOS kept + trailing newline, batched forward
+// via the resident model, real C2 sig, persisted to the registry if SP_NIGHTSHIFT_PERSIST).
+// Used to write the SYNTHESIZED fact a MERGE consolidates into. Returns true on success.
+// Kept separate from the inline B4 capture so the proven NIGHTSHIFT path is untouched;
+// uses a millis-unique episode name so it can never collide with a forgotten ep dir.
+#[cfg(feature = "wire_cuda_backend")]
+fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
+    use sp_daemon::cuda_kvdecode_dispatch as kv;
+    let text_nl = format!("{text}\n");
+    let toks = match app.tokenizer.encode(&text_nl) { Ok(t) => t, Err(_) => return false };
+    let ntok = toks.len();
+    if ntok < 4 { return false; }
+    let qm = {
+        let mut sguard = app.session.lock().unwrap();
+        let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+        (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
+    };
+    if qm.is_null() { return false; }
+    let uniq = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis()).unwrap_or(0);
+    let name = format!("ep_live_m{uniq}");
+    let engine_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().and_then(|p| p.parent()).unwrap_or_else(|| std::path::Path::new("."));
+    let dir = engine_root.join("_nightshift_live").join(&name);
+    let dir_str = dir.to_string_lossy().to_string();
+    if std::fs::create_dir_all(&dir).is_err() { return false; }
+    { let _ = std::fs::write(dir.join("ep.txt"), text);
+      let _ = std::fs::write(dir.join("ep.tok"), toks.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n")); }
+    if unsafe { kv::capture_batched(qm, &toks, &dir_str) }.is_err() { return false; }
+    let (gk, ng) = match sp_daemon::recall::load_episode_global_k(&dir_str, ntok as i32) {
+        Some(x) => x, None => return false };
+    let npos_sig = if ng > 0 { gk.len() / (ng * sp_daemon::recall::HD) } else { 0 };
+    let sig = if npos_sig > 0 { app.recall_proj.signature(&gk, ng, npos_sig) } else { [0u64; 4] };
+    if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
+        if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+            let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
+            let line = serde_json::json!({
+                "name": name.clone(), "dir": dir_str.clone(), "npos": ntok as i32,
+                "topic": text, "text": text, "sig_bits": sig_hex,
+            }).to_string();
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&reg_path) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    }
+    let topic: String = text.chars().take(40).collect();
+    let mut ns = app.nightshift.write().unwrap();
+    ns.push(sp_daemon::recall::Episode {
+        name, dir: dir_str.clone(), npos: ntok as i32, topic,
+        text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
+    });
+    tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
+    true
+}
+
 #[cfg(feature = "wire_cuda_backend")]
 #[allow(clippy::too_many_arguments)]
 fn run_kvdecode_chat(
@@ -2002,8 +2059,13 @@ Tag of the answer (or [NULL]):");
         // coupling that previously blocked the supersede case. N2 stays LOOSE by design.
         let lc = raw_user.as_ref().map(|s| s.trim().to_lowercase()).unwrap_or_default();
         let first_word = lc.split_whitespace().next().unwrap_or("");
+        // Skip questions AND request-imperatives ("tell me about X", "describe...") --
+        // they are not facts to store. wh-words + '?' + common request verbs/prefixes.
         let is_question = lc.ends_with('?')
-            || matches!(first_word, "what"|"who"|"whom"|"whose"|"where"|"when"|"why"|"how"|"which");
+            || lc.starts_with("tell me") || lc.starts_with("do you") || lc.starts_with("can you")
+            || matches!(first_word,
+                "what"|"who"|"whom"|"whose"|"where"|"when"|"why"|"how"|"which"
+                |"tell"|"describe"|"list"|"show"|"explain"|"summarize"|"recall"|"remind");
         let admit = !forget_done
             && !is_forget_turn
             && !is_question
@@ -2176,13 +2238,14 @@ Tag of the answer (or [NULL]):");
             cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             cands.truncate(5);
             if !cands.is_empty() {
+                let mut decided = false; // set true when stage-1 supersede forgets
                 // Present the new fact + numbered related memories; the model picks.
                 let mut listing = String::new();
                 for (i, (_, t)) in cands.iter().enumerate() {
                     listing.push_str(&format!("{}. \"{}\"\n", i + 1, t));
                 }
                 let prompt = format!(
-                    "A NEW fact was just stated:\n\"{}\"\nHere are earlier memories:\n{}\nDoes the NEW fact give an UPDATED value for something one of these memories already states -- the same person's favorite, name, location, status, or any attribute that has only one current value? If yes, that memory is now out of date: give its number. If the NEW fact is about something different and none are out of date, answer NONE.\nReply with the memory number that is now out of date, or NONE.",
+                    "A NEW fact was just stated:\n\"{}\"\nHere are earlier memories:\n{}\nIs the NEW fact a REPLACEMENT for one of these memories -- does it state a new value for the SAME attribute, so that the NEW fact and that memory CANNOT both be true at the same time (for example a favorite color changing, or a current home city changing)? Only then give that memory's number. If the NEW fact is about a DIFFERENT attribute and can be true ALONGSIDE the memories (for example a person's job AND the city they live in are both true), answer NONE.\nReply with the memory number that is replaced, or NONE.",
                     new_text, listing);
                 let dmsgs = vec![Message { role: "user".to_string(), content: prompt }];
                 if let Ok(dtoks) = app.tokenizer.apply_template_ids(&dmsgs) {
@@ -2247,6 +2310,87 @@ Tag of the answer (or [NULL]):");
                                         }
                                     }
                                     tracing::info!("LAYER-3 DECIDE: the model chose to FORGET #{} -> \"{}\" (superseded by the new fact)", n, victim);
+                                    decided = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                // ── STAGE 2: MERGE — consolidate two partial facts into ONE synthesized
+                // truth. Runs only if stage-1 found NO supersede. Compares the new fact
+                // with the single best-overlap candidate; if the model judges they describe
+                // the SAME subject, it returns the combined fact, and the daemon drops BOTH
+                // old episodes and captures the one consolidation (the operator's "holy grail").
+                if !decided {
+                    let cand0 = cands[0].1.clone();
+                    let mprompt = format!(
+                        "Two facts may describe the SAME thing and belong together as ONE memory:\nA: \"{}\"\nB: \"{}\"\nIf A and B are about the same subject and should be combined, reply with the single complete combined fact on one line, prefixed exactly: MERGE:: <combined fact>\nIf they are about DIFFERENT things, reply NONE.",
+                        new_text, cand0);
+                    let mmsgs = vec![Message { role: "user".to_string(), content: mprompt }];
+                    if let Ok(mtoks) = app.tokenizer.apply_template_ids(&mmsgs) {
+                        if mtoks.len() >= 2 {
+                            let _ = unsafe { kv::reset(handle) };
+                            let (mhead, mlast) = mtoks.split_at(mtoks.len() - 1);
+                            let ok = mhead.is_empty() || unsafe { kv::prefill(handle, mhead) }.is_ok();
+                            let mut mreply = String::new();
+                            if ok {
+                                let mut tok = mlast[0];
+                                let turn_stops = app.tokenizer.turn_stop_ids();
+                                let suppress = app.tokenizer.suppress_token_ids();
+                                for _ in 0..40 {
+                                    if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                    for &sid in &suppress { let u = sid as usize; if u < logits.len() { logits[u] = f32::NEG_INFINITY; } }
+                                    let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
+                                    for (i, &v) in logits.iter().enumerate() { if v > bv { bv = v; bi = i; } }
+                                    let g = bi as i32;
+                                    if app.tokenizer.eos_ids.contains(&g) || turn_stops.contains(&g) { break; }
+                                    mreply.push_str(&String::from_utf8_lossy(app.tokenizer.decode_token(g)));
+                                    tok = g;
+                                    if mreply.contains('\n') { break; }
+                                }
+                            }
+                            let _ = unsafe { kv::reset_cold(handle) };
+                            let mtrim = mreply.trim().to_string();
+                            tracing::info!("LAYER-3 MERGE: A=\"{}\" B=\"{}\" -> reply=\"{}\"",
+                                new_text.chars().take(40).collect::<String>(),
+                                cand0.chars().take(40).collect::<String>(), mtrim);
+                            // Parse "MERGE:: <combined>" (case-insensitive). NONE / no marker /
+                            // empty combined ⇒ keep both (safe default, no removal).
+                            let lower = mtrim.to_lowercase();
+                            if let Some(mp) = lower.find("merge") {
+                                if !lower[..mp].contains("none") {
+                                    let rest = mtrim.get(mp + 5..).unwrap_or("");
+                                    let combined = rest
+                                        .trim_start_matches(|c: char| c == ':' || c == '=' || c == '-' || c == '>' || c == ' ')
+                                        .trim().trim_matches('"').trim().to_string();
+                                    if combined.chars().count() >= 4 {
+                                        // Drop BOTH old episodes (the just-captured new fact + the
+                                        // candidate) from the live set and the persisted registry...
+                                        let drop_a = new_text.clone();
+                                        let drop_b = cand0.clone();
+                                        { let mut ns = app.nightshift.write().unwrap();
+                                          ns.retain(|e| e.text != drop_a && e.text != drop_b); }
+                                        if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                                            if let Ok(content) = std::fs::read_to_string(&reg_path) {
+                                                let kept: Vec<&str> = content.lines().filter(|line| {
+                                                    match serde_json::from_str::<serde_json::Value>(line) {
+                                                        Ok(v) => { let t = v.get("text").and_then(|x| x.as_str());
+                                                            t != Some(drop_a.as_str()) && t != Some(drop_b.as_str()) },
+                                                        Err(_) => !line.trim().is_empty(),
+                                                    }
+                                                }).collect();
+                                                let mut out = kept.join("\n"); if !out.is_empty() { out.push('\n'); }
+                                                let _ = std::fs::write(&reg_path, out);
+                                            }
+                                        }
+                                        // ...and capture the single synthesized consolidation.
+                                        let okc = capture_live_episode(app, &combined);
+                                        tracing::info!("LAYER-3 MERGE: consolidated \"{}\" + \"{}\" -> \"{}\" (capture {})",
+                                            drop_a.chars().take(30).collect::<String>(),
+                                            drop_b.chars().take(30).collect::<String>(),
+                                            combined.chars().take(50).collect::<String>(),
+                                            if okc { "ok" } else { "FAILED" });
+                                    }
                                 }
                             }
                         }
