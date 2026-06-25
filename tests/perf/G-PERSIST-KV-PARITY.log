@@ -46,7 +46,32 @@ REPRO:
   python tests\perf\_g_persist_kv_parity.py off
   Get-FileHash _persist_r2_on.txt, _persist_r2_off.txt   -> equal hashes = PASS
 
-USAGE (live): persist applies to the PLAIN / agent decode path. Run the daemon plain
-(_persist_serve.bat 1 -- no SP_B3_JUDGE/auto_recall/SP_DECIDE/SP_FORGET/SP_B4_NIGHTSHIFT) and let
-the harness agent (run_gateway.bat) manage memory via tools; the console then gets O(1) full
+USAGE (live): persist applies to the PLAIN / agent decode path AND the auto_recall path (see
+extension below). Run the daemon plain (_persist_serve.bat 1) with the harness agent managing
+memory via tools, OR with auto_recall (_persist_recall_serve.bat 1); the console gets O(1) full
 context. Build: cargo build --release --features wire_cuda_backend (29.6s, BUILD_EXIT=0).
+
+================================================================================
+RECALL EXTENSION (2026-06-26) -- persist now engages UNDER auto_recall, still byte-exact.
+================================================================================
+The W_c / q.K relevance scoring reads the cache's global K/Q NON-COMMITTINGLY (read_global_q/k
+do a forward then roll the cache back), so on a NULL (no-fire) turn the plain-prompt cache stays
+pristine and persist reuses it. A PICK injects the chosen episode's K/V at [dpos,dpos+npos) for
+synthesis -> that turn skips the commit (recalled.is_some()), so the NEXT turn resets + full-
+prefills (clearing the injected episode). STILL EXCLUDED: the SPECULATIVE recall paths
+(SP_B3_JUDGE / SP_B3_DISPOSER / SP_INT2, which rebuild/speculatively inject into the cache) and
+the agency writers (SP_DECIDE / SP_FORGET / SP_B4_NIGHTSHIFT).
+
+GATE (recall config: SP_AUTO_RECALL_DEFAULT=1 + the div registry, no judge/disposer/agency):
+   ON  (SP_PERSIST_KV=1):  "PERSIST-KV: reuse 32 committed tokens; prefill suffix 21 (full 53)";
+                           B3 q.K scoring ran BOTH turns (auto_recall active); no fire (NULL).
+   OFF (env unset):        0 PERSIST-KV reuse lines.
+   turn-2 SHA-256: ON == OFF == 2D1C3BCC447F83021C70DDC0DFEA9E5BAFC83EFCD787B2A44526777E78CFA9B4
+   => BYTE-IDENTICAL: True. The non-committing scoring reads do not disturb the reused cache.
+WHY PICK IS ALSO SAFE (byte-exact by the same reuse-equivalence): the reused plain-prompt cache
+== the full-prefilled plain-prompt cache, so injecting the episode on top of it + synthesizing is
+bit-identical to full-prefill+inject; and the turn-end skips re-arming committed so no stale
+token-sequence can ever be reused over an episode-injected cache (fail-closed). REPRO:
+  tests\perf\_persist_recall_serve.bat 1   +   python tests\perf\_g_persist_kv_parity.py recall_on
+  tests\perf\_persist_recall_serve.bat     +   python tests\perf\_g_persist_kv_parity.py recall_off
+Engine: persist plain 51d7e5f; recall extension follows.

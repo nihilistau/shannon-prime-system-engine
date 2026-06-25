@@ -753,15 +753,25 @@ fn run_kvdecode_chat(
     let pos = unsafe { kv::position(handle) };
     // PERSISTENT O(1) KV (SP_PERSIST_KV): when the committed cache is a STRICT PREFIX of this
     // prompt AND the cache position equals its length (the cache holds exactly it), reuse it and
-    // prefill only the new suffix -- no reset, no re-prefill of the conversation. Restricted to the
-    // PLAIN decode path (no recall / agency / replay / inject / single_entry side-calls, all of
-    // which reset or rebuild the cache), so the committed sequence is guaranteed to mirror the cache.
+    // prefill only the new suffix -- no reset, no re-prefill of the conversation.
+    // RECALL EXTENSION: auto_recall is now ALLOWED. The W_c / q·K relevance scoring reads the
+    // cache's global K/Q NON-COMMITTINGLY (read_global_q/k roll the cache back), so on a NULL
+    // (no-fire) turn the plain-prompt cache stays pristine and persist engages with full speedup.
+    // A PICK injects the chosen episode's K/V at [dpos,dpos+npos) for synthesis -> that turn is
+    // marked dirty at the commit point (recalled.is_some()) so the NEXT turn full-prefills clean.
+    // STILL EXCLUDED (these rebuild / speculatively inject into the cache in ways a token-sequence
+    // committed cannot mirror): the SPECULATIVE recall paths (SP_B3_JUDGE / SP_B3_DISPOSER /
+    // SP_INT2), the memory-agency writers (SP_DECIDE / SP_FORGET / SP_B4_NIGHTSHIFT), and the
+    // operator replay / single_entry / inject_frames seams.
     // Default-off => prefill_from stays 0 => byte-identical to the reset+full-prefill null floor.
     let persist_kv = std::env::var("SP_PERSIST_KV").ok().as_deref() == Some("1")
-        && !auto_recall && replay_dir.is_none() && !single_entry && inject_frames.is_none()
+        && replay_dir.is_none() && !single_entry && inject_frames.is_none()
         && std::env::var("SP_DECIDE").ok().as_deref() != Some("1")
         && std::env::var("SP_FORGET").ok().as_deref() != Some("1")
-        && std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() != Some("1");
+        && std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() != Some("1")
+        && std::env::var("SP_B3_JUDGE").ok().as_deref() != Some("1")
+        && std::env::var("SP_B3_DISPOSER").is_err()
+        && std::env::var("SP_INT2").ok().as_deref() != Some("1");
     let mut prefill_from: usize = 0;
     if persist_kv {
         let committed = KV_COMMITTED.lock().unwrap();
@@ -2468,9 +2478,16 @@ Tag of the answer (or [NULL]):");
     if persist_kv {
         let mut c = KV_COMMITTED.lock().unwrap();
         c.clear();
-        c.reserve(tokens.len() + committed_gen.len());
-        c.extend_from_slice(tokens);
-        c.extend_from_slice(&committed_gen);
+        // RECALL EXTENSION: re-arm the reusable prefix ONLY when the cache is the pristine plain
+        // prompt + generated -- i.e. no episode was injected for synthesis this turn. A PICK
+        // (recalled.is_some()) leaves the cache holding the episode K/V at [dpos,dpos+npos), which
+        // a token-sequence committed cannot represent; leaving it cleared makes the next turn
+        // reset + full-prefill (clearing the injected episode) -- correct, just not O(1) that turn.
+        if recalled.is_none() {
+            c.reserve(tokens.len() + committed_gen.len());
+            c.extend_from_slice(tokens);
+            c.extend_from_slice(&committed_gen);
+        }
     }
 
     sessions.remove(chat_id);
