@@ -54,6 +54,14 @@ REM monotonically-growing, PMAX-bounded window so the prefix is reusable. Defaul
 REM daemon (null floor); opted in here. Plain decode path = fully covered.
 set "SP_PERSIST_KV=1"
 
+REM EOT BIAS (project_eot_coherence_fix): the gemma4 end-of-turn token reaches ~rank 1 at a real
+REM turn boundary but loses by a hair, so without a nudge the model never stops and degenerates
+REM (emoji -> repeated glyphs to max_tokens -- which ALSO looks like "slow"). A +4 logit bias on the
+REM stop tokens tips a rank-1 boundary to chosen without firing mid-answer. The console sends eot=4
+REM per request, but set the DAEMON default too so non-console clients (agent gateway, scripts) also
+REM stop cleanly. Per-request eot_bias still overrides this.
+set "SP_EOT_BIAS=4.0"
+
 REM CWD must be tools\sp_daemon so the static ServeDir("frontend_mockups") resolves.
 cd /d "%ENGINE%tools\sp_daemon"
 

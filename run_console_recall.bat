@@ -27,6 +27,9 @@ set "SP_DAEMON_KVDECODE_RING_W=2048"
 set "SP_DAEMON_KVDECODE_PMAX=20000"
 
 REM ---- B3-WC autonomous librarian (the only delta vs run_console.bat) ----
+REM SP_AUTO_RECALL_DEFAULT=1 makes the librarian fire without the client having to send auto_recall
+REM per request (the console DOES send it via its checkbox, but other clients / tests need this).
+set "SP_AUTO_RECALL_DEFAULT=1"
 set "SP_RECALL_REGISTRY=%ENGINE%_needle_corpus_div\registry.jsonl"
 set "SP_B3_WC=%ENGINE%_b3_wc\wc_deploy.bin"
 set "SP_REPLAY_MTARGET=42"
@@ -38,6 +41,11 @@ REM the plain-prompt cache pristine and persist reuses it; a RECALL injects the 
 REM synthesis -> that turn skips re-arming the reusable prefix, so the next turn full-prefills
 REM clean. Byte-exact either way (G-PERSIST-KV-PARITY recall extension). Default-off; opted in here.
 set "SP_PERSIST_KV=1"
+
+REM EOT BIAS default (project_eot_coherence_fix): stop the model degenerating past a turn boundary
+REM (repeated glyphs to max_tokens). Console sends eot=4 per request; this is the daemon default for
+REM other clients. Per-request eot_bias overrides.
+set "SP_EOT_BIAS=4.0"
 
 cd /d "%ENGINE%tools\sp_daemon"
 echo [recall] serving http://127.0.0.1:%PORT%/  with autonomous recall ARMED (registry=_needle_corpus_div, M=42)
