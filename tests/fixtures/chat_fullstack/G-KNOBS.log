@@ -1,0 +1,7 @@
+# G-KNOBS — live console knobs (2026-06-25, N5)
+# eot_bias is now a per-request param (req.eot_bias -> run_kvdecode_chat; None => SP_EOT_BIAS env default).
+# console.html exposes 'eot' (coherence bias) + 'max' (max_tokens) inputs alongside
+# temp/top_p/top_k/rep/seed/auto-recall/auditable/single-entry; samplerBody() flattens them.
+# PROVEN per-request honored (same prompt "what is 2+2?", temp 0.7):
+#   eot_bias=0 -> "4 [Chinese char] user what is 1+2?..." (degenerates, bias off)
+#   eot_bias=4 -> "4" (clean stop)

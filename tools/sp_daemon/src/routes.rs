@@ -240,6 +240,10 @@ pub struct ChatRequest {
     // 12B kvdecode (resident-cache) chat path.
     #[serde(default)]
     pub single_entry: Option<bool>,
+    // N5: live end-of-turn logit bias (the coherence knob). None => the daemon's
+    // SP_EOT_BIAS env default. Tunable per-request from the console GUI.
+    #[serde(default)]
+    pub eot_bias: Option<f32>,
     // CONTRACT-CHAT-FULLSTACK B5 — the GENERIC residual-frame channel. Raw E-float
     // residual vectors fed straight to gemma4_kv_inject_seq (the seam AUDIO/EAR and
     // MEMORY-as-residual sources also use). Each inner Vec is one E-length frame;
@@ -407,6 +411,7 @@ pub async fn v1_chat(
     // through gemma4_kv_inject_tokens (the residual seam) instead of prefill;
     // inject_frames feeds raw residual frames (audio/memory) through the same seam.
     let single_entry = req.single_entry.unwrap_or(false);
+    let eot_bias = req.eot_bias; // N5: per-request override of the SP_EOT_BIAS default
     let inject_frames = req.inject_frames.clone();
     let inject_ph = req.inject_ph;
     // A2: build the per-request sampler from the (flattened) ChatRequest knobs.
@@ -471,7 +476,7 @@ pub async fn v1_chat(
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
                 &mut sampler, byteexact, replay_dir, replay_npos,
                 single_entry, inject_frames, inject_ph, auto_recall,
-                raw_user,
+                raw_user, eot_bias,
             );
             return;
         }
@@ -603,6 +608,7 @@ fn run_kvdecode_chat(
     inject_ph: i32,
     auto_recall: bool,
     raw_user: Option<String>,
+    eot_bias_req: Option<f32>,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
 
@@ -1765,8 +1771,8 @@ Tag of the answer (or [NULL]):");
     // boundary but a hair short of winning, so the model never stops and degenerates.
     // A small fixed bias on the stop tokens tips a rank-1 boundary to chosen WITHOUT
     // firing mid-answer (where eot sits at rank ~1000, far out of reach). 0 = null floor.
-    let eot_bias: f32 = std::env::var("SP_EOT_BIAS").ok()
-        .and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    let eot_bias: f32 = eot_bias_req.unwrap_or_else(|| std::env::var("SP_EOT_BIAS").ok()
+        .and_then(|s| s.trim().parse().ok()).unwrap_or(0.0));
     if eot_bias != 0.0 { for &s in &eot_stop_ids { logits[s] += eot_bias; } }
     let mut next_token = sampler.sample(logits);
     sampler.observe(next_token);
