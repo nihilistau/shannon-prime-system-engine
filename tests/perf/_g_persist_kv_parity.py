@@ -7,9 +7,9 @@ conversation. At temperature 0 + byteexact (default on) the decode is determinis
 so the turn-2 answer MUST be identical on/off -- that is the byte-exact proof.
 Run once per daemon (tag 'on' / 'off'); compare the two _persist_r2_<tag>.txt files.
 """
-import json, sys, urllib.request
+import json, os, sys, urllib.request
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-PORT = 3001
+PORT = int(os.environ.get("SP_TEST_PORT", "3001"))
 
 
 def chat(msgs, max_tokens=80):
