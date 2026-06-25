@@ -666,13 +666,28 @@
       // Prefer multi-turn messages (server applies the chat template);
       // fall back to a client-side gemma prompt if no server template exists.
       const sk = samplerBody();
-      // CONTEXT WINDOW: the daemon re-prefills whatever conversation it receives (O(n) per turn),
-      // so a very long chat slows to a crawl (snappy at turn 1, minutes by turn 3000). Cap the
-      // prefilled history to the system prompt + the last W turns; older facts are held by the
-      // memory system (recall/agency), not the raw transcript. (The proper fix is a persistent
-      // O(1) conversation KV in the daemon; this bounds the cost until then.)
-      const W = 24;
-      const msgs = (history.length > W + 1) ? [history[0], ...history.slice(-W)] : history;
+      // CONTEXT WINDOW + PERSIST-KV. With persistent O(1) KV in the daemon (SP_PERSIST_KV) the
+      // prefill is REUSED across turns when this turn's prompt strictly extends the last one, so
+      // we keep a large in-context window cheaply instead of capping to a few turns. Bound it by an
+      // approximate token budget (~16k, headroom under the daemon's PMAX) so the resident cache
+      // never overflows: keep the system turn + the most recent turns that fit. The window grows
+      // monotonically while under budget (persist reuses the prefix => O(1) prefill); once it
+      // exceeds budget it slides and that single turn re-prefills (still bounded, not O(full chat)).
+      // Older facts beyond the window are held by the memory system (recall / agency / MEM-OKF).
+      const TOK_BUDGET = 16000;            // ~tokens; headroom under SP_DAEMON_KVDECODE_PMAX
+      const estTok = (m) => Math.ceil((((m && m.content) || '')).length / 4) + 8;
+      let msgs;
+      {
+        const sys = history[0];
+        let used = sys ? estTok(sys) : 0;
+        const tail = [];
+        for (let i = history.length - 1; i >= 1; i--) {
+          used += estTok(history[i]);
+          if (used > TOK_BUDGET && tail.length) break;   // always keep >=1 most-recent turn
+          tail.unshift(history[i]);
+        }
+        msgs = sys ? [sys, ...tail] : tail;
+      }
       let res = await streamChat({ messages: msgs, max_tokens: 512, ...sk });
       if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(msgs), max_tokens: 512, ...sk });
       const finalText = (res && res.text || '').trim();

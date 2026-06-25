@@ -47,6 +47,13 @@ REM doubling (O(1) SWA ring; globals full-cache caveat). See CONTRACT-CHAT-FULLS
 set "SP_DAEMON_KVDECODE_RING_W=1024"
 set "SP_DAEMON_KVDECODE_PMAX=20000"
 
+REM PERSISTENT O(1) CONVERSATION KV (G-PERSIST-KV-PARITY, byte-exact). Reuse the resident KV
+REM across turns: when this turn's prompt strictly extends the prior committed sequence, prefill
+REM ONLY the new suffix instead of re-prefilling the whole conversation. The console sends a
+REM monotonically-growing, PMAX-bounded window so the prefix is reusable. Default-off in the
+REM daemon (null floor); opted in here. Plain decode path = fully covered.
+set "SP_PERSIST_KV=1"
+
 REM CWD must be tools\sp_daemon so the static ServeDir("frontend_mockups") resolves.
 cd /d "%ENGINE%tools\sp_daemon"
 
