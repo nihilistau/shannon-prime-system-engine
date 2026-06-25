@@ -398,9 +398,11 @@ pub async fn v1_chat(
     // B2 (§6d-b): per-turn XBAR episode replay (None = no recall = null floor).
     let replay_dir = req.replay.clone();
     let replay_npos = req.replay_npos;
-    // B3: autonomous recall toggle (default OFF). Only meaningful when the daemon
-    // loaded a registry; an explicit `replay` overrides it (operator wins).
-    let auto_recall = req.auto_recall.unwrap_or(false);
+    // B3: autonomous recall toggle. An explicit request `auto_recall` always wins;
+    // otherwise it defaults to SP_AUTO_RECALL_DEFAULT (so the served console/UI gets
+    // recall without sending the flag per-request). Env unset => false = null floor.
+    let auto_recall = req.auto_recall
+        .unwrap_or(std::env::var("SP_AUTO_RECALL_DEFAULT").ok().as_deref() == Some("1"));
     // B5 (§6e): the single latent entry point. single_entry routes prompt ingest
     // through gemma4_kv_inject_tokens (the residual seam) instead of prefill;
     // inject_frames feeds raw residual frames (audio/memory) through the same seam.
