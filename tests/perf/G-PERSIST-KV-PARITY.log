@@ -1,0 +1,52 @@
+G-PERSIST-KV-PARITY -- persistent O(1) conversation KV is BYTE-EXACT (2026-06-26)
+================================================================================
+WHAT: the daemon's #1 slowdown fix. run_kvdecode_chat now REUSES the resident KV across
+turns: when the committed sequence (prev prompt + the tokens generated last turn) is a STRICT
+PREFIX of this turn's prompt AND the cache position equals its length, it prefills ONLY the new
+suffix instead of reset(0) + re-prefilling the whole conversation. Engine tools/sp_daemon
+src/routes.rs; default-off env SP_PERSIST_KV; PLAIN decode path only (gated out of recall /
+agency / replay / inject / single_entry, all of which reset or rebuild the cache, so the
+committed sequence is guaranteed to mirror the cache).
+
+GATE (real gemma4-12b-b1.sp-model, port 3001, temperature 0, byteexact default-on):
+ A 2-turn conversation -- turn 2 appends a new user message to turn 1. Identical script run
+ against two daemons (persist ON vs OFF).
+   ON  (SP_PERSIST_KV=1):  daemon log =>
+       "PERSIST-KV: reuse 32 committed tokens; prefill suffix 21 (full would be 53)"
+   OFF (env unset):        0 PERSIST-KV reuse lines  (pure null floor: reset + full re-prefill)
+   turn-2 answer SHA-256:
+       ON  2D1C3BCC447F83021C70DDC0DFEA9E5BAFC83EFCD787B2A44526777E78CFA9B4
+       OFF 2D1C3BCC447F83021C70DDC0DFEA9E5BAFC83EFCD787B2A44526777E78CFA9B4
+   => BYTE-IDENTICAL: True.
+
+WHY BYTE-EXACT: the reused prefix's K/V is the SAME deterministic computation whether it was
+prefilled last turn or re-prefilled this turn; only the new suffix is prefilled fresh -- exactly
+what a full re-prefill would compute. So reuse == full-prefill bit-for-bit (the byteexact /
+exact-integer forward already gives run-to-run bit-identity, which is what makes this provable).
+
+THE WIN: turn-2 prefill dropped 53 -> 21 tokens here. The reuse GROWS with conversation length:
+in a 3000-turn chat the committed prefix is ~the entire transcript, so the daemon prefills only
+the new ~20-token turn => O(new turn), not O(conversation). This is the structural fix for the
+"snappy at first, 30+ tok/s -> <=1, 5 min at 3000 turns" slowdown -- the per-turn prefill no
+longer re-pays the whole history. (Decode still attends over the live KV; for the plain / agent
+path that IS the real context. The daemon-recall config -- which resets the cache and so cannot
+use persist -- stays bounded by the console context-window cap W=24.)
+
+SAFETY / NULL FLOOR: env unset => prefill_from stays 0 => byte-identical to reset+full-prefill
+(the OFF run proves it: 0 reuse, identical SHA-256). The fast path fires ONLY when committed is a
+strict prefix AND cache pos == committed.len(); it FAILS CLOSED on any divergence (e.g. a
+response that re-tokenizes differently) or any external cache change -> full reset + prefill.
+Restricted to the plain decode path so no recall/agency side-call can desync committed from cache.
+
+REPRO:
+  tests\perf\_persist_serve.bat 1            (daemon: SP_PERSIST_KV=1, plain decode, :3001)
+  python tests\perf\_g_persist_kv_parity.py on
+  (stop daemon)
+  tests\perf\_persist_serve.bat              (daemon: persist OFF -- no arg)
+  python tests\perf\_g_persist_kv_parity.py off
+  Get-FileHash _persist_r2_on.txt, _persist_r2_off.txt   -> equal hashes = PASS
+
+USAGE (live): persist applies to the PLAIN / agent decode path. Run the daemon plain
+(_persist_serve.bat 1 -- no SP_B3_JUDGE/auto_recall/SP_DECIDE/SP_FORGET/SP_B4_NIGHTSHIFT) and let
+the harness agent (run_gateway.bat) manage memory via tools; the console then gets O(1) full
+context. Build: cargo build --release --features wire_cuda_backend (29.6s, BUILD_EXIT=0).

@@ -601,6 +601,17 @@ pub async fn v1_chat(
 /// token is obtained by prefilling `tokens[..n-1]` then `decode_step(tokens[n-1])`
 /// (which returns that token's next-position logits) — no separate seq-peek
 /// needed. Emit / EOS / stop-string handling mirrors the fallback decode loop.
+// ── Persistent O(1) conversation KV (SP_PERSIST_KV) ─────────────────────────────
+// The tokens currently committed in the resident KV (prompt + generated). When the next
+// turn's prompt is a STRICT PREFIX of this (the conversation just grew by appending) and the
+// cache position matches, we PREFILL ONLY THE NEW SUFFIX instead of rewinding to 0 and
+// re-prefilling the whole conversation -- the O(n)-per-turn cost that drops tok/s 30->1 in long
+// chats. Byte-exact: the reused prefix's KV is the same deterministic computation as
+// re-prefilling it. Default-off, and only on the PLAIN decode path (no recall/agency side-calls,
+// which reset the cache), so the committed sequence always mirrors the cache exactly.
+#[cfg(feature = "wire_cuda_backend")]
+static KV_COMMITTED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
 // LAYER-3 MERGE helper: capture an ARBITRARY text as a new live episode, with the
 // SAME provenance as the NIGHTSHIFT path (BOS kept + trailing newline, batched forward
 // via the resident model, real C2 sig, persisted to the registry if SP_NIGHTSHIFT_PERSIST).
@@ -740,7 +751,29 @@ fn run_kvdecode_chat(
     // writes to [0,dpos) on the next turn), so no behavior change there.
     // SAFETY: handle is a live sp_g4_kv* owned by AppState; we hold its Mutex.
     let pos = unsafe { kv::position(handle) };
-    if pos > 0 {
+    // PERSISTENT O(1) KV (SP_PERSIST_KV): when the committed cache is a STRICT PREFIX of this
+    // prompt AND the cache position equals its length (the cache holds exactly it), reuse it and
+    // prefill only the new suffix -- no reset, no re-prefill of the conversation. Restricted to the
+    // PLAIN decode path (no recall / agency / replay / inject / single_entry side-calls, all of
+    // which reset or rebuild the cache), so the committed sequence is guaranteed to mirror the cache.
+    // Default-off => prefill_from stays 0 => byte-identical to the reset+full-prefill null floor.
+    let persist_kv = std::env::var("SP_PERSIST_KV").ok().as_deref() == Some("1")
+        && !auto_recall && replay_dir.is_none() && !single_entry && inject_frames.is_none()
+        && std::env::var("SP_DECIDE").ok().as_deref() != Some("1")
+        && std::env::var("SP_FORGET").ok().as_deref() != Some("1")
+        && std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() != Some("1");
+    let mut prefill_from: usize = 0;
+    if persist_kv {
+        let committed = KV_COMMITTED.lock().unwrap();
+        let cl = committed.len();
+        if cl >= 1 && cl < tokens.len() && pos as usize == cl && tokens[..cl] == committed[..] {
+            prefill_from = cl;
+            tracing::info!(
+                "PERSIST-KV: reuse {} committed tokens; prefill suffix {} (full would be {})",
+                cl, tokens.len() - cl, tokens.len());
+        }
+    }
+    if prefill_from == 0 && pos > 0 {
         if let Err(e) = unsafe { kv::reset(handle) } {
             send_err(format!("kvdecode reset: {e}"));
             sessions.remove(chat_id);
@@ -764,6 +797,9 @@ fn run_kvdecode_chat(
     // logits; bit-identical either way since the cache state at position p depends
     // only on tokens[0..=p].
     let (head, last) = tokens.split_at(tokens.len() - 1);
+    // PERSIST-KV: skip the head positions already committed in the reused cache (prefill_from==0
+    // on the normal path => the whole head, byte-identical null floor).
+    let head = &head[prefill_from.min(head.len())..];
     if !head.is_empty() {
         let r = if single_entry {
             unsafe { kv::inject_tokens(handle, head) }
@@ -1908,6 +1944,9 @@ Tag of the answer (or [NULL]):");
     };
     let mut eot_gen: Vec<i32> = Vec::new();
     let mut eot_ranks: Vec<usize> = Vec::new();
+    // PERSIST-KV: the tokens we commit to the KV this turn (each is decode_step'd in the loop
+    // body below). Appended to the prompt to form the next turn's reusable committed prefix.
+    let mut committed_gen: Vec<i32> = Vec::new();
     if eot_dbg { eot_ranks.push(stop_rank(logits).1); }
     // SP_EOT_BIAS: the forward drives the end-of-turn token to ~rank 1 at a real turn
     // boundary but a hair short of winning, so the model never stops and degenerates.
@@ -1972,6 +2011,10 @@ Tag of the answer (or [NULL]):");
             break 'decode;
         }
 
+        // PERSIST-KV: record this token as committed -- the decode_step below writes its K/V into
+        // the cache, so it becomes part of the reusable committed prefix for the next turn. Placed
+        // AFTER every early break above so committed_gen never lists a token the cache doesn't hold.
+        committed_gen.push(next_token);
         // Feed the just-emitted token; get logits for the next position.
         // SAFETY: handle live; logits is vocab_size f32 (checked above).
         if let Err(_e) = unsafe { kv::decode_step(handle, next_token, logits) } {
@@ -2413,6 +2456,21 @@ Tag of the answer (or [NULL]):");
                 }
             }
         }
+    }
+
+    // PERSIST-KV: record the cache's new contents (this turn's prompt + the tokens we committed)
+    // so the next turn can reuse it as a strict prefix and prefill only its new suffix. Gated by
+    // persist_kv (the plain decode path) -- in that config NO side-call above touched the cache, so
+    // [tokens ++ committed_gen] mirrors it exactly. Any other config never sets persist_kv, so the
+    // committed state is simply left stale and the next turn's strict-prefix+position guard rejects
+    // it -> full reset+prefill (the byte-identical null floor). Cleared if anything went wrong is
+    // unnecessary: the guard already fails closed.
+    if persist_kv {
+        let mut c = KV_COMMITTED.lock().unwrap();
+        c.clear();
+        c.reserve(tokens.len() + committed_gen.len());
+        c.extend_from_slice(tokens);
+        c.extend_from_slice(&committed_gen);
     }
 
     sessions.remove(chat_id);
