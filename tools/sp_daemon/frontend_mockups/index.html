@@ -529,7 +529,8 @@
   const rewindBar = $('rewind-bar'), rewindToggle = $('rewind-toggle'),
         rewindScrub = $('rewind-scrub'), rewindTs = $('rewind-ts'), rewindClose = $('rewind-close');
 
-  const history = [];          // [{role, content}] multi-turn context
+  const SYS_PROMPT = "You are Shannon-Prime, an experimental AI that runs entirely locally on a single RTX 2060. You have a real working memory: you can store facts from a conversation, recall them in later turns, forget them, and consolidate them, and you can call tools including running Python code. Behaviour: (1) Pay close attention to what the user has said earlier in THIS conversation and use it faithfully -- never invent, substitute, or guess a fact the user already told you (if they said their favorite animal is an octopus, it is an octopus, not a generic guess). (2) If you do not know something or were not told it, say so plainly instead of making it up. (3) Keep replies short and direct -- usually one or two sentences in casual conversation. Answer what was asked; do not lecture, pad, or ask repeated filler questions.";
+  const history = [{ role: 'system', content: SYS_PROMPT }];   // [{role, content}] multi-turn context (system seed)
   let curMsg = null, curSpan = null, abortCtrl = null, curChatId = null;
   let lastTokenNodes = [], genT0 = 0, genCount = 0;
 
@@ -711,7 +712,7 @@
   clearBtn.addEventListener('click', clearCanvas);
   function clearCanvas() {
     chatWindow.innerHTML = ''; chatWindow.appendChild(emptyState);
-    curMsg = null; curSpan = null; lastTokenNodes = []; history.length = 0; curChatId = null;
+    curMsg = null; curSpan = null; lastTokenNodes = []; history.length = 0; history.push({ role: 'system', content: SYS_PROMPT }); curChatId = null;
     closeRewind();
   }
   copyBtn.addEventListener('click', () => {
