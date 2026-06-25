@@ -697,8 +697,8 @@
       // Prefer multi-turn messages (server applies the chat template);
       // fall back to a client-side gemma prompt if no server template exists.
       const s = samplerBody();
-      let res = await streamChat({ messages: history, max_tokens: 512, ...s });
-      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 512, ...s });
+      let res = await streamChat({ messages: history, max_tokens: 128, ...s });
+      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 128, ...s });
       const finalText = (res && res.text || '').trim();
       history.push({ role: 'assistant', content: finalText });
     } catch (err) {

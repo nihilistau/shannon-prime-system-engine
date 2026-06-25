@@ -1745,6 +1745,29 @@ Tag of the answer (or [NULL]):");
     // resident-cache 12B chat stops cleanly at the turn (the marker never decodes
     // into the stream). Belt-and-braces with default_stops()'s stop-strings.
     let turn_stop_ids = tokenizer.turn_stop_ids();
+    // SP_EOT_DEBUG (read-only): on free-gen turns, log the BEST stop-token RANK (# vocab
+    // logits strictly greater) from the RAW forward logits per generated token. High rank
+    // throughout => the model never wants to end (forward/mapping bug); low rank but not
+    // chosen => sampler/top_k. Default-off => zero overhead.
+    let eot_dbg = judge_ground.is_none()
+        && std::env::var("SP_EOT_DEBUG").ok().as_deref() == Some("1");
+    let eot_stop_ids: Vec<usize> = tokenizer.eos_ids.iter().chain(turn_stop_ids.iter())
+        .map(|&x| x as usize).filter(|&x| x < logits.len()).collect();
+    let stop_rank = |lg: &[f32]| -> (i32, usize) {
+        let mut bid = -1i32; let mut bl = f32::NEG_INFINITY;
+        for &s in &eot_stop_ids { if lg[s] > bl { bl = lg[s]; bid = s as i32; } }
+        if bid < 0 { (-1, usize::MAX) } else { (bid, lg.iter().filter(|&&v| v > bl).count()) }
+    };
+    let mut eot_gen: Vec<i32> = Vec::new();
+    let mut eot_ranks: Vec<usize> = Vec::new();
+    if eot_dbg { eot_ranks.push(stop_rank(logits).1); }
+    // SP_EOT_BIAS: the forward drives the end-of-turn token to ~rank 1 at a real turn
+    // boundary but a hair short of winning, so the model never stops and degenerates.
+    // A small fixed bias on the stop tokens tips a rank-1 boundary to chosen WITHOUT
+    // firing mid-answer (where eot sits at rank ~1000, far out of reach). 0 = null floor.
+    let eot_bias: f32 = std::env::var("SP_EOT_BIAS").ok()
+        .and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    if eot_bias != 0.0 { for &s in &eot_stop_ids { logits[s] += eot_bias; } }
     let mut next_token = sampler.sample(logits);
     sampler.observe(next_token);
     // B3-JUDGE grounding: accumulate the synthesized answer for the post-hoc check.
@@ -1756,6 +1779,7 @@ Tag of the answer (or [NULL]):");
         {
             break 'decode;
         }
+        if eot_dbg && eot_gen.len() < 64 { eot_gen.push(next_token); }
 
         let token_bytes = tokenizer.decode_token(next_token);
         // JUDGE-SERVED hard stop (recall turns only): the 12B won't self-terminate the
@@ -1805,8 +1829,17 @@ Tag of the answer (or [NULL]):");
         if let Err(_e) = unsafe { kv::decode_step(handle, next_token, logits) } {
             break 'decode;
         }
+        if eot_dbg && eot_ranks.len() < 64 { eot_ranks.push(stop_rank(logits).1); }
+        if eot_bias != 0.0 { for &s in &eot_stop_ids { logits[s] += eot_bias; } }
         next_token = sampler.sample(logits);
         sampler.observe(next_token);
+    }
+
+    if eot_dbg {
+        let ranks: Vec<String> = eot_ranks.iter().take(40).map(|r| r.to_string()).collect();
+        let gids: Vec<String> = eot_gen.iter().take(40).map(|g| g.to_string()).collect();
+        tracing::info!("EOT-DEBUG: stop_ids={:?} ngen={} stop_rank_per_step=[{}] gen_ids=[{}]",
+            eot_stop_ids, eot_gen.len(), ranks.join(","), gids.join(","));
     }
 
     let flushed = dec_buf.flush();

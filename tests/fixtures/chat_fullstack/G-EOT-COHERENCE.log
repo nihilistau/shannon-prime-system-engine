@@ -1,0 +1,21 @@
+# G-EOT-COHERENCE — end-of-turn coherence fix (2026-06-25)
+# DIAGNOSIS (SP_EOT_DEBUG instrumentation): the end-of-turn token (<turn|>=106) reaches
+# RANK 1 at a real turn boundary (e.g. after "Yes.") in our forward but loses by one
+# position; with top_k=40/temp0.7 a rank-1 token is rarely drawn, so the model never
+# stops and degenerates (fake user/model turns, foreign-script/HTML spam). NOT a weak
+# model -- an us-issue (the eot logit a hair too low). Rank trajectory after "Yes.":
+#   34940, 187, 24, 1, 965, ...   (best rank 1, never chosen)
+# FIX: SP_EOT_BIAS adds a small fixed logit bias to the stop tokens (eos + <|turn>/<turn|>)
+# so a rank-1 boundary tips to chosen, WITHOUT firing mid-answer (eot at rank ~1000).
+# Default 0 = byte-identical null floor. Operating point SP_EOT_BIAS=4.0.
+# ===== AFTER (SP_EOT_BIAS=4.0), coherent + stops cleanly: =====
+Q: Is the sky blue? Answer in one word.
+A: The sky is blue
+--------------------------------------------------
+Q: Tell me about the weather today.
+A: Today is a sunny day. The temperature will be in the mid-60s with a light breeze from the west. There might be a chance of rain later on in the evening.
+--------------------------------------------------
+Q: Who are you?
+A: I am an experimental model called Shannon-Prime.
+--------------------------------------------------
+
