@@ -47,6 +47,9 @@ REM (repeated glyphs to max_tokens). Console sends eot=4 per request; this is th
 REM other clients. Per-request eot_bias overrides.
 set "SP_EOT_BIAS=4.0"
 
+REM Only ONE 12B daemon fits in 12 GB VRAM -- kill any prior sp-daemon so launches never STACK
+REM (stacked daemons thrashing the GPU = the "slow af" symptom). A fresh one starts below.
+taskkill /F /IM sp-daemon.exe >nul 2>&1
 cd /d "%ENGINE%tools\sp_daemon"
 echo [recall] serving http://127.0.0.1:%PORT%/  with autonomous recall ARMED (registry=_needle_corpus_div, M=42)
 echo [recall] loading the 12B (~9 GB) ... open the browser once you see "listening".

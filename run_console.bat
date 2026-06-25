@@ -62,6 +62,10 @@ REM per request, but set the DAEMON default too so non-console clients (agent ga
 REM stop cleanly. Per-request eot_bias still overrides this.
 set "SP_EOT_BIAS=4.0"
 
+REM Only ONE 12B daemon fits in 12 GB VRAM. Kill any prior sp-daemon so launches never STACK --
+REM stacked daemons thrashing the GPU were the "slow af" symptom. A fresh one starts below.
+taskkill /F /IM sp-daemon.exe >nul 2>&1
+
 REM CWD must be tools\sp_daemon so the static ServeDir("frontend_mockups") resolves.
 cd /d "%ENGINE%tools\sp_daemon"
 
