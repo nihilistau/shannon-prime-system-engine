@@ -1,0 +1,9 @@
+# G-NIGHTSHIFT-PERSIST — learned facts survive a daemon restart (2026-06-25, N3 v1)
+# SP_NIGHTSHIFT_PERSIST=1: on B4 capture, append the live episode's registry line
+# (name/dir/npos/topic/text/sig_bits) to SP_RECALL_REGISTRY. On restart load_registry
+# reads it back (curated path; ep.k/ep.v/ep.mf already on disk). Default-off = null floor.
+# TEST: stated "the project codename is Bluebird." -> registry 8->9 lines + PERSIST log.
+# Killed the daemon (in-RAM nightshift wiped) -> restart loaded 9 episodes ->
+# "What is the project codename?" -> PICK ep_live_000 overlap=1.000 -> recites Bluebird.
+# (This is the pragmatic append-to-registry persistence; the full content-addressed
+#  MEM-OKF store with dedup + summary tier is the next refinement.)

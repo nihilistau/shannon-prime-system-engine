@@ -1985,6 +1985,28 @@ Tag of the answer (or [NULL]):");
                                                 let sig = if npos_sig > 0 {
                                                     app.recall_proj.signature(&gk, ng, npos_sig)
                                                 } else { [0u64; 4] };
+                                                // N3 PERSIST: append this live episode to the active registry
+                                                // file so it survives a daemon restart (default-off
+                                                // SP_NIGHTSHIFT_PERSIST=1 = null floor). Done here, before `sig`
+                                                // is moved into the Episode below. On restart load_registry reads
+                                                // it back (curated path; ep.k/ep.v/ep.mf already on disk at dir).
+                                                if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
+                                                    if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                                                        let pidx = app.nightshift.read().unwrap().len();
+                                                        let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
+                                                        let line = serde_json::json!({
+                                                            "name": format!("ep_live_{:03}", pidx),
+                                                            "dir": dir_str.clone(), "npos": ntok as i32,
+                                                            "topic": text.clone(), "text": text.clone(), "sig_bits": sig_hex,
+                                                        }).to_string();
+                                                        use std::io::Write as _;
+                                                        match std::fs::OpenOptions::new().create(true).append(true).open(&reg_path) {
+                                                            Ok(mut f) => { let _ = writeln!(f, "{line}");
+                                                                tracing::info!("B4-NIGHTSHIFT-PERSIST: appended ep_live_{:03} -> {}", pidx, reg_path); }
+                                                            Err(e) => tracing::warn!("B4-NIGHTSHIFT-PERSIST: append {} failed: {e}", reg_path),
+                                                        }
+                                                    }
+                                                }
                                                 let mut ns = app.nightshift.write().unwrap();
                                                 let idx = ns.len();
                                                 tracing::info!(
