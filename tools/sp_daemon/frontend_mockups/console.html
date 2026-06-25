@@ -123,9 +123,9 @@
   .canvas-head .sub { font-size: 9px; letter-spacing: 2px; color: var(--text-faint); }
   .canvas-head .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   /* A2 sampler controls */
-  .sampler-row { display: flex; align-items: center; gap: 10px; font-size: 9px; letter-spacing: 1px; color: var(--text-faint); }
-  .sampler-row label { display: flex; align-items: center; gap: 4px; text-transform: uppercase; }
-  .sampler-row input { width: 42px; background: rgba(8,9,13,0.8); border: 1px solid var(--rule); color: var(--gold); font-family: var(--font); font-size: 10px; padding: 2px 4px; border-radius: 2px; }
+  .sampler-row { display: flex; flex-direction: column; align-items: stretch; gap: 7px; font-size: 9px; letter-spacing: 1px; color: var(--text-faint); padding: 12px 10px; }
+  .sampler-row label { display: flex; align-items: center; justify-content: space-between; gap: 6px; text-transform: uppercase; }
+  .sampler-row input { width: 66px; background: rgba(8,9,13,0.8); border: 1px solid var(--rule); color: var(--gold); font-family: var(--font); font-size: 10px; padding: 2px 4px; border-radius: 2px; }
   .sampler-row input:focus { outline: none; border-color: var(--gold); }
   .toolbtn { border: 1px solid var(--rule); background: transparent; color: var(--text-dim); font-family: var(--font); font-size: 10px; letter-spacing: 2px; padding: 6px 12px; cursor: pointer; border-radius: 2px; transition: all 0.15s; display: flex; align-items: center; gap: 6px; }
   .toolbtn:hover { color: var(--gold); border-color: var(--gold); background: rgba(212,161,74,0.08); }
@@ -260,6 +260,19 @@
         <div class="stream-empty"><span class="dot"></span>polling /v1/mesh/peers</div>
       </div>
     </div>
+    <div class="ph"><span class="t">sampler · knobs</span></div>
+    <div class="sampler-row" id="sampler-row" title="L2 sampler knobs (flow into the /v1/chat body)">
+      <label title="temperature: 0 = greedy/deterministic.">temp <input type="number" id="s-temp" min="0" max="2" step="0.05" value="0.7"></label>
+      <label title="nucleus sampling top_p.">top_p <input type="number" id="s-topp" min="0" max="1" step="0.01" value="0.95"></label>
+      <label title="top_k.">top_k <input type="number" id="s-topk" min="0" max="200" step="1" value="40"></label>
+      <label title="repetition penalty.">rep <input type="number" id="s-rep" min="1" max="2" step="0.05" value="1.1"></label>
+      <label title="eot_bias: logit bias on the end-of-turn token so the model STOPS cleanly. 0=off, ~4=clean.">eot <input type="number" id="s-eot" min="-10" max="20" step="0.5" value="4"></label>
+      <label title="max_tokens per turn.">max <input type="number" id="s-maxtok" min="8" max="512" step="8" value="128"></label>
+      <label title="sampler seed (blank = random).">seed <input type="text" id="s-seed" placeholder="rand" style="width:66px"></label>
+      <label title="byte-exact auditable decode (pair with temp=0)."><input type="checkbox" id="s-byteexact"> auditable</label>
+      <label title="auto-recall: the model self-selects + replays a relevant stored memory."><input type="checkbox" id="s-autorecall" checked> auto-recall</label>
+      <label title="single-entry: ingest text through the one residual seam."><input type="checkbox" id="s-singleentry"> single-entry</label>
+    </div>
   </div>
 
   <!-- CANVAS -->
@@ -268,41 +281,7 @@
       <div class="canvas-head">
         <span class="title">canvas</span>
         <span class="sub">/v1/chat · sse · text/event-stream</span>
-        <!-- CONTRACT-CHAT-FULLSTACK A2: L2 sampler controls. temp=0 ⇒ greedy
-             argmax (the deterministic null floor). These flow into the
-             /v1/chat POST body (flattened SamplingParams). -->
-        <div class="sampler-row" id="sampler-row" title="L2 sampler — temp 0 = greedy/deterministic">
-          <label>temp <input type="number" id="s-temp" min="0" max="2" step="0.05" value="0.7"></label>
-          <label>top_p <input type="number" id="s-topp" min="0" max="1" step="0.01" value="0.95"></label>
-          <label>top_k <input type="number" id="s-topk" min="0" max="200" step="1" value="40"></label>
-          <label>rep <input type="number" id="s-rep" min="1" max="2" step="0.05" value="1.1"></label>
-          <label title="eot_bias: logit bias on the end-of-turn token so the model STOPS cleanly (the coherence knob). 0 = off, ~4 = clean.">eot <input type="number" id="s-eot" min="-10" max="20" step="0.5" value="4"></label>
-          <label title="max_tokens: hard cap on generated tokens per turn.">max <input type="number" id="s-maxtok" min="8" max="512" step="8" value="128"></label>
-          <label>seed <input type="text" id="s-seed" placeholder="rand" style="width:54px"></label>
-          <!-- CONTRACT-CHAT-FULLSTACK B1: byte-exact "auditable mode". Decodes
-               through the exact-integer islands + dual-prime CRT-NTT attention
-               (run-to-run bit-identical). Pair with temp=0 for the determinism
-               claim. Off = the Stage-A float path (null floor). -->
-          <label title="byte-exact: exact-integer / dual-prime decode (run-to-run bit-identical). Pair with temp=0.">
-            <input type="checkbox" id="s-byteexact"> auditable
-          </label>
-          <!-- CONTRACT-CHAT-FULLSTACK B3: AUTONOMOUS MEMORY RECALL. The daemon
-               computes this turn's C2 signature from the resident-cache global-K,
-               Hamming-matches the episode registry (SP_RECALL_REGISTRY), and
-               auto-replays the best episode if it clears TAU — no operator replay
-               field. Off = byte-untouched null floor. -->
-          <label title="auto-recall: the model self-selects + replays a relevant stored episode (C2 signature match), no manual replay.">
-            <input type="checkbox" id="s-autorecall"> auto-recall
-          </label>
-          <!-- CONTRACT-CHAT-FULLSTACK B5: the SINGLE LATENT ENTRY POINT. Ingest the
-               prompt through the ONE residual seam (gemma4_kv_inject_tokens:
-               embd[id]*sqrt(E) → the model mints K/V natively) instead of prefill.
-               Bit-identical to prefill by construction — text, audio, and memory all
-               enter through this one seam. -->
-          <label title="single entry: ingest text through the one residual seam (inject_seq), the same seam audio + memory use. Bit-identical to prefill.">
-            <input type="checkbox" id="s-singleentry"> single-entry
-          </label>
-        </div>
+        <!-- sampler/knob controls live in the LEFT pane now (id=sampler-row there). -->
         <div class="right">
           <button class="toolbtn" id="rewind-toggle" title="Scrub the response timeline">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M5 1 L1 5 L5 9 L5 6 L9 6 L9 4 L5 4 Z"/></svg>
@@ -624,7 +603,7 @@
     if ($('s-singleentry') && $('s-singleentry').checked) out.single_entry = true;
     // B3: autonomous memory recall — the daemon self-selects + replays a relevant
     // stored episode by matching this turn's C2 signature (no manual replay field).
-    if ($('s-autorecall') && $('s-autorecall').checked) out.auto_recall = true;
+    if ($('s-autorecall')) out.auto_recall = $('s-autorecall').checked; // explicit bool => unchecking truly disables recall
     return out;
   }
 
