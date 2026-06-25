@@ -250,6 +250,21 @@
       <div class="lbl-r">l4 · gossip</div>
       <svg id="mesh-svg" viewBox="0 0 280 200" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
+    <div class="ph"><span class="t">sampler · knobs</span></div>
+    <style>
+      #sampler-row { display:flex; flex-direction:column; gap:7px; padding:12px 10px; font-size:9px; letter-spacing:1px; color:var(--text-faint); flex-shrink:0; }
+      #sampler-row label { display:flex; align-items:center; justify-content:space-between; gap:6px; text-transform:uppercase; }
+      #sampler-row input[type=number], #sampler-row input[type=text] { width:66px; background:rgba(8,9,13,0.8); border:1px solid var(--rule); color:var(--gold); font-family:var(--font); font-size:10px; padding:2px 4px; border-radius:2px; }
+    </style>
+    <div id="sampler-row" title="L2 sampler knobs (flow into the /v1/chat body)">
+      <label title="temperature: 0 = greedy/deterministic.">temp <input type="number" id="s-temp" min="0" max="2" step="0.05" value="0.7"></label>
+      <label title="nucleus sampling top_p.">top_p <input type="number" id="s-topp" min="0" max="1" step="0.01" value="0.95"></label>
+      <label title="top_k.">top_k <input type="number" id="s-topk" min="0" max="200" step="1" value="40"></label>
+      <label title="repetition penalty.">rep <input type="number" id="s-rep" min="1" max="2" step="0.05" value="1.1"></label>
+      <label title="eot_bias: stop-token logit bias so the model STOPS cleanly. 0=off, ~4=clean.">eot <input type="number" id="s-eot" min="-10" max="20" step="0.5" value="4"></label>
+      <label title="max_tokens per turn.">max <input type="number" id="s-maxtok" min="8" max="512" step="8" value="128"></label>
+      <label title="auto-recall: the model self-selects + replays a relevant stored memory."><input type="checkbox" id="s-autorecall" checked> auto-recall</label>
+    </div>
     <div class="pb">
       <div id="mesh-container">
         <div class="stream-empty"><span class="dot"></span>polling /v1/mesh/peers</div>
@@ -615,6 +630,20 @@
     else { sendBtn.classList.remove('sending'); sendBtn.innerHTML = SEND_BTN_HTML; sendBtn.style.background = ''; sendBtn.style.color = ''; sendBtn.title = ''; }
   }
 
+  function samplerBody() {
+    const val = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+    const num = id => { const v = parseFloat(val(id)); return Number.isFinite(v) ? v : undefined; };
+    const out = {};
+    const t = num('s-temp'); if (t !== undefined) out.temperature = t;
+    const tp = num('s-topp'); if (tp !== undefined) out.top_p = tp;
+    const tk = num('s-topk'); if (tk !== undefined) out.top_k = tk;
+    const rp = num('s-rep'); if (rp !== undefined) out.repetition_penalty = rp;
+    const e = num('s-eot'); if (e !== undefined) out.eot_bias = e;
+    const mt = num('s-maxtok'); if (mt !== undefined) out.max_tokens = Math.round(mt);
+    const ar = document.getElementById('s-autorecall'); if (ar) out.auto_recall = ar.checked;
+    return out;
+  }
+
   async function submitPrompt() {
     const text = chatInput.value.trim();
     if (!text || abortCtrl) return;
@@ -630,8 +659,9 @@
     try {
       // Prefer multi-turn messages (server applies the chat template);
       // fall back to a client-side gemma prompt if no server template exists.
-      let res = await streamChat({ messages: history, max_tokens: 512 });
-      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 512 });
+      const sk = samplerBody();
+      let res = await streamChat({ messages: history, max_tokens: 512, ...sk });
+      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 512, ...sk });
       const finalText = (res && res.text || '').trim();
       history.push({ role: 'assistant', content: finalText });
     } catch (err) {

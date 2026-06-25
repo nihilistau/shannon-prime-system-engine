@@ -123,7 +123,7 @@
   .canvas-head .sub { font-size: 9px; letter-spacing: 2px; color: var(--text-faint); }
   .canvas-head .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   /* A2 sampler controls */
-  .sampler-row { display: flex; flex-direction: column; align-items: stretch; gap: 7px; font-size: 9px; letter-spacing: 1px; color: var(--text-faint); padding: 12px 10px; }
+  .sampler-row { display: flex; flex-direction: column; align-items: stretch; gap: 7px; font-size: 9px; letter-spacing: 1px; color: var(--text-faint); padding: 12px 10px; flex-shrink: 0; }
   .sampler-row label { display: flex; align-items: center; justify-content: space-between; gap: 6px; text-transform: uppercase; }
   .sampler-row input { width: 66px; background: rgba(8,9,13,0.8); border: 1px solid var(--rule); color: var(--gold); font-family: var(--font); font-size: 10px; padding: 2px 4px; border-radius: 2px; }
   .sampler-row input:focus { outline: none; border-color: var(--gold); }
@@ -255,11 +255,6 @@
       <div class="lbl-r">l4 · gossip</div>
       <svg id="mesh-svg" viewBox="0 0 280 200" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
-    <div class="pb">
-      <div id="mesh-container">
-        <div class="stream-empty"><span class="dot"></span>polling /v1/mesh/peers</div>
-      </div>
-    </div>
     <div class="ph"><span class="t">sampler · knobs</span></div>
     <div class="sampler-row" id="sampler-row" title="L2 sampler knobs (flow into the /v1/chat body)">
       <label title="temperature: 0 = greedy/deterministic.">temp <input type="number" id="s-temp" min="0" max="2" step="0.05" value="0.7"></label>
@@ -272,6 +267,11 @@
       <label title="byte-exact auditable decode (pair with temp=0)."><input type="checkbox" id="s-byteexact"> auditable</label>
       <label title="auto-recall: the model self-selects + replays a relevant stored memory."><input type="checkbox" id="s-autorecall" checked> auto-recall</label>
       <label title="single-entry: ingest text through the one residual seam."><input type="checkbox" id="s-singleentry"> single-entry</label>
+    </div>
+    <div class="pb">
+      <div id="mesh-container">
+        <div class="stream-empty"><span class="dot"></span>polling /v1/mesh/peers</div>
+      </div>
     </div>
   </div>
 
