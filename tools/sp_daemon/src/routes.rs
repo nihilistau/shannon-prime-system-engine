@@ -313,6 +313,21 @@ pub async fn v1_chat(
         ms.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone())
     });
 
+    // LIVE CONSOLIDATION HOOK: dump the current conversation to SP_CURRENT_CONVO so the
+    // harness agency scheduler can consolidate the LIVE chat (durable facts -> mid-term
+    // registry, transcript -> long-term MEM-OKF full+summary) on its heartbeat -- no manual
+    // step. Best-effort, messages-only; unset env = no-op (byte-identical null floor).
+    if let Ok(conv_path) = std::env::var("SP_CURRENT_CONVO") {
+        if let Some(ms) = req.messages.as_ref() {
+            let arr: Vec<serde_json::Value> = ms.iter()
+                .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+                .collect();
+            if let Ok(s) = serde_json::to_string(&arr) {
+                let _ = std::fs::write(&conv_path, s);
+            }
+        }
+    }
+
     // Tokenize input.
     let tokenizer = state.tokenizer.clone();
     let tokens: Vec<i32> = if let Some(ids) = req.prompt_tokens {
