@@ -396,11 +396,11 @@
   const isHttp = location.protocol === 'http:' || location.protocol === 'https:';
   const DEFAULT_DAEMON = 'http://127.0.0.1:3000';
   let DAEMON = isHttp ? location.origin : (localStorage.getItem('sp_endpoint') || DEFAULT_DAEMON);
-  // CHAT goes through the harness AGENT GATEWAY (port 8800) so the model CALLS its tools
-  // (memory / system / web) itself, in Gemma's tool_code format. Start it with run_gateway.bat
-  // alongside the daemon. Metrics/mesh stay on the daemon. Override via localStorage 'sp_chat_endpoint';
-  // set it to the DAEMON url to fall back to the plain (no-tools) daemon chat.
-  const CHAT_URL = (localStorage.getItem('sp_chat_endpoint') || 'http://127.0.0.1:8800');
+  // CHAT defaults to the SAME daemon that served this console (run_console.bat /
+  // run_console_recall.bat -- the coherent W_c-librarian chat with persistent O(1) KV). To route
+  // through the harness AGENT GATEWAY instead (so the model CALLS its tools in Gemma tool_code
+  // format), start run_gateway.bat and set localStorage 'sp_chat_endpoint' = 'http://127.0.0.1:8800'.
+  const CHAT_URL = (localStorage.getItem('sp_chat_endpoint') || DAEMON);
   const wsBase = () => DAEMON.replace(/^http/, 'ws');
 
   const $ = (id) => document.getElementById(id);
