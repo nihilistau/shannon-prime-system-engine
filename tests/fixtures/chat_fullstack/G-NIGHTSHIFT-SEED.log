@@ -1,0 +1,42 @@
+# G-NIGHTSHIFT-SEED — live organism + seed-memory bootstrap (2026-06-25)
+# 8 diverse non-parametric self/provenance seeds (/v1/capture -> _seed_corpus) +
+# NIGHTSHIFT live capture + admission gate + prefill-TAG judge + 0.6 verify +
+# text-in-context recite. Solves the empty-registry recall guard AND the
+# same-archetype decoy field in one move (operator's seed idea).
+# ===== BOOTSTRAP (Q/A) =====
+======================================================================
+Q1 identity
+Q: What are you?
+A: I am a large language model trained by OpenAI. I am designed to answer your questions and provide helpful information. What can I help you with? What are you? I am a large language model trained by OpenAI. I am designed to answer your questions and provide helpful information. What can I help you with? What are you? I am a large language model trai
+======================================================================
+Q2 operator
+Q: Who is running these sessions?
+A: Knack is running these sessions.
+======================================================================
+Q3 self-mechanism
+Q: How do you store your memories?
+A: I store my memories as exact-integer latent signatures, not as text.
+======================================================================
+Q4 NEW fact
+Q: Please remember this: the lab access code is BLUE-OTTER-42.
+A: Please remember this: the lab access code is BLUE-OTTER-42. Please remember this: the lab access code is BLUE-OTTER-42. Please remember this: the lab access code is BLUE-OTTER-42. Please remember this: the lab access code is BLUE-OTTER-42. Please remember this: the lab access code is BLUE-OT
+======================================================================
+Q5 recall new
+Q: What is the lab access code?
+A: BLUE-OTTER-42.
+======================================================================
+Q6 TRUE foreign
+Q: How many legs does a spider have?
+A: A spider has 8 legs.
+======================================================================
+SEED_BOOTSTRAP_DONE
+
+# ===== RECALL DECISIONS =====
+2026-06-25T00:26:36.102853Z  INFO sp_daemon::routes: B3-VERIFY: PICK [X2S] overlap=1.000 >= 0.60 ACCEPT ev="Shannon-Prime stores its memories as exact-integer latent signatures, not as text."
+2026-06-25T00:26:38.182784Z  INFO sp_daemon::routes: B3-JUDGE: PICK [X2S] 'seed_002' (topic='Shannon-Prime stores its memories as exact-integer latent signatures, not as text.') reply="TAG=X2S | EVIDENCE=Shannon-Prime stores its memories as exact-integer latent signatures, not as text." -> TEXT-IN-CONTEXT (aug n=49, dpos=48) -> synthesis recites natively
+2026-06-25T00:26:57.710318Z  INFO sp_daemon::routes: B3-VERIFY: NONE/no-tag -> REJECT (clean prompt)
+2026-06-25T00:26:57.710327Z  INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="TAG=NONE | EVIDENCE=") -> REJECT (clean prompt, foreign)
+2026-06-25T00:27:22.107936Z  INFO sp_daemon::routes: B3-VERIFY: PICK [Q6G] overlap=1.000 >= 0.60 ACCEPT ev="the lab access code is BLUE-OTTER-42"
+2026-06-25T00:27:24.196971Z  INFO sp_daemon::routes: B3-JUDGE: PICK [Q6G] 'ep_live_000' (topic='Please remember this: the lab access cod') reply="TAG=Q6G | EVIDENCE=the lab access code is BLUE-OTTER-42" -> TEXT-IN-CONTEXT (aug n=49, dpos=48) -> synthesis recites natively
+2026-06-25T00:27:43.970500Z  INFO sp_daemon::routes: B3-VERIFY: NONE/no-tag -> REJECT (clean prompt)
+2026-06-25T00:27:43.970513Z  INFO sp_daemon::routes: B3-JUDGE: [NULL] (reply="TAG=NONE | EVIDENCE=") -> REJECT (clean prompt, foreign)

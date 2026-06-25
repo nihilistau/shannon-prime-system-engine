@@ -1260,11 +1260,24 @@ Tag of the answer (or [NULL]):");
                                         // to RESTORE the exact pre-branch cache state (no contamination of
                                         // the final synthesis). reset() is the SWA-ring-safe reset (rewind
                                         // past Jmax is the diagnosed ring bug).
+                                        // JUDGE-SERVED: in verify mode FORCE the format by prefilling "TAG="
+                                        // into the model turn. The 12B otherwise sometimes answers in prose
+                                        // (the correct recalled fact, but no tag) and the deterministic parse
+                                        // drops a VALID recall (the NIGHTSHIFT live-fact smoke: it reproduced
+                                        // "5-RAVEN-9921" but as a sentence). Seed `reply` with "TAG=" so
+                                        // parse_tag_evidence sees the forced prefix. Default path unchanged.
+                                        let mut jtoks = jtoks;
+                                        let mut reply = String::new();
+                                        if verify_mode {
+                                            if let Ok(tt) = app.tokenizer.encode("TAG=") {
+                                                let tt: Vec<i32> = tt.into_iter().filter(|&t| t != 2).collect();
+                                                if !tt.is_empty() { jtoks.extend_from_slice(&tt); reply.push_str("TAG="); }
+                                            }
+                                        }
                                         let _ = unsafe { kv::reset(handle) };
                                         let (jhead, jlast) = jtoks.split_at(jtoks.len() - 1);
                                         let mut judge_ok = jhead.is_empty()
                                             || unsafe { kv::prefill(handle, jhead) }.is_ok();
-                                        let mut reply = String::new();
                                         if judge_ok {
                                             // greedy: decode_step(jlast) gives the first generated logits.
                                             let mut tok = jlast[0];
@@ -1853,7 +1866,17 @@ Tag of the answer (or [NULL]):");
     // TODO(B4-v2): admit via the teacher-forced ablation oracle (collapse < TAU=-8)
     // before append — v1 captures EVERY sufficiently-long user turn (no relevance gate).
     if std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() == Some("1") {
-        if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        // B4-v2 ADMISSION GATE (interim): only ASSERTIONS become memories. Skip a turn
+        // that was (a) answered FROM memory (recalled.is_some() => a query consuming a
+        // memory, not a new fact) or (b) interrogative (ends with '?'). This kills the
+        // junk-question capture that let a true-foreign query false-recall a stored
+        // question (the live-smoke regression). The rigorous gate is the teacher-forced
+        // ablation oracle (collapse < TAU=-8), which ALSO rejects parametric facts — the
+        // TODO above; this cheap gate is the safety floor it will subsume.
+        let admit = recalled.is_none()
+            && raw_user.as_ref().map(|s| !s.trim_end().ends_with('?')).unwrap_or(false);
+        if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()).filter(|_| admit) {
             // (a) tokenize the RAW user content (no chat template — match the curator).
             // PROVENANCE FIX (B4-v3): byte-match the curator's sp_tok_enc EXACTLY. The
             // curator captured each needle from a `.txt` file that ends in a trailing
