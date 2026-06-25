@@ -396,6 +396,11 @@
   const isHttp = location.protocol === 'http:' || location.protocol === 'https:';
   const DEFAULT_DAEMON = 'http://127.0.0.1:3000';
   let DAEMON = isHttp ? location.origin : (localStorage.getItem('sp_endpoint') || DEFAULT_DAEMON);
+  // CHAT goes through the harness AGENT GATEWAY (port 8800) so the model CALLS its tools
+  // (memory / system / web) itself, in Gemma's tool_code format. Start it with run_gateway.bat
+  // alongside the daemon. Metrics/mesh stay on the daemon. Override via localStorage 'sp_chat_endpoint';
+  // set it to the DAEMON url to fall back to the plain (no-tools) daemon chat.
+  const CHAT_URL = (localStorage.getItem('sp_chat_endpoint') || 'http://127.0.0.1:8800');
   const wsBase = () => DAEMON.replace(/^http/, 'ws');
 
   const $ = (id) => document.getElementById(id);
@@ -580,7 +585,7 @@
   }
 
   async function streamChat(bodyObj) {
-    const resp = await fetch(`${DAEMON}/v1/chat`, {
+    const resp = await fetch(`${CHAT_URL}/v1/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(bodyObj), signal: abortCtrl.signal,
     });
@@ -661,8 +666,15 @@
       // Prefer multi-turn messages (server applies the chat template);
       // fall back to a client-side gemma prompt if no server template exists.
       const sk = samplerBody();
-      let res = await streamChat({ messages: history, max_tokens: 512, ...sk });
-      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(history), max_tokens: 512, ...sk });
+      // CONTEXT WINDOW: the daemon re-prefills whatever conversation it receives (O(n) per turn),
+      // so a very long chat slows to a crawl (snappy at turn 1, minutes by turn 3000). Cap the
+      // prefilled history to the system prompt + the last W turns; older facts are held by the
+      // memory system (recall/agency), not the raw transcript. (The proper fix is a persistent
+      // O(1) conversation KV in the daemon; this bounds the cost until then.)
+      const W = 24;
+      const msgs = (history.length > W + 1) ? [history[0], ...history.slice(-W)] : history;
+      let res = await streamChat({ messages: msgs, max_tokens: 512, ...sk });
+      if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(msgs), max_tokens: 512, ...sk });
       const finalText = (res && res.text || '').trim();
       history.push({ role: 'assistant', content: finalText });
     } catch (err) {
