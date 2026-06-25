@@ -1976,6 +1976,10 @@ Tag of the answer (or [NULL]):");
     // A capture failure logs a warning and does NOT break the (already-sent) response.
     // TODO(B4-v2): admit via the teacher-forced ablation oracle (collapse < TAU=-8)
     // before append — v1 captures EVERY sufficiently-long user turn (no relevance gate).
+    // LAYER-3 DECIDE: carries the just-captured (episode_name, text) out of the
+    // NIGHTSHIFT block to the DECIDE pass below, so the model can judge whether the
+    // new fact supersedes an existing memory. None unless a capture happened this turn.
+    let mut decide_new: Option<(String, String)> = None;
     if std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() == Some("1") {
         // B4-v2 ADMISSION GATE (interim): only ASSERTIONS become memories. Skip a turn
         // that was (a) answered FROM memory (recalled.is_some() => a query consuming a
@@ -1991,10 +1995,19 @@ Tag of the answer (or [NULL]):");
             let l = s.to_lowercase();
             l.contains("forget") || l.contains("delete that") || l.contains("erase")
         }).unwrap_or(false);
-        let admit = recalled.is_none()
-            && !forget_done
+        // LAYER-3: capture STATEMENTS even when a related memory was recalled (so a
+        // superseding fact like "my favorite color is now green" IS stored and the
+        // DECIDE pass below can retire the old one). Skip interrogatives via wh-word /
+        // '?' detection (the spider-question false-recall fix), NOT the recalled.is_none()
+        // coupling that previously blocked the supersede case. N2 stays LOOSE by design.
+        let lc = raw_user.as_ref().map(|s| s.trim().to_lowercase()).unwrap_or_default();
+        let first_word = lc.split_whitespace().next().unwrap_or("");
+        let is_question = lc.ends_with('?')
+            || matches!(first_word, "what"|"who"|"whom"|"whose"|"where"|"when"|"why"|"how"|"which");
+        let admit = !forget_done
             && !is_forget_turn
-            && raw_user.as_ref().map(|s| !s.trim_end().ends_with('?')).unwrap_or(false);
+            && !is_question
+            && !lc.is_empty();
         if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()).filter(|_| admit) {
             // (a) tokenize the RAW user content (no chat template — match the curator).
@@ -2117,6 +2130,8 @@ Tag of the answer (or [NULL]):");
                                                     "B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_{:03}' npos={} ng={} — registry now has {} live episode(s)",
                                                     idx, ntok, ng, total
                                                 );
+                                                // LAYER-3: hand the new fact to the DECIDE pass below.
+                                                decide_new = Some((format!("ep_live_{:03}", idx), text.clone()));
                                             }
                                         }
                                     }
@@ -2126,6 +2141,117 @@ Tag of the answer (or [NULL]):");
                     }
                 }
                 Err(e) => tracing::warn!("B4-NIGHTSHIFT: tokenize failed: {e} — no episode appended"),
+            }
+        }
+    }
+
+    // ── LAYER-3: DECIDE — the model curates its own memory ──────────────────────────
+    // When NIGHTSHIFT just captured a new fact, show the model its RELATED existing
+    // memories and let IT decide whether the new one supersedes/contradicts an old one
+    // (e.g. "my favorite color is now green" retires "...is blue"). The model's verdict
+    // — not a dedup rule — drives the removal: this is the emergent agency layer. Runs
+    // AFTER the response streamed (cache free) and AFTER capture (the new episode
+    // exists). SP_DECIDE=1; unset ⇒ no model-call, no removal = byte-identical null floor.
+    if std::env::var("SP_DECIDE").ok().as_deref() == Some("1") {
+        if let Some((new_name, new_text)) = decide_new {
+            use sp_daemon::recall;
+            // Related existing memories (share subject with the new fact), excluding the
+            // just-captured episode. token_overlap >= 0.3 ≈ "about the same thing".
+            let mut cands: Vec<(f32, String)> = Vec::new();
+            if let Some(reg) = app.recall_registry.as_ref() {
+                for ep in reg.iter() {
+                    if ep.name == new_name || ep.text == new_text { continue; }
+                    let ov = recall::token_overlap(&new_text, &ep.text);
+                    if ov >= 0.3 && !cands.iter().any(|(_, ct)| ct == &ep.text) { cands.push((ov, ep.text.clone())); }
+                }
+            }
+            {
+                let ns = app.nightshift.read().unwrap();
+                for ep in ns.iter() {
+                    if ep.name == new_name || ep.text == new_text { continue; }
+                    let ov = recall::token_overlap(&new_text, &ep.text);
+                    if ov >= 0.3 && !cands.iter().any(|(_, ct)| ct == &ep.text) { cands.push((ov, ep.text.clone())); }
+                }
+            }
+            cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            cands.truncate(5);
+            if !cands.is_empty() {
+                // Present the new fact + numbered related memories; the model picks.
+                let mut listing = String::new();
+                for (i, (_, t)) in cands.iter().enumerate() {
+                    listing.push_str(&format!("{}. \"{}\"\n", i + 1, t));
+                }
+                let prompt = format!(
+                    "A NEW fact was just stated:\n\"{}\"\nHere are earlier memories:\n{}\nDoes the NEW fact give an UPDATED value for something one of these memories already states -- the same person's favorite, name, location, status, or any attribute that has only one current value? If yes, that memory is now out of date: give its number. If the NEW fact is about something different and none are out of date, answer NONE.\nReply with the memory number that is now out of date, or NONE.",
+                    new_text, listing);
+                let dmsgs = vec![Message { role: "user".to_string(), content: prompt }];
+                if let Ok(dtoks) = app.tokenizer.apply_template_ids(&dmsgs) {
+                    if dtoks.len() >= 2 {
+                        // Force the answer format + prevent template echo: prefill "CHANGED="
+                        // into the model turn (the judge's prefill-TAG trick). The model then
+                        // completes a number or NONE; reply is seeded with the forced prefix.
+                        let mut dtoks = dtoks;
+                        let mut reply = String::new();
+                        if let Ok(tt) = app.tokenizer.encode("CHANGED=") {
+                            let tt: Vec<i32> = tt.into_iter().filter(|&t| t != 2).collect();
+                            if !tt.is_empty() { dtoks.extend_from_slice(&tt); reply.push_str("CHANGED="); }
+                        }
+                        let _ = unsafe { kv::reset(handle) };
+                        let (dhead, dlast) = dtoks.split_at(dtoks.len() - 1);
+                        let ok = dhead.is_empty() || unsafe { kv::prefill(handle, dhead) }.is_ok();
+                        if ok {
+                            let mut tok = dlast[0];
+                            let turn_stops = app.tokenizer.turn_stop_ids();
+                            let suppress = app.tokenizer.suppress_token_ids();
+                            for _ in 0..12 {
+                                if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { break; }
+                                for &sid in &suppress { let u = sid as usize; if u < logits.len() { logits[u] = f32::NEG_INFINITY; } }
+                                let mut bi = 0usize; let mut bv = f32::NEG_INFINITY;
+                                for (i, &v) in logits.iter().enumerate() { if v > bv { bv = v; bi = i; } }
+                                let g = bi as i32;
+                                if app.tokenizer.eos_ids.contains(&g) || turn_stops.contains(&g) { break; }
+                                reply.push_str(&String::from_utf8_lossy(app.tokenizer.decode_token(g)));
+                                tok = g;
+                                if reply.contains('\n') { break; }
+                            }
+                        }
+                        // Restore a clean cache (the next turn re-prefills from scratch).
+                        let _ = unsafe { kv::reset_cold(handle) };
+                        tracing::info!("LAYER-3 DECIDE: new=\"{}\" {} cand(s) -> reply=\"{}\"",
+                            new_text.chars().take(50).collect::<String>(), cands.len(), reply.trim());
+                        // Parse CHANGED=<n>; execute the model's choice via the forget removal
+                        // (drop from the live set + rewrite the persisted registry). NONE / any
+                        // unparseable reply ⇒ no removal (safe default).
+                        let ru = reply.to_uppercase();
+                        let n: Option<usize> = if ru.contains("NONE") { None } else {
+                            ru.chars()
+                                .skip_while(|c| !c.is_ascii_digit())
+                                .take_while(|c| c.is_ascii_digit())
+                                .collect::<String>().parse().ok()
+                        };
+                        {
+                            if let Some(n) = n {
+                                if n >= 1 && n <= cands.len() {
+                                    let victim = cands[n - 1].1.clone();
+                                    { let mut ns = app.nightshift.write().unwrap(); ns.retain(|e| e.text != victim); }
+                                    if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                                        if let Ok(content) = std::fs::read_to_string(&reg_path) {
+                                            let kept: Vec<&str> = content.lines().filter(|line| {
+                                                match serde_json::from_str::<serde_json::Value>(line) {
+                                                    Ok(v) => v.get("text").and_then(|x| x.as_str()) != Some(victim.as_str()),
+                                                    Err(_) => !line.trim().is_empty(),
+                                                }
+                                            }).collect();
+                                            let mut out = kept.join("\n"); if !out.is_empty() { out.push('\n'); }
+                                            let _ = std::fs::write(&reg_path, out);
+                                        }
+                                    }
+                                    tracing::info!("LAYER-3 DECIDE: the model chose to FORGET #{} -> \"{}\" (superseded by the new fact)", n, victim);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

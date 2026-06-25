@@ -1,0 +1,49 @@
+G-DECIDE — LAYER-3 MEMORY AGENCY: the MODEL decides what to forget (2026-06-25)
+==============================================================================
+Layer 3 of memory agency: when NIGHTSHIFT captures a new fact that overlaps an
+existing memory, the model is shown the related memories and ITSELF decides
+whether the new fact supersedes an old one. The model's verdict — not a dedup
+rule — drives the removal (reuses the LAYER-2 forget primitive). Emergent
+curation, not imposed housekeeping. Default-off SP_DECIDE=1.
+
+Engine: cargo build --release --features wire_cuda_backend  BUILD_EXIT=0
+Launcher: _e2e_seed_serve.bat (port 3000) + SP_DECIDE=1 + SP_FORGET=1 ; 8 seeds.
+Test: tools/xbar_lsh/_decide_smoke.py (plant blue -> plant green -> recall).
+
+ARCHITECTURE (conflict-gated, silent — matches the operator's spec):
+  - Trigger ONLY on conflict: DECIDE runs only when the new fact shares
+    token_overlap >= 0.3 with an existing memory (no per-turn whole-existence
+    eval; unrelated facts skip it entirely).
+  - The model picks: a side model-call shows NEW + numbered related memories;
+    the model answers which is now out of date (CHANGED=<n>) or NONE.
+  - Silent execution: the daemon executes the forget (drop from live set +
+    rewrite persisted registry); the user never sees the plumbing.
+  - Admit-gate fix: statements are now captured even when they RECALL a related
+    memory (so a superseding fact is stored at all); interrogatives still skip
+    via wh-word/'?' detection (the spider-question fix preserved). N2 stays loose.
+
+SMOKE:
+======================================================================
+[PLANT-OLD] "My favorite color is blue."   -> captured ep_live_000
+[PLANT-NEW] "My favorite color is green."   -> captured ep_live_001
+            DECIDE: new="My favorite color is green." 1 cand -> reply "CHANGED=1"
+            -> the model chose to FORGET #1 -> "My favorite color is blue."
+[RECALL]    "What is my favorite color?"     -> "Green."     <-- supersede took
+======================================================================
+REGISTRY: 9 lines (8 seeds + green); blue=0, green=1, seeds=8 (NO over-deletion).
+
+PROMPT ENGINEERING (3 iterations, receipts-first):
+  v1 zero-shot "should I FORGET?"  -> model says KEEP (over-cautious; rationalizes
+       "different attribute"). Clean format, wrong decision.
+  v2 few-shot FORGET/KEEP examples -> model ECHOES the template ("NEW: ...") instead
+       of answering. Structure invited continuation.
+  v3 change-detection framing ("does the NEW fact UPDATE a single-value attribute?")
+       + PREFILL "CHANGED=" into the model turn (the judge's prefill-TAG trick to
+       force the format) -> reply "CHANGED=1". WORKS. The change-detection framing
+       (vs "should I delete") sidesteps the model's deletion-caution; the forced
+       prefix kills the echo.
+
+Default-off SP_DECIDE unset = byte-identical null floor (no model-call, no removal).
+The 3-layer agency stack is now LIVE: STORE (NIGHTSHIFT) + FORGET (SP_FORGET) +
+DECIDE (SP_DECIDE, the model curates itself). NEXT = MERGE (consolidate two facts
+into one synthesized truth).
