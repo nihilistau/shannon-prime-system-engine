@@ -1,0 +1,43 @@
+G-FORGET — LAYER-2 MEMORY AGENCY: the organism REMOVES a memory (2026-06-25)
+============================================================================
+The first memory-agency primitive: on a forget intent the best token-overlap
+match across the curated registry + live nightshift is dropped from the live set
+AND rewritten out of the persisted registry, then confirmed via text-in-context.
+Building block for "the model decides what it keeps." Default-off SP_FORGET=1.
+
+Engine: cargo build --release --features wire_cuda_backend  BUILD_EXIT=0
+Launcher: _e2e_seed_serve.bat (port 3000) + SP_FORGET=1 ; seed registry = 8 seeds.
+Test: tools/xbar_lsh/_forget_smoke.py (plant -> recall -> forget -> prove gone).
+
+SMOKE (4 turns, temp=0, auto_recall):
+======================================================================
+[PLANT] Q: Please remember this: the secret vault code is 7-RAVEN-3300.
+REPLY: I'm sorry, but I don't have access to the specific details of the story
+       "The Secret Vault"... (parametric reply; NIGHTSHIFT captures the fact)
+======================================================================
+[RECALL-BEFORE] Q: What is the secret vault code?
+REPLY: 7-RAVEN-3300                         <-- recall works (planted fact)
+======================================================================
+[FORGET] Q: Forget the secret vault code.
+REPLY: I have forgotten the secret vault code.   <-- forget fired + confirmed
+======================================================================
+[RECALL-AFTER] Q: What is the secret vault code?
+REPLY: The secret vault code is 12345.      <-- fact GONE (parametric guess)
+======================================================================
+
+BACKEND VERIFICATION:
+  daemon trace: LAYER-2 FORGET: removed memory (overlap 1.000)
+                -> "Please remember this: the secret vault code is 7-RAVEN-3300."
+  REGISTRY_LINES = 8        (plant added line 9, forget removed it; back to 8 seeds)
+  VAULT_OR_FORGET_LINES = 0 (no pollution: vault gone AND the forget turn NOT stored)
+
+FIX FOUND IN TESTING (receipts-first caught it): v1 removed the planted fact
+correctly BUT the forget command turn itself was captured by NIGHTSHIFT
+("Forget the secret vault code." re-appeared as ep_live_000). Added an admission
+exclusion: a turn with forget intent (forget_done OR forget phrasing) is NEVER
+admitted to memory. Re-test => registry clean at 8.
+
+PROVEN: recall-before -> forget+confirm -> recall-after-gone -> registry clean.
+Removal is from BOTH the in-RAM nightshift set AND the persisted registry file
+(survives restart). All exact-duplicate copies of the forgotten text are dropped.
+Default-off SP_FORGET unset = byte-identical null floor (no forget path taken).

@@ -759,7 +759,77 @@ fn run_kvdecode_chat(
     // B3-JUDGE: when the generative judge fires, stash (ep_name, injected_text)
     // for the post-synthesis CPU-side grounding check (parametric-hallucination flag).
     let mut judge_ground: Option<(String, String)> = None;
-    if auto_recall && replay_dir.is_none() {
+    // ── LAYER-2: FORGET (SP_FORGET=1) — the organism removes a memory ──────────────
+    // The building block for memory agency. On a forget intent ("forget ...") the best
+    // token-overlap match across the curated registry + live nightshift is dropped from
+    // the live set AND rewritten out of the persisted registry (all exact-duplicate
+    // copies), then confirmed via text-in-context. First operator-triggered; the same
+    // removal the model will later invoke itself. Default-off = byte-identical null floor.
+    let mut forget_done = false;
+    if auto_recall && replay_dir.is_none()
+        && std::env::var("SP_FORGET").ok().as_deref() == Some("1")
+    {
+        let is_forget = raw_user.as_ref().map(|s| {
+            let l = s.to_lowercase();
+            l.contains("forget") || l.contains("delete that") || l.contains("erase")
+        }).unwrap_or(false);
+        if is_forget {
+            use sp_daemon::recall;
+            let ftext = raw_user.as_ref().map(|s| s.trim().to_string()).unwrap_or_default();
+            let q = ftext.to_lowercase().replace("forget", " ").replace("please", " ").replace("erase", " ");
+            let mut best: Option<(f32, String)> = None; // (overlap, episode text)
+            if let Some(reg) = app.recall_registry.as_ref() {
+                for ep in reg.iter() {
+                    let ov = recall::token_overlap(&q, &ep.text);
+                    if best.as_ref().map_or(true, |(b, _)| ov > *b) { best = Some((ov, ep.text.clone())); }
+                }
+            }
+            {
+                let ns = app.nightshift.read().unwrap();
+                for ep in ns.iter() {
+                    let ov = recall::token_overlap(&q, &ep.text);
+                    if best.as_ref().map_or(true, |(b, _)| ov > *b) { best = Some((ov, ep.text.clone())); }
+                }
+            }
+            if let Some((ov, text)) = best.filter(|(ov, _)| *ov >= 0.25) {
+                // (1) drop from the live nightshift set (all exact copies)
+                { let mut ns = app.nightshift.write().unwrap(); ns.retain(|e| e.text != text); }
+                // (2) rewrite the persisted registry, dropping every line with this text
+                if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                    if let Ok(content) = std::fs::read_to_string(&reg_path) {
+                        let kept: Vec<&str> = content.lines().filter(|line| {
+                            match serde_json::from_str::<serde_json::Value>(line) {
+                                Ok(v) => v.get("text").and_then(|x| x.as_str()) != Some(text.as_str()),
+                                Err(_) => !line.trim().is_empty(),
+                            }
+                        }).collect();
+                        let mut out = kept.join("\n");
+                        if !out.is_empty() { out.push('\n'); }
+                        let _ = std::fs::write(&reg_path, out);
+                    }
+                }
+                tracing::info!("LAYER-2 FORGET: removed memory (overlap {:.3}) -> \"{}\"", ov, text);
+                // (3) confirm via text-in-context (the judge-PICK synthesis machinery)
+                let aug = format!(
+                    "Context: at the user's request you have just permanently removed this memory: \"{}\".\n\nUser: {}\n\nIn one short sentence, confirm that you have forgotten it.",
+                    text, ftext);
+                let aug_msgs = vec![Message { role: "user".to_string(), content: aug }];
+                if let Ok(aug_toks) = app.tokenizer.apply_template_ids(&aug_msgs) {
+                    if aug_toks.len() >= 2 {
+                        let _ = unsafe { kv::reset_cold(handle) };
+                        let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
+                        if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
+                            syn_last = aug_last[0];
+                        }
+                    }
+                }
+                forget_done = true;
+            } else {
+                tracing::info!("LAYER-2 FORGET: forget intent but no memory matched (best overlap < 0.25)");
+            }
+        }
+    }
+    if auto_recall && replay_dir.is_none() && !forget_done {
         if let Some(registry) = app.recall_registry.as_ref() {
             let npos_q = unsafe { kv::position(handle) }; // = head.len() after prefill
             if npos_q > 0 {
@@ -1914,7 +1984,16 @@ Tag of the answer (or [NULL]):");
         // question (the live-smoke regression). The rigorous gate is the teacher-forced
         // ablation oracle (collapse < TAU=-8), which ALSO rejects parametric facts — the
         // TODO above; this cheap gate is the safety floor it will subsume.
+        // A forget command turn must NEVER become a memory (it removed one; storing
+        // "Forget the secret vault code." re-pollutes the registry). Exclude both the
+        // matched case (forget_done) and any forget phrasing (matched or not).
+        let is_forget_turn = raw_user.as_ref().map(|s| {
+            let l = s.to_lowercase();
+            l.contains("forget") || l.contains("delete that") || l.contains("erase")
+        }).unwrap_or(false);
         let admit = recalled.is_none()
+            && !forget_done
+            && !is_forget_turn
             && raw_user.as_ref().map(|s| !s.trim_end().ends_with('?')).unwrap_or(false);
         if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()).filter(|_| admit) {
