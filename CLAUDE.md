@@ -1,5 +1,7 @@
 # CLAUDE.md — shannon-prime-system-engine (the inference engine)
 
+> ★ **CURRENT STATE — KEYSTONE (tag `keystone-1`, 2026-06-25).** Canonical whole-system map: **`shannon-prime-lattice/papers/PPT-LAT-KEYSTONE.md`** + **`PPT-LAT-KEYSTONE-API.md`** (call surface). KEYSTONE-era surfaces here: the served daemon `tools/sp_daemon/` (memory agency in `routes.rs` — SP_FORGET/SP_DECIDE; the SP_CURRENT_CONVO consolidation hook; the served console `frontend_mockups/index.html`). FIVE repos now (added **shannon-prime-harness**). Read the foundation doc before trusting the "Current edge (2026-06-…)" notes below (session history).
+
 **This is Shannon-Prime's inference engine. The canonical session bootstrap is `D:\F\shannon-prime-repos\shannon-prime-lattice\prompt.md` — read it first** (project, current state, methodology, machine, doc map, operator). This file is the short version + this repo's specifics.
 
 **Repo role:** the inference engine + backends, consuming the math core via the **`lib/shannon-prime-system` submodule**. Key surfaces:
