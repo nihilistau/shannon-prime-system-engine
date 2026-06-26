@@ -776,11 +776,32 @@ fn run_kvdecode_chat(
     if persist_kv {
         let committed = KV_COMMITTED.lock().unwrap();
         let cl = committed.len();
-        if cl >= 1 && cl < tokens.len() && pos as usize == cl && tokens[..cl] == committed[..] {
-            prefill_from = cl;
-            tracing::info!(
-                "PERSIST-KV: reuse {} committed tokens; prefill suffix {} (full would be {})",
-                cl, tokens.len() - cl, tokens.len());
+        // LONGEST-COMMON-PREFIX reuse. The cache holds exactly `committed` (pos == cl). Reuse the
+        // common prefix of committed and this prompt, REWINDING the small diverging committed tail.
+        // drop==0 is the strict-prefix append (no rewind). A bounded drop (<= REWIND_BOUND, inside
+        // the SWA undo-journal SP_G4_KV_JMAX=64) lets a PRE-WARMED persona+tools prefix be reused even
+        // though the first real turn diverges right after it (the dummy warm-up tail is rewound).
+        // Byte-exact: the reused prefix K/V is the same deterministic compute; the new suffix is
+        // prefilled fresh, overwriting the rewound positions.
+        const REWIND_BOUND: usize = 32;
+        if cl >= 1 && pos as usize == cl {
+            let maxp = cl.min(tokens.len().saturating_sub(1));
+            let mut lcp = 0usize;
+            while lcp < maxp && tokens[lcp] == committed[lcp] { lcp += 1; }
+            let drop_n = cl - lcp;
+            if lcp >= 1 && lcp < tokens.len() && drop_n <= REWIND_BOUND {
+                if drop_n > 0 {
+                    if let Err(e) = unsafe { kv::rewind(handle, drop_n as i32) } {
+                        send_err(format!("kvdecode persist rewind({drop_n}): {e}"));
+                        sessions.remove(chat_id);
+                        return;
+                    }
+                }
+                prefill_from = lcp;
+                tracing::info!(
+                    "PERSIST-KV: reuse {} of {} committed (drop {}); prefill suffix {} (full would be {})",
+                    lcp, cl, drop_n, tokens.len() - lcp, tokens.len());
+            }
         }
     }
     if prefill_from == 0 && pos > 0 {

@@ -14,6 +14,7 @@ def chat(msgs):
     b = {"messages": msgs, "max_tokens": 40, "eot_bias": 4.0,
          "temperature": float(os.environ.get("SP_TEMP", "0")),
          "repetition_penalty": float(os.environ.get("SP_REP", "1.0")),
+         "byteexact": os.environ.get("SP_BX", "1") == "1",
          "seed": 7}
     if AR:
         b["auto_recall"] = True

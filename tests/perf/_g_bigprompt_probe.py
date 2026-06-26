@@ -11,7 +11,8 @@ filler = " ".join(itertools.islice(itertools.cycle(vocab), WORDS))
 sysprompt = "You are a helpful assistant. Ignore this reference context: " + filler
 body = {"messages": [{"role": "system", "content": sysprompt},
                      {"role": "user", "content": "Say hello in exactly one word."}],
-        "max_tokens": int(os.environ.get("SP_MAXTOK", "40")), "temperature": 0, "eot_bias": 4.0}
+        "max_tokens": int(os.environ.get("SP_MAXTOK", "40")), "temperature": 0, "eot_bias": 4.0,
+        "byteexact": os.environ.get("SP_BX", "1") == "1"}
 
 t0 = time.time()
 chars = 0
@@ -19,7 +20,7 @@ done = False
 req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/chat", data=json.dumps(body).encode(),
                              headers={"Content-Type": "application/json"})
 try:
-    with urllib.request.urlopen(req, timeout=70) as r:
+    with urllib.request.urlopen(req, timeout=240) as r:
         for raw in r:
             s = raw.decode("utf-8", "replace").strip()
             if s.startswith("data:"):
