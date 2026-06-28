@@ -64,9 +64,15 @@ typedef enum {
     SP_ARCH_ID_QWEN25 = 6,
     SP_ARCH_ID_GEMMA4 = 7,
     SP_ARCH_ID_QWEN36 = 8,  /* qwen35moe: Gated DeltaNet + MoE hybrid (Qwen3.6-35B-A3B) */
-    SP_ARCH_ID_DIFFUSION_GEMMA = 9  /* diffusion-gemma: block masked-diffusion on the
+    SP_ARCH_ID_DIFFUSION_GEMMA = 9, /* diffusion-gemma: block masked-diffusion on the
                                        Gemma-4 MoE backbone (DiffusionGemma-26B-A4B; PR 24423).
                                        Backbone == gemma4 MoE; diffusion surface in dg_* fields. */
+    SP_ARCH_ID_GEMMA4_ASSISTANT = 10 /* gemma4-assistant: EAGLE/MTP draft head. 4 tiny layers
+                                        (hidden 1024) hung off the 12B residual: nextn.pre_projection
+                                        [2*3840->1024] consumes concat(target_hidden, token_embed),
+                                        nextn.post_projection [1024->3840] returns to the residual,
+                                        shares the 12B embd+head. A spec-decode DRAFT, not a stand-
+                                        alone LM (must be fed the target's last hidden each step). */
 } sp_arch_id;
 
 /* §7 tokenizer type_id. Doubles as the tokenizer FAMILY tag (#115): legacy

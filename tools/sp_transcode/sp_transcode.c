@@ -625,7 +625,8 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     int is_qwen3  = (strcmp(arch_str, "qwen3")  == 0);
     int is_qwen36 = (strcmp(arch_str, "qwen35moe") == 0);
     int is_dg     = (strcmp(arch_str, "diffusion-gemma") == 0);  /* Phase 5: gemma4 MoE backbone */
-    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3 && !is_qwen36 && !is_dg) {
+    int is_g4a    = (strcmp(arch_str, "gemma4-assistant") == 0); /* EAGLE/MTP draft head */
+    if (!is_gemma3 && !is_gemma4 && !is_qwen25 && !is_qwen3 && !is_qwen36 && !is_dg && !is_g4a) {
         fprintf(stderr, "fill_arch_struct: unsupported arch '%s'\n", arch_str); return 1;
     }
     /* diffusion-gemma reuses the gemma4 per-layer SWA/global geometry block; its
@@ -674,7 +675,8 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
 
     sp_arch_info ai;
     memset(&ai, 0, sizeof ai);
-    ai.arch_id          = is_gemma3 ? (uint32_t)SP_ARCH_ID_GEMMA3 :
+    ai.arch_id          = is_g4a    ? (uint32_t)SP_ARCH_ID_GEMMA4_ASSISTANT :
+                          is_gemma3 ? (uint32_t)SP_ARCH_ID_GEMMA3 :
                           is_gemma4 ? (uint32_t)SP_ARCH_ID_GEMMA4 :
                           is_dg     ? (uint32_t)SP_ARCH_ID_DIFFUSION_GEMMA :
                           is_qwen25 ? (uint32_t)SP_ARCH_ID_QWEN25 :
@@ -688,8 +690,8 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
     ai.max_context      = (uint32_t)context_length;
     ai.swa_window       = (uint32_t)swa_window;
     ai.rope_freq_base   = rope_freq_base;
-    ai.ffn_variant      = (is_gemma3 || is_gemma4_like) ? 1u : 0u;   /* 1=GeGLU(gemma3/4/dg), 0=SwiGLU(qwen3/qwen25) */
-    ai.norm_variant     = (is_gemma3 || is_gemma4_like) ? 1u : 0u;   /* 1=sandwich(gemma3/4/dg), 0=pre-norm(qwen3/qwen25) */
+    ai.ffn_variant      = (is_gemma3 || is_gemma4_like || is_g4a) ? 1u : 0u;   /* 1=GeGLU(gemma3/4/dg/g4a), 0=SwiGLU(qwen3/qwen25) */
+    ai.norm_variant     = (is_gemma3 || is_gemma4_like || is_g4a) ? 1u : 0u;   /* 1=sandwich(gemma3/4/dg/g4a), 0=pre-norm(qwen3/qwen25) */
     ai.tied_embeddings  = (uint32_t)tied;
     ai.has_qk_norm      = (uint32_t)has_qk_norm;
     ai.n_ff             = (uint32_t)n_ff;
@@ -803,6 +805,50 @@ static int fill_arch_struct(const gguf_ctx *g, uint8_t arch_struct[256],
         #undef G4K
     }
 
+    /* ── gemma4-assistant: the EAGLE/MTP DRAFT head. NOT a standalone LM — 4 tiny
+     * layers (hidden 1024) hung off the 12B residual stream: nextn.pre_projection
+     * [2*3840 -> 1024] consumes concat(target_hidden, token_embed), the 4 layers run,
+     * nextn.post_projection [1024 -> 3840] returns to the 12B residual dim, and the
+     * SHARED 12B embd+head produce logits. It carries the gemma4 GeGLU+sandwich
+     * surface but a SMALL fixed geometry with NO sliding_window_pattern array, so it
+     * gets its own fill (the is_gemma4_like SWA-period detection would hard-error).
+     * head_dim above = key_length (GLOBAL, 512); g4_hd_swa = key_length_swa (256). ── */
+    if (is_g4a) {
+        uint64_t gv = 0; float gf = 0.0f;
+        #define G4AK(suf) (snprintf(key, sizeof key, "gemma4-assistant." suf), (const char *)key)
+        uint64_t hd_swa = 0;
+        gguf_get_u64(g, G4AK("attention.key_length_swa"), &hd_swa);
+        ai.g4_hd_swa  = (uint32_t)(hd_swa ? hd_swa : head_dim);
+        ai.g4_nh_swa  = (uint32_t)n_head;                 /* n_head constant across layer types */
+        ai.g4_rope_base_swa = gguf_get_f32(g, G4AK("rope.freq_base_swa"), &gf) ? gf : 1e4f;
+        /* per-layer attention.head_count_kv is an ARRAY ([8,8,8,1]): the SWA layers
+         * carry the larger count, the trailing global layer the smaller. Read both
+         * ends directly (NO period detection — this head has no SWA pattern array). */
+        {
+            const gguf_kv *kv = gguf_find_kv(g, G4AK("attention.head_count_kv"));
+            if (kv && kv->type == GGUF_T_ARRAY && kv->arr_data && kv->arr_len >= 1 &&
+                (kv->arr_type == GGUF_T_UINT32 || kv->arr_type == GGUF_T_INT32)) {
+                const uint32_t *hk = (const uint32_t *)kv->arr_data;
+                ai.g4_nkv_swa = hk[0];                     /* SWA kv-heads (8)    */
+                ai.n_kv_heads = hk[kv->arr_len - 1];       /* global kv-heads (1) */
+            } else {
+                ai.g4_nkv_swa = (uint32_t)n_head_kv;
+            }
+        }
+        /* nextn/MTP: number of draft prediction blocks (== block_count here, 4). */
+        if (gguf_get_u64(g, G4AK("nextn_predict_layers"), &gv)) ai.q36_nextn_predict_layers = (uint32_t)gv;
+        ai.has_qk_norm = 1u;                               /* blk.*.attn_q_norm present */
+        if (ai.n_ff == 0) {                                /* feed_forward_length scalar fallback */
+            const gguf_tensor *fg0 = gguf_find_tensor(g, "blk.0.ffn_gate.weight");
+            if (fg0 && fg0->n_dims >= 2) ai.n_ff = (uint32_t)fg0->dims[1];
+        }
+        fprintf(stderr, "    [arch] gemma4-assistant (EAGLE/MTP draft): layers=%u hidden=%u nh=%u "
+                        "kv(swa=%u global=%u) hd(global=%u swa=%u) nextn=%u\n",
+                ai.n_layers, ai.hidden_dim, ai.n_heads, ai.g4_nkv_swa, ai.n_kv_heads,
+                ai.head_dim, ai.g4_hd_swa, ai.q36_nextn_predict_layers);
+        #undef G4AK
+    }
+
     /* ── qwen35moe q36_* fields (mirror qwen3_load): GDN geometry + MoE params +
      * IMRoPE sections. Base head_dim/n_heads/n_kv_heads hold the FULL-ATTN geometry. ── */
     if (is_qwen36) {
@@ -858,6 +904,7 @@ static int is_matmul_weight(const char *name) {
      * per_layer_token_embd / per_layer_model_proj). rope_freqs + layer_output_scale
      * stay F32 (freq table / scalar); *_norm caught above. */
     if (strstr(name, "inp_gate.weight") || strstr(name, "proj.weight") ||
+        strstr(name, "projection.weight") ||   /* gemma4-assistant nextn.pre/post_projection */
         strstr(name, "per_layer_token_embd.weight")) return 1;
     /* qwen35moe (Qwen3.6): GDN + MoE matmul weights -> Q8. The router gates
      * (ffn_gate_inp.weight, ffn_gate_inp_shexp.weight) and ssm_conv1d/a/dt/norm
