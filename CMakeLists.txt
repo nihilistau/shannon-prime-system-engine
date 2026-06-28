@@ -74,6 +74,7 @@ endif()
 # ── Tools (Phase 2-FMT: the sp_transcode GGUF -> .sp-model CLI) ──────────────
 add_subdirectory(tools/sp_transcode)
 add_subdirectory(tools/sp_tok_dump)
+add_subdirectory(tools/eagle)              # sp_eagle_fwd: gemma4-assistant MTP draft forward (step 2c)
 
 if(SP_ENGINE_BUILD_TESTS)
     enable_testing()
