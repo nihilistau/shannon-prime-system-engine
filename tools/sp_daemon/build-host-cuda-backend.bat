@@ -43,7 +43,7 @@ dir /b "%BUILD_DIR%\sp_cuda_daemon_backend.lib" 2>nul
 dir /b "%BUILD_DIR%\libsp_cuda_daemon_backend.a" 2>nul
 
 endlocal
-goto :eof
+endlocal & exit /b 0
 
 :err
 echo [build-host-cuda-backend] FAILED
