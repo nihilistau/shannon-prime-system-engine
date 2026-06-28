@@ -107,6 +107,10 @@ unsafe extern "C" {
     /// per-session byte-exact "auditable mode" on the resident cache. 0 on success.
     fn sp_daemon_cuda_kvdecode_byteexact(handle: *mut c_void, on: c_int) -> c_int;
 
+    /// CONTRACT-CUDA-KV-FOUNDATION — `gemma4_kv_set_kv_flags(s, flags)`. Sets the KV
+    /// codec flags (bit0 = SP_KV_SPINOR) on the resident cache. 0 on success.
+    fn sp_daemon_cuda_kvdecode_kv_flags(handle: *mut c_void, flags: u32) -> c_int;
+
     /// CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — `gemma4_kv_replay(s, epdir, npos, zero)`.
     /// Recall a stored episode's owner K/V into the resident cache at
     /// `[dpos, dpos+npos)` and advance dpos (SP_REPLAY into the live turn). `epdir`
@@ -353,6 +357,19 @@ pub unsafe fn set_byteexact(handle: *mut c_void, on: bool) -> Result<(), String>
     }
     // SAFETY: handle live per caller; glue forwards to gemma4_kv_byteexact_set.
     let rc = unsafe { sp_daemon_cuda_kvdecode_byteexact(handle, if on { 1 } else { 0 }) };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// Set the KV codec flags (bit0 = SP_KV_SPINOR) on the resident cache.
+/// CONTRACT-CUDA-KV-FOUNDATION. flags==0 = float null floor (default).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn set_kv_flags(handle: *mut c_void, flags: u32) -> Result<(), String> {
+    if handle.is_null() {
+        return Err("kvdecode set_kv_flags: NULL handle".to_string());
+    }
+    let rc = unsafe { sp_daemon_cuda_kvdecode_kv_flags(handle, flags) };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
 

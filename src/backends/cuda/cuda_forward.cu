@@ -183,6 +183,9 @@ __device__ __forceinline__ long long bx_exp_fixed(long long d) {
  * d_bx_flag==0 => the float path runs unchanged (byte-identical null floor). Validated offline on
  * REAL 12B activations: RMS 3.84e-5 / GELU 8.18e-7 / RoPE 9.62e-6 (G-BYTEEXACT-ISLANDS-CUDA). */
 __device__ __constant__ int d_bx_flag = 0;
+/* CONTRACT-CUDA-KV-FOUNDATION: per-session KV codec flags (bit0 = SP_KV_SPINOR).
+ * 0 = float null floor; consumed by the KV alloc/read once the O_K Spinor carrier lands. */
+__device__ __constant__ unsigned int d_kv_flags = 0u;
 
 /* RMSNorm fixed-point layout (frozen, == the ref): Q=16 / IB=20 / Qw=16. */
 #define BX_RMS_Q   16
@@ -4417,6 +4420,16 @@ extern "C" int gemma4_kv_byteexact_set(sp_g4_kv *s, int on) {
     cudaError_t e = cudaMemcpyToSymbol(d_bx_flag, &bx, sizeof(int), 0, cudaMemcpyHostToDevice);
     if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_byteexact_set: d_bx_flag H2D");
     s->bx_on = bx;
+    return 0;
+}
+
+/* CONTRACT-CUDA-KV-FOUNDATION — set the per-session KV codec flags (bit0 = SP_KV_SPINOR)
+ * on the resident decode cache. flags==0 = float null floor (default). Mirrors
+ * gemma4_kv_byteexact_set; consumed by the KV alloc/read when the O_K Spinor carrier lands. */
+extern "C" int gemma4_kv_set_kv_flags(sp_g4_kv *s, unsigned int flags) {
+    if (!s) { sp_set_error("gemma4_kv_set_kv_flags: NULL handle"); return -1; }
+    cudaError_t e = cudaMemcpyToSymbol(d_kv_flags, &flags, sizeof(unsigned int), 0, cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_set_kv_flags: d_kv_flags H2D");
     return 0;
 }
 

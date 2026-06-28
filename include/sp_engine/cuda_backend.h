@@ -150,6 +150,7 @@ int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits);
  * path (byte-identical null floor). Callable per request under the cache Mutex
  * (the chat path sets on=1 at request start, on=0 at end). 0 on success. */
 int gemma4_kv_byteexact_set(sp_g4_kv *s, int on);
+int gemma4_kv_set_kv_flags(sp_g4_kv *s, unsigned int flags);  /* CONTRACT-CUDA-KV-FOUNDATION */
 
 /* CONTRACT-CHAT-FULLSTACK B5: the SINGLE LATENT ENTRY POINT (CONTRACT §6).
  *

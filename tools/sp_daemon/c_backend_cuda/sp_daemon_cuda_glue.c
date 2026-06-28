@@ -301,6 +301,14 @@ int sp_daemon_cuda_kvdecode_byteexact(void *handle, int on) {
     return gemma4_kv_byteexact_set(s, on);
 }
 
+/* kv_flags(handle, flags): CONTRACT-CUDA-KV-FOUNDATION — set the KV codec flags
+ * (bit0 = SP_KV_SPINOR) on the resident decode cache. flags==0 = float null floor. */
+int sp_daemon_cuda_kvdecode_kv_flags(void *handle, unsigned int flags) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s) { sp_set_error("cuda kvdecode kv_flags: NULL handle"); return -1; }
+    return gemma4_kv_set_kv_flags(s, flags);
+}
+
 /* replay(handle, epdir, npos, zero): CONTRACT-CHAT-FULLSTACK B2 (§6d-b) — recall a
  * stored episode's owner K/V into the resident cache at [dpos,dpos+npos) and advance
  * dpos (SP_REPLAY into a live turn). zero!=0 = the zeroed reject control. The chat
