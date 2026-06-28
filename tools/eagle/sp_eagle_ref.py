@@ -53,13 +53,13 @@ def rope_neox(v, pos, base):
     out = v.copy(); out[:half] = v[:half] * c - v[half:] * s; out[half:] = v[half:] * c + v[:half] * s
     return out
 
-def block(T, il, cur, K, V):
+def block(T, il, cur, K, V, pos):
     p = f"blk.{il}."
     n = rms(cur, T[p + "attn_norm.weight"])
     Q = lin(T[p + "attn_q.weight"], n); hd = Q.shape[0] // NH; Q = Q.reshape(NH, hd)
     Q = rms_head(Q, T[p + "attn_q_norm.weight"])
     base = ROPE_BASE_SWA if SWA_PATTERN[il] else ROPE_BASE_FULL
-    Q = np.stack([rope_neox(Q[h], POS, base) for h in range(NH)], 0)
+    Q = np.stack([rope_neox(Q[h], pos, base) for h in range(NH)], 0)
     asc = 1.0 / math.sqrt(hd); ctx = np.empty((NH, hd), np.float32)
     for h in range(NH):
         sc = (K @ Q[h]) * asc; sc -= sc.max(); w = np.exp(sc); w /= w.sum(); ctx[h] = w @ V
@@ -82,15 +82,29 @@ def gen_inputs(T):
         kv.append((K, V))
     return x, inp_h, kv
 
-def forward(T, x, inp_h, kv):
+def forward(T, x, inp_h, kv, pos=POS):
     xh = np.concatenate([x, inp_h]).astype(np.float32)                  # EMBED FIRST (PR #23398)
     cur = lin(T["nextn.pre_projection.weight"], xh); dims = [("pre_proj", cur.shape[0])]
     for il in range(NL):
-        cur, hd = block(T, il, cur, kv[il][0], kv[il][1]); dims.append((f"blk.{il}(hd={hd})", cur.shape[0]))
+        cur, hd = block(T, il, cur, kv[il][0], kv[il][1], pos); dims.append((f"blk.{il}(hd={hd})", cur.shape[0]))
     cur = rms(cur, T["output_norm.weight"])
     logits = lin(T["token_embd.weight"], cur); h_next = lin(T["nextn.post_projection.weight"], cur)
     dims += [("output_norm", cur.shape[0]), ("logits", logits.shape[0]), ("h_next", h_next.shape[0])]
     return logits.astype(np.float32), h_next.astype(np.float32), dims
+
+def drive(T, x0, h0, kv, K):
+    """K-step EAGLE recurrence: per step feed [x_k, h_k] (h_k = prev step's post_proj output);
+    token_k = argmax(logits); h_{k+1} carries the recurrence (the draft owns no KV -- its memory
+    of its own speculated tokens lives in h, not the cache). pos advances POS+k. Returns the K
+    speculative tokens + the per-step embedding inputs x_k used (deterministic, dumped for the C gate).
+    NOTE: x_k here is synthetic-deterministic; live path = TARGET tok_embd[token_k]*sqrt(3840)."""
+    toks, xs, h = [], [], h0.copy()
+    for k in range(K):
+        xk = (np.random.default_rng(2000 + k).standard_normal(BB).astype(np.float32) * 0.02 * math.sqrt(BB)
+              if k > 0 else x0)
+        lg, h, _ = forward(T, xk, h, kv, pos=POS + k)
+        toks.append(int(np.argmax(lg))); xs.append(xk)
+    return toks, xs
 
 def main():
     print(f"[load] {GGUF}"); T = load()
@@ -111,15 +125,25 @@ def main():
     print(f"[gate] dims_ok={dims[0][1]==1024 and lg1.shape[0]==262144 and hn1.shape[0]==3840} "
           f"deterministic={det} finite={fin} argmax={am}(valid={valid}) "
           f"logit[min/max]={lg1.min():.3f}/{lg1.max():.3f} |h_next|={np.linalg.norm(hn1):.3f}")
+    # K-step EAGLE drive (the recurrence spec.rs's independent-draft assumption gets wrong)
+    KDRIVE = 4
+    dtoks, dxs = drive(T, x, inp_h, kv, KDRIVE)
+    dtoks2, _ = drive(T, x, inp_h, kv, KDRIVE)
+    drive_det = (dtoks == dtoks2)
+    drive_ok = drive_det and all(0 <= t < 262144 for t in dtoks) and len(set(dtoks)) >= 1
+    print(f"[drive] K={KDRIVE} tokens={dtoks} deterministic={drive_det}")
     if DUMP:
         os.makedirs(DUMP, exist_ok=True)
         x.tofile(os.path.join(DUMP, "x.f32")); inp_h.tofile(os.path.join(DUMP, "h.f32"))
         for il, (K, V) in enumerate(kv):
             K.tofile(os.path.join(DUMP, f"k{il}.f32")); V.tofile(os.path.join(DUMP, f"v{il}.f32"))
         lg1.tofile(os.path.join(DUMP, "logits.f32")); hn1.tofile(os.path.join(DUMP, "hnext.f32"))
-        print(f"[dump] fixture -> {DUMP} (P={P} POS={POS}); argmax={am} expected for C gate")
-    print("G-EAGLE-DRAFT-REF:", "GREEN" if ok else "RED")
-    sys.exit(0 if ok else 1)
+        for k, xk in enumerate(dxs): xk.tofile(os.path.join(DUMP, f"dx{k}.f32"))
+        with open(os.path.join(DUMP, "drive_tokens.txt"), "w") as f:
+            f.write(f"{KDRIVE}\n" + " ".join(str(t) for t in dtoks) + "\n")
+        print(f"[dump] fixture -> {DUMP} (P={P} POS={POS}); single argmax={am}; drive K={KDRIVE} tokens={dtoks}")
+    print("G-EAGLE-DRAFT-REF:", "GREEN" if (ok and drive_ok) else "RED")
+    sys.exit(0 if (ok and drive_ok) else 1)
 
 if __name__ == "__main__":
     main()
