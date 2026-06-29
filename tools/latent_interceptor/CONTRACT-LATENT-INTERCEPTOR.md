@@ -168,6 +168,22 @@ RESULT held-out val_acc=**1.000** (confusion clean). The latent routes directly 
 result -> RP-1 inject -> KV ring -> model continues. TH-1 (the trigger) + RP-1 (the return) are each
 verified; the integration `run_th_loop` ties them (a real python eval on PYTHON/CALC events).
 
+## TRUTH SERUM — adversarial eval (TS-1, 2026-06-30)
+
+The clean-template heads' 1.000 scores were LAB CONDITIONS. make_adversarial_tape.py (near-miss /
+paraphrase / noise / ambig, near-miss-heavy) + sp_li_eval.py (eval-only, no retrain) on the CLEAN
+tool head:
+- **OVERALL adversarial accuracy = 0.393** (was 1.000). **NONE recall = 0.000, FALSE-FIRE = 1.000**:
+  the clean head fires a tool on EVERY near-miss ("i was reading how python counts" -> fires). It
+  learned surface cues (python/count/file -> fire), NOT invoke-vs-discuss. FILE = the confusion sink
+  (prec 0.19); CALC 14/20 -> PYTHON (compute blur).
+- **RECOVERY:** retrain WITH near-misses (label NONE) -> val_acc 1.000 (CAVEAT: same-generator val,
+  optimistic; true number needs a different adversarial distribution or live data). The architecture
+  is SOUND — the probe learns the boundary when the training distribution contains it.
+- **CONCLUSION:** every head MUST train with near-misses-as-NONE + paraphrase variety, or it false-
+  fires on any mention of a tool/memory/action. Lab-clean training is UNSAFE. The fix is DATA
+  coverage (real/adversarial tapes), not a redesign. This is the honest routing floor.
+
 ## Gate
 
 - **G-LI-AGREEMENT:** Latent Interceptor action vs the ground-truth tape label (held-out tape).

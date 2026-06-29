@@ -1,0 +1,152 @@
+# ADVERSARIAL Tool-Head tape (truth serum). kind=EVENT.<tool>.<dim>; expect=ground truth.
+# dims: nearmiss(->NONE) paraphrase noise ambig clean
+0     EVENT.db.paraphrase        "give me the row count for events"                           0.42  DB
+1     EVENT.chat.nearmiss        "why is counting letters such a classic llm failure"         0.85  NONE
+2     EVENT.calc.paraphrase      "evaluate three plus four lots of five"                      0.5   CALC
+3     EVENT.chat.nearmiss        "that website was down yesterday for a while"                0.63  NONE
+4     EVENT.chat.nearmiss        "remember when we used to read files line by line"           0.5   NONE
+5     EVENT.file.noise           "list the logs directory ..."                                0.62  FILE
+6     EVENT.ambig.web            "find the latest"                                            0.53  WEB
+7     EVENT.file.noise           "ok so list teh ogs directory— actually nvm"                 0.63  FILE
+8     EVENT.chat.nearmiss        "remember when we used to read files line by line"           0.48  NONE
+9     EVENT.web.clean            "fetch the status of example.com"                            0.72  WEB
+10    EVENT.ambig.web            "find the latest"                                            0.9   WEB
+11    EVENT.chat.nearmiss        "the sqrt function is interesting mathematically"            0.88  NONE
+12    EVENT.python.clean         "reverse the string hello"                                   0.46  PYTHON
+13    EVENT.calc.paraphrase      "evaluate three plus four lots of five"                      0.51  CALC
+14    EVENT.web.clean            "fetch the status of example.com"                            0.79  WEB
+15    EVENT.calc.noise           "3 plus 4 times 5"                                           0.75  CALC
+16    EVENT.chat.nearmiss        "remember when we used to read files line by line"           0.76  NONE
+17    EVENT.db.noise             "k so query active users today— actually nvm"                0.54  DB
+18    EVENT.file.paraphrase      "save this writeup somewhere on disk"                        0.74  FILE
+19    EVENT.ambig.db             "what's in events"                                           0.62  DB
+20    EVENT.python.clean         "count the letter r in strawberry"                           0.74  PYTHON
+21    EVENT.python.paraphrase    "tally up the r's for me in strawberry"                      0.75  PYTHON
+22    EVENT.web.noise            "wait get teh latest release tag— actually nvm"              0.9   WEB
+23    EVENT.calc.paraphrase      "if something costs 840 what's twelve and a half percent of it" 0.53  CALC
+24    EVENT.chat.nearmiss        "our database is postgres by the way"                        0.72  NONE
+25    EVENT.db.noise             "um, orders over 100 dollars ..."                            0.69  DB
+26    EVENT.ambig.file           "get me the config"                                          0.41  FILE
+27    EVENT.db.clean             "orders over 100 dollars"                                    0.56  DB
+28    EVENT.python.noise         "reverse eh string hello— actually nvm"                      0.46  PYTHON
+29    EVENT.web.paraphrase       "is example dot com up right now"                            0.55  WEB
+30    EVENT.web.paraphrase       "is example dot com up right now"                            0.84  WEB
+31    EVENT.chat.nearmiss        "the sqrt function is interesting mathematically"            0.47  NONE
+32    EVENT.calc.paraphrase      "what number times itself gives 2025"                        0.64  CALC
+33    EVENT.idle.clean           "just thinking out loud"                                     0.4   NONE
+34    EVENT.ambig.web            "find the latest"                                            0.69  WEB
+35    EVENT.chat.nearmiss        "i was just reading about how python counts characters in a string" 0.88  NONE
+36    EVENT.web.paraphrase       "whats the newest tagged version out there"                  0.67  WEB
+37    EVENT.web.paraphrase       "is example dot com up right now"                            0.9   WEB
+38    EVENT.web.paraphrase       "is example dot com up right now"                            0.59  WEB
+39    EVENT.ambig.python         "can you check strawberry for me"                            0.45  PYTHON
+40    EVENT.db.noise             "orders over 100 dollars"                                    0.79  DB
+41    EVENT.chat.nearmiss        "what does it mean to factor a number conceptually"          0.65  NONE
+42    EVENT.idle.clean           "just thinking out loud"                                     0.78  NONE
+43    EVENT.chat.nearmiss        "why is counting letters such a classic llm failure"         0.58  NONE
+44    EVENT.web.noise            "uh fetch the status of example.com"                         0.53  WEB
+45    EVENT.chat.nearmiss        "tokyo weather is usually humid this time of year"           0.84  NONE
+46    EVENT.chat.nearmiss        "explain how the .count() method works in general"           0.58  NONE
+47    EVENT.calc.paraphrase      "if something costs 840 what's twelve and a half percent of it" 0.88  CALC
+48    EVENT.chat.nearmiss        "the logs folder got huge last month"                        0.83  NONE
+49    EVENT.file.clean           "list the logs directory"                                    0.71  FILE
+50    EVENT.calc.noise           "square root of 2025"                                        0.56  CALC
+51    EVENT.chat.nearmiss        "what does it mean to factor a number conceptually"          0.41  NONE
+52    EVENT.idle.clean           "nice work earlier"                                          0.7   NONE
+53    EVENT.file.paraphrase      "what's sitting in the logs folder"                          0.46  FILE
+54    EVENT.ambig.calc           "look up the sum of these"                                   0.5   CALC
+55    EVENT.chat.nearmiss        "i think someone already queried that last week"             0.56  NONE
+56    EVENT.file.noise           "read config.yaml"                                           0.48  FILE
+57    EVENT.db.paraphrase        "show purchases above a hundred bucks"                       0.86  DB
+58    EVENT.ambig.file           "get me the config"                                          0.43  FILE
+59    EVENT.db.paraphrase        "show purchases above a hundred bucks"                       0.8   DB
+60    EVENT.python.clean         "count the letter r in strawberry"                           0.75  PYTHON
+61    EVENT.ambig.file           "get me the config"                                          0.44  FILE
+62    EVENT.chat.nearmiss        "explain how the .count() method works in general"           0.45  NONE
+63    EVENT.chat.nearmiss        "i was just reading about how python counts characters in a string" 0.68  NONE
+64    EVENT.ambig.calc           "look up the sum of these"                                   0.67  CALC
+65    EVENT.chat.nearmiss        "i think someone already queried that last week"             0.44  NONE
+66    EVENT.calc.noise           "wait 3 plus 4 tmes 5"                                       0.52  CALC
+67    EVENT.python.paraphrase    "flip the word hello back to front"                          0.65  PYTHON
+68    EVENT.chat.nearmiss        "i'm terrible at percentages, they always confuse me"        0.78  NONE
+69    EVENT.ambig.web            "find the latest"                                            0.65  WEB
+70    EVENT.chat.nearmiss        "fibonacci shows up a lot in nature apparently"              0.81  NONE
+71    EVENT.chat.nearmiss        "the sqrt function is interesting mathematically"            0.67  NONE
+72    EVENT.chat.nearmiss        "the logs folder got huge last month"                        0.83  NONE
+73    EVENT.chat.nearmiss        "what does it mean to factor a number conceptually"          0.63  NONE
+74    EVENT.python.paraphrase    "give me the tenth number in the fibonacci sequence"         0.66  PYTHON
+75    EVENT.idle.clean           "nice work earlier"                                          0.54  NONE
+76    EVENT.python.paraphrase    "give me the tenth number in the fibonacci sequence"         0.49  PYTHON
+77    EVENT.python.paraphrase    "work out whether ninety-seven has any factors"              0.47  PYTHON
+78    EVENT.chat.nearmiss        "that website was down yesterday for a while"                0.73  NONE
+79    EVENT.python.noise         "reverse teh string hello"                                   0.64  PYTHON
+80    EVENT.db.paraphrase        "show purchases above a hundred bucks"                       0.48  DB
+81    EVENT.db.noise             "wait query active users today"                              0.7   DB
+82    EVENT.calc.noise           "3 plus 4 times5"                                            0.42  CALC
+83    EVENT.chat.nearmiss        "i think someone already queried that last week"             0.48  NONE
+84    EVENT.file.paraphrase      "save this writeup somewhere on disk"                        0.75  FILE
+85    EVENT.file.paraphrase      "what's sitting in the logs folder"                          0.63  FILE
+86    EVENT.ambig.calc           "look up the sum of these"                                   0.85  CALC
+87    EVENT.calc.paraphrase      "if something costs 840 what's twelve and a half percent of it" 0.42  CALC
+88    EVENT.chat.nearmiss        "i think someone already queried that last week"             0.89  NONE
+89    EVENT.web.noise            "fetch the status of example.com"                            0.54  WEB
+90    EVENT.python.paraphrase    "tally up the r's for me in strawberry"                      0.77  PYTHON
+91    EVENT.ambig.web            "find the latest"                                            0.88  WEB
+92    EVENT.file.noise           "list the logs dirctory lol"                                 0.66  FILE
+93    EVENT.chat.nearmiss        "our database is postgres by the way"                        0.59  NONE
+94    EVENT.web.clean            "get the latest release tag"                                 0.6   WEB
+95    EVENT.ambig.file           "get me the config"                                          0.64  FILE
+96    EVENT.chat.nearmiss        "the config file is really important, don't lose it"         0.49  NONE
+97    EVENT.chat.nearmiss        "our database is postgres by the way"                        0.71  NONE
+98    EVENT.chat.nearmiss        "what does it mean to factor a number conceptually"          0.65  NONE
+99    EVENT.web.paraphrase       "is example dot com up right now"                            0.43  WEB
+100   EVENT.python.noise         "wait everse teh string hello"                               0.61  PYTHON
+101   EVENT.calc.paraphrase      "what number times itself gives 2025"                        0.85  CALC
+102   EVENT.file.clean           "list the logs directory"                                    0.7   FILE
+103   EVENT.chat.nearmiss        "the config file is really important, don't lose it"         0.47  NONE
+104   EVENT.chat.nearmiss        "tokyo weather is usually humid this time of year"           0.62  NONE
+105   EVENT.python.paraphrase    "how many times does the character r show up in the word strawberry" 0.45  PYTHON
+106   EVENT.calc.noise           "3 pus 4 times 5 lol"                                        0.84  CALC
+107   EVENT.chat.nearmiss        "fibonacci shows up a lot in nature apparently"              0.48  NONE
+108   EVENT.file.paraphrase      "save this writeup somewhere on disk"                        0.63  FILE
+109   EVENT.python.noise         "find duplicates in this list lol"                           0.67  PYTHON
+110   EVENT.python.noise         "check if 97 is prime"                                       0.58  PYTHON
+111   EVENT.calc.paraphrase      "what number times itself gives 2025"                        0.64  CALC
+112   EVENT.ambig.db             "what's in events"                                           0.64  DB
+113   EVENT.chat.nearmiss        "i was just reading about how python counts characters in a string" 0.64  NONE
+114   EVENT.web.paraphrase       "pull today's tokyo forecast"                                0.58  WEB
+115   EVENT.python.paraphrase    "tally up the r's for me in strawberry"                      0.74  PYTHON
+116   EVENT.db.clean             "query active users today"                                   0.81  DB
+117   EVENT.ambig.web            "find the latest"                                            0.45  WEB
+118   EVENT.web.noise            "ok so get the latest release tag"                           0.67  WEB
+119   EVENT.chat.nearmiss        "tokyo weather is usually humid this time of year"           0.75  NONE
+120   EVENT.chat.nearmiss        "the sqrt function is interesting mathematically"            0.63  NONE
+121   EVENT.chat.nearmiss        "fibonacci shows up a lot in nature apparently"              0.81  NONE
+122   EVENT.file.noise           "uh list the logs diretory lol"                              0.51  FILE
+123   EVENT.chat.nearmiss        "remember when we used to read files line by line"           0.66  NONE
+124   EVENT.db.noise             "query active users today"                                   0.5   DB
+125   EVENT.python.clean         "find duplicates in this list"                               0.6   PYTHON
+126   EVENT.calc.noise           "3plus 4 times 5 lol"                                        0.63  CALC
+127   EVENT.python.noise         "pls count the letter r in strawberry"                       0.5   PYTHON
+128   EVENT.chat.nearmiss        "i'm terrible at percentages, they always confuse me"        0.83  NONE
+129   EVENT.chat.nearmiss        "remember when we used to read files line by line"           0.73  NONE
+130   EVENT.chat.nearmiss        "the sqrt function is interesting mathematically"            0.64  NONE
+131   EVENT.db.noise             "query active users today"                                   0.57  DB
+132   EVENT.calc.noise           "uh square root of 2025 lol"                                 0.42  CALC
+133   EVENT.chat.nearmiss        "the logs folder got huge last month"                        0.81  NONE
+134   EVENT.ambig.db             "how many users"                                             0.89  DB
+135   EVENT.chat.nearmiss        "i was just reading about how python counts characters in a string" 0.65  NONE
+136   EVENT.ambig.file           "get me the config"                                          0.45  FILE
+137   EVENT.calc.paraphrase      "evaluate three plus four lots of five"                      0.63  CALC
+138   EVENT.chat.nearmiss        "i was just reading about how python counts characters in a string" 0.7   NONE
+139   EVENT.web.paraphrase       "whats the newest tagged version out there"                  0.82  WEB
+140   EVENT.db.noise             "wait query active users today"                              0.88  DB
+141   EVENT.chat.nearmiss        "i think someone already queried that last week"             0.76  NONE
+142   EVENT.chat.nearmiss        "the config file is really important, don't lose it"         0.73  NONE
+143   EVENT.calc.noise           "square root of 2025 lol"                                    0.66  CALC
+144   EVENT.chat.nearmiss        "i think someone already queried that last week"             0.5   NONE
+145   EVENT.chat.nearmiss        "the config file is really important, don't lose it"         0.72  NONE
+146   EVENT.chat.nearmiss        "i'm terrible at percentages, they always confuse me"        0.89  NONE
+147   EVENT.chat.nearmiss        "our database is postgres by the way"                        0.68  NONE
+148   EVENT.db.paraphrase        "give me the row count for events"                           0.6   DB
+149   EVENT.chat.nearmiss        "i'm terrible at percentages, they always confuse me"        0.66  NONE
