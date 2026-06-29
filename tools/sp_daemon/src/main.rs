@@ -297,6 +297,24 @@ async fn main() {
             Err(e) => { eprintln!("[li-heartbeat] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_MH_GATE — Memory Head gate: latent -> pooled_K -> curator R -> C2 sig -> MEM-OKF.
+    //   SP_MH_GATE=1 SP_MODEL_PATH=… SP_TOKENIZER_PATH=… SP_LI_TAPE=tape SP_MH_HEAD=_mh_head.bin SP_DRAFT_GGUF=…
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_MH_GATE").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        let tape = std::env::var("SP_LI_TAPE").unwrap_or_default();
+        let head = std::env::var("SP_MH_HEAD").unwrap_or_else(|_| "_mh_head.bin".to_string());
+        let draft = std::env::var("SP_DRAFT_GGUF").unwrap_or_default();
+        if model.is_empty() || tok.is_empty() || tape.is_empty() || draft.is_empty() {
+            eprintln!("SP_MH_GATE=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH, SP_LI_TAPE, SP_DRAFT_GGUF (+ SP_MH_HEAD)");
+            std::process::exit(2);
+        }
+        match eagle_accept::run_mh_gate(&model, &tok, &tape, &head, &draft) {
+            Ok(()) => { eprintln!("[mh-gate] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[mh-gate] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 

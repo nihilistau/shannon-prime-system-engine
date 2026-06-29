@@ -127,6 +127,29 @@ on each event frame (attends the real KV) and dumps `latent.f32 [N x1024]` along
 - **Deploy (next):** CUDA `gemma4_draft_mem(latent)->55-d key` (tiny MLP, like li_probe) ->
   sp_spinor_encode -> emit to MEM-OKF (tools/okf_mem.py add / the curator ADMIT path), all latent-side.
 
+## MEMORY HEAD v2 — CURATOR DISTILLATION (G-MH-CURATOR, 2026-06-30)
+
+**RETARGET (user veto of v1 JL):** the curator does NOT emit a 63-byte Spinor — that's the KV codec.
+The curator's geometrically-pure content key is the **C2 256-bit LSH signature** (recall.rs
+`Projection`): `sig[b] = sign(R[b]·pooled_K)`, R = frozen +/-1 `smix(SEED,256*512)`, pooled_K = sum
+over (8 global layers, pos) of K[512]. Integer Hamming, zero float in the address.
+- **Head:** `latent[1024] -> Linear(1024,512) -> ReLU -> Linear(512,512) = pooled_K_est`; the FROZEN
+  curator R then produces the byte-identical address. The head reconstructs the GEOMETRY; R is untouched.
+- **Capture (MH-2 ext):** `SP_LI_CAPTURE`+`SP_DRAFT_GGUF` reads the live global-K
+  (`gemma4_kv_read_global_k`), pools it, applies the real `recall::Projection` -> dumps
+  `latent.f32`+`pooledk.f32`+`sig.u64` (curator ground truth). Parity: captured pooled_K->R->sig == sig.
+- **Train (`sp_mh_train.py`):** BCE on `sign(R@pooled_K_est)` vs curator sig + MSE on unit pooled_K.
+  RESULT (150 synthetic, held-out val): **val_bit_agree 255/256 (Hamming 1.0)**, recall@168 **1.000**,
+  exact-256 **0.567**. R replicated byte-identically (splitmix64).
+- **Gate (`SP_MH_GATE`, run_mh_gate):** live held-out — latent->mh_probe->frozen R->C2 sig vs the
+  curator's own sig: **mean Hamming 1.17/256, max 3, 100% RECALL-MATCH** (several byte-exact). The
+  draft writes curator-identical addresses from the latent, no tokenization. **Honest gap: gate
+  ~91.5ms** (the gemma4_draft_body GPU pass; mh_probe+R are CPU-us), NOT the <3ms target. Closing
+  that needs body optimization (CUDA-graph the 4-layer body, or the CPU/Hexagon low-dim port).
+- Caveat: 150 synthetic templated events; the 255/256 will soften on real diverse data. Mechanism proven.
+- **Deploy-to-MEM-OKF (next):** emit on KEEP (`okf_mem.py add --kind episode --addr c2sig_{hex}`),
+  latent-native; + the body-speed optimization for the <3ms idle write.
+
 ## Gate
 
 - **G-LI-AGREEMENT:** Latent Interceptor action vs the ground-truth tape label (held-out tape).

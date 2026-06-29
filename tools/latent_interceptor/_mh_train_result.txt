@@ -1,0 +1,13 @@
+[mh-train] N=150 | pooled_K->R->sig parity vs captured sig = 1.0000 (should be ~1.0)
+  ep60 loss=0.001 val_bit_agree=255.0/256 recall@168=1.000
+  ep120 loss=0.001 val_bit_agree=255.0/256 recall@168=1.000
+  ep180 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep240 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep300 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep360 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep420 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep480 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep540 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+  ep600 loss=0.001 val_bit_agree=254.9/256 recall@168=1.000
+[mh-train] BEST val_bit_agree=255.0/256 (Hamming dist 1.0) | recall@168=1.000 | exact256=0.567
+[mh-train] wrote _mh_head.bin (+ .json) -> Rust mh_probe: latent->pooled_K, recall::Projection->sig

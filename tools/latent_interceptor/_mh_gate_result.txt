@@ -1,0 +1,13 @@
+    [draft] gemma4-assistant loaded: 4 layers hd=256/256/256/512 Vd=262144 BBt=3840
+[mh-gate] ev   0 KEEP     sig=c2sig_1aaf84155486a799.. ham=0/256 RECALL-MATCH gate=99.06ms
+[mh-gate] ev   1 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=91.05ms
+[mh-gate] ev   2 KEEP     sig=c2sig_1aaf841554c6a799.. ham=0/256 RECALL-MATCH gate=89.80ms
+[mh-gate] ev   3 NO_OP    sig=c2sig_1aaf84155486a799.. ham=2/256 RECALL-MATCH gate=94.17ms
+[mh-gate] ev   4 FORGET   sig=c2sig_1aaf80155486a799.. ham=2/256 RECALL-MATCH gate=90.76ms
+[mh-gate] ev   5 E2B_TOOL sig=c2sig_1a8f84155486a799.. ham=3/256 RECALL-MATCH gate=89.39ms
+[mh-gate] ev   6 E2B_TOOL sig=c2sig_1aaf84155486a79b.. ham=1/256 RECALL-MATCH gate=90.63ms
+[mh-gate] ev   7 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=89.90ms
+[mh-gate] ev   8 NO_OP    sig=c2sig_1aaf8415d486a799.. ham=3/256 RECALL-MATCH gate=90.27ms
+[mh-gate] ev   9 KEEP     sig=c2sig_9aab84155486a799.. ham=0/256 RECALL-MATCH gate=91.83ms
+[mh-gate] ev  10 KEEP     sig=c2sig_1aaf84155486a799.. ham=1/256 RECALL-MATCH gate=90.17ms
+[mh-gate] ev  11 E2B_TOOL sig=c2sig_1aaf84155486a799.. ham=2/256 RECALL-MATCH gate=91.40ms

@@ -56,6 +56,8 @@ extern "C" {
     fn gemma4_kv_rewind(s: *mut sp_g4_kv, delta: c_int) -> c_int;
     // Latent Interceptor: draft BODY -> 1024-d latent (no vocab head). The shared substrate.
     fn gemma4_draft_body(s: *mut sp_g4_kv, feat_host: *const f32, token: c_int, out_latent: *mut f32) -> c_int;
+    // Memory Head ground truth: read the live global-layer K [n_global x npos x HD=512] (curator C2 input).
+    fn gemma4_kv_read_global_k(s: *const sp_g4_kv, out: *mut f32, npos: c_int) -> c_int;
 }
 
 /// KAIROS action space (Latent Interceptor) — keep in sync with CONTRACT-LATENT-INTERCEPTOR.md.
@@ -292,6 +294,81 @@ event. Decide exactly one action and respond with exactly one of: NO_OP (idle, d
 (intervene). Most events are NO_OP.";
 fn li_frame_text(body: &str) -> String { format!("{LI_CONTRACT}\n\nCURRENT EVENT: {body}") }
 
+/// Memory-head probe: latent[1024] -> mu/sd norm -> W1/ReLU(512) -> W2(512) = pooled_K_est. Pure CPU.
+fn mh_probe(blob: &[f32], latent: &[f32]) -> Vec<f32> {
+    let (h, p, o) = (1024usize, 512usize, 512usize);
+    let mu = &blob[0..h]; let sd = &blob[h..2 * h];
+    let w1 = &blob[2 * h..2 * h + p * h]; let b1 = &blob[2 * h + p * h..2 * h + p * h + p];
+    let w2o = 2 * h + p * h + p; let w2 = &blob[w2o..w2o + o * p]; let b2 = &blob[w2o + o * p..w2o + o * p + o];
+    let mut hid = vec![0.0f32; p];
+    for j in 0..p { let mut s = b1[j]; let row = &w1[j * h..j * h + h]; for i in 0..h { s += row[i] * ((latent[i] - mu[i]) / sd[i]); } hid[j] = s.max(0.0); }
+    let mut out = vec![0.0f32; o];
+    for k in 0..o { let mut s = b2[k]; let row = &w2[k * p..k * p + p]; for j in 0..p { s += row[j] * hid[j]; } out[k] = s; }
+    out
+}
+fn ham4(a: &[u64; 4], b: &[u64; 4]) -> u32 { (0..4).map(|i| (a[i] ^ b[i]).count_ones()).sum() }
+
+/// LIVE MEMORY-HEAD GATE: per event, gemma4_draft_body -> latent -> mh_probe -> pooled_K_est ->
+/// recall::Projection (the FROZEN curator R) -> C2 256-bit sig -> MEM-OKF addr. Reports the Hamming
+/// distance to the curator's own sig (the ground truth) + the per-event gate time. This is the draft
+/// body writing curator-identical cyclotomic addresses from the latent stream, no tokenization.
+pub fn run_mh_gate(model_path: &str, tok_path: &str, tape_path: &str, head_path: &str, draft_gguf: &str) -> Result<(), String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize; let hidden = arch.hidden_dim as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("mh_gate: qm NULL".to_string()); }
+    let raw = std::fs::read(head_path).map_err(|e| format!("head: {e}"))?;
+    let blob: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let proj = sp_daemon::recall::Projection::build();
+    let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD; let hd_g = sp_daemon::recall::HD;
+    let events = parse_kairos_tape(&std::fs::read_to_string(tape_path).map_err(|e| format!("tape: {e}"))?);
+    let s = unsafe { gemma4_kv_open(qm, 512) };
+    if s.is_null() { return Err("mh_gate: kv_open NULL".to_string()); }
+    let dc = CString::new(draft_gguf).unwrap();
+    if unsafe { gemma4_draft_open(dc.as_ptr()) } != 0 { return Err("mh_gate: draft_open failed".to_string()); }
+    let mut feat = vec![0.0f32; hidden]; let mut logits = vec![0.0f32; vocab];
+    let mut gk_buf = vec![0.0f32; n_global * 512 * hd_g];
+    let (mut sum_ham, mut sum_ms, mut n, mut keeps) = (0u64, 0.0f64, 0usize, 0usize);
+    for (i, (body, aid)) in events.iter().enumerate() {
+        let ids = match tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: li_frame_text(body) }]) { Ok(p) => p, Err(_) => continue };
+        if ids.len() < 2 || ids.len() >= 512 { continue; }
+        unsafe { gemma4_kv_reset(s) };
+        let np = ids.len();
+        if unsafe { gemma4_kv_prefill(s, ids.as_ptr(), (np - 1) as c_int) } != 0 { continue; }
+        unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+        if unsafe { gemma4_kv_decode_logits(s, ids[np - 1], logits.as_mut_ptr()) } != 0 { continue; }
+        // THE GATE: latent -> pooled_K_est -> curator R -> sig (timed)
+        let t0 = std::time::Instant::now();
+        let mut latent = vec![0.0f32; 1024];
+        if unsafe { gemma4_draft_body(s, feat.as_ptr(), ids[np - 1], latent.as_mut_ptr()) } != 0 { continue; }
+        let pk_est = mh_probe(&blob, &latent);
+        let sig_est = proj.signature(&pk_est, 1, 1);     // sign(R @ pooled_K_est)
+        let gate_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        // ground truth: the curator's sig from the live global-K
+        if unsafe { gemma4_kv_read_global_k(s, gk_buf.as_mut_ptr(), np as c_int) } <= 0 { continue; }
+        let cur_sig = proj.signature(&gk_buf[..n_global * np * hd_g], n_global, np);
+        let ham = ham4(&sig_est, &cur_sig);
+        sum_ham += ham as u64; sum_ms += gate_ms; n += 1;
+        if *aid == 1 { keeps += 1; } // KEEP -> would emit to MEM-OKF
+        if i < 12 {
+            eprintln!("[mh-gate] ev {i:>3} {:<8} sig=c2sig_{:016x}.. ham={ham}/256 {} gate={gate_ms:.2}ms",
+                      LI_ACTIONS[*aid as usize], sig_est[0], if ham <= (256 - sp_daemon::recall::TAU_BITS as u32) { "RECALL-MATCH" } else { "miss" });
+        }
+    }
+    unsafe { gemma4_draft_close(); gemma4_kv_close(s); }
+    if n == 0 { return Err("mh_gate: no events".to_string()); }
+    let max_ham = 256 - sp_daemon::recall::TAU_BITS as u32;
+    eprintln!("[mh-gate] DONE {n} events ({keeps} KEEP) | mean Hamming-to-curator = {:.1}/256 | mean gate = {:.2}ms (latent->pooledK->R->C2 sig, no tokenization) | recall-radius<= {max_ham}",
+              sum_ham as f64 / n as f64, sum_ms / n as f64);
+    Ok(())
+}
+
 /// LATENT INTERCEPTOR CAPTURE: run the 12B over a KAIROS event tape; per tick frame the event
 /// against the kernel contract, prefill it, capture the FRAME-END feature[hidden] (the post-
 /// output_norm hidden the LM head consumes) + the action label (tape `expect`). The interceptor
@@ -358,6 +435,13 @@ pub fn run_li_capture(
     let mut latents: Vec<f32> = Vec::new();
     let mut labels: Vec<i32> = Vec::with_capacity(events.len());
     let mut dist = [0usize; 5];
+    // MEMORY HEAD ground truth (v2 curator-distillation): the C2 256-bit sig + the 512-d pooled-K.
+    let proj = sp_daemon::recall::Projection::build();
+    let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD;  // 8 global layers (period-6 over 48)
+    let hd_g = sp_daemon::recall::HD;                              // 512
+    let mut gk_buf = vec![0.0f32; n_global * (pmax as usize) * hd_g];
+    let mut pooledks: Vec<f32> = Vec::new();   // [N x 512]
+    let mut sigs: Vec<u64> = Vec::new();       // [N x 4]
 
     for (i, (body, aid)) in events.iter().enumerate() {
         let msgs = vec![Message { role: "user".to_string(), content: li_frame_text(body) }];
@@ -372,6 +456,16 @@ pub fn run_li_capture(
             // draft body on the live frame -> the 1024-d latent (attends the frame KV).
             if unsafe { gemma4_draft_body(s, feat.as_ptr(), ids[np - 1], latent.as_mut_ptr()) } != 0 { continue; }
             latents.extend_from_slice(&latent);
+            // curator C2 ground truth: read the live global-K, pool it, sign through the frozen R.
+            if unsafe { gemma4_kv_read_global_k(s, gk_buf.as_mut_ptr(), np as c_int) } > 0 {
+                let nk = n_global * np * hd_g;
+                let gk = &gk_buf[..nk];
+                let mut pk = vec![0.0f32; hd_g];
+                for v in 0..(n_global * np) { let b = v * hd_g; for d in 0..hd_g { pk[d] += gk[b + d]; } }
+                let sig = proj.signature(gk, n_global, np);
+                pooledks.extend_from_slice(&pk);
+                sigs.extend_from_slice(&sig);
+            } else { latents.truncate(latents.len() - 1024); continue; } // keep arrays aligned
         }
         feats.extend_from_slice(&feat);
         labels.push(*aid);
@@ -388,7 +482,12 @@ pub fn run_li_capture(
     if use_draft {
         let lb: Vec<u8> = latents.iter().flat_map(|x| x.to_le_bytes()).collect();
         std::fs::write(format!("{out_dir}/latent.f32"), &lb).map_err(|e| format!("latent: {e}"))?;
-        eprintln!("[li-capture] dumped latent.f32 [{} x 1024]", latents.len() / 1024);
+        let pb: Vec<u8> = pooledks.iter().flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(format!("{out_dir}/pooledk.f32"), &pb).map_err(|e| format!("pooledk: {e}"))?;
+        let sb: Vec<u8> = sigs.iter().flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(format!("{out_dir}/sig.u64"), &sb).map_err(|e| format!("sig: {e}"))?;
+        eprintln!("[li-capture] dumped latent.f32 [{} x1024] + pooledk.f32 [{} x512] + sig.u64 [{} x4] (curator C2)",
+                  latents.len() / 1024, pooledks.len() / 512, sigs.len() / 4);
     }
     std::fs::write(format!("{out_dir}/manifest.jsonl"),
         format!("{{\"n\":{},\"hidden\":{hidden},\"n_actions\":5,\"actions\":[\"NO_OP\",\"KEEP\",\"FORGET\",\"E2B_TOOL\",\"ACTION\"]}}\n", labels.len()))

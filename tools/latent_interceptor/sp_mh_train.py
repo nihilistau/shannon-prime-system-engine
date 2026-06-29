@@ -1,96 +1,97 @@
 #!/usr/bin/env python3
-# sp_mh_train.py — MEMORY HEAD trainer (Latent -> 63-byte C2 Spinor). CONTRACT-LATENT-INTERCEPTOR.md.
+# sp_mh_train.py — MEMORY HEAD trainer v2 (CURATOR DISTILLATION). CONTRACT-LATENT-INTERCEPTOR.md.
 #
-# The Memory Head maps the draft's 1024-d latent directly to the VHT2 content key that
-# sp_spinor_encode packs into the FROZEN 63-byte Spinor block (sp/spinor_block.h: scale + 55 int8
-# Mobius-permuted anchors + CRC-8). The model writes MEM-OKF from the latent stream, no tokenization.
+# Target = the curator's C2 256-bit LSH signature (recall.rs Projection): sig[b] = sign(R[b]·pooled_K),
+# R = frozen +/-1 router smix(SEED, 256*512), pooled_K = sum over (global-layer, pos) of K[512].
+# The Memory Head reconstructs pooled_K from the draft's 1024-d latent; the FROZEN R then produces the
+# byte-identical address. Objective: minimize Hamming distance to the curator sig (exact-integer space,
+# no float noise, no random projection). The head learns to think in the memory-addressing geometry.
 #
-#   memory_head: latent[1024] -> Linear(1024,256) -> ReLU -> Linear(256,55) = the 55-d content key.
-#   deploy: key -> sp_spinor_encode (C, in the engine) -> 63-byte block -> MEM-OKF write/address.
+#   memory_head: latent[1024] -> Linear(1024,512) -> ReLU -> Linear(512,512) = pooled_K_est (unit).
+#   deploy: pooled_K_est -> sign(R @ pooled_K_est) -> 256-bit C2 sig -> MEM-OKF addr (c2sig_hex).
 #
-# TARGET (v1, self-supervised): the content KEY of the event = a FROZEN random projection of the 12B
-# feature to 55-d (Johnson-Lindenstrauss: distance-preserving, so similar events -> similar keys ->
-# content-addressed recall). The head learns latent -> proj(feat). This proves the latent->Spinor
-# route is content-meaningful with NO external labels. v2 = distill the nightshift_curator's actual
-# episode Spinor (MEM-OKF fidelity); v3 = contrastive recall objective (cue->memory).
-#
-# Data: SP_LI_CAPTURE w/ SP_DRAFT_GGUF (latent.f32 [N x1024], feat.f32 [N x3840], label.i32 [N]).
-# By default trains on KEEP events (label==1, the memory-worthy class); --all to use every event.
+# Data: SP_LI_CAPTURE w/ SP_DRAFT_GGUF: latent.f32 [N x1024], pooledk.f32 [N x512], sig.u64 [N x4].
 import argparse, json, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 
-ANCHORS = 55  # SP_SPINOR_BODY_LEN
+SEED = 0x5350524F4A2B; R_BITS = 256; HD = 512; TAU_BITS = 168  # recall.rs constants
+M64 = (1 << 64) - 1
 
-def spinor_roundtrip_np(vec):  # mirror sp_spinor_encode/decode (v1 canonical) for a fidelity check
-    scale = np.max(np.abs(vec)) or 1.0
-    q = np.clip(np.round(vec / scale * 127.0), -127, 127)
-    return q / 127.0 * scale  # decode (Mobius perm is index-only -> no effect on values)
+def smix_pm1(seed, n):  # splitmix64 +/-1 — byte-identical to recall.rs smix / discrete_resolve.build_R
+    s = seed & M64; out = np.empty(n, np.float32)
+    for i in range(n):
+        s = (s + 0x9E3779B97F4A7C15) & M64
+        z = s
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & M64
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & M64
+        z ^= z >> 31
+        out[i] = 1.0 if (z & 1) else -1.0
+    return out
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True); ap.add_argument("--out", default="mh_head")
-    ap.add_argument("--proj", type=int, default=256); ap.add_argument("--epochs", type=int, default=400)
-    ap.add_argument("--lr", type=float, default=1e-3); ap.add_argument("--val", type=float, default=0.2)
-    ap.add_argument("--device", default="cuda"); ap.add_argument("--all", action="store_true")
+    ap.add_argument("--epochs", type=int, default=600); ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--val", type=float, default=0.2); ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
     dev = a.device if (a.device == "cpu" or torch.cuda.is_available()) else "cpu"
-    meta = json.loads(open(f"{a.data}/manifest.jsonl").readline())
-    H = meta["hidden"]
     lat = np.fromfile(f"{a.data}/latent.f32", dtype=np.float32).reshape(-1, 1024)
-    feat = np.fromfile(f"{a.data}/feat.f32", dtype=np.float32).reshape(-1, H)
-    lbl = np.fromfile(f"{a.data}/label.i32", dtype=np.int32)
-    if not a.all:
-        keep = lbl == 1  # KEEP
-        if keep.sum() >= 8: lat, feat = lat[keep], feat[keep]
-        else: print(f"[mh-train] only {int(keep.sum())} KEEP samples; using ALL events")
+    pk = np.fromfile(f"{a.data}/pooledk.f32", dtype=np.float32).reshape(-1, HD)
+    sigw = np.fromfile(f"{a.data}/sig.u64", dtype=np.uint64).reshape(-1, 4)
     N = lat.shape[0]
-    print(f"[mh-train] N={N} latent=1024 feat={H} anchors={ANCHORS}")
+    # unpack the curator sig -> target bits [N,256]
+    bits = np.zeros((N, R_BITS), np.float32)
+    for b in range(R_BITS): bits[:, b] = ((sigw[:, b // 64] >> np.uint64(b % 64)) & np.uint64(1)).astype(np.float32)
+    R = torch.tensor(smix_pm1(SEED, R_BITS * HD).reshape(R_BITS, HD), device=dev)  # [256,512] frozen
+    # sanity: the captured pooled_K reproduces the captured sig exactly (curator parity)
+    pkt = torch.tensor(pk, device=dev)
+    sig_from_pk = (pkt @ R.t() > 0).float()
+    parity = (sig_from_pk.cpu().numpy() == bits).mean()
+    print(f"[mh-train] N={N} | pooled_K->R->sig parity vs captured sig = {parity:.4f} (should be ~1.0)")
 
-    # FROZEN random projection feat(H)->key(55) (J-L). Saved for deploy (capture-side target).
-    rng = np.random.default_rng(163)
-    P = (rng.standard_normal((H, ANCHORS)) / np.sqrt(H)).astype(np.float32)
-    target = feat @ P                                   # [N,55] content key
-    target = target / (np.abs(target).max(1, keepdims=True) + 1e-6)  # normalize to [-1,1] (Spinor range)
-
-    X = torch.tensor(lat, device=dev); Y = torch.tensor(target, device=dev)
+    pkn = F.normalize(pkt, dim=1)                       # unit pooled_K (sign-invariant) = head target
+    X = torch.tensor(lat, device=dev); B = torch.tensor(bits, device=dev)
     g = torch.Generator().manual_seed(0); perm = torch.randperm(N, generator=g)
     nval = max(1, int(N * a.val)); vi, ti = perm[:nval].to(dev), perm[nval:].to(dev)
     mu, sd = X[ti].mean(0), X[ti].std(0) + 1e-6
     Xn = (X - mu) / sd
 
-    net = nn.Sequential(nn.Linear(1024, a.proj), nn.ReLU(), nn.Linear(a.proj, ANCHORS)).to(dev)
+    net = nn.Sequential(nn.Linear(1024, 512), nn.ReLU(), nn.Linear(512, HD)).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
-    best, best_state = 1e9, None
+    def hamming_agree(pred_pk, tb):  # bits agreeing with curator sig, out of 256
+        s = (pred_pk @ R.t() > 0).float()
+        return (s == tb).float().sum(1)  # [n] agreement count
+    best, best_state = -1.0, None
     for ep in range(a.epochs):
         net.train(); opt.zero_grad()
-        loss = F.mse_loss(net(Xn[ti]), Y[ti]); loss.backward(); opt.step()
-        if (ep + 1) % 40 == 0 or ep == a.epochs - 1:
+        pkh = net(Xn[ti])
+        logits = pkh @ R.t()                            # [n,256] projected (the sign decides the bit)
+        bce = F.binary_cross_entropy_with_logits(logits, B[ti])
+        mse = F.mse_loss(F.normalize(pkh, dim=1), pkn[ti])
+        loss = bce + 0.5 * mse
+        loss.backward(); opt.step()
+        if (ep + 1) % 60 == 0 or ep == a.epochs - 1:
             net.eval()
             with torch.no_grad():
-                pred = net(Xn[vi])
-                vloss = F.mse_loss(pred, Y[vi]).item()
-                # cosine of the decoded-Spinor key vs target (the recall-relevant fidelity)
-                pn = F.normalize(pred, dim=1); yn = F.normalize(Y[vi], dim=1)
-                cos = (pn * yn).sum(1).mean().item()
-            print(f"  ep{ep+1} train_mse={loss.item():.4f} val_mse={vloss:.4f} val_key_cos={cos:.3f}")
-            if vloss < best: best = vloss; best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+                ag = hamming_agree(net(Xn[vi]), B[vi])
+            agree = ag.mean().item(); recall = (ag >= TAU_BITS).float().mean().item()
+            print(f"  ep{ep+1} loss={loss.item():.3f} val_bit_agree={agree:.1f}/256 recall@{TAU_BITS}={recall:.3f}")
+            if agree > best: best = agree; best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
     net.load_state_dict(best_state)
-    # spinor roundtrip fidelity on val (does the int8 quantization preserve the key?)
-    with torch.no_grad():
-        pv = net(Xn[vi]).cpu().numpy()
-    rt = np.array([np.dot(spinor_roundtrip_np(k), k) / (np.linalg.norm(spinor_roundtrip_np(k)) * np.linalg.norm(k) + 1e-9) for k in pv])
-    print(f"[mh-train] best val_mse={best:.4f} | spinor int8-roundtrip cos={rt.mean():.4f}")
+    net.eval()
+    with torch.no_grad(): ag = hamming_agree(net(Xn[vi]), B[vi])
+    print(f"[mh-train] BEST val_bit_agree={ag.mean().item():.1f}/256 (Hamming dist {256-ag.mean().item():.1f}) | recall@{TAU_BITS}={(ag>=TAU_BITS).float().mean().item():.3f} | exact256={(ag==256).float().mean().item():.3f}")
 
     sd_ = net.state_dict()
     W1, b1 = sd_["0.weight"].cpu().numpy(), sd_["0.bias"].cpu().numpy()
     W2, b2 = sd_["2.weight"].cpu().numpy(), sd_["2.bias"].cpu().numpy()
     blob = np.concatenate([mu.cpu().numpy().ravel(), sd.cpu().numpy().ravel(),
                            W1.ravel(), b1.ravel(), W2.ravel(), b2.ravel()]).astype(np.float32)
-    blob.tofile(f"{a.out}.bin"); P.tofile(f"{a.out}.proj.bin")
-    json.dump({"in": 1024, "proj": a.proj, "anchors": ANCHORS,
-               "layout": ["mu[1024]", "sd[1024]", "W1[proj*1024]", "b1[proj]", "W2[55*proj]", "b2[55]"],
-               "target": "frozen-randproj feat->55 (J-L); deploy: key->sp_spinor_encode->63B block",
-               "val_mse": best}, open(f"{a.out}.json", "w"), indent=2)
-    print(f"[mh-train] wrote {a.out}.bin (+ .proj.bin, .json) -> CUDA memory-head: latent->key->sp_spinor_encode")
+    blob.tofile(f"{a.out}.bin")
+    json.dump({"in": 1024, "hidden": 512, "out": HD, "R_bits": R_BITS, "tau_bits": TAU_BITS, "seed": hex(SEED),
+               "layout": ["mu[1024]", "sd[1024]", "W1[512*1024]", "b1[512]", "W2[512*512]", "b2[512]"],
+               "deploy": "latent->pooled_K_est->sign(R@pk)->C2 sig->MEM-OKF (R via recall::Projection)",
+               "val_bit_agree": ag.mean().item()}, open(f"{a.out}.json", "w"), indent=2)
+    print(f"[mh-train] wrote {a.out}.bin (+ .json) -> Rust mh_probe: latent->pooled_K, recall::Projection->sig")
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,18 @@
+{
+  "in": 1024,
+  "hidden": 512,
+  "out": 512,
+  "R_bits": 256,
+  "tau_bits": 168,
+  "seed": "0x5350524f4a2b",
+  "layout": [
+    "mu[1024]",
+    "sd[1024]",
+    "W1[512*1024]",
+    "b1[512]",
+    "W2[512*512]",
+    "b2[512]"
+  ],
+  "deploy": "latent->pooled_K_est->sign(R@pk)->C2 sig->MEM-OKF (R via recall::Projection)",
+  "val_bit_agree": 254.96665954589844
+}
