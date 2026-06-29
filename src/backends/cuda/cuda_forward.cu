@@ -4677,7 +4677,7 @@ extern "C" void gemma4_draft_close(void) {
 extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
                                  int *out_token, float *out_hnext) {
     if (!g_draft.loaded || !s || !out_token) { sp_set_error("gemma4_draft_step: bad args/not loaded"); return -1; }
-    if (!g_w.embd) { sp_set_error("gemma4_draft_step: target g_w.embd not f32 (packed-embd input path TODO — live tweak)"); return -1; }
+    if (!g_w.embd && !g_w.embd_packed.codes) { sp_set_error("gemma4_draft_step: target has no embd (f32 or packed)"); return -1; }
     const int HID = 1024, BBt = g_draft.BBt, Vd = g_draft.Vd, FFm = 8192;
     static float *sx=0,*sfeat=0,*sxh=0,*scur=0,*snorm=0,*satt=0,*sao=0,*sq=0,*sff=0,*sff2=0,*slog=0,*shn=0; static int *dtok=0;
     if (!sxh) {
@@ -4687,8 +4687,14 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
     }
     const float eps = s->eps; const int ctx = s->dpos_host;            /* positions 0..ctx-1 are written */
     const char *am = getenv("SP_DRAFT_ASCALE");
-    /* x = TARGET tok_embd[token] * sqrt(BBt) ; xh = [x ; feat] ; cur = pre_proj @ xh */
-    k_embed_scale_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd, token, BBt, sqrtf((float)BBt), sx);
+    /* x = TARGET tok_embd[token] * sqrt(BBt) ; xh = [x ; feat] ; cur = pre_proj @ xh.
+     * The served 12B (OK_Q4B recipe) keeps the embd PACKED (g_w.embd_packed), not f32 — gather
+     * via the packed twin; fall back to f32 when present. (Resolved at the first live run.) */
+    if (g_w.embd)
+        k_embed_scale_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd, token, BBt, sqrtf((float)BBt), sx);
+    else
+        k_embed_packed_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd_packed.codes, g_w.embd_packed.row_off,
+            g_w.embd_packed.row_scale, g_w.embd_packed.row_prec, token, BBt, sqrtf((float)BBt), sx);
     cudaMemcpy(sfeat, feat_host, (size_t)BBt*4, cudaMemcpyHostToDevice);
     cudaMemcpy(sxh, sx, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
     cudaMemcpy(sxh+BBt, sfeat, (size_t)BBt*4, cudaMemcpyDeviceToDevice);

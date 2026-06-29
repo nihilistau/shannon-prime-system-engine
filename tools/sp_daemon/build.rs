@@ -421,10 +421,15 @@ fn main() {
                 String::from("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2")
             });
         if target_env == "msvc" {
+            // Use rustc-link-arg with absolute .lib paths (same bypass the MODULES use
+            // above): cargo:rustc-link-lib does NOT propagate to standalone [[bin]]
+            // targets on MSVC, leaving cudart/cudadevrt unresolved for the gate/probe
+            // bins. cudadevrt carries the __cudaRegister* fatbin glue for the device
+            // code embedded in the static backend lib.
             println!("cargo:rustc-link-search=native={cuda_root}/lib/x64");
-            println!("cargo:rustc-link-lib=cudart");
-            println!("cargo:rustc-link-lib=cublas");
-            println!("cargo:rustc-link-lib=cublasLt");
+            for l in ["cudart", "cudadevrt", "cublas", "cublasLt"] {
+                println!("cargo:rustc-link-arg={cuda_root}/lib/x64/{l}.lib");
+            }
         } else {
             // Linux: cudart + cublas dylibs from CUDA_PATH/lib64.
             println!("cargo:rustc-link-search=native={cuda_root}/lib64");
