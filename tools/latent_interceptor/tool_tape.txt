@@ -1,0 +1,142 @@
+# Tool Head tape — expect = tool (NONE|PYTHON|WEB|DB|FILE|CALC)
+# tick kind payload salience expect
+0     IDLE           -                                  0.17  NONE
+1     IDLE           -                                  0.15  NONE
+2     EVENT.query    "orders over 100"                  0.69  DB
+3     EVENT.compute  "count letters in strawberry"      0.66  PYTHON
+4     EVENT.note     "status ok"                        0.23  NONE
+5     IDLE           -                                  0.12  NONE
+6     EVENT.note     "status ok"                        0.22  NONE
+7     IDLE           -                                  0.09  NONE
+8     EVENT.fetch    "weather in tokyo"                 0.68  WEB
+9     EVENT.fetch    "weather in tokyo"                 0.75  WEB
+10    IDLE           -                                  0.05  NONE
+11    EVENT.fetch    "latest release tag"               0.68  WEB
+12    EVENT.note     "log line"                         0.27  NONE
+13    IDLE           -                                  0.05  NONE
+14    EVENT.compute  "reverse the string hello"         0.9   PYTHON
+15    IDLE           -                                  0.19  NONE
+16    EVENT.file     "read config.yaml"                 0.76  FILE
+17    IDLE           -                                  0.12  NONE
+18    EVENT.file     "list the logs dir"                0.54  FILE
+19    IDLE           -                                  0.02  NONE
+20    IDLE           -                                  0.11  NONE
+21    IDLE           -                                  0.15  NONE
+22    EVENT.math     "12.5% of 840"                     0.74  CALC
+23    EVENT.math     "compound interest 1000 5% 3y"     0.67  CALC
+24    IDLE           -                                  0.03  NONE
+25    EVENT.file     "read config.yaml"                 0.66  FILE
+26    IDLE           -                                  0.06  NONE
+27    EVENT.compute  "reverse the string hello"         0.75  PYTHON
+28    EVENT.math     "12.5% of 840"                     0.78  CALC
+29    EVENT.file     "write the report"                 0.53  FILE
+30    EVENT.compute  "is 97 prime"                      0.64  PYTHON
+31    IDLE           -                                  0.14  NONE
+32    EVENT.math     "sqrt of 2025"                     0.66  CALC
+33    IDLE           -                                  0.01  NONE
+34    IDLE           -                                  0.2   NONE
+35    EVENT.compute  "sum 4 7 9"                        0.61  PYTHON
+36    EVENT.note     "log line"                         0.18  NONE
+37    IDLE           -                                  0.16  NONE
+38    EVENT.note     "status ok"                        0.11  NONE
+39    EVENT.fetch    "status of example.com"            0.87  WEB
+40    EVENT.compute  "reverse the string hello"         0.88  PYTHON
+41    EVENT.compute  "count letters in strawberry"      0.85  PYTHON
+42    EVENT.compute  "reverse the string hello"         0.7   PYTHON
+43    EVENT.math     "12.5% of 840"                     0.69  CALC
+44    EVENT.math     "compound interest 1000 5% 3y"     0.62  CALC
+45    EVENT.file     "read config.yaml"                 0.52  FILE
+46    IDLE           -                                  0.14  NONE
+47    IDLE           -                                  0.12  NONE
+48    EVENT.file     "write the report"                 0.5   FILE
+49    EVENT.note     "status ok"                        0.13  NONE
+50    EVENT.note     "log line"                         0.16  NONE
+51    EVENT.compute  "reverse the string hello"         0.89  PYTHON
+52    EVENT.file     "read config.yaml"                 0.5   FILE
+53    EVENT.query    "count rows in events"             0.74  DB
+54    IDLE           -                                  0.19  NONE
+55    EVENT.note     "ping"                             0.25  NONE
+56    EVENT.file     "write the report"                 0.6   FILE
+57    EVENT.compute  "fibonacci of 10"                  0.71  PYTHON
+58    EVENT.file     "write the report"                 0.54  FILE
+59    EVENT.file     "read config.yaml"                 0.61  FILE
+60    EVENT.fetch    "status of example.com"            0.63  WEB
+61    EVENT.math     "sqrt of 2025"                     0.73  CALC
+62    EVENT.note     "log line"                         0.23  NONE
+63    EVENT.compute  "sum 4 7 9"                        0.7   PYTHON
+64    EVENT.compute  "reverse the string hello"         0.89  PYTHON
+65    IDLE           -                                  0.06  NONE
+66    IDLE           -                                  0.06  NONE
+67    EVENT.math     "12.5% of 840"                     0.71  CALC
+68    EVENT.math     "sqrt of 2025"                     0.62  CALC
+69    EVENT.math     "compound interest 1000 5% 3y"     0.62  CALC
+70    IDLE           -                                  0.12  NONE
+71    IDLE           -                                  0.19  NONE
+72    IDLE           -                                  0.12  NONE
+73    EVENT.compute  "fibonacci of 10"                  0.66  PYTHON
+74    IDLE           -                                  0.13  NONE
+75    EVENT.file     "list the logs dir"                0.56  FILE
+76    EVENT.file     "list the logs dir"                0.7   FILE
+77    EVENT.note     "ping"                             0.22  NONE
+78    EVENT.compute  "reverse the string hello"         0.88  PYTHON
+79    EVENT.note     "log line"                         0.27  NONE
+80    EVENT.file     "read config.yaml"                 0.66  FILE
+81    EVENT.math     "sqrt of 2025"                     0.72  CALC
+82    IDLE           -                                  0.1   NONE
+83    EVENT.file     "write the report"                 0.77  FILE
+84    EVENT.note     "log line"                         0.22  NONE
+85    EVENT.note     "ping"                             0.29  NONE
+86    EVENT.fetch    "latest release tag"               0.62  WEB
+87    EVENT.note     "status ok"                        0.22  NONE
+88    EVENT.fetch    "status of example.com"            0.63  WEB
+89    EVENT.note     "log line"                         0.28  NONE
+90    IDLE           -                                  0.1   NONE
+91    IDLE           -                                  0.0   NONE
+92    EVENT.compute  "factor 8051"                      0.65  PYTHON
+93    EVENT.query    "count rows in events"             0.83  DB
+94    EVENT.note     "log line"                         0.23  NONE
+95    IDLE           -                                  0.12  NONE
+96    EVENT.file     "write the report"                 0.58  FILE
+97    IDLE           -                                  0.09  NONE
+98    IDLE           -                                  0.03  NONE
+99    IDLE           -                                  0.16  NONE
+100   EVENT.note     "ping"                             0.13  NONE
+101   EVENT.file     "list the logs dir"                0.57  FILE
+102   IDLE           -                                  0.0   NONE
+103   EVENT.math     "compound interest 1000 5% 3y"     0.64  CALC
+104   EVENT.compute  "fibonacci of 10"                  0.71  PYTHON
+105   EVENT.math     "12.5% of 840"                     0.74  CALC
+106   EVENT.file     "list the logs dir"                0.55  FILE
+107   EVENT.note     "status ok"                        0.28  NONE
+108   EVENT.compute  "factor 8051"                      0.75  PYTHON
+109   IDLE           -                                  0.1   NONE
+110   IDLE           -                                  0.06  NONE
+111   EVENT.query    "orders over 100"                  0.85  DB
+112   IDLE           -                                  0.04  NONE
+113   EVENT.math     "compound interest 1000 5% 3y"     0.62  CALC
+114   IDLE           -                                  0.03  NONE
+115   EVENT.note     "ping"                             0.29  NONE
+116   EVENT.compute  "fibonacci of 10"                  0.75  PYTHON
+117   EVENT.fetch    "weather in tokyo"                 0.81  WEB
+118   EVENT.query    "orders over 100"                  0.62  DB
+119   EVENT.fetch    "status of example.com"            0.73  WEB
+120   EVENT.note     "log line"                         0.25  NONE
+121   IDLE           -                                  0.14  NONE
+122   EVENT.note     "ping"                             0.21  NONE
+123   EVENT.note     "ping"                             0.27  NONE
+124   EVENT.query    "count rows in events"             0.66  DB
+125   IDLE           -                                  0.04  NONE
+126   EVENT.note     "status ok"                        0.24  NONE
+127   IDLE           -                                  0.17  NONE
+128   EVENT.query    "count rows in events"             0.74  DB
+129   IDLE           -                                  0.18  NONE
+130   EVENT.math     "sqrt of 2025"                     0.79  CALC
+131   EVENT.file     "list the logs dir"                0.56  FILE
+132   EVENT.compute  "reverse the string hello"         0.81  PYTHON
+133   EVENT.compute  "sum 4 7 9"                        0.77  PYTHON
+134   IDLE           -                                  0.15  NONE
+135   EVENT.note     "log line"                         0.29  NONE
+136   EVENT.fetch    "latest release tag"               0.72  WEB
+137   EVENT.fetch    "latest release tag"               0.74  WEB
+138   IDLE           -                                  0.03  NONE
+139   IDLE           -                                  0.12  NONE

@@ -1,0 +1,35 @@
+[li-train] N=140 hidden=3840 actions=['NONE', 'PYTHON', 'WEB', 'DB', 'FILE', 'CALC'] dist=[69, 20, 11, 7, 18, 15]
+  ep20 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep40 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep60 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep80 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep100 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep120 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep140 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep160 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep180 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep200 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep220 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep240 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep260 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep280 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep300 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep320 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep340 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep360 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep380 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep400 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep420 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep440 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep460 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep480 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep500 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+[li-train] val confusion (rows=true, cols=pred):
+             NONE  PYTHO    WEB     DB   FILE   CALC
+       NONE     14      0      0      0      0      0
+     PYTHON      0      3      0      0      0      0
+        WEB      0      0      0      0      0      0
+         DB      0      0      0      1      0      0
+       FILE      0      0      0      0      6      0
+       CALC      0      0      0      0      0      4
+[li-train] best val_acc=1.000 -> _tool_head.bin (+ .json)

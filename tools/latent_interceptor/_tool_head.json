@@ -1,0 +1,22 @@
+{
+  "hidden": 3840,
+  "proj": 256,
+  "n_actions": 6,
+  "actions": [
+    "NONE",
+    "PYTHON",
+    "WEB",
+    "DB",
+    "FILE",
+    "CALC"
+  ],
+  "layout": [
+    "mu[H]",
+    "sd[H]",
+    "W1[proj*H]",
+    "b1[proj]",
+    "W2[A*proj]",
+    "b2[A]"
+  ],
+  "val_acc": 1.0
+}

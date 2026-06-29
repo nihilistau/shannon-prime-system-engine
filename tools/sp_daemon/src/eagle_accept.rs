@@ -65,6 +65,18 @@ extern "C" {
 /// KAIROS action space (Latent Interceptor) — keep in sync with CONTRACT-LATENT-INTERCEPTOR.md.
 pub const LI_ACTIONS: [&str; 5] = ["NO_OP", "KEEP", "FORGET", "E2B_TOOL", "ACTION"];
 
+/// The active label set: SP_LI_LABELS (comma-separated) overrides the KAIROS action space, so the
+/// SAME capture/probe pipeline serves the Tool Head (e.g. NONE,PYTHON,WEB,DB,FILE,CALC).
+fn li_label_set() -> Vec<String> {
+    match std::env::var("SP_LI_LABELS") {
+        Ok(s) if !s.trim().is_empty() => s.split(',').map(|x| x.trim().to_string()).collect(),
+        _ => LI_ACTIONS.iter().map(|s| s.to_string()).collect(),
+    }
+}
+fn label_id(labels: &[String], s: &str) -> i32 {
+    labels.iter().position(|a| a.eq_ignore_ascii_case(s.trim())).map(|i| i as i32).unwrap_or(-1)
+}
+
 /// Apply the tiny Latent Interceptor probe (mu,sd,W1,b1,W2,b2 from li_head.bin) to a feature
 /// (host f32[H]) -> action id. Pure CPU matmul (proj~256), microseconds. Layout per sp_li_train.py.
 fn li_probe(blob: &[f32], h: usize, a: usize, proj: usize, feat: &[f32]) -> i32 {
@@ -488,6 +500,8 @@ pub fn run_li_capture(
     if qm.is_null() { return Err("li_capture: qm NULL".to_string()); }
 
     let tape = std::fs::read_to_string(tape_path).map_err(|e| format!("tape {tape_path}: {e}"))?;
+    let labelset = li_label_set();   // KAIROS actions by default; SP_LI_LABELS overrides (e.g. Tool Head)
+    eprintln!("[li-capture] label set ({}): {:?}", labelset.len(), labelset);
     let mut events: Vec<(String, i32)> = Vec::new();
     for line in tape.lines() {
         let l = line.trim();
@@ -504,7 +518,7 @@ pub fn run_li_capture(
         }
         if !cur.is_empty() { toks.push(cur); }
         if toks.len() != 5 { continue; }
-        let aid = li_action_id(&toks[4]);
+        let aid = label_id(&labelset, &toks[4]);
         if aid < 0 { continue; }
         let payload = if toks[2] == "-" { String::new() } else { format!(" payload=\"{}\"", toks[2]) };
         let body = format!("EVENT kind={} salience={}{}", toks[1], toks[3], payload);
@@ -529,7 +543,7 @@ pub fn run_li_capture(
     let mut feats: Vec<f32> = Vec::with_capacity(events.len() * hidden);
     let mut latents: Vec<f32> = Vec::new();
     let mut labels: Vec<i32> = Vec::with_capacity(events.len());
-    let mut dist = [0usize; 5];
+    let mut dist = vec![0usize; labelset.len()];
     // MEMORY HEAD ground truth (v2 curator-distillation): the C2 256-bit sig + the 512-d pooled-K.
     let proj = sp_daemon::recall::Projection::build();
     let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD;  // 8 global layers (period-6 over 48)
@@ -584,11 +598,12 @@ pub fn run_li_capture(
         eprintln!("[li-capture] dumped latent.f32 [{} x1024] + pooledk.f32 [{} x512] + sig.u64 [{} x4] (curator C2)",
                   latents.len() / 1024, pooledks.len() / 512, sigs.len() / 4);
     }
+    let actions_json: String = labelset.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(",");
     std::fs::write(format!("{out_dir}/manifest.jsonl"),
-        format!("{{\"n\":{},\"hidden\":{hidden},\"n_actions\":5,\"actions\":[\"NO_OP\",\"KEEP\",\"FORGET\",\"E2B_TOOL\",\"ACTION\"]}}\n", labels.len()))
+        format!("{{\"n\":{},\"hidden\":{hidden},\"n_actions\":{},\"actions\":[{}]}}\n", labels.len(), labelset.len(), actions_json))
         .map_err(|e| format!("manifest: {e}"))?;
-    eprintln!("[li-capture] DONE {} samples -> {out_dir} (hidden={hidden}) dist NO_OP={} KEEP={} FORGET={} E2B={} ACTION={}",
-              labels.len(), dist[0], dist[1], dist[2], dist[3], dist[4]);
+    let dist_str: String = labelset.iter().zip(dist.iter()).map(|(a, c)| format!("{a}={c}")).collect::<Vec<_>>().join(" ");
+    eprintln!("[li-capture] DONE {} samples -> {out_dir} (hidden={hidden}) dist {dist_str}", labels.len());
     Ok(labels.len())
 }
 

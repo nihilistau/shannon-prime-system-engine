@@ -150,6 +150,24 @@ over (8 global layers, pos) of K[512]. Integer Hamming, zero float in the addres
 - **Deploy-to-MEM-OKF (next):** emit on KEEP (`okf_mem.py add --kind episode --addr c2sig_{hex}`),
   latent-native; + the body-speed optimization for the <3ms idle write.
 
+## RETURN PATH + TOOL HEAD (RP-1 / TH-1, 2026-06-30)
+
+**RP-1 (return path, GREEN):** `run_li_return` (SP_LI_RETURN) — a tool result enters the KV ring
+DIRECTLY via `gemma4_kv_inject_tokens` (the embedding->residual seam), no prompt-text re-feed, no
+tokenizer-output round-trip. The model's next forward attends the injected result. Demo (strawberry):
+13 result tokens injected -> the continuation is conditioned on them. The model FEELS the tool output
+latent-native. (Single-vector cyclotomic residue via gemma4_kv_inject = the refinement.)
+
+**TH-1 (Tool Head, GREEN):** the capture/probe pipeline is now label-set-agnostic (`SP_LI_LABELS`
+overrides the KAIROS action space). Tool vocab NONE,PYTHON,WEB,DB,FILE,CALC; tool_tape (make_tool_tape.py,
+140 events); capture (SP_LI_LABELS=...) -> _tool_data; sp_li_train (label-agnostic) -> _tool_head.bin.
+RESULT held-out val_acc=**1.000** (confusion clean). The latent routes directly to the MCP/E2B tool id
+-> fire the harness decorator from a latent trigger. Same synthetic-tape caveat as the other heads.
+
+**The closed loop** (capstone, pieces all proven): latent -> Tool Head (tool id) -> fire tool ->
+result -> RP-1 inject -> KV ring -> model continues. TH-1 (the trigger) + RP-1 (the return) are each
+verified; the integration `run_th_loop` ties them (a real python eval on PYTHON/CALC events).
+
 ## Gate
 
 - **G-LI-AGREEMENT:** Latent Interceptor action vs the ground-truth tape label (held-out tape).
