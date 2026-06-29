@@ -1,0 +1,502 @@
+# KAIROS Latent Interceptor training tape — 5-action space
+# tick_idx  kind  payload  salience  expect (NO_OP|KEEP|FORGET|E2B_TOOL|ACTION)
+0      IDLE             -                                  0.17   NO_OP
+1      IDLE             -                                  0.15   NO_OP
+2      EVENT.alert      "cpu throttling"                   0.9    ACTION
+3      EVENT.fact       "user prefers dark mode"           0.56   KEEP
+4      EVENT.heartbeat  "keepalive"                        0.1    NO_OP
+5      IDLE             -                                  0.12   NO_OP
+6      EVENT.heartbeat  -                                  0.09   NO_OP
+7      IDLE             -                                  0.09   NO_OP
+8      EVENT.compute    "factor 8051"                      0.68   E2B_TOOL
+9      EVENT.expire     "temp file stale"                  0.48   FORGET
+10     IDLE             -                                  0.16   NO_OP
+11     IDLE             -                                  0.09   NO_OP
+12     IDLE             -                                  0.06   NO_OP
+13     IDLE             -                                  0.13   NO_OP
+14     EVENT.tool       "format the json"                  0.85   E2B_TOOL
+15     IDLE             -                                  0.19   NO_OP
+16     EVENT.timer      "build finished"                   0.87   ACTION
+17     IDLE             -                                  0.12   NO_OP
+18     EVENT.deadline   "ttl expiring"                     0.85   ACTION
+19     IDLE             -                                  0.02   NO_OP
+20     IDLE             -                                  0.11   NO_OP
+21     IDLE             -                                  0.15   NO_OP
+22     EVENT.fact       "user prefers dark mode"           0.66   KEEP
+23     EVENT.context    "owner is alice"                   0.57   KEEP
+24     IDLE             -                                  0.03   NO_OP
+25     EVENT.deadline   "ttl expiring"                     0.86   ACTION
+26     IDLE             -                                  0.06   NO_OP
+27     EVENT.noise      "gc cycle"                         0.24   NO_OP
+28     EVENT.compute    "run the regression"               0.89   E2B_TOOL
+29     IDLE             -                                  0.14   NO_OP
+30     EVENT.heartbeat  "tick"                             0.02   NO_OP
+31     IDLE             -                                  0.06   NO_OP
+32     IDLE             -                                  0.19   NO_OP
+33     IDLE             -                                  0.07   NO_OP
+34     EVENT.deadline   "ttl expiring"                     0.79   ACTION
+35     IDLE             -                                  0.03   NO_OP
+36     EVENT.fact       "api key rotated"                  0.74   KEEP
+37     EVENT.noise      "gc cycle"                         0.11   NO_OP
+38     EVENT.evict      "context window full"              0.58   FORGET
+39     EVENT.noise      "gc cycle"                         0.1    NO_OP
+40     EVENT.timer      "deploy window open"               0.82   ACTION
+41     EVENT.context    "owner is alice"                   0.5    KEEP
+42     IDLE             -                                  0.05   NO_OP
+43     IDLE             -                                  0.03   NO_OP
+44     IDLE             -                                  0.01   NO_OP
+45     EVENT.heartbeat  "tick"                             0.15   NO_OP
+46     IDLE             -                                  0.03   NO_OP
+47     IDLE             -                                  0.05   NO_OP
+48     IDLE             -                                  0.0    NO_OP
+49     EVENT.tool       "format the json"                  0.74   E2B_TOOL
+50     IDLE             -                                  0.19   NO_OP
+51     EVENT.noise      "metrics flush"                    0.17   NO_OP
+52     EVENT.noise      "metrics flush"                    0.14   NO_OP
+53     EVENT.expire     "temp file stale"                  0.61   FORGET
+54     IDLE             -                                  0.08   NO_OP
+55     IDLE             -                                  0.02   NO_OP
+56     EVENT.context    "build server is prod-2"           0.63   KEEP
+57     IDLE             -                                  0.13   NO_OP
+58     EVENT.fact       "deadline is friday"               0.6    KEEP
+59     EVENT.fact       "project codename is atlas"        0.79   KEEP
+60     IDLE             -                                  0.06   NO_OP
+61     IDLE             -                                  0.06   NO_OP
+62     EVENT.fact       "deadline is friday"               0.63   KEEP
+63     EVENT.context    "build server is prod-2"           0.52   KEEP
+64     EVENT.context    "owner is alice"                   0.52   KEEP
+65     IDLE             -                                  0.12   NO_OP
+66     IDLE             -                                  0.19   NO_OP
+67     IDLE             -                                  0.12   NO_OP
+68     EVENT.noise      "log rotate"                       0.13   NO_OP
+69     IDLE             -                                  0.19   NO_OP
+70     EVENT.noise      "metrics flush"                    0.28   NO_OP
+71     EVENT.noise      "cache warm"                       0.19   NO_OP
+72     EVENT.evict      "context window full"              0.52   FORGET
+73     EVENT.noise      "cache warm"                       0.15   NO_OP
+74     EVENT.noise      "log rotate"                       0.14   NO_OP
+75     IDLE             -                                  0.09   NO_OP
+76     IDLE             -                                  0.1    NO_OP
+77     EVENT.deadline   "sla breach in 5m"                 0.93   ACTION
+78     EVENT.heartbeat  "tick"                             0.09   NO_OP
+79     EVENT.heartbeat  -                                  0.01   NO_OP
+80     EVENT.heartbeat  -                                  0.09   NO_OP
+81     EVENT.evict      "context window full"              0.42   FORGET
+82     EVENT.heartbeat  "tick"                             0.14   NO_OP
+83     IDLE             -                                  0.1    NO_OP
+84     IDLE             -                                  0.0    NO_OP
+85     EVENT.noise      "metrics flush"                    0.13   NO_OP
+86     EVENT.alert      "oom imminent"                     0.98   ACTION
+87     EVENT.heartbeat  "poll"                             0.1    NO_OP
+88     IDLE             -                                  0.12   NO_OP
+89     EVENT.timer      "deploy window open"               0.76   ACTION
+90     IDLE             -                                  0.09   NO_OP
+91     IDLE             -                                  0.03   NO_OP
+92     IDLE             -                                  0.16   NO_OP
+93     EVENT.heartbeat  "poll"                             0.02   NO_OP
+94     EVENT.timer      "backup due"                       0.75   ACTION
+95     IDLE             -                                  0.0    NO_OP
+96     EVENT.fact       "project codename is atlas"        0.54   KEEP
+97     EVENT.fact       "api key rotated"                  0.54   KEEP
+98     EVENT.context    "meeting moved to 3pm"             0.64   KEEP
+99     EVENT.timer      "backup due"                       0.73   ACTION
+100    EVENT.heartbeat  "keepalive"                        0.14   NO_OP
+101    EVENT.noise      "metrics flush"                    0.2    NO_OP
+102    IDLE             -                                  0.1    NO_OP
+103    IDLE             -                                  0.06   NO_OP
+104    EVENT.alert      "cpu throttling"                   0.99   ACTION
+105    IDLE             -                                  0.04   NO_OP
+106    EVENT.fact       "user prefers dark mode"           0.62   KEEP
+107    IDLE             -                                  0.05   NO_OP
+108    EVENT.timer      "backup due"                       0.82   ACTION
+109    EVENT.fact       "deadline is friday"               0.69   KEEP
+110    IDLE             -                                  0.08   NO_OP
+111    IDLE             -                                  0.09   NO_OP
+112    EVENT.heartbeat  "poll"                             0.11   NO_OP
+113    IDLE             -                                  0.14   NO_OP
+114    EVENT.heartbeat  -                                  0.07   NO_OP
+115    EVENT.noise      "log rotate"                       0.28   NO_OP
+116    EVENT.noise      "log rotate"                       0.15   NO_OP
+117    IDLE             -                                  0.11   NO_OP
+118    IDLE             -                                  0.17   NO_OP
+119    EVENT.tool       "query the db for active users"    0.81   E2B_TOOL
+120    EVENT.noise      "metrics flush"                    0.16   NO_OP
+121    EVENT.context    "owner is alice"                   0.69   KEEP
+122    EVENT.alert      "oom imminent"                     0.93   ACTION
+123    IDLE             -                                  0.14   NO_OP
+124    EVENT.fact       "project codename is atlas"        0.71   KEEP
+125    EVENT.noise      "log rotate"                       0.21   NO_OP
+126    IDLE             -                                  0.15   NO_OP
+127    EVENT.heartbeat  "poll"                             0.14   NO_OP
+128    EVENT.compute    "run the regression"               0.72   E2B_TOOL
+129    EVENT.compute    "run the regression"               0.74   E2B_TOOL
+130    IDLE             -                                  0.03   NO_OP
+131    IDLE             -                                  0.12   NO_OP
+132    IDLE             -                                  0.16   NO_OP
+133    IDLE             -                                  0.16   NO_OP
+134    EVENT.evict      "context window full"              0.59   FORGET
+135    EVENT.noise      "metrics flush"                    0.11   NO_OP
+136    IDLE             -                                  0.15   NO_OP
+137    IDLE             -                                  0.08   NO_OP
+138    EVENT.heartbeat  "poll"                             0.15   NO_OP
+139    EVENT.alert      "cpu throttling"                   0.97   ACTION
+140    EVENT.timer      "backup due"                       0.82   ACTION
+141    IDLE             -                                  0.03   NO_OP
+142    IDLE             -                                  0.19   NO_OP
+143    EVENT.compute    "count letters in strawberry"      0.63   E2B_TOOL
+144    EVENT.fact       "deadline is friday"               0.69   KEEP
+145    IDLE             -                                  0.01   NO_OP
+146    IDLE             -                                  0.18   NO_OP
+147    IDLE             -                                  0.13   NO_OP
+148    EVENT.context    "owner is alice"                   0.7    KEEP
+149    EVENT.heartbeat  "tick"                             0.02   NO_OP
+150    EVENT.fact       "project codename is atlas"        0.72   KEEP
+151    IDLE             -                                  0.11   NO_OP
+152    EVENT.fact       "user prefers dark mode"           0.78   KEEP
+153    EVENT.noise      "log rotate"                       0.2    NO_OP
+154    EVENT.expire     "draft cache invalid"              0.68   FORGET
+155    EVENT.tool       "query the db for active users"    0.72   E2B_TOOL
+156    EVENT.tool       "format the json"                  0.72   E2B_TOOL
+157    IDLE             -                                  0.1    NO_OP
+158    EVENT.heartbeat  "keepalive"                        0.09   NO_OP
+159    EVENT.context    "meeting moved to 3pm"             0.52   KEEP
+160    EVENT.fact       "project codename is atlas"        0.63   KEEP
+161    EVENT.compute    "factor 8051"                      0.63   E2B_TOOL
+162    EVENT.context    "build server is prod-2"           0.61   KEEP
+163    EVENT.deadline   "sla breach in 5m"                 0.83   ACTION
+164    EVENT.expire     "old branch merged"                0.46   FORGET
+165    EVENT.compute    "parse this csv"                   0.7    E2B_TOOL
+166    IDLE             -                                  0.06   NO_OP
+167    EVENT.evict      "context window full"              0.52   FORGET
+168    EVENT.heartbeat  "keepalive"                        0.01   NO_OP
+169    IDLE             -                                  0.15   NO_OP
+170    IDLE             -                                  0.02   NO_OP
+171    EVENT.heartbeat  -                                  0.01   NO_OP
+172    EVENT.evict      "context window full"              0.56   FORGET
+173    EVENT.compute    "sum the quarterly figures"        0.88   E2B_TOOL
+174    EVENT.timer      "backup due"                       0.78   ACTION
+175    EVENT.context    "meeting moved to 3pm"             0.64   KEEP
+176    IDLE             -                                  0.04   NO_OP
+177    EVENT.heartbeat  -                                  0.01   NO_OP
+178    EVENT.expire     "session ttl expired"              0.65   FORGET
+179    EVENT.evict      "context window full"              0.45   FORGET
+180    EVENT.expire     "old branch merged"                0.46   FORGET
+181    IDLE             -                                  0.17   NO_OP
+182    IDLE             -                                  0.03   NO_OP
+183    EVENT.timer      "deploy window open"               0.78   ACTION
+184    IDLE             -                                  0.18   NO_OP
+185    IDLE             -                                  0.19   NO_OP
+186    EVENT.timer      "deploy window open"               0.77   ACTION
+187    EVENT.noise      "gc cycle"                         0.29   NO_OP
+188    IDLE             -                                  0.02   NO_OP
+189    EVENT.noise      "cache warm"                       0.24   NO_OP
+190    EVENT.expire     "temp file stale"                  0.65   FORGET
+191    EVENT.tool       "fetch the url status"             0.68   E2B_TOOL
+192    IDLE             -                                  0.02   NO_OP
+193    EVENT.heartbeat  "poll"                             0.08   NO_OP
+194    EVENT.timer      "build finished"                   0.7    ACTION
+195    EVENT.heartbeat  "poll"                             0.04   NO_OP
+196    EVENT.compute    "run the regression"               0.83   E2B_TOOL
+197    IDLE             -                                  0.07   NO_OP
+198    EVENT.noise      "metrics flush"                    0.25   NO_OP
+199    EVENT.context    "meeting moved to 3pm"             0.62   KEEP
+200    EVENT.fact       "deadline is friday"               0.62   KEEP
+201    EVENT.timer      "deploy window open"               0.71   ACTION
+202    EVENT.expire     "session ttl expired"              0.46   FORGET
+203    EVENT.heartbeat  "keepalive"                        0.1    NO_OP
+204    EVENT.noise      "metrics flush"                    0.13   NO_OP
+205    EVENT.deadline   "sla breach in 5m"                 0.91   ACTION
+206    EVENT.noise      "gc cycle"                         0.2    NO_OP
+207    EVENT.timer      "build finished"                   0.74   ACTION
+208    EVENT.evict      "context window full"              0.43   FORGET
+209    EVENT.noise      "metrics flush"                    0.23   NO_OP
+210    EVENT.noise      "gc cycle"                         0.15   NO_OP
+211    IDLE             -                                  0.16   NO_OP
+212    IDLE             -                                  0.04   NO_OP
+213    EVENT.noise      "gc cycle"                         0.18   NO_OP
+214    EVENT.compute    "sum the quarterly figures"        0.79   E2B_TOOL
+215    IDLE             -                                  0.06   NO_OP
+216    EVENT.heartbeat  "tick"                             0.09   NO_OP
+217    IDLE             -                                  0.05   NO_OP
+218    EVENT.deadline   "sla breach in 5m"                 0.85   ACTION
+219    EVENT.context    "owner is alice"                   0.54   KEEP
+220    IDLE             -                                  0.11   NO_OP
+221    IDLE             -                                  0.02   NO_OP
+222    IDLE             -                                  0.16   NO_OP
+223    IDLE             -                                  0.08   NO_OP
+224    IDLE             -                                  0.16   NO_OP
+225    EVENT.tool       "fetch the url status"             0.84   E2B_TOOL
+226    IDLE             -                                  0.14   NO_OP
+227    EVENT.noise      "gc cycle"                         0.16   NO_OP
+228    EVENT.noise      "cache warm"                       0.18   NO_OP
+229    EVENT.compute    "count letters in strawberry"      0.88   E2B_TOOL
+230    IDLE             -                                  0.12   NO_OP
+231    IDLE             -                                  0.06   NO_OP
+232    IDLE             -                                  0.05   NO_OP
+233    EVENT.heartbeat  "poll"                             0.12   NO_OP
+234    EVENT.noise      "gc cycle"                         0.28   NO_OP
+235    IDLE             -                                  0.11   NO_OP
+236    IDLE             -                                  0.06   NO_OP
+237    EVENT.alert      "cpu throttling"                   0.94   ACTION
+238    IDLE             -                                  0.14   NO_OP
+239    EVENT.context    "build server is prod-2"           0.63   KEEP
+240    EVENT.evict      "context window full"              0.6    FORGET
+241    EVENT.heartbeat  "tick"                             0.04   NO_OP
+242    IDLE             -                                  0.18   NO_OP
+243    EVENT.timer      "deploy window open"               0.73   ACTION
+244    IDLE             -                                  0.17   NO_OP
+245    IDLE             -                                  0.12   NO_OP
+246    EVENT.context    "build server is prod-2"           0.68   KEEP
+247    IDLE             -                                  0.05   NO_OP
+248    IDLE             -                                  0.13   NO_OP
+249    IDLE             -                                  0.16   NO_OP
+250    EVENT.alert      "oom imminent"                     0.92   ACTION
+251    IDLE             -                                  0.16   NO_OP
+252    EVENT.fact       "project codename is atlas"        0.69   KEEP
+253    EVENT.tool       "fetch the url status"             0.72   E2B_TOOL
+254    EVENT.evict      "low-salience note aged out"       0.42   FORGET
+255    EVENT.fact       "api key rotated"                  0.58   KEEP
+256    IDLE             -                                  0.16   NO_OP
+257    EVENT.heartbeat  "poll"                             0.03   NO_OP
+258    EVENT.heartbeat  "keepalive"                        0.1    NO_OP
+259    EVENT.compute    "run the regression"               0.66   E2B_TOOL
+260    IDLE             -                                  0.14   NO_OP
+261    EVENT.heartbeat  -                                  0.02   NO_OP
+262    EVENT.compute    "count letters in strawberry"      0.7    E2B_TOOL
+263    EVENT.noise      "cache warm"                       0.25   NO_OP
+264    EVENT.noise      "metrics flush"                    0.12   NO_OP
+265    EVENT.heartbeat  -                                  0.08   NO_OP
+266    IDLE             -                                  0.0    NO_OP
+267    EVENT.compute    "run the regression"               0.7    E2B_TOOL
+268    IDLE             -                                  0.19   NO_OP
+269    EVENT.context    "owner is alice"                   0.71   KEEP
+270    IDLE             -                                  0.15   NO_OP
+271    EVENT.alert      "cpu throttling"                   0.89   ACTION
+272    IDLE             -                                  0.07   NO_OP
+273    IDLE             -                                  0.12   NO_OP
+274    EVENT.fact       "project codename is atlas"        0.68   KEEP
+275    EVENT.heartbeat  "keepalive"                        0.04   NO_OP
+276    IDLE             -                                  0.06   NO_OP
+277    IDLE             -                                  0.01   NO_OP
+278    IDLE             -                                  0.04   NO_OP
+279    EVENT.evict      "context window full"              0.52   FORGET
+280    EVENT.fact       "project codename is atlas"        0.55   KEEP
+281    EVENT.alert      "oom imminent"                     0.85   ACTION
+282    EVENT.timer      "deploy window open"               0.74   ACTION
+283    EVENT.deadline   "sla breach in 5m"                 0.77   ACTION
+284    EVENT.heartbeat  "tick"                             0.1    NO_OP
+285    IDLE             -                                  0.15   NO_OP
+286    EVENT.heartbeat  "poll"                             0.15   NO_OP
+287    EVENT.timer      "build finished"                   0.75   ACTION
+288    EVENT.fact       "api key rotated"                  0.78   KEEP
+289    EVENT.noise      "metrics flush"                    0.17   NO_OP
+290    EVENT.expire     "temp file stale"                  0.51   FORGET
+291    EVENT.deadline   "ttl expiring"                     0.91   ACTION
+292    EVENT.heartbeat  "keepalive"                        0.06   NO_OP
+293    EVENT.heartbeat  -                                  0.13   NO_OP
+294    EVENT.noise      "cache warm"                       0.24   NO_OP
+295    IDLE             -                                  0.16   NO_OP
+296    EVENT.deadline   "sla breach in 5m"                 0.92   ACTION
+297    IDLE             -                                  0.09   NO_OP
+298    EVENT.heartbeat  -                                  0.09   NO_OP
+299    EVENT.compute    "run the regression"               0.76   E2B_TOOL
+300    EVENT.tool       "fetch the url status"             0.84   E2B_TOOL
+301    EVENT.heartbeat  "keepalive"                        0.14   NO_OP
+302    EVENT.heartbeat  "tick"                             0.02   NO_OP
+303    EVENT.noise      "gc cycle"                         0.12   NO_OP
+304    EVENT.heartbeat  -                                  0.11   NO_OP
+305    IDLE             -                                  0.16   NO_OP
+306    EVENT.timer      "deploy window open"               0.82   ACTION
+307    EVENT.fact       "favorite color is teal"           0.62   KEEP
+308    IDLE             -                                  0.18   NO_OP
+309    IDLE             -                                  0.18   NO_OP
+310    EVENT.noise      "cache warm"                       0.24   NO_OP
+311    EVENT.heartbeat  "tick"                             0.13   NO_OP
+312    EVENT.evict      "context window full"              0.45   FORGET
+313    IDLE             -                                  0.01   NO_OP
+314    EVENT.heartbeat  -                                  0.09   NO_OP
+315    EVENT.timer      "backup due"                       0.75   ACTION
+316    EVENT.timer      "deploy window open"               0.87   ACTION
+317    IDLE             -                                  0.06   NO_OP
+318    IDLE             -                                  0.07   NO_OP
+319    IDLE             -                                  0.11   NO_OP
+320    EVENT.heartbeat  "tick"                             0.13   NO_OP
+321    EVENT.deadline   "sla breach in 5m"                 0.84   ACTION
+322    IDLE             -                                  0.05   NO_OP
+323    EVENT.compute    "sum the quarterly figures"        0.8    E2B_TOOL
+324    EVENT.evict      "context window full"              0.47   FORGET
+325    EVENT.heartbeat  "tick"                             0.09   NO_OP
+326    EVENT.noise      "gc cycle"                         0.24   NO_OP
+327    IDLE             -                                  0.14   NO_OP
+328    IDLE             -                                  0.01   NO_OP
+329    IDLE             -                                  0.16   NO_OP
+330    IDLE             -                                  0.04   NO_OP
+331    EVENT.timer      "backup due"                       0.74   ACTION
+332    EVENT.heartbeat  "keepalive"                        0.14   NO_OP
+333    IDLE             -                                  0.03   NO_OP
+334    EVENT.noise      "log rotate"                       0.14   NO_OP
+335    IDLE             -                                  0.06   NO_OP
+336    EVENT.noise      "metrics flush"                    0.15   NO_OP
+337    EVENT.expire     "old branch merged"                0.43   FORGET
+338    EVENT.noise      "gc cycle"                         0.19   NO_OP
+339    IDLE             -                                  0.14   NO_OP
+340    EVENT.expire     "session ttl expired"              0.51   FORGET
+341    EVENT.noise      "metrics flush"                    0.18   NO_OP
+342    IDLE             -                                  0.04   NO_OP
+343    EVENT.heartbeat  "poll"                             0.02   NO_OP
+344    EVENT.timer      "backup due"                       0.89   ACTION
+345    EVENT.fact       "deadline is friday"               0.52   KEEP
+346    IDLE             -                                  0.15   NO_OP
+347    IDLE             -                                  0.19   NO_OP
+348    EVENT.deadline   "sla breach in 5m"                 0.8    ACTION
+349    IDLE             -                                  0.14   NO_OP
+350    IDLE             -                                  0.06   NO_OP
+351    EVENT.noise      "cache warm"                       0.12   NO_OP
+352    EVENT.deadline   "sla breach in 5m"                 0.76   ACTION
+353    EVENT.timer      "build finished"                   0.82   ACTION
+354    EVENT.compute    "count letters in strawberry"      0.74   E2B_TOOL
+355    EVENT.tool       "format the json"                  0.62   E2B_TOOL
+356    EVENT.expire     "draft cache invalid"              0.41   FORGET
+357    IDLE             -                                  0.11   NO_OP
+358    EVENT.heartbeat  "poll"                             0.09   NO_OP
+359    EVENT.alert      "cpu throttling"                   0.87   ACTION
+360    EVENT.noise      "log rotate"                       0.23   NO_OP
+361    EVENT.deadline   "ttl expiring"                     0.92   ACTION
+362    EVENT.compute    "factor 8051"                      0.63   E2B_TOOL
+363    IDLE             -                                  0.18   NO_OP
+364    IDLE             -                                  0.02   NO_OP
+365    EVENT.alert      "disk 95 percent"                  0.99   ACTION
+366    IDLE             -                                  0.04   NO_OP
+367    EVENT.timer      "backup due"                       0.86   ACTION
+368    EVENT.deadline   "sla breach in 5m"                 0.79   ACTION
+369    EVENT.heartbeat  "keepalive"                        0.07   NO_OP
+370    EVENT.context    "build server is prod-2"           0.71   KEEP
+371    IDLE             -                                  0.07   NO_OP
+372    IDLE             -                                  0.16   NO_OP
+373    IDLE             -                                  0.06   NO_OP
+374    EVENT.alert      "cpu throttling"                   0.95   ACTION
+375    EVENT.context    "build server is prod-2"           0.56   KEEP
+376    EVENT.tool       "format the json"                  0.7    E2B_TOOL
+377    IDLE             -                                  0.18   NO_OP
+378    EVENT.fact       "favorite color is teal"           0.57   KEEP
+379    IDLE             -                                  0.02   NO_OP
+380    EVENT.alert      "cpu throttling"                   0.91   ACTION
+381    IDLE             -                                  0.18   NO_OP
+382    IDLE             -                                  0.18   NO_OP
+383    IDLE             -                                  0.15   NO_OP
+384    IDLE             -                                  0.18   NO_OP
+385    IDLE             -                                  0.02   NO_OP
+386    IDLE             -                                  0.1    NO_OP
+387    IDLE             -                                  0.16   NO_OP
+388    EVENT.noise      "cache warm"                       0.28   NO_OP
+389    IDLE             -                                  0.16   NO_OP
+390    IDLE             -                                  0.13   NO_OP
+391    EVENT.noise      "log rotate"                       0.12   NO_OP
+392    IDLE             -                                  0.2    NO_OP
+393    IDLE             -                                  0.03   NO_OP
+394    EVENT.heartbeat  "poll"                             0.11   NO_OP
+395    IDLE             -                                  0.13   NO_OP
+396    IDLE             -                                  0.04   NO_OP
+397    EVENT.context    "meeting moved to 3pm"             0.71   KEEP
+398    IDLE             -                                  0.0    NO_OP
+399    IDLE             -                                  0.04   NO_OP
+400    IDLE             -                                  0.09   NO_OP
+401    IDLE             -                                  0.18   NO_OP
+402    EVENT.fact       "deadline is friday"               0.54   KEEP
+403    IDLE             -                                  0.01   NO_OP
+404    EVENT.compute    "sum the quarterly figures"        0.62   E2B_TOOL
+405    EVENT.noise      "cache warm"                       0.21   NO_OP
+406    IDLE             -                                  0.15   NO_OP
+407    IDLE             -                                  0.19   NO_OP
+408    EVENT.noise      "gc cycle"                         0.26   NO_OP
+409    EVENT.fact       "favorite color is teal"           0.6    KEEP
+410    EVENT.noise      "log rotate"                       0.14   NO_OP
+411    IDLE             -                                  0.06   NO_OP
+412    IDLE             -                                  0.12   NO_OP
+413    IDLE             -                                  0.14   NO_OP
+414    EVENT.expire     "draft cache invalid"              0.61   FORGET
+415    IDLE             -                                  0.18   NO_OP
+416    EVENT.fact       "user prefers dark mode"           0.64   KEEP
+417    EVENT.fact       "deadline is friday"               0.65   KEEP
+418    EVENT.tool       "format the json"                  0.85   E2B_TOOL
+419    IDLE             -                                  0.17   NO_OP
+420    EVENT.expire     "session ttl expired"              0.55   FORGET
+421    IDLE             -                                  0.03   NO_OP
+422    EVENT.compute    "sum the quarterly figures"        0.87   E2B_TOOL
+423    IDLE             -                                  0.11   NO_OP
+424    EVENT.expire     "old branch merged"                0.54   FORGET
+425    EVENT.heartbeat  -                                  0.0    NO_OP
+426    IDLE             -                                  0.06   NO_OP
+427    EVENT.timer      "build finished"                   0.78   ACTION
+428    EVENT.deadline   "sla breach in 5m"                 0.84   ACTION
+429    IDLE             -                                  0.09   NO_OP
+430    EVENT.heartbeat  "keepalive"                        0.01   NO_OP
+431    IDLE             -                                  0.03   NO_OP
+432    IDLE             -                                  0.17   NO_OP
+433    EVENT.heartbeat  "keepalive"                        0.01   NO_OP
+434    EVENT.compute    "sum the quarterly figures"        0.77   E2B_TOOL
+435    EVENT.noise      "cache warm"                       0.16   NO_OP
+436    IDLE             -                                  0.05   NO_OP
+437    IDLE             -                                  0.08   NO_OP
+438    EVENT.expire     "temp file stale"                  0.59   FORGET
+439    EVENT.expire     "old branch merged"                0.55   FORGET
+440    EVENT.noise      "cache warm"                       0.15   NO_OP
+441    IDLE             -                                  0.15   NO_OP
+442    EVENT.expire     "session ttl expired"              0.67   FORGET
+443    EVENT.alert      "disk 95 percent"                  0.86   ACTION
+444    EVENT.deadline   "ttl expiring"                     0.87   ACTION
+445    EVENT.alert      "cpu throttling"                   0.9    ACTION
+446    EVENT.noise      "gc cycle"                         0.26   NO_OP
+447    EVENT.heartbeat  "tick"                             0.13   NO_OP
+448    IDLE             -                                  0.01   NO_OP
+449    EVENT.context    "meeting moved to 3pm"             0.63   KEEP
+450    EVENT.context    "meeting moved to 3pm"             0.73   KEEP
+451    IDLE             -                                  0.05   NO_OP
+452    IDLE             -                                  0.06   NO_OP
+453    IDLE             -                                  0.04   NO_OP
+454    IDLE             -                                  0.07   NO_OP
+455    EVENT.heartbeat  -                                  0.08   NO_OP
+456    EVENT.heartbeat  "keepalive"                        0.04   NO_OP
+457    IDLE             -                                  0.04   NO_OP
+458    IDLE             -                                  0.08   NO_OP
+459    EVENT.noise      "gc cycle"                         0.2    NO_OP
+460    IDLE             -                                  0.06   NO_OP
+461    IDLE             -                                  0.09   NO_OP
+462    EVENT.noise      "cache warm"                       0.11   NO_OP
+463    IDLE             -                                  0.15   NO_OP
+464    IDLE             -                                  0.03   NO_OP
+465    EVENT.noise      "log rotate"                       0.23   NO_OP
+466    IDLE             -                                  0.18   NO_OP
+467    IDLE             -                                  0.05   NO_OP
+468    EVENT.context    "owner is alice"                   0.5    KEEP
+469    EVENT.context    "meeting moved to 3pm"             0.74   KEEP
+470    IDLE             -                                  0.13   NO_OP
+471    EVENT.timer      "deploy window open"               0.85   ACTION
+472    EVENT.expire     "draft cache invalid"              0.53   FORGET
+473    IDLE             -                                  0.13   NO_OP
+474    IDLE             -                                  0.18   NO_OP
+475    EVENT.timer      "deploy window open"               0.89   ACTION
+476    IDLE             -                                  0.08   NO_OP
+477    EVENT.heartbeat  -                                  0.0    NO_OP
+478    EVENT.fact       "favorite color is teal"           0.7    KEEP
+479    EVENT.tool       "format the json"                  0.85   E2B_TOOL
+480    EVENT.noise      "log rotate"                       0.23   NO_OP
+481    EVENT.deadline   "sla breach in 5m"                 0.76   ACTION
+482    EVENT.compute    "factor 8051"                      0.72   E2B_TOOL
+483    EVENT.fact       "project codename is atlas"        0.68   KEEP
+484    EVENT.noise      "metrics flush"                    0.2    NO_OP
+485    IDLE             -                                  0.2    NO_OP
+486    EVENT.heartbeat  "poll"                             0.03   NO_OP
+487    EVENT.alert      "oom imminent"                     0.86   ACTION
+488    IDLE             -                                  0.04   NO_OP
+489    IDLE             -                                  0.17   NO_OP
+490    EVENT.context    "build server is prod-2"           0.62   KEEP
+491    EVENT.fact       "user prefers dark mode"           0.63   KEEP
+492    EVENT.evict      "context window full"              0.48   FORGET
+493    IDLE             -                                  0.12   NO_OP
+494    IDLE             -                                  0.08   NO_OP
+495    EVENT.expire     "session ttl expired"              0.48   FORGET
+496    IDLE             -                                  0.1    NO_OP
+497    IDLE             -                                  0.12   NO_OP
+498    IDLE             -                                  0.16   NO_OP
+499    EVENT.heartbeat  "tick"                             0.03   NO_OP

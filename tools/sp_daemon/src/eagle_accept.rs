@@ -56,6 +56,102 @@ extern "C" {
     fn gemma4_kv_rewind(s: *mut sp_g4_kv, delta: c_int) -> c_int;
 }
 
+/// KAIROS action space (Latent Interceptor) — keep in sync with CONTRACT-LATENT-INTERCEPTOR.md.
+pub const LI_ACTIONS: [&str; 5] = ["NO_OP", "KEEP", "FORGET", "E2B_TOOL", "ACTION"];
+fn li_action_id(s: &str) -> i32 {
+    LI_ACTIONS.iter().position(|&a| a.eq_ignore_ascii_case(s.trim())).map(|i| i as i32).unwrap_or(-1)
+}
+
+/// LATENT INTERCEPTOR CAPTURE: run the 12B over a KAIROS event tape; per tick frame the event
+/// against the kernel contract, prefill it, capture the FRAME-END feature[hidden] (the post-
+/// output_norm hidden the LM head consumes) + the action label (tape `expect`). The interceptor
+/// learns feature -> action WITHOUT the 262k vocab head. Each event is evaluated against a clean
+/// contract context (KV reset between events = the pruned-heartbeat semantics).
+pub fn run_li_capture(
+    model_path: &str,
+    tok_path: &str,
+    tape_path: &str,
+    out_dir: &str,
+) -> Result<usize, String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let hidden = arch.hidden_dim as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("li_capture: qm NULL".to_string()); }
+
+    const CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment event. \
+Decide exactly one action: NO_OP (idle, do nothing), KEEP (remember this fact), FORGET (evict stale state), \
+E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
+
+    let tape = std::fs::read_to_string(tape_path).map_err(|e| format!("tape {tape_path}: {e}"))?;
+    let mut events: Vec<(String, i32)> = Vec::new();
+    for line in tape.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') { continue; }
+        // tick_idx kind payload(may be quoted) salience expect
+        let mut toks: Vec<String> = Vec::new();
+        let (mut cur, mut q) = (String::new(), false);
+        for ch in l.chars() {
+            match ch {
+                '"' => q = !q,
+                c if c.is_whitespace() && !q => { if !cur.is_empty() { toks.push(std::mem::take(&mut cur)); } }
+                c => cur.push(c),
+            }
+        }
+        if !cur.is_empty() { toks.push(cur); }
+        if toks.len() != 5 { continue; }
+        let aid = li_action_id(&toks[4]);
+        if aid < 0 { continue; }
+        let payload = if toks[2] == "-" { String::new() } else { format!(" payload=\"{}\"", toks[2]) };
+        let body = format!("EVENT kind={} salience={}{}", toks[1], toks[3], payload);
+        events.push((body, aid));
+    }
+    if events.is_empty() { return Err("li_capture: no events parsed".to_string()); }
+
+    let pmax = 512 as c_int;
+    let s = unsafe { gemma4_kv_open(qm, pmax) };
+    if s.is_null() { return Err("li_capture: gemma4_kv_open NULL".to_string()); }
+    let mut feat = vec![0.0f32; hidden];
+    let mut logits = vec![0.0f32; vocab];
+    let mut feats: Vec<f32> = Vec::with_capacity(events.len() * hidden);
+    let mut labels: Vec<i32> = Vec::with_capacity(events.len());
+    let mut dist = [0usize; 5];
+
+    for (i, (body, aid)) in events.iter().enumerate() {
+        let frame = format!("{CONTRACT}\n\nCURRENT EVENT: {body}\nRespond with exactly one of: NO_OP, KEEP, FORGET, E2B_TOOL, ACTION.");
+        let msgs = vec![Message { role: "user".to_string(), content: frame }];
+        let ids = match tok.apply_template_ids(&msgs) { Ok(p) => p, Err(_) => continue };
+        if ids.len() < 2 || ids.len() as c_int >= pmax { continue; }
+        if unsafe { gemma4_kv_reset(s) } != 0 { return Err("li_capture: reset".to_string()); }
+        let np = ids.len();
+        if unsafe { gemma4_kv_prefill(s, ids.as_ptr(), (np - 1) as c_int) } != 0 { continue; }
+        unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+        if unsafe { gemma4_kv_decode_logits(s, ids[np - 1], logits.as_mut_ptr()) } != 0 { continue; }
+        feats.extend_from_slice(&feat);
+        labels.push(*aid);
+        dist[*aid as usize] += 1;
+        if i % 50 == 0 { eprintln!("[li-capture] {i}/{}", events.len()); }
+    }
+    unsafe { gemma4_kv_close(s) };
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {out_dir}: {e}"))?;
+    let f32b: Vec<u8> = feats.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let i32b: Vec<u8> = labels.iter().flat_map(|x| x.to_le_bytes()).collect();
+    std::fs::write(format!("{out_dir}/feat.f32"), &f32b).map_err(|e| format!("feat: {e}"))?;
+    std::fs::write(format!("{out_dir}/label.i32"), &i32b).map_err(|e| format!("label: {e}"))?;
+    std::fs::write(format!("{out_dir}/manifest.jsonl"),
+        format!("{{\"n\":{},\"hidden\":{hidden},\"n_actions\":5,\"actions\":[\"NO_OP\",\"KEEP\",\"FORGET\",\"E2B_TOOL\",\"ACTION\"]}}\n", labels.len()))
+        .map_err(|e| format!("manifest: {e}"))?;
+    eprintln!("[li-capture] DONE {} samples -> {out_dir} (hidden={hidden}) dist NO_OP={} KEEP={} FORGET={} E2B={} ACTION={}",
+              labels.len(), dist[0], dist[1], dist[2], dist[3], dist[4]);
+    Ok(labels.len())
+}
+
 /// EAGLE flywheel CAPTURE: greedy-roll the target over a corpus, dumping per generated
 /// position (feature h, input token, target label) + the full-sequence KV the draft attends.
 /// This is the engine-matched training data for #2 (the draft learns OUR engine's distribution).

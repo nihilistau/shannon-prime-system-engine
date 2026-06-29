@@ -245,6 +245,23 @@ async fn main() {
             Err(e) => { eprintln!("[capture] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_LI_CAPTURE — Latent Interceptor capture (KAIROS event tape -> frame-end feature + action label).
+    //   SP_LI_CAPTURE=1 SP_MODEL_PATH=… SP_TOKENIZER_PATH=… SP_LI_TAPE=kairos_tape.txt SP_LI_OUT=_li_data
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_LI_CAPTURE").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        let tape = std::env::var("SP_LI_TAPE").unwrap_or_default();
+        let out = std::env::var("SP_LI_OUT").unwrap_or_else(|_| "_li_data".to_string());
+        if model.is_empty() || tok.is_empty() || tape.is_empty() {
+            eprintln!("SP_LI_CAPTURE=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH, SP_LI_TAPE");
+            std::process::exit(2);
+        }
+        match eagle_accept::run_li_capture(&model, &tok, &tape, &out) {
+            Ok(n) => { eprintln!("[li-capture] DONE {n} samples"); std::process::exit(0); }
+            Err(e) => { eprintln!("[li-capture] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 

@@ -1,0 +1,29 @@
+[li-train] N=150 hidden=3840 actions=['NO_OP', 'KEEP', 'FORGET', 'E2B_TOOL', 'ACTION'] dist=[100, 20, 6, 8, 16]
+  ep20 loss=0.001 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep40 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep60 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep80 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep100 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep120 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep140 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep160 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep180 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep200 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep220 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep240 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep260 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep280 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep300 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep320 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep340 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep360 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep380 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+  ep400 loss=0.000 val_acc=1.000 NO_OP_prec=1.000 ACTION_recall=1.000
+[li-train] val confusion (rows=true, cols=pred):
+            NO_OP   KEEP  FORGE  E2B_T  ACTIO
+      NO_OP     20      0      0      0      0
+       KEEP      0      3      0      0      0
+     FORGET      0      0      0      0      0
+   E2B_TOOL      0      0      0      1      0
+     ACTION      0      0      0      0      6
+[li-train] best val_acc=1.000 -> _li_head.bin (+ .json)
