@@ -113,69 +113,106 @@ pub fn run_eagle_accept(
     }
     let mut last = prompt[np - 1];
 
+    // K-step EAGLE DRIVE: draft K tokens via the recurrence (h_{k+1} = draft post_proj
+    // out_hnext; token feedback), verify the prefix against the target's greedy, accept the
+    // matching prefix. Measures mean ACCEPT-LENGTH (the real spec-decode quality metric) +
+    // single-token accept (K=1 case) + a sequential-verify tok/s baseline. The realized
+    // throughput win = (mean_accept+1) tokens per target forward, UNLOCKED by batched verify.
+    let k = std::env::var("SP_EAGLE_K").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(4);
+    let dump = std::env::var("SP_EAGLE_DUMP").ok(); // optional flywheel-data dir (feature,target-token)
     let mut feat = vec![0.0f32; hidden];
+    let mut hnext = vec![0.0f32; hidden];
     let mut logits = vec![0.0f32; vocab];
-    let (mut accept, mut count) = (0usize, 0usize);
-    let mut samples: Vec<(i32, i32)> = Vec::new();
+    let mut accept_lens: Vec<usize> = Vec::new();
+    let (mut single_hit, mut single_n) = (0usize, 0usize);
     let mut tgt_seq: Vec<i32> = Vec::new();
-    for _ in 0..n_decode {
-        unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
-        if unsafe { gemma4_kv_decode_logits(s, last, logits.as_mut_ptr()) } != 0 {
-            break;
-        }
-        // TARGET: suppress then argmax (the served sampler's clean-greedy contract).
-        for &id in &suppress {
-            if (id as usize) < vocab {
-                logits[id as usize] = f32::NEG_INFINITY;
-            }
-        }
-        let tgt = argmax(&logits);
-        // STOP on eos / turn terminator.
-        if tok.eos_ids.contains(&tgt) {
-            break;
-        }
-        // DRAFT: same suppression masked on-device before its argmax.
-        let mut dtok: c_int = -1;
-        let rc = unsafe {
-            gemma4_draft_step(
-                s,
-                feat.as_ptr(),
-                last,
-                suppress.as_ptr(),
-                suppress.len() as c_int,
-                &mut dtok,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc != 0 {
-            return Err("eagle: gemma4_draft_step failed".to_string());
-        }
-        if dtok == tgt {
-            accept += 1;
-        }
-        if samples.len() < 12 {
-            samples.push((dtok, tgt));
-        }
-        tgt_seq.push(tgt);
-        count += 1;
-        last = tgt;
+    let mut samples: Vec<(i32, i32)> = Vec::new();
+    let mut dump_rows: Vec<(Vec<f32>, i32)> = Vec::new();
+
+    let suppress_logits = |lg: &mut [f32]| {
+        for &id in &suppress { if (id as usize) < vocab { lg[id as usize] = f32::NEG_INFINITY; } }
+    };
+
+    // prime: feature + target greedy for the position right after `last`.
+    unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+    if unsafe { gemma4_kv_decode_logits(s, last, logits.as_mut_ptr()) } != 0 {
+        return Err("eagle: prime decode failed".to_string());
     }
-    unsafe {
-        gemma4_draft_close();
-        gemma4_kv_close(s);
+    suppress_logits(&mut logits);
+    let mut g = argmax(&logits);
+
+    let t0 = std::time::Instant::now();
+    let mut target_tokens = 0usize;
+    while target_tokens < n_decode && !tok.eos_ids.contains(&g) {
+        // draft K tokens from (feat, last) via the EAGLE recurrence.
+        let mut drafts: Vec<i32> = Vec::with_capacity(k);
+        let mut dh = feat.clone();
+        let mut din = last;
+        for _ in 0..k {
+            let mut dk: c_int = -1;
+            let rc = unsafe {
+                gemma4_draft_step(s, dh.as_ptr(), din, suppress.as_ptr(),
+                                  suppress.len() as c_int, &mut dk, hnext.as_mut_ptr())
+            };
+            if rc != 0 { return Err("eagle: draft_step failed".to_string()); }
+            drafts.push(dk);
+            din = dk;
+            std::mem::swap(&mut dh, &mut hnext); // dh := post_proj h_next (recurrence)
+        }
+        single_n += 1;
+        if drafts[0] == g { single_hit += 1; }
+        if samples.len() < 12 { samples.push((drafts[0], g)); }
+        if dump.is_some() { dump_rows.push((feat.clone(), g)); }
+
+        // verify: accept the leading drafts matching the target greedy continuation.
+        let mut m = 0usize;
+        while m < k && drafts[m] == g && !tok.eos_ids.contains(&g) {
+            m += 1;
+            tgt_seq.push(g);
+            last = g;
+            target_tokens += 1;
+            unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+            if unsafe { gemma4_kv_decode_logits(s, g, logits.as_mut_ptr()) } != 0 { g = -1; break; }
+            suppress_logits(&mut logits);
+            g = argmax(&logits);
+        }
+        if g == -1 { break; }
+        if m == 0 {
+            // draft[0] missed -> commit the target's corrected token (1 step) and move on.
+            tgt_seq.push(g);
+            last = g;
+            target_tokens += 1;
+            unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+            if unsafe { gemma4_kv_decode_logits(s, g, logits.as_mut_ptr()) } != 0 { break; }
+            suppress_logits(&mut logits);
+            g = argmax(&logits);
+        }
+        accept_lens.push(m);
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    unsafe { gemma4_draft_close(); gemma4_kv_close(s); }
+
+    if let Some(dir) = dump {
+        let _ = std::fs::create_dir_all(&dir);
+        let mut feats: Vec<u8> = Vec::with_capacity(dump_rows.len() * hidden * 4);
+        let mut toks: Vec<u8> = Vec::with_capacity(dump_rows.len() * 4);
+        for (h, t) in &dump_rows {
+            for &v in h { feats.extend_from_slice(&v.to_le_bytes()); }
+            toks.extend_from_slice(&t.to_le_bytes());
+        }
+        let _ = std::fs::write(format!("{dir}/feat.f32"), &feats);
+        let _ = std::fs::write(format!("{dir}/tgt.i32"), &toks);
+        eprintln!("[eagle] flywheel dump: {} (feature,target) rows -> {dir}", dump_rows.len());
     }
 
-    // Decode the target continuation so we can eyeball coherence ("Paris").
-    let cont: String = tgt_seq
-        .iter()
-        .flat_map(|&t| tok.decode_token(t).to_vec())
-        .collect::<Vec<u8>>()
-        .into_iter()
-        .map(|b| b as char)
-        .collect();
+    let cont: String = tgt_seq.iter().flat_map(|&t| tok.decode_token(t).to_vec())
+        .collect::<Vec<u8>>().into_iter().map(|b| b as char).collect();
+    let mean_acc = if accept_lens.is_empty() { 0.0 } else { accept_lens.iter().sum::<usize>() as f64 / accept_lens.len() as f64 };
+    let single = if single_n > 0 { 100.0 * single_hit as f64 / single_n as f64 } else { 0.0 };
+    let toks_s = if elapsed > 0.0 { target_tokens as f64 / elapsed } else { 0.0 };
     eprintln!("[eagle] target continuation: {:?}", cont);
-    eprintln!("[eagle] samples (draft -> target): {:?}", samples);
-    let rate = if count > 0 { 100.0 * accept as f64 / count as f64 } else { 0.0 };
-    eprintln!("[eagle] ACCEPT(K=1): {accept}/{count} = {rate:.1}%");
-    Ok((accept, count))
+    eprintln!("[eagle] samples (draft0 -> target): {:?}", samples);
+    eprintln!("[eagle] K={k} rounds={} mean_accept_len={mean_acc:.3} (potential {:.2}x w/ batched verify) | single-token={single:.1}% | {target_tokens} tok in {elapsed:.1}s = {toks_s:.1} tok/s (seq verify)",
+              accept_lens.len(), mean_acc + 1.0);
+    Ok((single_hit, single_n))
 }
