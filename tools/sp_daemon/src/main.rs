@@ -48,6 +48,9 @@ mod nightshift_curator;
 // CUDA backend. It must live in the binary (not a [[bin]]) to reach the binary-private
 // tokenizer/sampler/session (the token-management contract).
 mod eagle_accept;
+// Telepathy — the LatentBridge (tokenizer-free latent->latent transport). Pure-Rust object + adapter
+// + routing primitive + fail-closed license; SP_TELEPATHY default-off. See telepathy.rs / the spec.
+mod telepathy;
 
 // Sprint WIRE-CPU — host CPU AVX-512 full-forward backend dispatcher for
 // sp_l1.h:§6. Symmetric to the lib-crate's hex_forward_dispatch (android).
@@ -340,6 +343,14 @@ async fn main() {
         match eagle_accept::run_th_loop(&model, &tok, &head) {
             Ok(()) => { eprintln!("[th-loop] DONE"); std::process::exit(0); }
             Err(e) => { eprintln!("[th-loop] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
+    // SP_TELEPATHY — LatentBridge: load adapter, fail-closed license, in-engine transfer + parity vs
+    // Python, routing primitive. Default-off (this branch only runs when SP_TELEPATHY=1 = null floor).
+    if std::env::var("SP_TELEPATHY").as_deref() == Ok("1") {
+        match telepathy::run_telepathy() {
+            Ok(()) => { eprintln!("[telepathy] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[telepathy] FAILED: {e}"); std::process::exit(1); }
         }
     }
 
