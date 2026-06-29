@@ -89,8 +89,7 @@ def draft_forward(P, x, feat, kvg, kvs, attend, pos, g_base, s_base):
         f = rms(f, p("post_ffw_norm"))
         cur = (f + attn_out) * p("layer_output_scale")[0]
     cur = rms(cur, P["output_norm.weight"])
-    logits = cur @ P["token_embd.weight"].T                          # [Vd]
-    return logits
+    return cur                                                        # pre-head [HID]; head applied batched
 
 def main():
     ap = argparse.ArgumentParser()
@@ -98,6 +97,7 @@ def main():
     ap.add_argument("--out", required=True); ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--lr", type=float, default=1e-4); ap.add_argument("--device", default="cuda")
     ap.add_argument("--max_pos", type=int, default=20000)
+    ap.add_argument("--bs", type=int, default=128)   # head/backward batch (amortizes the 1GB tok_embd read)
     a = ap.parse_args()
     dev = a.device if torch.cuda.is_available() or a.device == "cpu" else "cpu"
     print(f"[train] device={dev}")
@@ -125,26 +125,34 @@ def main():
         gen = np.fromfile(f"{sd}/lbl.i32", dtype=np.int32).shape[0]
         npos = np.fromfile(f"{sd}/kg.f32", dtype=np.float32).shape[0] // kvd_g
         d = dict(feat=L("feat.f32",np.float32).view(gen,-1), x=L("x.f32",np.float32).view(gen,-1),
-                 lbl=L("lbl.i32",np.int32), att=L("att.i32",np.int32),
+                 lbl=L("lbl.i32",np.int32).long(), att_cpu=np.fromfile(f"{sd}/att.i32", dtype=np.int32),
                  kg=L("kg.f32",np.float32).view(npos,kvd_g), vg=L("vg.f32",np.float32).view(npos,kvd_g),
                  ks=L("ks.f32",np.float32).view(npos,kvd_s), vs=L("vs.f32",np.float32).view(npos,kvd_s))
-        if len(cache) < 64: cache[sd] = d
+        if len(cache) < 400: cache[sd] = d   # cache all ~310 seqs resident (avoids per-epoch disk reload)
         return d
+    head = P["token_embd.weight"].T                                  # [HID, Vd], frozen
     for ep in range(a.epochs):
         np.random.shuffle(examples)
-        tot, hit, lsum = 0, 0, 0.0
-        for sd, j in examples:
-            d = load_seq(sd)
-            att = int(d["att"][j].item()); pos = att
-            if att < 1: continue
-            logits = draft_forward(P, d["x"][j], d["feat"][j], (d["kg"],d["vg"]), (d["ks"],d["vs"]),
-                                   att, pos, g_base, s_base)
-            lbl = d["lbl"][j].long()
-            loss = F.cross_entropy(logits.unsqueeze(0), lbl.unsqueeze(0))
+        tot = 0; lsum = torch.zeros((), device=dev); hits = torch.zeros((), device=dev)
+        for bstart in range(0, len(examples), a.bs):
+            batch = examples[bstart:bstart + a.bs]
+            curs, lbls = [], []
+            for sd, j in batch:
+                d = load_seq(sd)
+                att = int(d["att_cpu"][j])                           # CPU read -> no per-example GPU sync
+                if att < 1: continue
+                curs.append(draft_forward(P, d["x"][j], d["feat"][j], (d["kg"],d["vg"]), (d["ks"],d["vs"]),
+                                          att, att, g_base, s_base))
+                lbls.append(d["lbl"][j])
+            if not curs: continue
+            C = torch.stack(curs); L = torch.stack(lbls)             # [b,HID], [b]
+            logits = C @ head                                        # [b,Vd] -- ONE big matmul (head read amortized)
+            loss = F.cross_entropy(logits, L)
             opt.zero_grad(); loss.backward(); opt.step()
-            lsum += loss.item(); tot += 1; hit += int(logits.argmax().item() == lbl.item())
-            if tot % 500 == 0: print(f"  ep{ep} {tot}/{len(examples)} loss={lsum/tot:.3f} train_acc={hit/tot:.3f}")
-        print(f"[train] epoch {ep}: loss={lsum/max(tot,1):.3f} train_acc={hit/max(tot,1):.3f}")
+            n = len(curs); lsum += loss.detach()*n; hits += (logits.argmax(1) == L).float().sum(); tot += n
+            if (bstart // a.bs) % 8 == 0:
+                print(f"  ep{ep} {tot}/{len(examples)} loss={lsum.item()/tot:.3f} train_acc={hits.item()/tot:.3f}", flush=True)
+        print(f"[train] epoch {ep}: loss={lsum.item()/max(tot,1):.3f} train_acc={hits.item()/max(tot,1):.3f}", flush=True)
 
     # export: copy the draft GGUF, overwrite the trained tensors IN PLACE (dtype preserved -> metadata
     # byte-identical -> sp_transcode reads it unchanged). F16/F32 only (norms F32, weights F16).
