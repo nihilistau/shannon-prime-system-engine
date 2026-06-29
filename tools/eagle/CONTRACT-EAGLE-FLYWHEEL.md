@@ -49,8 +49,42 @@ next rigor step before a throughput claim. 1 GPU (local RTX 2060), 3 epochs, 310
    3 epochs: train_acc 0.823 -> 0.928 -> 0.951.
 3. **Measure** (this contract): point `SP_DRAFT_GGUF` at the finetuned GGUF, re-run the accept drive.
 
-## Next
+## Held-out A/B (rigor, G-EAGLE-FLYWHEEL-AB-OOD, 2026-06-30)
 
-- Held-out-prompt A/B (rigor).
-- Batched-verify CUDA verb (now justified) -> realize ~2x tok/s.
-- Transcode finetuned draft -> sp Q4 for deployment; scale corpus (-> Colab L4/RTX6000) for breadth.
+OOD prompt ("write a short story about a lighthouse keeper who befriends a whale" — NOT in the
+corpus): baseline 0.176/15.2% -> finetuned **0.709/68.5%** = the 4x accept lift GENERALIZES
+(coherent story output). Not an overfitting artifact. Receipts: _ab_receipts/heldout_*.txt.
+
+## THROUGHPUT — the honest negative (G-EAGLE-THROUGHPUT, 2026-06-30)
+
+Profiled (SP_EAGLE_PROFILE) on the float probe, RTX 2060:
+
+| config | tok/s | note |
+|---|---|---|
+| **plain greedy decode (K=0)** | **24.9** | the REAL baseline (no speculation) |
+| spec, baseline draft, K=4, fast draft | 8.4 | post suppress-fix |
+| spec, finetuned draft, K=4, fast draft | 4.4 | post suppress-fix |
+| spec, finetuned draft, K=4, slow draft | 2.2 | pre suppress-fix |
+
+Component costs: decode_logits=38ms/tok; draft_step=89ms -> **24ms** (suppress fix: device mask
+kernel replaced 6248 sync cudaMemcpy/step); gemma4_kv_decode_batch (loop, one sync) = **1.00x**
+(no amortization — sync was never the cost; the per-forward GPU compute is).
+
+**Conclusion: speculative decoding does NOT yield a throughput win on this engine/HW.** (1) The
+verify is sequential = 1 target forward per token, same as plain decode, so spec only ADDS the
+draft cost. (2) The draft (24ms) is ~0.64x a target forward (38ms), not << , because the draft
+carries the same 262144-vocab head as the target. Even a true batched-GEMM verify (weight-bound
+forward, ~26ms weights) reaches only ~breakeven vs plain, since the draft cost dominates. A real
+win would require BOTH draft_step -> ~5ms AND a batched-GEMM multi-position verify, for ~1.7x best
+case. Receipts: _ab_receipts/profile_after_suppressfix.txt, finetuned_fastdraft.txt; K=0 run.
+
+**Banked assets (not wasted):** the finetuned draft is a 96.6%-single-token target predictor that
+generalizes OOD — valuable independent of throughput (cross-machine where target>>draft, or as a
+predictor for recall/XBAR). The suppress fix is a permanent engine speedup (draft 3.7x faster).
+gemma4_kv_decode_batch kept as the honest-negative verb (+ ready if a batched-GEMM forward lands).
+
+## Next (decision pending)
+
+- If throughput is critical: the two-arc path (draft_step -> ~5ms + batched-GEMM verify) for ~1.7x.
+- Else: bank the finetuned draft + suppress fix; plain decode (24.9 tok/s) stands. Optionally still
+  transcode the finetuned draft -> sp Q4 + scale the corpus (the draft QUALITY asset is reusable).

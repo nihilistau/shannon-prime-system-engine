@@ -315,8 +315,8 @@ pub fn run_eagle_accept(
             std::mem::swap(&mut dh, &mut hnext); // dh := post_proj h_next (recurrence)
         }
         single_n += 1;
-        if drafts[0] == g { single_hit += 1; }
-        if samples.len() < 12 { samples.push((drafts[0], g)); }
+        if !drafts.is_empty() && drafts[0] == g { single_hit += 1; } // K=0 => plain-decode baseline
+        if samples.len() < 12 && !drafts.is_empty() { samples.push((drafts[0], g)); }
         if dump.is_some() { dump_rows.push((feat.clone(), g)); }
 
         // verify: accept the leading drafts matching the target greedy continuation.
