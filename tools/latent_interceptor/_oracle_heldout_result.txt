@@ -1,0 +1,51 @@
+[li-oracle] head=D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\..\latent_interceptor\_li_head.bin hidden=3840 proj=256 actions=5
+[li-oracle] tick   0 action=KEEP     gt=KEEP     prefill=4418ms probe=1282us  WOKE 12B decode=952ms
+[li-oracle] tick   1 action=NO_OP gt=NO_OP prefill=4092ms probe=959us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick   2 action=KEEP     gt=KEEP     prefill=4381ms probe=954us  WOKE 12B decode=952ms
+[li-oracle] tick   3 action=NO_OP gt=NO_OP prefill=4275ms probe=1223us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick   4 action=FORGET   gt=FORGET   prefill=4348ms probe=1065us  WOKE 12B decode=955ms
+[li-oracle] tick   5 action=E2B_TOOL gt=E2B_TOOL prefill=4456ms probe=958us  WOKE 12B decode=954ms
+[li-oracle] tick   6 action=E2B_TOOL gt=E2B_TOOL prefill=4353ms probe=956us  WOKE 12B decode=954ms
+[li-oracle] tick   7 action=NO_OP gt=NO_OP prefill=4075ms probe=955us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick   8 action=NO_OP gt=NO_OP prefill=4358ms probe=957us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick   9 action=KEEP     gt=KEEP     prefill=4479ms probe=1060us  WOKE 12B decode=965ms
+[li-oracle] tick  10 action=KEEP     gt=KEEP     prefill=4436ms probe=954us  WOKE 12B decode=956ms
+[li-oracle] tick  11 action=E2B_TOOL gt=E2B_TOOL prefill=4469ms probe=964us  WOKE 12B decode=957ms
+[li-oracle] tick  12 action=KEEP     gt=KEEP     prefill=4470ms probe=981us  WOKE 12B decode=957ms
+[li-oracle] tick  13 action=ACTION   gt=ACTION   prefill=4475ms probe=957us  WOKE 12B decode=961ms
+[li-oracle] tick  14 action=FORGET   gt=FORGET   prefill=4374ms probe=949us  WOKE 12B decode=959ms
+[li-oracle] tick  15 action=E2B_TOOL gt=E2B_TOOL prefill=4344ms probe=955us  WOKE 12B decode=964ms
+[li-oracle] tick  16 action=NO_OP gt=NO_OP prefill=4136ms probe=962us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  17 action=FORGET   gt=FORGET   prefill=4424ms probe=957us  WOKE 12B decode=965ms
+[li-oracle] tick  18 action=NO_OP gt=NO_OP prefill=4400ms probe=1233us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  19 action=NO_OP gt=NO_OP prefill=4151ms probe=1201us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  20 action=NO_OP gt=NO_OP prefill=4160ms probe=966us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  21 action=NO_OP gt=NO_OP prefill=4224ms probe=1100us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  22 action=FORGET   gt=FORGET   prefill=4442ms probe=997us  WOKE 12B decode=968ms
+[li-oracle] tick  23 action=E2B_TOOL gt=E2B_TOOL prefill=4446ms probe=1014us  WOKE 12B decode=968ms
+[li-oracle] tick  24 action=ACTION   gt=ACTION   prefill=4377ms probe=959us  WOKE 12B decode=967ms
+[li-oracle] tick  25 action=KEEP     gt=KEEP     prefill=4521ms probe=1217us  WOKE 12B decode=969ms
+[li-oracle] tick  26 action=NO_OP gt=NO_OP prefill=4168ms probe=995us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  27 action=NO_OP gt=NO_OP prefill=4240ms probe=996us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  28 action=FORGET   gt=FORGET   prefill=4423ms probe=1068us  WOKE 12B decode=970ms
+[li-oracle] tick  29 action=FORGET   gt=FORGET   prefill=4470ms probe=949us  WOKE 12B decode=965ms
+[li-oracle] tick  30 action=FORGET   gt=FORGET   prefill=4420ms probe=961us  WOKE 12B decode=968ms
+[li-oracle] tick  31 action=NO_OP gt=NO_OP prefill=4163ms probe=956us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  32 action=NO_OP gt=NO_OP prefill=4171ms probe=948us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  33 action=ACTION   gt=ACTION   prefill=4419ms probe=958us  WOKE 12B decode=978ms
+[li-oracle] tick  34 action=NO_OP gt=NO_OP prefill=4209ms probe=1130us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  35 action=NO_OP gt=NO_OP prefill=4168ms probe=956us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  36 action=ACTION   gt=ACTION   prefill=4418ms probe=1018us  WOKE 12B decode=971ms
+[li-oracle] tick  37 action=NO_OP gt=NO_OP prefill=4383ms probe=954us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  38 action=NO_OP gt=NO_OP prefill=4166ms probe=957us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  39 action=NO_OP gt=NO_OP prefill=4388ms probe=949us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  40 action=FORGET   gt=FORGET   prefill=4440ms probe=959us  WOKE 12B decode=972ms
+[li-oracle] tick  41 action=E2B_TOOL gt=E2B_TOOL prefill=4456ms probe=956us  WOKE 12B decode=970ms
+[li-oracle] tick  42 action=NO_OP gt=NO_OP prefill=4170ms probe=1091us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  43 action=NO_OP gt=NO_OP prefill=4380ms probe=953us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  44 action=ACTION   gt=ACTION   prefill=4381ms probe=1014us  WOKE 12B decode=973ms
+[li-oracle] tick  45 action=NO_OP gt=NO_OP prefill=4399ms probe=1038us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  46 action=E2B_TOOL gt=E2B_TOOL prefill=4439ms probe=947us  WOKE 12B decode=967ms
+[li-oracle] tick  47 action=NO_OP gt=NO_OP prefill=4171ms probe=1206us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  48 action=NO_OP gt=NO_OP prefill=4459ms probe=957us  DECODE SKIPPED (~440ms banked)
+[li-oracle] tick  49 action=KEEP     gt=KEEP     prefill=4550ms probe=1013us  WOKE 12B decode=971ms

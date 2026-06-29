@@ -262,6 +262,24 @@ async fn main() {
             Err(e) => { eprintln!("[li-capture] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_LI_ORACLE — LIVE KAIROS action gate (the Latent Interceptor). Per tick: 12B prefill -> tap
+    // latent -> CPU probe -> NO_OP short-circuits the decode; action wakes the 12B.
+    //   SP_LI_ORACLE=1 SP_MODEL_PATH=… SP_TOKENIZER_PATH=… SP_LI_TAPE=tape SP_LI_HEAD=_li_head.bin
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_LI_ORACLE").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        let tape = std::env::var("SP_LI_TAPE").unwrap_or_default();
+        let head = std::env::var("SP_LI_HEAD").unwrap_or_else(|_| "_li_head.bin".to_string());
+        if model.is_empty() || tok.is_empty() || tape.is_empty() {
+            eprintln!("SP_LI_ORACLE=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH, SP_LI_TAPE (+ SP_LI_HEAD)");
+            std::process::exit(2);
+        }
+        match eagle_accept::run_li_oracle(&model, &tok, &tape, &head) {
+            Ok(()) => { eprintln!("[li-oracle] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[li-oracle] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 

@@ -58,6 +58,144 @@ extern "C" {
 
 /// KAIROS action space (Latent Interceptor) — keep in sync with CONTRACT-LATENT-INTERCEPTOR.md.
 pub const LI_ACTIONS: [&str; 5] = ["NO_OP", "KEEP", "FORGET", "E2B_TOOL", "ACTION"];
+
+/// Apply the tiny Latent Interceptor probe (mu,sd,W1,b1,W2,b2 from li_head.bin) to a feature
+/// (host f32[H]) -> action id. Pure CPU matmul (proj~256), microseconds. Layout per sp_li_train.py.
+fn li_probe(blob: &[f32], h: usize, a: usize, proj: usize, feat: &[f32]) -> i32 {
+    let mu = &blob[0..h];
+    let sd = &blob[h..2 * h];
+    let w1 = &blob[2 * h..2 * h + proj * h];
+    let b1 = &blob[2 * h + proj * h..2 * h + proj * h + proj];
+    let w2o = 2 * h + proj * h + proj;
+    let w2 = &blob[w2o..w2o + a * proj];
+    let b2 = &blob[w2o + a * proj..w2o + a * proj + a];
+    let mut hid = vec![0.0f32; proj];
+    for p in 0..proj {
+        let mut s = b1[p];
+        let row = &w1[p * h..p * h + h];
+        for i in 0..h { s += row[i] * ((feat[i] - mu[i]) / sd[i]); }
+        hid[p] = if s > 0.0 { s } else { 0.0 }; // ReLU
+    }
+    let mut best = 0i32; let mut bestv = f32::NEG_INFINITY;
+    for c in 0..a {
+        let mut s = b2[c];
+        let row = &w2[c * proj..c * proj + proj];
+        for p in 0..proj { s += row[p] * hid[p]; }
+        if s > bestv { bestv = s; best = c as i32; }
+    }
+    best
+}
+
+fn parse_kairos_tape(text: &str) -> Vec<(String, i32)> {
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') { continue; }
+        let (mut toks, mut cur, mut q): (Vec<String>, String, bool) = (Vec::new(), String::new(), false);
+        for ch in l.chars() {
+            match ch {
+                '"' => q = !q,
+                c if c.is_whitespace() && !q => { if !cur.is_empty() { toks.push(std::mem::take(&mut cur)); } }
+                c => cur.push(c),
+            }
+        }
+        if !cur.is_empty() { toks.push(cur); }
+        if toks.len() != 5 { continue; }
+        let aid = li_action_id(&toks[4]);
+        if aid < 0 { continue; }
+        let payload = if toks[2] == "-" { String::new() } else { format!(" payload=\"{}\"", toks[2]) };
+        events.push((format!("EVENT kind={} salience={}{}", toks[1], toks[3], payload), aid));
+    }
+    events
+}
+
+/// LIVE KAIROS ORACLE (the Latent Interceptor action gate). Per tick: 12B prefills the event frame
+/// (~35ms, unavoidable), taps the frame-end latent, runs the CPU probe (~us) -> action. NO_OP ->
+/// SHORT-CIRCUIT (skip the ~440ms 12B decode); any action class -> wake the 12B decode. Logs the
+/// per-tick decision + the banked compute. Reuses the gemma4_kv handle + the eagle feature tap.
+pub fn run_li_oracle(model_path: &str, tok_path: &str, tape_path: &str, head_path: &str) -> Result<(), String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let hidden = arch.hidden_dim as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("li_oracle: qm NULL".to_string()); }
+
+    let raw = std::fs::read(head_path).map_err(|e| format!("head {head_path}: {e}"))?;
+    let blob: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let a = LI_ACTIONS.len();
+    // len = 2H + A + proj*(H+1+A)  ->  proj
+    let proj = (blob.len() - 2 * hidden - a) / (hidden + 1 + a);
+    eprintln!("[li-oracle] head={head_path} hidden={hidden} proj={proj} actions={a}");
+
+    const CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment event. \
+Decide exactly one action: NO_OP (idle, do nothing), KEEP (remember this fact), FORGET (evict stale state), \
+E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
+    let events = parse_kairos_tape(&std::fs::read_to_string(tape_path).map_err(|e| format!("tape: {e}"))?);
+    if events.is_empty() { return Err("li_oracle: no events".to_string()); }
+
+    let s = unsafe { gemma4_kv_open(qm, 512) };
+    if s.is_null() { return Err("li_oracle: kv_open NULL".to_string()); }
+    let mut feat = vec![0.0f32; hidden];
+    let mut logits = vec![0.0f32; vocab];
+    let suppress: Vec<i32> = tok.suppress_token_ids();
+    let (mut correct, mut skips, mut woke, mut false_wake, mut missed) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut saved_ms, mut spent_ms) = (0.0f64, 0.0f64);
+    let decode_cap = 24usize;
+
+    for (i, (body, gt)) in events.iter().enumerate() {
+        let frame = format!("{CONTRACT}\n\nCURRENT EVENT: {body}\nRespond with exactly one of: NO_OP, KEEP, FORGET, E2B_TOOL, ACTION.");
+        let ids = match tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: frame }]) { Ok(p) => p, Err(_) => continue };
+        if ids.len() < 2 || ids.len() >= 512 { continue; }
+        unsafe { gemma4_kv_reset(s) };
+        let np = ids.len();
+        let tpf = std::time::Instant::now();
+        if unsafe { gemma4_kv_prefill(s, ids.as_ptr(), (np - 1) as c_int) } != 0 { continue; }
+        unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+        if unsafe { gemma4_kv_decode_logits(s, ids[np - 1], logits.as_mut_ptr()) } != 0 { continue; }
+        let prefill_ms = tpf.elapsed().as_secs_f64() * 1000.0;
+        let tpr = std::time::Instant::now();
+        let action = li_probe(&blob, hidden, a, proj, &feat);
+        let probe_us = tpr.elapsed().as_secs_f64() * 1e6;
+
+        if action == *gt { correct += 1; }
+        if action == 0 {
+            // NO_OP -> short-circuit: the 477ms 12B decode is SKIPPED.
+            skips += 1;
+            let est = 440.0; saved_ms += est;
+            if *gt != 0 { missed += 1; } // wrongly skipped a real event
+            eprintln!("[li-oracle] tick {i:>3} action=NO_OP gt={} prefill={prefill_ms:.0}ms probe={probe_us:.0}us  DECODE SKIPPED (~{est:.0}ms banked)",
+                      LI_ACTIONS[*gt as usize]);
+        } else {
+            // action -> wake the 12B to decode the execution (bounded).
+            woke += 1;
+            if *gt == 0 { false_wake += 1; } // wrongly woke on an idle tick
+            let td = std::time::Instant::now();
+            let mut last = argmax(&logits);
+            for _ in 0..decode_cap {
+                if tok.eos_ids.contains(&last) { break; }
+                unsafe { gemma4_kv_decode_logits(s, last, logits.as_mut_ptr()) };
+                for &id in &suppress { if (id as usize) < vocab { logits[id as usize] = f32::NEG_INFINITY; } }
+                last = argmax(&logits);
+            }
+            let dms = td.elapsed().as_secs_f64() * 1000.0; spent_ms += dms;
+            eprintln!("[li-oracle] tick {i:>3} action={:<8} gt={:<8} prefill={prefill_ms:.0}ms probe={probe_us:.0}us  WOKE 12B decode={dms:.0}ms",
+                      LI_ACTIONS[action as usize], LI_ACTIONS[*gt as usize]);
+        }
+    }
+    unsafe { gemma4_kv_close(s) };
+    let n = events.len();
+    eprintln!("[li-oracle] DONE {n} ticks | accuracy={:.3} ({correct}/{n}) | NO_OP-skips={skips} woke={woke} | false_wake={false_wake} missed={missed}",
+              correct as f64 / n as f64);
+    eprintln!("[li-oracle] COMPUTE: decode spent={spent_ms:.0}ms on {woke} woke ticks; BANKED ~{saved_ms:.0}ms on {skips} skipped ticks ({:.0}% of ticks gated)",
+              100.0 * skips as f64 / n as f64);
+    Ok(())
+}
 fn li_action_id(s: &str) -> i32 {
     LI_ACTIONS.iter().position(|&a| a.eq_ignore_ascii_case(s.trim())).map(|i| i as i32).unwrap_or(-1)
 }
