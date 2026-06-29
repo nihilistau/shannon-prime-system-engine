@@ -54,6 +54,8 @@ extern "C" {
     fn gemma4_kv_decode_batch(s: *mut sp_g4_kv, toks: *const i32, b: c_int,
                               logits_out: *mut f32, feat_out: *mut f32) -> c_int;
     fn gemma4_kv_rewind(s: *mut sp_g4_kv, delta: c_int) -> c_int;
+    // Latent Interceptor: draft BODY -> 1024-d latent (no vocab head). The shared substrate.
+    fn gemma4_draft_body(s: *mut sp_g4_kv, feat_host: *const f32, token: c_int, out_latent: *mut f32) -> c_int;
 }
 
 /// KAIROS action space (Latent Interceptor) — keep in sync with CONTRACT-LATENT-INTERCEPTOR.md.
@@ -341,9 +343,19 @@ pub fn run_li_capture(
     let pmax = 512 as c_int;
     let s = unsafe { gemma4_kv_open(qm, pmax) };
     if s.is_null() { return Err("li_capture: gemma4_kv_open NULL".to_string()); }
+    // OPTIONAL draft body (SP_DRAFT_GGUF): also dump the 1024-d draft latent per event (the head
+    // training substrate). Without it, only the 12B feature is captured (the feature-probe path).
+    let draft_gguf = std::env::var("SP_DRAFT_GGUF").unwrap_or_default();
+    let use_draft = if !draft_gguf.is_empty() {
+        let dc = CString::new(draft_gguf.clone()).unwrap();
+        if unsafe { gemma4_draft_open(dc.as_ptr()) } == 0 { eprintln!("[li-capture] draft body loaded -> dumping 1024-d latent"); true }
+        else { eprintln!("[li-capture] WARN draft_open failed; feature-only"); false }
+    } else { false };
     let mut feat = vec![0.0f32; hidden];
+    let mut latent = vec![0.0f32; 1024];
     let mut logits = vec![0.0f32; vocab];
     let mut feats: Vec<f32> = Vec::with_capacity(events.len() * hidden);
+    let mut latents: Vec<f32> = Vec::new();
     let mut labels: Vec<i32> = Vec::with_capacity(events.len());
     let mut dist = [0usize; 5];
 
@@ -356,17 +368,28 @@ pub fn run_li_capture(
         if unsafe { gemma4_kv_prefill(s, ids.as_ptr(), (np - 1) as c_int) } != 0 { continue; }
         unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
         if unsafe { gemma4_kv_decode_logits(s, ids[np - 1], logits.as_mut_ptr()) } != 0 { continue; }
+        if use_draft {
+            // draft body on the live frame -> the 1024-d latent (attends the frame KV).
+            if unsafe { gemma4_draft_body(s, feat.as_ptr(), ids[np - 1], latent.as_mut_ptr()) } != 0 { continue; }
+            latents.extend_from_slice(&latent);
+        }
         feats.extend_from_slice(&feat);
         labels.push(*aid);
         dist[*aid as usize] += 1;
         if i % 50 == 0 { eprintln!("[li-capture] {i}/{}", events.len()); }
     }
+    if use_draft { unsafe { gemma4_draft_close() }; }
     unsafe { gemma4_kv_close(s) };
     std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {out_dir}: {e}"))?;
     let f32b: Vec<u8> = feats.iter().flat_map(|x| x.to_le_bytes()).collect();
     let i32b: Vec<u8> = labels.iter().flat_map(|x| x.to_le_bytes()).collect();
     std::fs::write(format!("{out_dir}/feat.f32"), &f32b).map_err(|e| format!("feat: {e}"))?;
     std::fs::write(format!("{out_dir}/label.i32"), &i32b).map_err(|e| format!("label: {e}"))?;
+    if use_draft {
+        let lb: Vec<u8> = latents.iter().flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(format!("{out_dir}/latent.f32"), &lb).map_err(|e| format!("latent: {e}"))?;
+        eprintln!("[li-capture] dumped latent.f32 [{} x 1024]", latents.len() / 1024);
+    }
     std::fs::write(format!("{out_dir}/manifest.jsonl"),
         format!("{{\"n\":{},\"hidden\":{hidden},\"n_actions\":5,\"actions\":[\"NO_OP\",\"KEEP\",\"FORGET\",\"E2B_TOOL\",\"ACTION\"]}}\n", labels.len()))
         .map_err(|e| format!("manifest: {e}"))?;

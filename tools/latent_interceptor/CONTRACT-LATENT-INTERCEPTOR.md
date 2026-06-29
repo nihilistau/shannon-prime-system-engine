@@ -101,6 +101,32 @@ distribution, re-ran the held-out heartbeat:
   latent decision. Further reduction requires the OKFS-MEM header load to move OFF the prefill (into
   a latent memory head) — the multi-head framework, next.
 
+## MULTI-HEAD FRAMEWORK — body + heads (MH, 2026-06-30)
+
+**MH-1 (DONE):** `gemma4_draft_body` (cuda_forward.cu) = the draft step WITHOUT the 262k vocab head;
+runs pre_proj + 4 layers + out_norm, returns ONLY the 1024-d latent (host). No vocab gemm / argmax /
+suppress -> the cost is the 4-layer body alone (CPU/Hexagon-able). The shared substrate all heads tap.
+gemma4_draft_step (with vocab head) stays in the shelved spec-decode drawer.
+
+**MH-2 (DONE):** draft-body capture — `SP_LI_CAPTURE` + `SP_DRAFT_GGUF` runs `gemma4_draft_body` live
+on each event frame (attends the real KV) and dumps `latent.f32 [N x1024]` alongside `feat.f32` +
+`label.i32`. Validated (20-event run: latent [20x1024]). This is the head training substrate.
+
+**MH-3 Memory Head (Priority 1) — SCOPE (`sp_mh_train.py`):**
+- **Head:** `latent[1024] -> Linear(1024,256) -> ReLU -> Linear(256,55)` = the 55-d VHT2 content key.
+  Deploy: key -> `sp_spinor_encode` (C, sp/spinor_block.h) -> the frozen 63-byte block -> MEM-OKF
+  write/address. Pure latent -> Spinor, zero tokenization.
+- **Target (v1, self-supervised):** content key = a FROZEN random projection of the 12B feature to
+  55-d (Johnson-Lindenstrauss, distance-preserving -> similar events -> similar Spinors ->
+  content-addressed recall). Head learns latent -> proj(feat); MSE loss. No external labels.
+  - v2: distill the nightshift_curator's actual episode Spinor (MEM-OKF fidelity).
+  - v3: contrastive recall objective (cue -> memory) for XBAR-style retrieval.
+- **63-byte Spinor (frozen v1, sp/spinor_block.h):** 7B header (scale f32 + exp int8 + basis +
+  reserved) + 55 int8 Mobius-permuted anchors (sp_mobius(i)=17i mod 55) + CRC-8. anchor_i =
+  round(vec_i/scale*127). The int8 roundtrip fidelity is checked in the trainer.
+- **Deploy (next):** CUDA `gemma4_draft_mem(latent)->55-d key` (tiny MLP, like li_probe) ->
+  sp_spinor_encode -> emit to MEM-OKF (tools/okf_mem.py add / the curator ADMIT path), all latent-side.
+
 ## Gate
 
 - **G-LI-AGREEMENT:** Latent Interceptor action vs the ground-truth tape label (held-out tape).

@@ -4798,6 +4798,71 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
     return 0;
 }
 
+/* LATENT INTERCEPTOR body — gemma4_draft_step WITHOUT the 262k vocab head. Runs pre_proj + the 4
+ * draft layers + out_norm and returns ONLY the 1024-d latent manifold (out_latent[1024], host). This
+ * is the shared substrate the action/memory/tool heads tap (each a tiny HID->small projection). No
+ * vocab gemm, no argmax, no suppress -> the per-call cost is the 4-layer body alone (CPU/Hexagon-able
+ * once off-GPU). CONTRACT-LATENT-INTERCEPTOR.md. Math identical to gemma4_draft_step's body. */
+extern "C" int gemma4_draft_body(sp_g4_kv *s, const float *feat_host, int token, float *out_latent) {
+    if (!g_draft.loaded || !s || !out_latent) { sp_set_error("gemma4_draft_body: bad args/not loaded"); return -1; }
+    if (!g_w.embd && !g_w.embd_packed.codes) { sp_set_error("gemma4_draft_body: target has no embd"); return -1; }
+    const int HID = 1024, BBt = g_draft.BBt, FFm = 8192;
+    static float *bx=0,*bfeat=0,*bxh=0,*bcur=0,*bnorm=0,*batt=0,*bao=0,*bq=0,*bff=0,*bff2=0;
+    if (!bxh) {
+        cudaMalloc(&bx,BBt*4); cudaMalloc(&bfeat,BBt*4); cudaMalloc(&bxh,2*BBt*4); cudaMalloc(&bcur,HID*4);
+        cudaMalloc(&bnorm,HID*4); cudaMalloc(&batt,HID*4); cudaMalloc(&bao,16*512*4); cudaMalloc(&bq,16*512*4);
+        cudaMalloc(&bff,FFm*4); cudaMalloc(&bff2,FFm*4);
+    }
+    const float eps = s->eps; const int ctx = s->dpos_host;
+    const char *am = getenv("SP_DRAFT_ASCALE");
+    cublasSetStream(g_w.cublas, 0);
+    if (g_w.embd)
+        k_embed_scale_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd, token, BBt, sqrtf((float)BBt), bx);
+    else
+        k_embed_packed_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd_packed.codes, g_w.embd_packed.row_off,
+            g_w.embd_packed.row_scale, g_w.embd_packed.row_prec, token, BBt, sqrtf((float)BBt), bx);
+    cudaMemcpy(bfeat, feat_host, (size_t)BBt*4, cudaMemcpyHostToDevice);
+    cudaMemcpy(bxh, bx, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(bxh+BBt, bfeat, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
+    if (gemm(g_w.cublas, g_draft.pre, bxh, bcur, 1, 2*BBt, HID)) return -1;       /* pre_proj */
+    for (int il = 0; il < DRAFT_NL; il++) {
+        const int qd = g_draft.qd[il], hd = g_draft.hd[il], swa = g_draft_swa[il];
+        const int il_src = swa ? (s->NL - 2) : (s->NL - 1);
+        const int HD   = swa ? s->s_hd  : s->g_hd;
+        const int nkv  = swa ? s->s_nkv : s->g_nkv;
+        const int KVD  = nkv * HD, group = (nkv > 0 ? 16 / nkv : 16);
+        const int win  = swa ? s->SW : -1;
+        const int Wring= swa ? (s->ring_W > 0 ? s->ring_W : s->Pmax) : s->Pmax;
+        const float rb = swa ? s->s_base : s->g_base;
+        const float asc = (am && !strcmp(am,"one")) ? 1.0f : 1.0f/sqrtf((float)hd);
+        k_rmsnorm<<<1,256>>>(bcur, g_draft.attn_norm[il], HID, eps, bnorm);
+        if (gemm(g_w.cublas, g_draft.wq[il], bnorm, bq, 1, HID, qd)) return -1;
+        k_rmsnorm_head<<<16,256>>>(bq, g_draft.qn[il], 16, hd, qd, eps);
+        if (!swa && g_draft.rope_freqs)
+            k_rope_freqs_at<<<16, hd/2>>>(bq, 16, hd, rb, g_draft.rope_freqs, ctx);
+        else
+            k_rope_at<<<16, hd/2>>>(bq, 16, hd, qd, rb, ctx);
+        k_attn_decode_ring<<<16,256,(size_t)ctx*sizeof(float)>>>(bq, s->dKc[il_src], s->dVc[il_src],
+                                                                 ctx, KVD, HD, group, asc, win, Wring, bao);
+        if (gemm(g_w.cublas, g_draft.wo[il], bao, batt, 1, qd, HID)) return -1;
+        k_rmsnorm<<<1,256>>>(batt, g_draft.post_attn[il], HID, eps, bnorm);
+        cudaMemcpy(batt, bnorm, (size_t)HID*4, cudaMemcpyDeviceToDevice);
+        k_add<<<(unsigned)((HID+255)/256),256>>>(batt, bcur, (size_t)HID);
+        k_rmsnorm<<<1,256>>>(batt, g_draft.ffn_norm[il], HID, eps, bnorm);
+        if (gemm(g_w.cublas, g_draft.wg[il], bnorm, bff, 1, HID, FFm)) return -1;
+        if (gemm(g_w.cublas, g_draft.wu[il], bnorm, bff2, 1, HID, FFm)) return -1;
+        k_gelu_mul<<<(unsigned)((FFm+255)/256),256>>>(bff, bff2, (size_t)FFm);
+        if (gemm(g_w.cublas, g_draft.wd[il], bff, bnorm, 1, FFm, HID)) return -1;
+        k_rmsnorm<<<1,256>>>(bnorm, g_draft.post_ffw[il], HID, eps, bcur);
+        k_add<<<(unsigned)((HID+255)/256),256>>>(bcur, batt, (size_t)HID);
+        k_scale_by_dev<<<(unsigned)((HID+255)/256),256>>>(bcur, (size_t)HID, g_draft.osc[il]);
+    }
+    k_rmsnorm<<<1,256>>>(bcur, g_draft.out_norm, HID, eps, bnorm);               /* the 1024-d latent */
+    cudaError_t e = cudaMemcpy(out_latent, bnorm, (size_t)HID*4, cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_draft_body latent D2H");
+    return 0;
+}
+
 /* EAGLE flywheel capture: D2H the TARGET KV context the draft attends — the global owner
  * (kvfs-1, kvd=g_nkv*g_hd) and SWA owner (kvfs-2, kvd=s_nkv*s_hd), positions [0,dpos).
  * Caller allocates kg/vg (Pmax*g_nkv*g_hd) and ks/vs (Pmax*s_nkv*s_hd); pass NULL to skip.
