@@ -4583,6 +4583,7 @@ static const int g_draft_swa[DRAFT_NL] = {1, 1, 1, 0};   /* layers 0-2 SWA (read
 struct DraftWeights {
     int loaded; gguf_ctx *g;
     float *pre, *post, *out_norm, *head;      /* head = draft token_embd [Vd x 1024] (tied) */
+    float *rope_freqs;                        /* [hd_full/2] proportional RoPE freq-factors (full layer) */
     int Vd, BBt;                              /* draft vocab; target hidden (pre in / post out) */
     float *attn_norm[DRAFT_NL], *wq[DRAFT_NL], *qn[DRAFT_NL], *wo[DRAFT_NL], *post_attn[DRAFT_NL],
           *ffn_norm[DRAFT_NL], *wg[DRAFT_NL], *wu[DRAFT_NL], *wd[DRAFT_NL], *post_ffw[DRAFT_NL], *osc[DRAFT_NL];
@@ -4649,6 +4650,12 @@ extern "C" int gemma4_draft_open(const char *gguf_path) {
         #undef LDUP
     }
     #undef DUP
+    /* full-layer proportional RoPE freq-factors (gemma4 globals use them; SWA layers don't).
+     * Optional: older drafts may lack it -> NULL falls back to plain base-rope. */
+    if (gguf_find_tensor(g, "rope_freqs.weight")) {
+        int ri = 0, ro = 0;
+        g_draft.rope_freqs = draft_up(g, "rope_freqs.weight", &ri, &ro);
+    }
     g_draft.loaded = 1;
     fprintf(stderr, "    [draft] gemma4-assistant loaded: %d layers hd=%d/%d/%d/%d Vd=%d BBt=%d\n",
             DRAFT_NL, g_draft.hd[0], g_draft.hd[1], g_draft.hd[2], g_draft.hd[3], g_draft.Vd, g_draft.BBt);
@@ -4713,7 +4720,10 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
         k_rmsnorm<<<1,256>>>(scur, g_draft.attn_norm[il], HID, eps, snorm);
         k_matmul_draft<<<(unsigned)((qd+255)/256),256>>>(g_draft.wq[il], snorm, sq, qd, HID);
         k_rmsnorm_head<<<16,256>>>(sq, g_draft.qn[il], 16, hd, qd, eps);
-        k_rope_at<<<16, hd/2>>>(sq, 16, hd, qd, rb, ctx);              /* query position = ctx */
+        if (!swa && g_draft.rope_freqs)   /* full layer: proportional freq-factors (gemma4 global RoPE) */
+            k_rope_freqs_at<<<16, hd/2>>>(sq, 16, hd, rb, g_draft.rope_freqs, ctx);
+        else
+            k_rope_at<<<16, hd/2>>>(sq, 16, hd, qd, rb, ctx);          /* SWA: plain base-rope; query pos = ctx */
         k_attn_decode_ring<<<16,256,(size_t)ctx*sizeof(float)>>>(sq, s->dKc[il_src], s->dVc[il_src],
                                                                  ctx, KVD, HD, group, asc, win, Wring, sao);
         k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.wo[il], sao, satt, HID, qd);
