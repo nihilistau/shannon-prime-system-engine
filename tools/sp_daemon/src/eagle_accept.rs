@@ -50,6 +50,10 @@ extern "C" {
     fn gemma4_kv_ctx_geom(s: *mut sp_g4_kv, g_nkv: *mut c_int, g_hd: *mut c_int, s_nkv: *mut c_int,
                           s_hd: *mut c_int, period: *mut c_int, kvfs: *mut c_int,
                           g_base: *mut f32, s_base: *mut f32) -> c_int;
+    fn gemma4_embd_row(token: c_int, e: c_int, out: *mut f32) -> c_int;
+    fn gemma4_kv_decode_batch(s: *mut sp_g4_kv, toks: *const i32, b: c_int,
+                              logits_out: *mut f32, feat_out: *mut f32) -> c_int;
+    fn gemma4_kv_rewind(s: *mut sp_g4_kv, delta: c_int) -> c_int;
 }
 
 /// EAGLE flywheel CAPTURE: greedy-roll the target over a corpus, dumping per generated
@@ -99,6 +103,7 @@ pub fn run_eagle_capture(
     let mut ks = vec![0.0f32; (pmax as usize) * kvd_s.max(1)];
     let mut vs = vec![0.0f32; (pmax as usize) * kvd_s.max(1)];
     let mut feat = vec![0.0f32; hidden];
+    let mut xbuf = vec![0.0f32; hidden];
     let mut logits = vec![0.0f32; vocab];
 
     let mut seqs = 0usize;
@@ -110,14 +115,16 @@ pub fn run_eagle_capture(
         let np = prompt.len();
         if unsafe { gemma4_kv_prefill(s, prompt.as_ptr(), (np - 1) as c_int) } != 0 { continue; }
         let mut last = prompt[np - 1];
-        let (mut feats, mut inps, mut lbls, mut atts): (Vec<f32>, Vec<i32>, Vec<i32>, Vec<i32>) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut feats, mut xs, mut inps, mut lbls, mut atts): (Vec<f32>, Vec<f32>, Vec<i32>, Vec<i32>, Vec<i32>) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for _ in 0..gen_len {
             unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
             if unsafe { gemma4_kv_decode_logits(s, last, logits.as_mut_ptr()) } != 0 { break; }
             for &id in &suppress { if (id as usize) < vocab { logits[id as usize] = f32::NEG_INFINITY; } }
             let g = argmax(&logits);
             let attend = np as i32 + inps.len() as i32; // KV positions the draft attends for this step
+            unsafe { gemma4_embd_row(last, hidden as c_int, xbuf.as_mut_ptr()); } // draft pre_proj input x
+            xs.extend_from_slice(&xbuf);
             feats.extend_from_slice(&feat);
             inps.push(last);
             lbls.push(g);
@@ -135,6 +142,7 @@ pub fn run_eagle_capture(
         let f32b = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
         let i32b = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
         w("feat.f32", &f32b(&feats));
+        w("x.f32", &f32b(&xs));
         w("inp.i32", &i32b(&inps));
         w("lbl.i32", &i32b(&lbls));
         w("att.i32", &i32b(&atts));
@@ -183,9 +191,12 @@ pub fn run_eagle_accept(
     }
 
     // FRAME via the token-management contract (real <|turn>/<turn|> ids, not literal strings).
+    // SP_EAGLE_PROMPT overrides the probe prompt (held-out / OOD A/B).
+    let prompt_text = std::env::var("SP_EAGLE_PROMPT")
+        .unwrap_or_else(|_| "What is the capital of France?".to_string());
     let msgs = vec![Message {
         role: "user".to_string(),
-        content: "What is the capital of France?".to_string(),
+        content: prompt_text,
     }];
     let prompt = tok.apply_template_ids(&msgs)?;
     if prompt.len() < 2 {
@@ -211,10 +222,17 @@ pub fn run_eagle_accept(
     }
 
     // prefill all-but-last so the first decode_logits processes the last prompt token cleanly.
+    // BOTTLENECK PROFILE: prefill = (np-1) forwards with ONE host sync; decode below = one sync +
+    // a full-vocab D2H per token. prefill_ms/token << decode_ms/token => sync/D2H-bound (cheap
+    // batched verify wins); ~equal => per-forward compute-bound (needs batched-GEMM).
     let np = prompt.len();
+    let t_pf = std::time::Instant::now();
     if unsafe { gemma4_kv_prefill(s, prompt.as_ptr(), (np - 1) as c_int) } != 0 {
         return Err("eagle: prefill failed".to_string());
     }
+    let pf_ms = t_pf.elapsed().as_secs_f64() * 1000.0;
+    eprintln!("[eagle] PROFILE prefill {} tok in {:.1}ms = {:.1} ms/tok (one host sync, no per-tok logits D2H)",
+              np - 1, pf_ms, pf_ms / (np - 1).max(1) as f64);
     let mut last = prompt[np - 1];
 
     // K-step EAGLE DRIVE: draft K tokens via the recurrence (h_{k+1} = draft post_proj
@@ -244,6 +262,39 @@ pub fn run_eagle_accept(
     }
     suppress_logits(&mut logits);
     let mut g = argmax(&logits);
+
+    // BOTTLENECK ISOLATION (SP_EAGLE_PROFILE=1): B sequential decode_logits (B syncs + B full-vocab
+    // D2H) vs ONE gemma4_kv_decode_batch(B) (one sync). Same B tokens, same start (rewind between).
+    // ratio >> 1 => per-token overhead is collapsible (batched verify wins without batched-GEMM).
+    if std::env::var("SP_EAGLE_PROFILE").as_deref() == Ok("1") {
+        let bb = 8usize;
+        let probe_toks: Vec<i32> = (0..bb).map(|_| last).collect();
+        let mut blog = vec![0.0f32; bb * vocab];
+        // sequential
+        let ts = std::time::Instant::now();
+        for &t in &probe_toks { let _ = unsafe { gemma4_kv_decode_logits(s, t, logits.as_mut_ptr()) }; }
+        let seq_ms = ts.elapsed().as_secs_f64() * 1000.0;
+        unsafe { gemma4_kv_rewind(s, bb as c_int) };
+        // batched
+        let tb = std::time::Instant::now();
+        let rc = unsafe { gemma4_kv_decode_batch(s, probe_toks.as_ptr(), bb as c_int, blog.as_mut_ptr(), std::ptr::null_mut()) };
+        let bat_ms = tb.elapsed().as_secs_f64() * 1000.0;
+        unsafe { gemma4_kv_rewind(s, bb as c_int) };
+        eprintln!("[eagle] PROFILE B={bb}: {bb}x seq decode_logits = {seq_ms:.1}ms ({:.1} ms/tok) | 1x decode_batch = {bat_ms:.1}ms ({:.1} ms/tok) | speedup {:.2}x  rc={rc}",
+                  seq_ms / bb as f64, bat_ms / bb as f64, seq_ms / bat_ms.max(0.001));
+        // draft-step cost (the suspected real bottleneck): time bb draft_steps (no KV advance).
+        let mut hn = vec![0.0f32; hidden];
+        let mut dh = feat.clone();
+        let td = std::time::Instant::now();
+        for _ in 0..bb {
+            let mut dk: c_int = -1;
+            unsafe { gemma4_draft_step(s, dh.as_ptr(), last, suppress.as_ptr(), suppress.len() as c_int, &mut dk, hn.as_mut_ptr()); }
+            std::mem::swap(&mut dh, &mut hn);
+        }
+        let draft_ms = td.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("[eagle] PROFILE B={bb}: draft_step = {draft_ms:.1}ms ({:.1} ms/step)  vs decode {:.1} ms/tok  -> draft/decode = {:.2}x",
+                  draft_ms / bb as f64, seq_ms / bb as f64, (draft_ms / bb as f64) / (seq_ms / bb as f64).max(0.001));
+    }
 
     let t0 = std::time::Instant::now();
     let mut target_tokens = 0usize;

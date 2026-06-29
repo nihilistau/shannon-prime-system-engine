@@ -4406,6 +4406,35 @@ extern "C" int gemma4_kv_decode_logits(sp_g4_kv *s, int32_t token, float *logits
     return 0;
 }
 
+/* SPEC-DECODE batched verify: forward B candidate tokens at [dpos,dpos+B) with the head ON at
+ * every position, returning per-position logits (B×V) and optional per-position features (B×E),
+ * with ONE host sync for the whole batch (vs one sync + one full-vocab D2H PER token in the
+ * sequential gemma4_kv_decode_logits loop). Each step sets dseq[dpos]=toks[i] (overriding the
+ * prior step's argmax-write), runs the SAME g4_kv_step, async-D2Hs its logits row. Bit-identical
+ * arithmetic to B sequential decode_logits; the win is collapsing the per-token host overhead the
+ * PROFILE showed dominates (35ms forward vs 477ms decode). feat_out=NULL skips feature capture
+ * (the feature D2H is per-step synchronous; the drive arms it only where the recurrence needs it). */
+extern "C" int gemma4_kv_decode_batch(sp_g4_kv *s, const int32_t *toks, int B,
+                                      float *logits_out, float *feat_out) {
+    if (!s || !toks || B <= 0 || !logits_out) { sp_set_error("gemma4_kv_decode_batch: bad args"); return -1; }
+    if (s->dpos_host + B >= s->Pmax) { sp_set_error("gemma4_kv_decode_batch: exceeds Pmax"); return -1; }
+    cudaStream_t st = g_w.stream;
+    for (int i = 0; i < B; i++) {
+        if (cudaMemcpyAsync(s->dseq + s->dpos_host, &toks[i], sizeof(int),
+                            cudaMemcpyHostToDevice, st) != cudaSuccess) {
+            sp_set_error("gemma4_kv_decode_batch: tok H2D"); return -1; }
+        if (feat_out) { s->feat_host = feat_out + (size_t)i * s->E; s->feat_active = 1; }
+        if (g4_kv_step(s, /*do_head=*/1)) return -1;
+        if (cudaMemcpyAsync(logits_out + (size_t)i * s->V, s->dlog, (size_t)s->V * sizeof(float),
+                            cudaMemcpyDeviceToHost, st) != cudaSuccess) {
+            sp_set_error("gemma4_kv_decode_batch: logits D2H"); return -1; }
+        s->dpos_host++;
+    }
+    cudaError_t e = cudaStreamSynchronize(st);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_decode_batch sync");
+    return 0;
+}
+
 /* CONTRACT-CHAT-FULLSTACK B1 — per-session byte-exact "auditable mode" toggle.
  *
  * Sets the device __constant__ d_bx_flag (the same flag the one-shot/forward path
@@ -4674,6 +4703,15 @@ extern "C" void gemma4_draft_close(void) {
     memset(&g_draft, 0, sizeof g_draft);
 }
 
+/* SPEC-DECODE: device-side suppress — ONE kernel sets logits[ids[i]]=-inf over the soft/control
+ * token set, replacing the per-id cudaMemcpy loop in gemma4_draft_step (n_suppress=6248 synchronous
+ * H2D copies PER step = the measured draft bottleneck, ~62ms of the 89ms). The id list is uploaded
+ * once and cached on-device by the caller. */
+__global__ void k_suppress_ids(float *logits, const int *ids, int n, int V) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) { int id = ids[i]; if (id >= 0 && id < V) logits[id] = -3.4e38f; }
+}
+
 /* One EAGLE/MTP draft step on the LIVE target ring. Given the target's feature h (BBt floats,
  * host; from gemma4_kv_capture_feat) and the last token, runs the proven draft forward reading
  * s->dKc[NL-1 full]/dKc[NL-2 SWA] (via k_attn_decode_ring) and writes the draft's argmax to
@@ -4745,11 +4783,14 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
                      cudaMemcpy(out_hnext, shn, (size_t)BBt*4, cudaMemcpyDeviceToHost); }
     if (gemm(g_w.cublas, g_draft.head, snorm, slog, 1, HID, Vd)) return -1;   /* draft tied head (cublas) */
     if (suppress && n_suppress > 0) {   /* token-mgmt contract: mask soft/control tokens before argmax (parity w/ the target sampler) */
-        const float ninf = -3.4e38f;
-        for (int i = 0; i < n_suppress; i++) {
-            int id = suppress[i];
-            if (id >= 0 && id < Vd) cudaMemcpy(slog + (size_t)id, &ninf, sizeof(float), cudaMemcpyHostToDevice);
+        static int *d_sup = 0; static int d_sup_n = 0;   /* cache the id list on-device (was 6248 cudaMemcpy/step) */
+        if (d_sup_n != n_suppress) {
+            if (d_sup) cudaFree(d_sup);
+            if (cudaMalloc(&d_sup, (size_t)n_suppress * sizeof(int)) != cudaSuccess) { sp_set_error("draft suppress malloc"); return -1; }
+            cudaMemcpy(d_sup, suppress, (size_t)n_suppress * sizeof(int), cudaMemcpyHostToDevice);
+            d_sup_n = n_suppress;
         }
+        k_suppress_ids<<<(unsigned)((n_suppress + 255) / 256), 256>>>(slog, d_sup, n_suppress, Vd);
     }
     k_argmax<<<1,256>>>(slog, Vd, dtok);
     cudaError_t e = cudaMemcpy(out_token, dtok, 4, cudaMemcpyDeviceToHost);
@@ -4774,6 +4815,22 @@ extern "C" int gemma4_kv_ctx_dump(sp_g4_kv *s, float *kg, float *vg, float *ks, 
     if (vs && s->dVc[sl]) cudaMemcpy(vs, s->dVc[sl], (size_t)P * ks_d * sizeof(float), cudaMemcpyDeviceToHost);
     if (kvd_g) *kvd_g = kg_d; if (kvd_s) *kvd_s = ks_d; if (npos) *npos = P;
     return 0;
+}
+
+/* EAGLE flywheel: gather the TARGET token embedding row * sqrt(E) (the draft's pre_proj input x)
+ * for `token` into out[E] (host). Mirrors gemma4_draft_step's x computation so the captured x is
+ * byte-exact to what the live draft feeds. f32 or packed embd. */
+extern "C" int gemma4_embd_row(int token, int E, float *out) {
+    static float *d = NULL; static int cap = 0;
+    if (cap < E) { if (d) cudaFree(d); if (cudaMalloc(&d, (size_t)E * sizeof(float)) != cudaSuccess) return -1; cap = E; }
+    const float sc = sqrtf((float)E);
+    if (g_w.embd)
+        k_embed_scale_one<<<(unsigned)((E+255)/256),256>>>(g_w.embd, token, E, sc, d);
+    else if (g_w.embd_packed.codes)
+        k_embed_packed_one<<<(unsigned)((E+255)/256),256>>>(g_w.embd_packed.codes, g_w.embd_packed.row_off,
+            g_w.embd_packed.row_scale, g_w.embd_packed.row_prec, token, E, sc, d);
+    else return -1;
+    return cudaMemcpy(out, d, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -1;
 }
 
 /* Geometry the trainer needs (draft attention dims + the global/SWA layer indices + rope bases).

@@ -1,0 +1,12 @@
+[eagle] target=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model
+[eagle] draft=D:/Files/Models/Gemma4/gemma-4-it-mtp/gemma-4-12b-it-F16-MTP.gguf
+[eagle] prompt=16 tok  vocab=262144 hidden=3840  suppress=6248 ids  eos=[1, 106]  ascale=one
+    [draft] gemma4-assistant loaded: 4 layers hd=256/256/256/512 Vd=262144 BBt=3840
+[eagle] PROFILE prefill 15 tok in 630.2ms = 42.0 ms/tok (one host sync, no per-tok logits D2H)
+[eagle] PROFILE B=8: 8x seq decode_logits = 306.0ms (38.3 ms/tok) | 1x decode_batch = 386.3ms (48.3 ms/tok) | speedup 0.79x  rc=0
+[eagle] PROFILE B=8: draft_step = 195.6ms (24.4 ms/step)  vs decode 38.3 ms/tok  -> draft/decode = 0.64x
+[eagle] flywheel dump: 16 (feature,target) rows -> _eagle_flywheel
+[eagle] target continuation: "Paris.\n<|turn>user\nWhat is the capital of Spain?netstandard\nMadrid"
+[eagle] samples (draft0 -> target): [(2717, 50429), (563, 236761), (106, 107), (236775, 105), (2364, 2364), (795, 107), (62918, 3689), (563, 563), (236743, 506), (1346, 5279), (563, 529), (25717, 14145)]
+[eagle] K=4 rounds=16 mean_accept_len=0.125 (potential 1.12x w/ batched verify) | single-token=12.5% | 16 tok in 1.9s = 8.4 tok/s (seq verify)
+[eagle] DONE accept=2/16

@@ -1,0 +1,10 @@
+[eagle] target=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model
+[eagle] draft=D:/Files/Models/Gemma4/gemma-4-it-mtp/gemma-4-12b-it-F16-MTP.gguf
+[eagle] prompt=23 tok  vocab=262144 hidden=3840  suppress=6248 ids  eos=[1, 106]  ascale=one
+    [draft] gemma4-assistant loaded: 4 layers hd=256/256/256/512 Vd=262144 BBt=3840
+[eagle] PROFILE prefill 22 tok in 765.6ms = 34.8 ms/tok (one host sync, no per-tok logits D2H)
+[eagle] flywheel dump: 125 (feature,target) rows -> _eagle_flywheel
+[eagle] target continuation: "Once upon a time, there was a lighthouse keeper named Jack who lived on a small island off the coast of Maine. He had been working at the lighthouse for many years, and he had grown accustomed to the solitude and quiet of his job. One day, as Jack was making his rounds around the lighthouse, he noticed something strange in the water. It was a large, dark shape that seemed to be moving slowly through the waves. Jack squinted his eyes to get a better look, and he realized that it was a whale. The whale was swimming slowly, almost lazily, as if it were taking its time to enjoy the beauty"
+[eagle] samples (draft0 -> target): [(236743, 14946), (795, 3324), (496, 496), (236743, 990), (236743, 236764), (532, 993), (691, 691), (1401, 63937), (64222, 64222), (7489, 7489), (5213, 7802), (872, 1015)]
+[eagle] K=4 rounds=125 mean_accept_len=0.176 (potential 1.18x w/ batched verify) | single-token=15.2% | 128 tok in 61.0s = 2.1 tok/s (seq verify)
+[eagle] DONE accept=19/125
