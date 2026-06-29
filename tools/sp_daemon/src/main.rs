@@ -328,6 +328,20 @@ async fn main() {
             Err(e) => { eprintln!("[li-return] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_TH_LOOP — closed loop: latent -> tool head -> fire tool -> return-path inject -> continue.
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_TH_LOOP").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        let head = std::env::var("SP_TH_HEAD").unwrap_or_else(|_| "_tool_head.bin".to_string());
+        if model.is_empty() || tok.is_empty() {
+            eprintln!("SP_TH_LOOP=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH (+ SP_TH_HEAD, SP_LI_LABELS)"); std::process::exit(2);
+        }
+        match eagle_accept::run_th_loop(&model, &tok, &head) {
+            Ok(()) => { eprintln!("[th-loop] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[th-loop] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 

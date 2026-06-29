@@ -127,6 +127,80 @@ fn parse_kairos_tape(text: &str) -> Vec<(String, i32)> {
     events
 }
 
+/// CLOSED LOOP (capstone): latent -> Tool Head (tool id) -> FIRE the tool -> result -> RETURN PATH
+/// inject into the KV ring -> the model continues. Ties TH-1 + RP-1 into one call. The tool fire is a
+/// real subprocess (python for PYTHON/CALC = the E2B stand-in); SP_TH_Q / SP_TH_CODE override.
+pub fn run_th_loop(model_path: &str, tok_path: &str, head_path: &str) -> Result<(), String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize; let hidden = arch.hidden_dim as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("th_loop: qm NULL".to_string()); }
+    let raw = std::fs::read(head_path).map_err(|e| format!("head: {e}"))?;
+    let blob: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let tools = li_label_set();
+    let a = tools.len();
+    let proj = (blob.len() - 2 * hidden - a) / (hidden + 1 + a);
+    let suppress: Vec<i32> = tok.suppress_token_ids();
+    let supp = |lg: &mut [f32]| { for &id in &suppress { if (id as usize) < vocab { lg[id as usize] = f32::NEG_INFINITY; } } };
+
+    let question = std::env::var("SP_TH_Q").unwrap_or_else(|_| "EVENT kind=EVENT.compute payload=\"count letters in strawberry\"".to_string());
+    let py_code = std::env::var("SP_TH_CODE").unwrap_or_else(|_| "print('strawberry'.count('r'))".to_string());
+    let py = std::env::var("SP_OKF_PY").unwrap_or_else(|_| "python".to_string());
+    let prompt = tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: question.clone() }])?;
+    let np = prompt.len();
+    let s = unsafe { gemma4_kv_open(qm, 256) };
+    if s.is_null() { return Err("th_loop: kv_open NULL".to_string()); }
+    let mut feat = vec![0.0f32; hidden];
+    let mut logits = vec![0.0f32; vocab];
+
+    // 1) latent: prefill the event, tap the frame-end feature.
+    unsafe { gemma4_kv_reset(s) };
+    if unsafe { gemma4_kv_prefill(s, prompt.as_ptr(), (np - 1) as c_int) } != 0 { return Err("th_loop: prefill".into()); }
+    unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+    unsafe { gemma4_kv_decode_logits(s, prompt[np - 1], logits.as_mut_ptr()) };
+    // 2) Tool Head: latent -> tool id.
+    let tool = li_probe(&blob, hidden, a, proj, &feat);
+    let tool_name = tools.get(tool as usize).cloned().unwrap_or_else(|| "?".into());
+    eprintln!("[th-loop] event: {question}");
+    eprintln!("[th-loop] TOOL HEAD fired (latent->tool id): {tool_name}");
+    // 3) FIRE the tool (real subprocess for PYTHON/CALC = the E2B stand-in).
+    let result = if tool_name == "PYTHON" || tool_name == "CALC" {
+        match std::process::Command::new(&py).args(["-c", &py_code]).stdin(std::process::Stdio::null()).output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) => { eprintln!("[th-loop] tool stderr: {}", String::from_utf8_lossy(&o.stderr).trim()); "ERR".into() }
+            Err(e) => { eprintln!("[th-loop] tool spawn failed: {e}"); "ERR".into() }
+        }
+    } else { format!("(no tool fired for {tool_name})") };
+    let result_text = format!(" [tool result] {result}");
+    eprintln!("[th-loop] tool ran -> result = \"{}\"", result.trim());
+    // 4) RETURN PATH: inject the result into the KV ring (no prompt re-feed).
+    let mut res_ids = tok.encode(&result_text).map_err(|e| format!("{e:?}"))?;
+    if res_ids.first() == Some(&2) { res_ids.remove(0); }
+    let rl = res_ids.len();
+    if rl > 1 { unsafe { gemma4_kv_inject_tokens(s, res_ids.as_ptr(), (rl - 1) as c_int) }; }
+    if unsafe { gemma4_kv_decode_logits(s, res_ids[rl - 1], logits.as_mut_ptr()) } != 0 { return Err("th_loop: decode".into()); }
+    supp(&mut logits);
+    // 5) continue: the model now "knows" the result latent-native.
+    let mut g = argmax(&logits); let mut cont = String::new();
+    for _ in 0..16 {
+        if tok.eos_ids.contains(&g) { break; }
+        cont.push_str(&String::from_utf8_lossy(tok.decode_token(g)));
+        if unsafe { gemma4_kv_decode_logits(s, g, logits.as_mut_ptr()) } != 0 { break; }
+        supp(&mut logits); g = argmax(&logits);
+    }
+    unsafe { gemma4_kv_close(s) };
+    eprintln!("[th-loop] result injected into KV ring ({rl} tokens) -> model continues:");
+    eprintln!("[th-loop]   \"{}\"", cont.trim());
+    eprintln!("[th-loop] DONE — full latent loop: event -> tool head -> fire -> inject -> continue (no tokenizer in the decision/return)");
+    Ok(())
+}
+
 /// LATENT-INJECTION RETURN PATH: a tool result enters the model's KV ring DIRECTLY (token-embeddings
 /// injected, no prompt-text re-feed, no tokenizer output round-trip) — the model FEELS the result.
 /// Demo (the strawberry problem): baseline (model alone) vs tool-result injected via

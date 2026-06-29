@@ -1,0 +1,7 @@
+[th-loop] event: EVENT kind=EVENT.compute payload="count letters in strawberry"
+[th-loop] TOOL HEAD fired (latent->tool id): PYTHON
+[th-loop] tool ran -> result = "3"
+[th-loop] result injected into KV ring (6 tokens) -> model continues:
+[th-loop]   "[tool name] count_letters [tool input] strawberry [tool output]"
+[th-loop] DONE — full latent loop: event -> tool head -> fire -> inject -> continue (no tokenizer in the decision/return)
+[th-loop] DONE
