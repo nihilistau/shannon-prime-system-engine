@@ -45,28 +45,46 @@ TOOL = {
 # ===================== ACTION SPACE =====================
 ACTION = {
  "none": "NO_OP",
+ "weights": {"KEEP":3,"ACTION":3,"FORGET":1,"E2B_TOOL":1},  # bias samples toward the weak classes
  "invoke": {
    "train": {
      "KEEP":    ["remember that the staging password is hunter2","note for later the client prefers email over calls",
-                 "save this fact our prod region is us-east-1","keep in mind the deadline moved to the 14th"],
-     "FORGET":  ["forget what i told you about the password","delete the note about the client preference","scratch that fact about the region"],
-     "E2B_TOOL":["run this python snippet for me","execute the test suite now","compute the checksum of this file"],
-     "ACTION":  ["send the status email to the team","open the dashboard now","deploy the build to staging"]},
+                 "save this fact our prod region is us-east-1","keep in mind the deadline moved to the 14th",
+                 "remember my flight is at 6am tuesday","save that the wifi code is bluefox42",
+                 "note that the invoice number is 8841","remember the spare key is under the third pot",
+                 "store the fact that sarah owns the billing account","keep a record that the contract renews in march",
+                 "remember the door pin is 4417","jot down that the api base url changed"],
+     "FORGET":  ["forget what i told you about the password","delete the note about the client preference",
+                 "scratch that fact about the region","forget the deadline i mentioned earlier",
+                 "erase the record about the wifi code","drop the note about the invoice number"],
+     "E2B_TOOL":["run this python snippet for me","execute the test suite now","compute the checksum of this file",
+                 "run the migration script","execute this query in the sandbox","build and run the container"],
+     "ACTION":  ["send the status email to the team","open the dashboard now","deploy the build to staging",
+                 "post the update to the channel","schedule the meeting for friday","create a ticket for this bug",
+                 "archive the closed threads","restart the web service","assign this task to priya"]},
    "ood": {
      "KEEP":    ["log that the api key rotates every 30 days","don't let me forget the meeting is at noon thursday",
-                 "store this the backup runs at 2am","make a note that vendor x is approved"],
-     "FORGET":  ["remove the entry about the api key","discard what i said earlier about the deadline","wipe the note on the backup schedule"],
-     "E2B_TOOL":["spin up the sandbox and run it","go ahead and fire the script","evaluate this expression in the sandbox"],
-     "ACTION":  ["push the release out now","message the on-call about this","launch the report generator"]}},
+                 "store this the backup runs at 2am","make a note that vendor x is approved",
+                 "remember the server room code is 7723","save that my manager signed off on the budget",
+                 "note down that the license expires in q3","keep track of the fact that build 42 is the golden one",
+                 "remember the new office opens in may","record that the db password changed today"],
+     "FORGET":  ["remove the entry about the api key","discard what i said earlier about the deadline",
+                 "wipe the note on the backup schedule","forget the server room code i gave you","clear the record about the license"],
+     "E2B_TOOL":["spin up the sandbox and run it","go ahead and fire the script","evaluate this expression in the sandbox",
+                 "kick off the benchmark run","execute the cleanup job now"],
+     "ACTION":  ["push the release out now","message the on-call about this","launch the report generator",
+                 "file an issue for the regression","book the conference room for 3pm","roll back the last deploy","publish the changelog"]}},
  "nearmiss": {  # reuse trigger verbs WITHOUT a command -> NO_OP (the mention-vs-invoke trap)
    "train":["memory is such a hard problem in these systems","i keep forgetting things lately",
             "we should automate more of this someday","running tests is always tedious",
             "i wonder if we should remember more context","deploys make me nervous honestly",
-            "i lost my keys again this morning"],
+            "i lost my keys again this morning","notes pile up faster than i can read them",
+            "saving everything just creates clutter","i can never remember where i put things"],
    "ood":  ["the whole forget-versus-remember thing is fascinating","i lost my train of thought there",
             "tooling has come a long way","sending emails all day is exhausting",
             "i should really clean up my notes sometime","execution is the hard part of any plan",
-            "she told me to deploy more empathy lol"]},
+            "she told me to deploy more empathy lol","my memory is terrible before coffee",
+            "scheduling is the bane of my existence","i keep a record of nothing these days"]},
  "clean": {"train":["status ok","just thinking","carry on","good morning","hmm"],
            "ood":  ["all quiet","sounds good","noted","morning","ok"]},
 }
@@ -93,7 +111,8 @@ def main():
         if r < 0.34:                      # near-miss -> idle class (the safety boundary, heaviest)
             rows.append(("EVENT.chat.nearmiss", rng.choice(nearmiss), none))
         elif r < 0.74:                    # invoke (paraphrased / sometimes noisy) -> the capability
-            t = rng.choice(list(inv)); p = rng.choice(inv[t])
+            cls = list(inv); w = [S.get("weights", {}).get(c, 1) for c in cls]
+            t = rng.choices(cls, weights=w, k=1)[0]; p = rng.choice(inv[t])
             if rng.random() < 0.4: p = noise(p, rng)
             rows.append((f"EVENT.{t.lower()}.invoke", p, t))
         else:                             # clean idle

@@ -1,202 +1,222 @@
 # HARD train tape [action] (disjoint banks, seed-split). near-miss->NO_OP.
 # tick kind payload salience expect
-0     EVENT.idle.clean         "status ok"                                     0.52  NO_OP
-1     EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.62  KEEP
-2     EVENT.idle.clean         "hmm"                                           0.84  NO_OP
-3     EVENT.chat.nearmiss      "i keep forgetting things lately"               0.57  NO_OP
-4     EVENT.e2b_tool.invoke    "execute the test suite now"                    0.78  E2B_TOOL
-5     EVENT.idle.clean         "status ok"                                     0.77  NO_OP
-6     EVENT.chat.nearmiss      "we should automate more of this someday"       0.72  NO_OP
-7     EVENT.keep.invoke        "note for later the client prefers email over calls" 0.42  KEEP
-8     EVENT.forget.invoke      "scratch that fact about the region"            0.46  FORGET
-9     EVENT.action.invoke      "deploy the build to staging"                   0.71  ACTION
-10    EVENT.idle.clean         "hmm"                                           0.42  NO_OP
-11    EVENT.keep.invoke        "keep in mind the deadline moved to the 14th"   0.82  KEEP
-12    EVENT.keep.invoke        "note for late teh client prefers email over calls" 0.54  KEEP
-13    EVENT.chat.nearmiss      "i lost my keys again this morning"             0.52  NO_OP
-14    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.56  NO_OP
-15    EVENT.chat.nearmiss      "we should automate more of this someday"       0.83  NO_OP
-16    EVENT.forget.invoke      "delete the note about the client preference"   0.46  FORGET
-17    EVENT.e2b_tool.invoke    "run this python snippet for me"                0.42  E2B_TOOL
-18    EVENT.idle.clean         "hmm"                                           0.42  NO_OP
-19    EVENT.action.invoke      "wait send the status email to the team"        0.47  ACTION
-20    EVENT.idle.clean         "good morning"                                  0.78  NO_OP
-21    EVENT.action.invoke      "deploy the build to staging"                   0.41  ACTION
-22    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.66  NO_OP
-23    EVENT.keep.invoke        "remember that teh staging password is hunter2" 0.4   KEEP
-24    EVENT.idle.clean         "good morning"                                  0.59  NO_OP
-25    EVENT.idle.clean         "just thinking"                                 0.58  NO_OP
-26    EVENT.idle.clean         "status ok"                                     0.7   NO_OP
-27    EVENT.idle.clean         "good morning"                                  0.77  NO_OP
-28    EVENT.action.invoke      "send the status email to the team"             0.56  ACTION
-29    EVENT.forget.invoke      "scratch that fact about the region"            0.51  FORGET
-30    EVENT.idle.clean         "carry on"                                      0.85  NO_OP
-31    EVENT.e2b_tool.invoke    "execute the test suite now"                    0.48  E2B_TOOL
-32    EVENT.chat.nearmiss      "running tests is always tedious"               0.65  NO_OP
-33    EVENT.idle.clean         "hmm"                                           0.63  NO_OP
-34    EVENT.idle.clean         "hmm"                                           0.54  NO_OP
-35    EVENT.idle.clean         "good morning"                                  0.54  NO_OP
-36    EVENT.idle.clean         "just thinking"                                 0.89  NO_OP
-37    EVENT.chat.nearmiss      "running tests is always tedious"               0.65  NO_OP
-38    EVENT.chat.nearmiss      "i keep forgetting things lately"               0.45  NO_OP
-39    EVENT.idle.clean         "good morning"                                  0.49  NO_OP
-40    EVENT.keep.invoke        "keep in mind the deadline moved to the 14th"   0.45  KEEP
-41    EVENT.action.invoke      "deploy the build to staging"                   0.49  ACTION
-42    EVENT.forget.invoke      "forget what i told you about the password"     0.44  FORGET
-43    EVENT.idle.clean         "just thinking"                                 0.78  NO_OP
-44    EVENT.forget.invoke      "forget what i told you about the password"     0.46  FORGET
-45    EVENT.e2b_tool.invoke    "pls run this python snippet for me"            0.44  E2B_TOOL
-46    EVENT.action.invoke      "deploy the build to staging"                   0.54  ACTION
-47    EVENT.idle.clean         "status ok"                                     0.8   NO_OP
-48    EVENT.idle.clean         "status ok"                                     0.53  NO_OP
-49    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.8   NO_OP
-50    EVENT.idle.clean         "just thinking"                                 0.68  NO_OP
-51    EVENT.action.invoke      "send the status email to the team"             0.41  ACTION
-52    EVENT.idle.clean         "hmm"                                           0.88  NO_OP
-53    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.78  NO_OP
-54    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.76  NO_OP
-55    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.55  NO_OP
-56    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.89  NO_OP
-57    EVENT.idle.clean         "good morning"                                  0.69  NO_OP
-58    EVENT.idle.clean         "hmm"                                           0.86  NO_OP
-59    EVENT.forget.invoke      "scratch that fact about the region"            0.52  FORGET
-60    EVENT.keep.invoke        "note for later the client prefers email over calls" 0.54  KEEP
-61    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.41  NO_OP
-62    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.84  NO_OP
-63    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.55  NO_OP
-64    EVENT.idle.clean         "hmm"                                           0.65  NO_OP
-65    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.65  NO_OP
-66    EVENT.idle.clean         "status ok"                                     0.47  NO_OP
-67    EVENT.action.invoke      "deploy the build to staging"                   0.82  ACTION
-68    EVENT.idle.clean         "good morning"                                  0.51  NO_OP
-69    EVENT.chat.nearmiss      "running tests is always tedious"               0.83  NO_OP
-70    EVENT.idle.clean         "good morning"                                  0.52  NO_OP
-71    EVENT.forget.invoke      "forget what i told you about the password"     0.51  FORGET
-72    EVENT.chat.nearmiss      "i keep forgetting things lately"               0.85  NO_OP
-73    EVENT.action.invoke      "send the status email to the team"             0.48  ACTION
-74    EVENT.idle.clean         "carry on"                                      0.57  NO_OP
-75    EVENT.forget.invoke      "scratch that fact about the region"            0.63  FORGET
-76    EVENT.chat.nearmiss      "i lost my keys again this morning"             0.64  NO_OP
-77    EVENT.idle.clean         "carry on"                                      0.58  NO_OP
-78    EVENT.e2b_tool.invoke    "run this python snippet for me"                0.46  E2B_TOOL
-79    EVENT.chat.nearmiss      "i lost my keys again this morning"             0.67  NO_OP
-80    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.41  NO_OP
-81    EVENT.idle.clean         "good morning"                                  0.66  NO_OP
-82    EVENT.chat.nearmiss      "we should automate more of this someday"       0.41  NO_OP
-83    EVENT.e2b_tool.invoke    "compute the checksum of this file"             0.83  E2B_TOOL
-84    EVENT.idle.clean         "just thinking"                                 0.87  NO_OP
-85    EVENT.idle.clean         "status ok"                                     0.74  NO_OP
-86    EVENT.e2b_tool.invoke    "um compute teh checksum of this file"          0.66  E2B_TOOL
-87    EVENT.chat.nearmiss      "i lost my keys again this morning"             0.82  NO_OP
-88    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.49  NO_OP
-89    EVENT.idle.clean         "good morning"                                  0.63  NO_OP
-90    EVENT.action.invoke      "pls open the dashboard now"                    0.83  ACTION
-91    EVENT.e2b_tool.invoke    "execute the test suite now"                    0.41  E2B_TOOL
-92    EVENT.keep.invoke        "remember that the staging password is hunter2" 0.6   KEEP
-93    EVENT.chat.nearmiss      "we should automate more of this someday"       0.84  NO_OP
-94    EVENT.idle.clean         "good morning"                                  0.43  NO_OP
-95    EVENT.forget.invoke      "uh forget wha i told you about the password"   0.56  FORGET
-96    EVENT.forget.invoke      "delete the note about the client preference"   0.66  FORGET
-97    EVENT.action.invoke      "deploy the build to staging"                   0.64  ACTION
-98    EVENT.chat.nearmiss      "running tests is always tedious"               0.57  NO_OP
-99    EVENT.idle.clean         "good morning"                                  0.65  NO_OP
-100   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.59  NO_OP
-101   EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.82  KEEP
-102   EVENT.idle.clean         "good morning"                                  0.51  NO_OP
-103   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.41  E2B_TOOL
-104   EVENT.idle.clean         "carry on"                                      0.72  NO_OP
-105   EVENT.chat.nearmiss      "we should automate more of this someday"       0.8   NO_OP
-106   EVENT.action.invoke      "uh send teh status email to the team"          0.53  ACTION
-107   EVENT.idle.clean         "hmm"                                           0.41  NO_OP
-108   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.4   NO_OP
-109   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.51  NO_OP
-110   EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.9   KEEP
-111   EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.6   NO_OP
-112   EVENT.forget.invoke      "scratch that fact about the region"            0.44  FORGET
-113   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.68  NO_OP
-114   EVENT.idle.clean         "just thinking"                                 0.44  NO_OP
-115   EVENT.action.invoke      "send the status email to the team"             0.74  ACTION
-116   EVENT.idle.clean         "just thinking"                                 0.76  NO_OP
-117   EVENT.action.invoke      "um openthe dashboard now"                      0.45  ACTION
-118   EVENT.idle.clean         "carry on"                                      0.41  NO_OP
-119   EVENT.chat.nearmiss      "we should automate more of this someday"       0.65  NO_OP
-120   EVENT.idle.clean         "hmm"                                           0.59  NO_OP
-121   EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.7   NO_OP
-122   EVENT.idle.clean         "status ok"                                     0.66  NO_OP
-123   EVENT.idle.clean         "status ok"                                     0.67  NO_OP
-124   EVENT.idle.clean         "just thinking"                                 0.89  NO_OP
-125   EVENT.keep.invoke        "remember that the staging password is hunter2" 0.82  KEEP
-126   EVENT.keep.invoke        "remember that the staging password is hunter2" 0.4   KEEP
-127   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.51  NO_OP
-128   EVENT.forget.invoke      "forget what i tld you about the password"      0.74  FORGET
-129   EVENT.chat.nearmiss      "running tests is always tedious"               0.49  NO_OP
-130   EVENT.e2b_tool.invoke    "execute the test suite now"                    0.69  E2B_TOOL
-131   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.57  E2B_TOOL
-132   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.42  NO_OP
-133   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.61  NO_OP
-134   EVENT.keep.invoke        "note for later the client prefers email over calls" 0.71  KEEP
-135   EVENT.action.invoke      "uh deploy the build to staging"                0.7   ACTION
-136   EVENT.idle.clean         "just thinking"                                 0.55  NO_OP
-137   EVENT.e2b_tool.invoke    "execute the test suite now"                    0.46  E2B_TOOL
-138   EVENT.idle.clean         "just thinking"                                 0.86  NO_OP
-139   EVENT.idle.clean         "status ok"                                     0.63  NO_OP
-140   EVENT.idle.clean         "status ok"                                     0.72  NO_OP
-141   EVENT.idle.clean         "status ok"                                     0.74  NO_OP
-142   EVENT.chat.nearmiss      "we should automate more of this someday"       0.85  NO_OP
-143   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.73  NO_OP
-144   EVENT.idle.clean         "just thinking"                                 0.74  NO_OP
-145   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.57  NO_OP
-146   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.81  NO_OP
-147   EVENT.idle.clean         "good morning"                                  0.8   NO_OP
-148   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.88  NO_OP
-149   EVENT.keep.invoke        "note for later the client prefers email over calls" 0.56  KEEP
-150   EVENT.action.invoke      "send the status email to the team"             0.66  ACTION
-151   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.47  E2B_TOOL
-152   EVENT.action.invoke      "deploy the build to staging"                   0.89  ACTION
-153   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.8   NO_OP
-154   EVENT.chat.nearmiss      "we should automate more of this someday"       0.62  NO_OP
-155   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.81  E2B_TOOL
-156   EVENT.idle.clean         "good morning"                                  0.47  NO_OP
-157   EVENT.action.invoke      "open the dashboard now"                        0.57  ACTION
-158   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.87  NO_OP
-159   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.81  NO_OP
-160   EVENT.action.invoke      "wait open the dashboard nw"                    0.63  ACTION
-161   EVENT.action.invoke      "send the status email to the team"             0.56  ACTION
-162   EVENT.forget.invoke      "scratch that fact about the region"            0.7   FORGET
-163   EVENT.keep.invoke        "remember that the staging password is hunter2" 0.87  KEEP
-164   EVENT.idle.clean         "just thinking"                                 0.52  NO_OP
-165   EVENT.forget.invoke      "um delete tehnote about the client preference" 0.84  FORGET
-166   EVENT.chat.nearmiss      "we should automate more of this someday"       0.7   NO_OP
-167   EVENT.chat.nearmiss      "running tests is always tedious"               0.72  NO_OP
-168   EVENT.chat.nearmiss      "we should automate more of this someday"       0.41  NO_OP
-169   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.58  NO_OP
-170   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.88  NO_OP
-171   EVENT.idle.clean         "hmm"                                           0.71  NO_OP
-172   EVENT.keep.invoke        "pls remember that teh staging password is hunter2" 0.78  KEEP
-173   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.56  NO_OP
-174   EVENT.keep.invoke        "remember that the staging password is hunter2" 0.57  KEEP
-175   EVENT.idle.clean         "carry on"                                      0.47  NO_OP
-176   EVENT.idle.clean         "just thinking"                                 0.71  NO_OP
-177   EVENT.e2b_tool.invoke    "execute the test suite now"                    0.67  E2B_TOOL
-178   EVENT.e2b_tool.invoke    "compute the checksum of this file"             0.81  E2B_TOOL
-179   EVENT.forget.invoke      "delete teh note about the client preference"   0.57  FORGET
-180   EVENT.idle.clean         "hmm"                                           0.62  NO_OP
-181   EVENT.forget.invoke      "delete the note about the client preference"   0.62  FORGET
-182   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.64  NO_OP
-183   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.88  NO_OP
-184   EVENT.chat.nearmiss      "we should automate more of this someday"       0.7   NO_OP
-185   EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.87  KEEP
-186   EVENT.idle.clean         "just thinking"                                 0.73  NO_OP
-187   EVENT.idle.clean         "good morning"                                  0.77  NO_OP
-188   EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.45  NO_OP
-189   EVENT.chat.nearmiss      "we should automate more of this someday"       0.59  NO_OP
-190   EVENT.idle.clean         "carry on"                                      0.69  NO_OP
-191   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.8   E2B_TOOL
-192   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.56  NO_OP
-193   EVENT.forget.invoke      "sratch that fact about the region"             0.42  FORGET
-194   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.47  NO_OP
-195   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.69  NO_OP
-196   EVENT.chat.nearmiss      "we should automate more of this someday"       0.73  NO_OP
-197   EVENT.forget.invoke      "delete the note about the client preference"   0.43  FORGET
-198   EVENT.chat.nearmiss      "we should automate more of this someday"       0.79  NO_OP
-199   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.66  NO_OP
+0     EVENT.idle.clean         "status ok"                                     0.81  NO_OP
+1     EVENT.keep.invoke        "note for later the client prefers email over calls" 0.5   KEEP
+2     EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.87  KEEP
+3     EVENT.keep.invoke        "keep a record that the contract renews in march" 0.72  KEEP
+4     EVENT.chat.nearmiss      "we should automate more of this someday"       0.52  NO_OP
+5     EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.82  NO_OP
+6     EVENT.e2b_tool.invoke    "execute the test suite now"                    0.75  E2B_TOOL
+7     EVENT.action.invoke      "ok so deploy teh build to staging"             0.62  ACTION
+8     EVENT.forget.invoke      "forget what i told you about the password"     0.45  FORGET
+9     EVENT.keep.invoke        "note that the invoice number is 8841"          0.64  KEEP
+10    EVENT.keep.invoke        "note for later the client prefers email over calls" 0.78  KEEP
+11    EVENT.forget.invoke      "um forget what i told you about the pasword"   0.88  FORGET
+12    EVENT.chat.nearmiss      "running tests is always tedious"               0.43  NO_OP
+13    EVENT.keep.invoke        "remember the door pin is 4417"                 0.74  KEEP
+14    EVENT.idle.clean         "status ok"                                     0.63  NO_OP
+15    EVENT.action.invoke      "archive teh closed threads"                    0.43  ACTION
+16    EVENT.idle.clean         "carry on"                                      0.7   NO_OP
+17    EVENT.forget.invoke      "forget the deadline i mentioned earlier"       0.74  FORGET
+18    EVENT.idle.clean         "hmm"                                           0.61  NO_OP
+19    EVENT.chat.nearmiss      "running tests is always tedious"               0.86  NO_OP
+20    EVENT.keep.invoke        "remember my flight is at 6am tuesday"          0.65  KEEP
+21    EVENT.idle.clean         "good morning"                                  0.57  NO_OP
+22    EVENT.idle.clean         "just thinking"                                 0.82  NO_OP
+23    EVENT.idle.clean         "status ok"                                     0.68  NO_OP
+24    EVENT.idle.clean         "good morning"                                  0.42  NO_OP
+25    EVENT.action.invoke      "um archive the closed threads"                 0.55  ACTION
+26    EVENT.action.invoke      "archive the closed threads"                    0.9   ACTION
+27    EVENT.idle.clean         "carry on"                                      0.56  NO_OP
+28    EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.52  KEEP
+29    EVENT.idle.clean         "hmm"                                           0.55  NO_OP
+30    EVENT.idle.clean         "hmm"                                           0.84  NO_OP
+31    EVENT.idle.clean         "good morning"                                  0.62  NO_OP
+32    EVENT.idle.clean         "just thinking"                                 0.83  NO_OP
+33    EVENT.chat.nearmiss      "notes pile up faster than i can read them"     0.86  NO_OP
+34    EVENT.chat.nearmiss      "we should automate more of this someday"       0.71  NO_OP
+35    EVENT.idle.clean         "good morning"                                  0.51  NO_OP
+36    EVENT.action.invoke      "assign this tas to priya"                      0.62  ACTION
+37    EVENT.chat.nearmiss      "i lost my keys again this morning"             0.87  NO_OP
+38    EVENT.action.invoke      "open teh dashboard now"                        0.46  ACTION
+39    EVENT.idle.clean         "good morning"                                  0.74  NO_OP
+40    EVENT.idle.clean         "hmm"                                           0.45  NO_OP
+41    EVENT.chat.nearmiss      "saving everything just creates clutter"        0.44  NO_OP
+42    EVENT.keep.invoke        "ok so remember teh door pin is 4417"           0.47  KEEP
+43    EVENT.forget.invoke      "drop the note about the invoice number"        0.8   FORGET
+44    EVENT.idle.clean         "just thinking"                                 0.41  NO_OP
+45    EVENT.chat.nearmiss      "we should automate more of this someday"       0.47  NO_OP
+46    EVENT.idle.clean         "good morning"                                  0.83  NO_OP
+47    EVENT.chat.nearmiss      "i keep forgetting things lately"               0.54  NO_OP
+48    EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.89  NO_OP
+49    EVENT.chat.nearmiss      "notes pile up faster than i can read them"     0.49  NO_OP
+50    EVENT.keep.invoke        "remember the door pin is 4417"                 0.81  KEEP
+51    EVENT.keep.invoke        "note for later the client prefers email over calls" 0.53  KEEP
+52    EVENT.chat.nearmiss      "saving everything just creates clutter"        0.58  NO_OP
+53    EVENT.chat.nearmiss      "running tests is always tedious"               0.53  NO_OP
+54    EVENT.forget.invoke      "erase the record about the wifi code"          0.65  FORGET
+55    EVENT.chat.nearmiss      "i keep forgetting things lately"               0.63  NO_OP
+56    EVENT.action.invoke      "send teh statu email to the team"              0.55  ACTION
+57    EVENT.action.invoke      "ssign this task to priya"                      0.72  ACTION
+58    EVENT.action.invoke      "assign this task to priya"                     0.88  ACTION
+59    EVENT.action.invoke      "assign this task to priya"                     0.53  ACTION
+60    EVENT.keep.invoke        "uh remember the spare key is under the third pot" 0.61  KEEP
+61    EVENT.action.invoke      "send the status email to the team"             0.57  ACTION
+62    EVENT.idle.clean         "carry on"                                      0.57  NO_OP
+63    EVENT.action.invoke      "pls archiv the closed threads"                 0.42  ACTION
+64    EVENT.chat.nearmiss      "i keep forgetting things lately"               0.74  NO_OP
+65    EVENT.chat.nearmiss      "running tests is always tedious"               0.65  NO_OP
+66    EVENT.chat.nearmiss      "i can never remember where i put things"       0.67  NO_OP
+67    EVENT.action.invoke      "schedule the meeting for friday"               0.49  ACTION
+68    EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.81  NO_OP
+69    EVENT.idle.clean         "status ok"                                     0.55  NO_OP
+70    EVENT.chat.nearmiss      "we should automate more of this someday"       0.77  NO_OP
+71    EVENT.chat.nearmiss      "saving everything just creates clutter"        0.66  NO_OP
+72    EVENT.chat.nearmiss      "running tests is always tedious"               0.47  NO_OP
+73    EVENT.action.invoke      "deploy the build to staging"                   0.47  ACTION
+74    EVENT.chat.nearmiss      "we should automate more of this someday"       0.75  NO_OP
+75    EVENT.action.invoke      "archive the closed threads"                    0.73  ACTION
+76    EVENT.idle.clean         "carry on"                                      0.75  NO_OP
+77    EVENT.chat.nearmiss      "i can never remember where i put things"       0.57  NO_OP
+78    EVENT.keep.invoke        "remember the spare key is under the third pot" 0.46  KEEP
+79    EVENT.action.invoke      "create a ticket for this bug"                  0.67  ACTION
+80    EVENT.e2b_tool.invoke    "ok so execute this query in the sandbox"       0.84  E2B_TOOL
+81    EVENT.action.invoke      "uh post the udate to the channel"              0.74  ACTION
+82    EVENT.keep.invoke        "remember my flight is at 6am tuesday"          0.81  KEEP
+83    EVENT.chat.nearmiss      "i can never remember where i put things"       0.56  NO_OP
+84    EVENT.forget.invoke      "drop teh note about the invoice number"        0.54  FORGET
+85    EVENT.idle.clean         "status ok"                                     0.6   NO_OP
+86    EVENT.action.invoke      "restart the web service"                       0.77  ACTION
+87    EVENT.keep.invoke        "uh savethat the wifi code is bluefox42"        0.55  KEEP
+88    EVENT.chat.nearmiss      "i lost my keys again this morning"             0.87  NO_OP
+89    EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.47  NO_OP
+90    EVENT.idle.clean         "hmm"                                           0.79  NO_OP
+91    EVENT.chat.nearmiss      "i keep forgetting things lately"               0.49  NO_OP
+92    EVENT.chat.nearmiss      "saving everything just creates clutter"        0.41  NO_OP
+93    EVENT.e2b_tool.invoke    "compute the checksum of this file"             0.86  E2B_TOOL
+94    EVENT.chat.nearmiss      "notes pile up faster than i can read them"     0.5   NO_OP
+95    EVENT.idle.clean         "just thinking"                                 0.58  NO_OP
+96    EVENT.keep.invoke        "store the fact that sarah owns the billing account" 0.52  KEEP
+97    EVENT.keep.invoke        "keep in mind teh deadline moved to the 14th"   0.42  KEEP
+98    EVENT.action.invoke      "post the update to the channel"                0.48  ACTION
+99    EVENT.keep.invoke        "um note that the invoice number is 8841"       0.76  KEEP
+100   EVENT.idle.clean         "carry on"                                      0.51  NO_OP
+101   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.87  NO_OP
+102   EVENT.idle.clean         "hmm"                                           0.72  NO_OP
+103   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.44  NO_OP
+104   EVENT.idle.clean         "status ok"                                     0.83  NO_OP
+105   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.89  NO_OP
+106   EVENT.chat.nearmiss      "running tests is always tedious"               0.72  NO_OP
+107   EVENT.keep.invoke        "note for later the client prefers email over calls" 0.68  KEEP
+108   EVENT.action.invoke      "send the status email to the team"             0.53  ACTION
+109   EVENT.chat.nearmiss      "running tests is always tedious"               0.6   NO_OP
+110   EVENT.action.invoke      "post th update to the channel"                 0.79  ACTION
+111   EVENT.chat.nearmiss      "notes pile up faster than i can read them"     0.43  NO_OP
+112   EVENT.keep.invoke        "keep in mind the deadline moved to the 14th"   0.62  KEEP
+113   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.47  NO_OP
+114   EVENT.chat.nearmiss      "i can never remember where i put things"       0.83  NO_OP
+115   EVENT.idle.clean         "status ok"                                     0.68  NO_OP
+116   EVENT.idle.clean         "status ok"                                     0.77  NO_OP
+117   EVENT.keep.invoke        "note for later the client prefers email over calls" 0.55  KEEP
+118   EVENT.action.invoke      "assign this task to priya"                     0.59  ACTION
+119   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.56  NO_OP
+120   EVENT.idle.clean         "good morning"                                  0.71  NO_OP
+121   EVENT.idle.clean         "good morning"                                  0.43  NO_OP
+122   EVENT.forget.invoke      "uh erase the record about the wifi code"       0.49  FORGET
+123   EVENT.idle.clean         "just thinking"                                 0.79  NO_OP
+124   EVENT.keep.invoke        "remember the door pin is 4417"                 0.86  KEEP
+125   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.83  NO_OP
+126   EVENT.chat.nearmiss      "notes pile up faster than i can read them"     0.9   NO_OP
+127   EVENT.action.invoke      "open teh dashboard now"                        0.72  ACTION
+128   EVENT.chat.nearmiss      "we should automate more of this someday"       0.87  NO_OP
+129   EVENT.action.invoke      "uh archive he closed threads"                  0.78  ACTION
+130   EVENT.action.invoke      "archive the closed threads"                    0.56  ACTION
+131   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.72  E2B_TOOL
+132   EVENT.forget.invoke      "forget the deadline i mentioned earlier"       0.8   FORGET
+133   EVENT.keep.invoke        "note for later the client prefers email over calls" 0.89  KEEP
+134   EVENT.idle.clean         "good morning"                                  0.41  NO_OP
+135   EVENT.forget.invoke      "ok so drop the note about th invoice number"   0.45  FORGET
+136   EVENT.keep.invoke        "note for later the client prefers email over calls" 0.79  KEEP
+137   EVENT.forget.invoke      "delete the note about the client preference"   0.61  FORGET
+138   EVENT.action.invoke      "post the update to the channel"                0.59  ACTION
+139   EVENT.idle.clean         "good morning"                                  0.8   NO_OP
+140   EVENT.keep.invoke        "note that the invoice number is 8841"          0.9   KEEP
+141   EVENT.idle.clean         "status ok"                                     0.87  NO_OP
+142   EVENT.idle.clean         "status ok"                                     0.86  NO_OP
+143   EVENT.chat.nearmiss      "saving everything just creates clutter"        0.89  NO_OP
+144   EVENT.idle.clean         "hmm"                                           0.45  NO_OP
+145   EVENT.idle.clean         "just thinking"                                 0.67  NO_OP
+146   EVENT.action.invoke      "post tehupdate to the channel"                 0.46  ACTION
+147   EVENT.chat.nearmiss      "notes pile up faster than i can read them"     0.48  NO_OP
+148   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.63  NO_OP
+149   EVENT.chat.nearmiss      "running tests is always tedious"               0.53  NO_OP
+150   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.71  NO_OP
+151   EVENT.idle.clean         "hmm"                                           0.82  NO_OP
+152   EVENT.e2b_tool.invoke    "pls run this python snippet for me"            0.61  E2B_TOOL
+153   EVENT.chat.nearmiss      "we should automate more of this someday"       0.48  NO_OP
+154   EVENT.keep.invoke        "remember that the staging password is hunter2" 0.42  KEEP
+155   EVENT.idle.clean         "carry on"                                      0.56  NO_OP
+156   EVENT.idle.clean         "just thinking"                                 0.76  NO_OP
+157   EVENT.action.invoke      "create a ticket for this bug"                  0.74  ACTION
+158   EVENT.idle.clean         "hmm"                                           0.63  NO_OP
+159   EVENT.chat.nearmiss      "saving everything just creates clutter"        0.76  NO_OP
+160   EVENT.forget.invoke      "erase the record about the wifi code"          0.41  FORGET
+161   EVENT.action.invoke      "post the update to the channel"                0.84  ACTION
+162   EVENT.action.invoke      "deploy the build to staging"                   0.89  ACTION
+163   EVENT.idle.clean         "status ok"                                     0.52  NO_OP
+164   EVENT.chat.nearmiss      "we should automate more of this someday"       0.53  NO_OP
+165   EVENT.idle.clean         "carry on"                                      0.54  NO_OP
+166   EVENT.idle.clean         "good morning"                                  0.57  NO_OP
+167   EVENT.keep.invoke        "wait remember that he staging password is hunter2" 0.87  KEEP
+168   EVENT.action.invoke      "post the update to the channel"                0.43  ACTION
+169   EVENT.idle.clean         "carry on"                                      0.51  NO_OP
+170   EVENT.action.invoke      "wat schedule the meeting for friday"           0.51  ACTION
+171   EVENT.idle.clean         "status ok"                                     0.78  NO_OP
+172   EVENT.keep.invoke        "jot down that the api base url changed"        0.56  KEEP
+173   EVENT.chat.nearmiss      "running tests is always tedious"               0.55  NO_OP
+174   EVENT.chat.nearmiss      "running tests is always tedious"               0.41  NO_OP
+175   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.46  NO_OP
+176   EVENT.action.invoke      "post the update to the channel"                0.48  ACTION
+177   EVENT.e2b_tool.invoke    "run this python snippet for me"                0.79  E2B_TOOL
+178   EVENT.idle.clean         "just thinking"                                 0.41  NO_OP
+179   EVENT.idle.clean         "carry on"                                      0.44  NO_OP
+180   EVENT.chat.nearmiss      "we should automate more of this someday"       0.8   NO_OP
+181   EVENT.action.invoke      "send the status email to the team"             0.67  ACTION
+182   EVENT.forget.invoke      "scratch that fact about the region"            0.44  FORGET
+183   EVENT.idle.clean         "status ok"                                     0.6   NO_OP
+184   EVENT.chat.nearmiss      "memory is such a hard problem in these systems" 0.43  NO_OP
+185   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.79  NO_OP
+186   EVENT.idle.clean         "status ok"                                     0.57  NO_OP
+187   EVENT.keep.invoke        "remember my flight is at 6am tuesday"          0.46  KEEP
+188   EVENT.chat.nearmiss      "running tests is always tedious"               0.76  NO_OP
+189   EVENT.idle.clean         "status ok"                                     0.8   NO_OP
+190   EVENT.chat.nearmiss      "saving everything just creates clutter"        0.46  NO_OP
+191   EVENT.idle.clean         "carry on"                                      0.67  NO_OP
+192   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.5   NO_OP
+193   EVENT.idle.clean         "good morning"                                  0.87  NO_OP
+194   EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.82  NO_OP
+195   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.58  NO_OP
+196   EVENT.chat.nearmiss      "i can never remember where i put things"       0.65  NO_OP
+197   EVENT.chat.nearmiss      "i keep forgetting things lately"               0.85  NO_OP
+198   EVENT.chat.nearmiss      "we should automate more of this someday"       0.43  NO_OP
+199   EVENT.chat.nearmiss      "saving everything just creates clutter"        0.75  NO_OP
+200   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.74  NO_OP
+201   EVENT.keep.invoke        "note that the invoice number is 8841"          0.43  KEEP
+202   EVENT.chat.nearmiss      "i can never remember where i put things"       0.48  NO_OP
+203   EVENT.idle.clean         "good morning"                                  0.81  NO_OP
+204   EVENT.chat.nearmiss      "i wonder if we should remember more context"   0.73  NO_OP
+205   EVENT.chat.nearmiss      "saving everything just creates clutter"        0.87  NO_OP
+206   EVENT.chat.nearmiss      "saving everything just creates clutter"        0.63  NO_OP
+207   EVENT.idle.clean         "just thinking"                                 0.49  NO_OP
+208   EVENT.chat.nearmiss      "i lost my keys again this morning"             0.61  NO_OP
+209   EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.44  NO_OP
+210   EVENT.chat.nearmiss      "running tests is always tedious"               0.89  NO_OP
+211   EVENT.idle.clean         "good morning"                                  0.54  NO_OP
+212   EVENT.chat.nearmiss      "deploys make me nervous honestly"              0.84  NO_OP
+213   EVENT.idle.clean         "good morning"                                  0.71  NO_OP
+214   EVENT.keep.invoke        "save this fact our prod region is us-east-1"   0.46  KEEP
+215   EVENT.keep.invoke        "keep in mind the deadline moved to the 14th"   0.88  KEEP
+216   EVENT.action.invoke      "post the update to the channel"                0.64  ACTION
+217   EVENT.action.invoke      "create a ticket for this bug"                  0.6   ACTION
+218   EVENT.idle.clean         "status ok"                                     0.75  NO_OP
+219   EVENT.idle.clean         "just thinking"                                 0.84  NO_OP

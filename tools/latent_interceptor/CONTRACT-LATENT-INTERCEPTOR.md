@@ -224,3 +224,17 @@ isolated OOD 120 ev -> `_hard_act_ood_data`.
 - Multi-head safety pass status: Tool head GREEN (TS-2), Action head GREEN-safety (TS-3); Memory head needs no
   hardening (address producer downstream of KEEP, gated by the action head, cannot false-fire).
 - Repro: `python make_hard_tape.py hard_train_act.txt 200 train action` / `hard_ood_act.txt 120 ood action`; capture `_hard_act_{train,ood}_cap.bat`; `sp_li_eval.py --head _act_head_hard.bin --data _hard_act_ood_data`.
+
+## TS-3b — Action Head recall lift (G-ACT-HARD v2) GREEN
+Enriched KEEP/ACTION phrasing banks + weighted invoke sampling (KEEP=3,ACTION=3,FORGET=1,E2B=1) so the weak
+classes get enough samples (KEEP train 18->32, KEEP OOD 7->12, ACTION OOD 14->24). Disjoint TRAIN/OOD banks held.
+- **v1 (TS-3) isolated OOD: 0.958, KEEP recall 0.429, KEEP prec 1.000, false-fire 0.000.**
+- **v2 (TS-3b) isolated OOD: 0.979 (137/140), KEEP recall 1.000 (12/12), KEEP prec 0.800, ACTION rec 0.875/prec 1.000,
+  NO_OP prec/rec 1.000, FALSE-FIRE 0.000.**
+- Net: memory gate goes from deaf (43% recall) to complete (100%); cost = minor ACTION<->KEEP active-command blur
+  (KEEP prec 1.000->0.800). Safety property unchanged (NO_OP false-fire 0.000). The blur is command-vs-command, never
+  fires on idle/near-miss, so no junk memories from chatter.
+- Deployed: `_act_head_hard2.bin` -> live `_li_head.bin` (v1 clean still at `_li_head_clean.bin`).
+- **Multi-head safety pass COMPLETE**: Tool head GREEN (TS-2, OOD 1.000), Action head GREEN (TS-3b, OOD 0.979,
+  false-fire 0.000, KEEP recall 1.000), Memory head gated downstream (secure by construction).
+- Repro: `make_hard_tape.py hard_train_act.txt 220 train action` / `hard_ood_act.txt 140 ood action`; `sp_li_eval.py --head _act_head_hard2.bin --data _hard_act_ood_data`.
