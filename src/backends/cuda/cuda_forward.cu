@@ -4579,6 +4579,7 @@ extern "C" int gemma4_kv_capture_feat(sp_g4_kv *s, float *feat_out) {
  * (resolves full-layer rope_freqs, the 12B embd packing for the input-embed gather, and the
  * accept-length/tok-s gate which only exists with the running 12B). */
 #define DRAFT_NL 4
+static const int g_draft_swa[DRAFT_NL] = {1, 1, 1, 0};   /* layers 0-2 SWA (read target NL-2), 3 full (NL-1) */
 struct DraftWeights {
     int loaded; gguf_ctx *g;
     float *pre, *post, *out_norm, *head;      /* head = draft token_embd [Vd x 1024] (tied) */
@@ -4664,6 +4665,71 @@ extern "C" void gemma4_draft_close(void) {
     }
     if (g_draft.g) gguf_close(g_draft.g);
     memset(&g_draft, 0, sizeof g_draft);
+}
+
+/* One EAGLE/MTP draft step on the LIVE target ring. Given the target's feature h (BBt floats,
+ * host; from gemma4_kv_capture_feat) and the last token, runs the proven draft forward reading
+ * s->dKc[NL-1 full]/dKc[NL-2 SWA] (via k_attn_decode_ring) and writes the draft's argmax to
+ * *out_token (+ optional h_next, BBt host). The draft owns no KV — recurrence is via h, which the
+ * caller threads (h_{k+1} = out_hnext). Attention scale is env-tunable (SP_DRAFT_ASCALE=one|rsqrt;
+ * default rsqrt = the proven-standalone choice) — the live accept rate dials it. rope = plain neox
+ * base (full-layer rope_freqs is the next knob if accept is low). Math == G-EAGLE-DRAFT-FWD-CUDA. */
+extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
+                                 int *out_token, float *out_hnext) {
+    if (!g_draft.loaded || !s || !out_token) { sp_set_error("gemma4_draft_step: bad args/not loaded"); return -1; }
+    if (!g_w.embd) { sp_set_error("gemma4_draft_step: target g_w.embd not f32 (packed-embd input path TODO — live tweak)"); return -1; }
+    const int HID = 1024, BBt = g_draft.BBt, Vd = g_draft.Vd, FFm = 8192;
+    static float *sx=0,*sfeat=0,*sxh=0,*scur=0,*snorm=0,*satt=0,*sao=0,*sq=0,*sff=0,*sff2=0,*slog=0,*shn=0; static int *dtok=0;
+    if (!sxh) {
+        cudaMalloc(&sx,BBt*4); cudaMalloc(&sfeat,BBt*4); cudaMalloc(&sxh,2*BBt*4); cudaMalloc(&scur,HID*4);
+        cudaMalloc(&snorm,HID*4); cudaMalloc(&satt,HID*4); cudaMalloc(&sao,16*512*4); cudaMalloc(&sq,16*512*4);
+        cudaMalloc(&sff,FFm*4); cudaMalloc(&sff2,FFm*4); cudaMalloc(&slog,(size_t)Vd*4); cudaMalloc(&shn,BBt*4); cudaMalloc(&dtok,4);
+    }
+    const float eps = s->eps; const int ctx = s->dpos_host;            /* positions 0..ctx-1 are written */
+    const char *am = getenv("SP_DRAFT_ASCALE");
+    /* x = TARGET tok_embd[token] * sqrt(BBt) ; xh = [x ; feat] ; cur = pre_proj @ xh */
+    k_embed_scale_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd, token, BBt, sqrtf((float)BBt), sx);
+    cudaMemcpy(sfeat, feat_host, (size_t)BBt*4, cudaMemcpyHostToDevice);
+    cudaMemcpy(sxh, sx, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(sxh+BBt, sfeat, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
+    k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.pre, sxh, scur, HID, 2*BBt);
+    for (int il = 0; il < DRAFT_NL; il++) {
+        const int qd = g_draft.qd[il], hd = g_draft.hd[il], swa = g_draft_swa[il];
+        const int il_src = swa ? (s->NL - 2) : (s->NL - 1);
+        const int HD   = swa ? s->s_hd  : s->g_hd;
+        const int nkv  = swa ? s->s_nkv : s->g_nkv;
+        const int KVD  = nkv * HD, group = (nkv > 0 ? 16 / nkv : 16);
+        const int win  = swa ? s->SW : -1;
+        const int Wring= swa ? (s->ring_W > 0 ? s->ring_W : s->Pmax) : s->Pmax;
+        const float rb = swa ? s->s_base : s->g_base;
+        const float asc = (am && !strcmp(am,"one")) ? 1.0f : 1.0f/sqrtf((float)hd);
+        k_rmsnorm<<<1,256>>>(scur, g_draft.attn_norm[il], HID, eps, snorm);
+        k_matmul_draft<<<(unsigned)((qd+255)/256),256>>>(g_draft.wq[il], snorm, sq, qd, HID);
+        k_rmsnorm_head<<<16,256>>>(sq, g_draft.qn[il], 16, hd, qd, eps);
+        k_rope_at<<<16, hd/2>>>(sq, 16, hd, qd, rb, ctx);              /* query position = ctx */
+        k_attn_decode_ring<<<16,256,(size_t)ctx*sizeof(float)>>>(sq, s->dKc[il_src], s->dVc[il_src],
+                                                                 ctx, KVD, HD, group, asc, win, Wring, sao);
+        k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.wo[il], sao, satt, HID, qd);
+        k_rmsnorm<<<1,256>>>(satt, g_draft.post_attn[il], HID, eps, snorm);
+        cudaMemcpy(satt, snorm, (size_t)HID*4, cudaMemcpyDeviceToDevice);
+        k_add<<<(unsigned)((HID+255)/256),256>>>(satt, scur, (size_t)HID);   /* satt = rms(attn) + cur = attn_out */
+        k_rmsnorm<<<1,256>>>(satt, g_draft.ffn_norm[il], HID, eps, snorm);
+        k_matmul_draft<<<(unsigned)((FFm+255)/256),256>>>(g_draft.wg[il], snorm, sff, FFm, HID);
+        k_matmul_draft<<<(unsigned)((FFm+255)/256),256>>>(g_draft.wu[il], snorm, sff2, FFm, HID);
+        k_gelu_mul<<<(unsigned)((FFm+255)/256),256>>>(sff, sff2, (size_t)FFm);
+        k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.wd[il], sff, snorm, HID, FFm);
+        k_rmsnorm<<<1,256>>>(snorm, g_draft.post_ffw[il], HID, eps, scur);   /* scur = rms(ffn) */
+        k_add<<<(unsigned)((HID+255)/256),256>>>(scur, satt, (size_t)HID);   /* cur = rms(ffn) + attn_out */
+        k_scale_by_dev<<<(unsigned)((HID+255)/256),256>>>(scur, (size_t)HID, g_draft.osc[il]); /* cur *= layer_output_scale */
+    }
+    k_rmsnorm<<<1,256>>>(scur, g_draft.out_norm, HID, eps, snorm);           /* final hidden */
+    if (out_hnext) { k_matmul_draft<<<(unsigned)((BBt+255)/256),256>>>(g_draft.post, snorm, shn, BBt, HID);
+                     cudaMemcpy(out_hnext, shn, (size_t)BBt*4, cudaMemcpyDeviceToHost); }
+    k_matmul_draft<<<(unsigned)((Vd+255)/256),256>>>(g_draft.head, snorm, slog, Vd, HID);
+    k_argmax<<<1,256>>>(slog, Vd, dtok);
+    cudaError_t e = cudaMemcpy(out_token, dtok, 4, cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) return fail_cuda(e, "gemma4_draft_step out_token D2H");
+    return 0;
 }
 
 /* KAI-2: stage a latent event packet (one E-float residual) to OVERRIDE the next step's
