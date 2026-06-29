@@ -131,17 +131,14 @@ pub fn run_li_heartbeat(model_path: &str, tok_path: &str, tape_path: &str, head_
     let a = LI_ACTIONS.len();
     let proj = (blob.len() - 2 * hidden - a) / (hidden + 1 + a);
 
-    const CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment event. \
-Decide exactly one action: NO_OP (idle, do nothing), KEEP (remember this fact), FORGET (evict stale state), \
-E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
     let events = parse_kairos_tape(&std::fs::read_to_string(tape_path).map_err(|e| format!("tape: {e}"))?);
     if events.len() < 2 { return Err("li_heartbeat: need >=2 events".to_string()); }
 
-    // Frame every event (apply_template_ids = correct <|turn> ids). The CONTRACT prefix is shared;
-    // find its length L = the common token prefix across two different events.
+    // Frame every event (apply_template_ids = correct <|turn> ids). DELTA-TRIM: all static framing is
+    // in li_frame_text's contract prefix, so the common token prefix L spans everything but the event
+    // body -> the per-tick delta is strictly the event data + turn close/primer.
     let frame_of = |body: &str| -> Result<Vec<i32>, String> {
-        let f = format!("{CONTRACT}\n\nCURRENT EVENT: {body}\nRespond with exactly one of: NO_OP, KEEP, FORGET, E2B_TOOL, ACTION.");
-        tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: f }]).map_err(|e| format!("{e:?}"))
+        tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: li_frame_text(body) }]).map_err(|e| format!("{e:?}"))
     };
     let framed: Vec<(Vec<i32>, i32)> = events.iter().filter_map(|(b, g)| frame_of(b).ok().map(|ids| (ids, *g))).collect();
     let mut lcp = framed[0].0.len().min(framed[1].0.len());
@@ -221,9 +218,6 @@ pub fn run_li_oracle(model_path: &str, tok_path: &str, tape_path: &str, head_pat
     let proj = (blob.len() - 2 * hidden - a) / (hidden + 1 + a);
     eprintln!("[li-oracle] head={head_path} hidden={hidden} proj={proj} actions={a}");
 
-    const CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment event. \
-Decide exactly one action: NO_OP (idle, do nothing), KEEP (remember this fact), FORGET (evict stale state), \
-E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
     let events = parse_kairos_tape(&std::fs::read_to_string(tape_path).map_err(|e| format!("tape: {e}"))?);
     if events.is_empty() { return Err("li_oracle: no events".to_string()); }
 
@@ -237,8 +231,7 @@ E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
     let decode_cap = 24usize;
 
     for (i, (body, gt)) in events.iter().enumerate() {
-        let frame = format!("{CONTRACT}\n\nCURRENT EVENT: {body}\nRespond with exactly one of: NO_OP, KEEP, FORGET, E2B_TOOL, ACTION.");
-        let ids = match tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: frame }]) { Ok(p) => p, Err(_) => continue };
+        let ids = match tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: li_frame_text(body) }]) { Ok(p) => p, Err(_) => continue };
         if ids.len() < 2 || ids.len() >= 512 { continue; }
         unsafe { gemma4_kv_reset(s) };
         let np = ids.len();
@@ -288,6 +281,15 @@ fn li_action_id(s: &str) -> i32 {
     LI_ACTIONS.iter().position(|&a| a.eq_ignore_ascii_case(s.trim())).map(|i| i as i32).unwrap_or(-1)
 }
 
+/// DELTA-TRIM: ALL static system framing (the kernel role + the action list + the respond
+/// instruction) lives in the contract prefix; the per-tick delta is STRICTLY the event data + the
+/// turn close/primer. Capture and heartbeat MUST share this exact framing for KV alignment.
+const LI_CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment \
+event. Decide exactly one action and respond with exactly one of: NO_OP (idle, do nothing), KEEP \
+(remember this fact), FORGET (evict stale state), E2B_TOOL (run a tool/compute), or ACTION \
+(intervene). Most events are NO_OP.";
+fn li_frame_text(body: &str) -> String { format!("{LI_CONTRACT}\n\nCURRENT EVENT: {body}") }
+
 /// LATENT INTERCEPTOR CAPTURE: run the 12B over a KAIROS event tape; per tick frame the event
 /// against the kernel contract, prefill it, capture the FRAME-END feature[hidden] (the post-
 /// output_norm hidden the LM head consumes) + the action label (tape `expect`). The interceptor
@@ -310,10 +312,6 @@ pub fn run_li_capture(
     let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
     let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
     if qm.is_null() { return Err("li_capture: qm NULL".to_string()); }
-
-    const CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment event. \
-Decide exactly one action: NO_OP (idle, do nothing), KEEP (remember this fact), FORGET (evict stale state), \
-E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
 
     let tape = std::fs::read_to_string(tape_path).map_err(|e| format!("tape {tape_path}: {e}"))?;
     let mut events: Vec<(String, i32)> = Vec::new();
@@ -350,8 +348,7 @@ E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
     let mut dist = [0usize; 5];
 
     for (i, (body, aid)) in events.iter().enumerate() {
-        let frame = format!("{CONTRACT}\n\nCURRENT EVENT: {body}\nRespond with exactly one of: NO_OP, KEEP, FORGET, E2B_TOOL, ACTION.");
-        let msgs = vec![Message { role: "user".to_string(), content: frame }];
+        let msgs = vec![Message { role: "user".to_string(), content: li_frame_text(body) }];
         let ids = match tok.apply_template_ids(&msgs) { Ok(p) => p, Err(_) => continue };
         if ids.len() < 2 || ids.len() as c_int >= pmax { continue; }
         if unsafe { gemma4_kv_reset(s) } != 0 { return Err("li_capture: reset".to_string()); }

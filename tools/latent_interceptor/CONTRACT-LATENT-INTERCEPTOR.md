@@ -88,9 +88,18 @@ Persistent-contract heartbeat (`SP_LI_HEARTBEAT`, run_li_heartbeat) on the held-
   the 12B decode ELIMINATED. Contract prefilled ONCE (2762ms, amortized). decode skipped 85/150.
 - This kills the run_li_oracle harness artifact (~4000ms full re-prefill/tick). Floor is now the
   event-delta prefill (the model seeing the event) + the ~1ms probe.
-- NEXT delta-trim: move the constant "Respond with…" instruction into the contract prefix (re-capture
-  + re-train for framing consistency) -> delta = body only (~600ms); + the OKFS-MEM header load moves
-  to a latent memory head (off the per-tick prefill).
+## DELTA-TRIM (G-LI-FLOOR, 2026-06-30)
+
+All static framing moved into the contract prefix (`LI_CONTRACT` + `li_frame_text`); the per-tick
+delta is STRICTLY the event body + turn close/primer. Re-captured + re-trained on the trimmed
+distribution, re-ran the held-out heartbeat:
+- **NO_OP idle tick: 585ms avg** (shortest ~505ms) = bare event-delta prefill (669ms) + probe
+  (1.04ms), 12B decode eliminated. **~8.5x down from the original ~5000ms.** Contract prefilled
+  once (2965ms, amortized).
+- accuracy 0.993 (149/150) — one mis-gate; the small cost of less per-tick context (was 1.000).
+- The absolute physical minimum of the idle tick is now: the model seeing the bare event + a 1ms
+  latent decision. Further reduction requires the OKFS-MEM header load to move OFF the prefill (into
+  a latent memory head) — the multi-head framework, next.
 
 ## Gate
 
