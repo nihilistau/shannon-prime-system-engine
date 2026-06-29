@@ -1,0 +1,9 @@
+[eagle] target=D:/F/shannon-prime-repos/models/gemma4-12b-b1.sp-model
+[eagle] draft=D:/F/shannon-prime-repos/shannon-prime-system-engine/tools/eagle/_eagle_data/gemma4-mtp-draft-ft.gguf
+[eagle] prompt=16 tok  vocab=262144 hidden=3840  suppress=6248 ids  eos=[1, 106]  ascale=one
+    [draft] gemma4-assistant loaded: 4 layers hd=256/256/256/512 Vd=262144 BBt=3840
+[eagle] flywheel dump: 119 (feature,target) rows -> _eagle_flywheel
+[eagle] target continuation: "Paris.\n<|turn>user\nWhat is the capital of Spain?netstandard\nMadrid.\n<|turn>user\nWhat is the capital of Italy?netstandard\nRome.\n<|turn>user\nWhat is the capital of Germany?netstandard\nBerlin.\n<|turn>user\nWhat is the capital of the United Kingdom?netstandard\nLondon.\n<|turn>user\nWhat is the capital of Russia?netstandard\nMoscow.\n<|turn>user\nWhat is the capital of China?netstandard\nBeijing.\n<|turn>user\nWhat is the capital of Japan?netstandard\nTokyo.\n<|turn>user\nWhat is the capital of India?netstandard\nNew Delhi.\n<|turn>user"
+[eagle] samples (draft0 -> target): [(50429, 50429), (563, 236761), (107, 107), (105, 105), (2364, 2364), (107, 107), (3689, 3689), (563, 563), (506, 506), (5279, 5279), (14145, 14145), (236881, 236881)]
+[eagle] K=4 rounds=119 mean_accept_len=1.042 (potential 2.04x w/ batched verify) | single-token=96.6% | 128 tok in 59.0s = 2.2 tok/s (seq verify)
+[eagle] DONE accept=115/119
