@@ -307,6 +307,7 @@ fn mh_probe(blob: &[f32], latent: &[f32]) -> Vec<f32> {
     out
 }
 fn ham4(a: &[u64; 4], b: &[u64; 4]) -> u32 { (0..4).map(|i| (a[i] ^ b[i]).count_ones()).sum() }
+fn sig_hex(s: &[u64; 4]) -> String { format!("{:016x}{:016x}{:016x}{:016x}", s[3], s[2], s[1], s[0]) } // curator addr format
 
 /// LIVE MEMORY-HEAD GATE: per event, gemma4_draft_body -> latent -> mh_probe -> pooled_K_est ->
 /// recall::Projection (the FROZEN curator R) -> C2 256-bit sig -> MEM-OKF addr. Reports the Hamming
@@ -328,6 +329,12 @@ pub fn run_mh_gate(model_path: &str, tok_path: &str, tape_path: &str, head_path:
     let proj = sp_daemon::recall::Projection::build();
     let n_global = sp_daemon::recall::NL / sp_daemon::recall::PERIOD; let hd_g = sp_daemon::recall::HD;
     let events = parse_kairos_tape(&std::fs::read_to_string(tape_path).map_err(|e| format!("tape: {e}"))?);
+    // SP_MH_EMIT=1 -> actually write the KEEP episodes to MEM-OKF at the head's C2 address.
+    let okf_mem = std::env::var("SP_OKF_MEM").unwrap_or_default();
+    let okf_root = std::env::var("SP_OKF_ROOT").unwrap_or_else(|_| "memory-okf".to_string());
+    let okf_py = std::env::var("SP_OKF_PY").unwrap_or_else(|_| "python".to_string());
+    let emit = std::env::var("SP_MH_EMIT").as_deref() == Ok("1") && !okf_mem.is_empty();
+    let mut emitted = 0usize;
     let s = unsafe { gemma4_kv_open(qm, 512) };
     if s.is_null() { return Err("mh_gate: kv_open NULL".to_string()); }
     let dc = CString::new(draft_gguf).unwrap();
@@ -355,7 +362,24 @@ pub fn run_mh_gate(model_path: &str, tok_path: &str, tape_path: &str, head_path:
         let cur_sig = proj.signature(&gk_buf[..n_global * np * hd_g], n_global, np);
         let ham = ham4(&sig_est, &cur_sig);
         sum_ham += ham as u64; sum_ms += gate_ms; n += 1;
-        if *aid == 1 { keeps += 1; } // KEEP -> would emit to MEM-OKF
+        if *aid == 1 {  // KEEP -> write a live MEM-OKF episode at the head's C2 address (latent-native)
+            keeps += 1;
+            if emit {
+                let addr = format!("c2sig_{}", sig_hex(&sig_est));
+                // sanitize: strip quotes (embedded " breaks Windows argv -> okf_mem argparse exit 2)
+                let safe: String = body.chars().map(|c| if c == '"' || c == '\'' { ' ' } else { c }).collect();
+                let blob = format!("mh_latent_episode:{addr}"); // the latent-written episode pointer (KV persist = prod detail)
+                match std::process::Command::new(&okf_py).arg(&okf_mem)
+                    .args(["add", "--root", &okf_root, "--kind", "episode", "--addr", &addr,
+                           "--keys", &safe, "--summary", &safe, "--title", &safe, "--blob-ref", &blob,
+                           "--status", "ACTIVE", "--gate", "G-MH-CURATOR", "--detail", &safe])
+                    .stdin(std::process::Stdio::null()).output() {
+                    Ok(o) if o.status.success() => { emitted += 1; eprintln!("[mh-gate] EMIT KEEP -> MEM-OKF {addr} {}", String::from_utf8_lossy(&o.stdout).trim()); }
+                    Ok(o) => eprintln!("[mh-gate] EMIT rc={} err={}", o.status, String::from_utf8_lossy(&o.stderr).trim()),
+                    Err(e) => eprintln!("[mh-gate] EMIT failed: {e}"),
+                }
+            }
+        }
         if i < 12 {
             eprintln!("[mh-gate] ev {i:>3} {:<8} sig=c2sig_{:016x}.. ham={ham}/256 {} gate={gate_ms:.2}ms",
                       LI_ACTIONS[*aid as usize], sig_est[0], if ham <= (256 - sp_daemon::recall::TAU_BITS as u32) { "RECALL-MATCH" } else { "miss" });
@@ -364,7 +388,7 @@ pub fn run_mh_gate(model_path: &str, tok_path: &str, tape_path: &str, head_path:
     unsafe { gemma4_draft_close(); gemma4_kv_close(s); }
     if n == 0 { return Err("mh_gate: no events".to_string()); }
     let max_ham = 256 - sp_daemon::recall::TAU_BITS as u32;
-    eprintln!("[mh-gate] DONE {n} events ({keeps} KEEP) | mean Hamming-to-curator = {:.1}/256 | mean gate = {:.2}ms (latent->pooledK->R->C2 sig, no tokenization) | recall-radius<= {max_ham}",
+    eprintln!("[mh-gate] DONE {n} events ({keeps} KEEP, {emitted} emitted to MEM-OKF) | mean Hamming-to-curator = {:.1}/256 | mean gate = {:.2}ms (latent->pooledK->R->C2 sig, no tokenization) | recall-radius<= {max_ham}",
               sum_ham as f64 / n as f64, sum_ms / n as f64);
     Ok(())
 }

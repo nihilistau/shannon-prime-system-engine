@@ -1,0 +1,16 @@
+    [draft] gemma4-assistant loaded: 4 layers hd=256/256/256/512 Vd=262144 BBt=3840
+[mh-gate] ev   0 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=91.22ms
+[mh-gate] ev   1 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=84.17ms
+[mh-gate] ev   2 ACTION   sig=c2sig_1aaf80155486a79b.. ham=4/256 RECALL-MATCH gate=83.67ms
+[mh-gate] EMIT KEEP -> MEM-OKF c2sig_44d5f3c3b08367db4c9ae475b501ff69d9f5ee6497933b941aaf841554c6a799 added c2sig_44d5f3c3b08367db4c9ae475b501ff69d9f5ee6497933b941aaf841554c6a799  [episode/ACTIVE]  EVENT kind=EVENT.fact salience=0.56 payload= user prefers dark mode
+[mh-gate] ev   3 KEEP     sig=c2sig_1aaf841554c6a799.. ham=0/256 RECALL-MATCH gate=83.44ms
+[mh-gate] ev   4 NO_OP    sig=c2sig_1a8f8015d486a799.. ham=0/256 RECALL-MATCH gate=83.87ms
+[mh-gate] ev   5 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=83.25ms
+[mh-gate] ev   6 NO_OP    sig=c2sig_9a8f80155486a799.. ham=0/256 RECALL-MATCH gate=83.58ms
+[mh-gate] ev   7 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=84.18ms
+[mh-gate] ev   8 E2B_TOOL sig=c2sig_1aaf84155486a799.. ham=0/256 RECALL-MATCH gate=84.09ms
+[mh-gate] ev   9 FORGET   sig=c2sig_1aaf84155486a799.. ham=0/256 RECALL-MATCH gate=83.50ms
+[mh-gate] ev  10 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=83.55ms
+[mh-gate] ev  11 NO_OP    sig=c2sig_9aaf80155486a799.. ham=0/256 RECALL-MATCH gate=93.00ms
+[mh-gate] DONE 20 events (1 KEEP, 1 emitted to MEM-OKF) | mean Hamming-to-curator = 0.2/256 | mean gate = 84.89ms (latent->pooledK->R->C2 sig, no tokenization) | recall-radius<= 88
+[mh-gate] DONE
