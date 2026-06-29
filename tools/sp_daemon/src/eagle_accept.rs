@@ -109,6 +109,94 @@ fn parse_kairos_tape(text: &str) -> Vec<(String, i32)> {
     events
 }
 
+/// PERSISTENT-CONTRACT KAIROS heartbeat (the TRUE Latent Interceptor deploy). The contract prefix is
+/// prefilled ONCE; each tick appends only the EVENT-DELTA tokens, taps the latent, probes (~1ms), and
+/// gates — then rewinds the delta so the next tick re-enters the clean contract context (O(Δ)). This
+/// kills the per-tick full-contract re-prefill (~4000ms harness artifact in run_li_oracle). Logs the
+/// true NO_OP-tick floor = [event-delta prefill ms] + [latent probe ms].
+pub fn run_li_heartbeat(model_path: &str, tok_path: &str, tape_path: &str, head_path: &str) -> Result<(), String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let hidden = arch.hidden_dim as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("li_heartbeat: qm NULL".to_string()); }
+    let raw = std::fs::read(head_path).map_err(|e| format!("head: {e}"))?;
+    let blob: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let a = LI_ACTIONS.len();
+    let proj = (blob.len() - 2 * hidden - a) / (hidden + 1 + a);
+
+    const CONTRACT: &str = "You are a background kernel daemon. Each tick you receive one environment event. \
+Decide exactly one action: NO_OP (idle, do nothing), KEEP (remember this fact), FORGET (evict stale state), \
+E2B_TOOL (run a tool/compute), or ACTION (intervene). Most events are NO_OP.";
+    let events = parse_kairos_tape(&std::fs::read_to_string(tape_path).map_err(|e| format!("tape: {e}"))?);
+    if events.len() < 2 { return Err("li_heartbeat: need >=2 events".to_string()); }
+
+    // Frame every event (apply_template_ids = correct <|turn> ids). The CONTRACT prefix is shared;
+    // find its length L = the common token prefix across two different events.
+    let frame_of = |body: &str| -> Result<Vec<i32>, String> {
+        let f = format!("{CONTRACT}\n\nCURRENT EVENT: {body}\nRespond with exactly one of: NO_OP, KEEP, FORGET, E2B_TOOL, ACTION.");
+        tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: f }]).map_err(|e| format!("{e:?}"))
+    };
+    let framed: Vec<(Vec<i32>, i32)> = events.iter().filter_map(|(b, g)| frame_of(b).ok().map(|ids| (ids, *g))).collect();
+    let mut lcp = framed[0].0.len().min(framed[1].0.len());
+    for k in 0..lcp { if framed[0].0[k] != framed[1].0[k] { lcp = k; break; } }
+    eprintln!("[li-heartbeat] contract prefix L={lcp} tok (prefilled ONCE); per-tick delta = ids[L..] | hidden={hidden} proj={proj}");
+
+    let s = unsafe { gemma4_kv_open(qm, 512) };
+    if s.is_null() { return Err("li_heartbeat: kv_open NULL".to_string()); }
+    // PREFILL THE CONTRACT PREFIX ONCE.
+    unsafe { gemma4_kv_reset(s) };
+    let t_ctx = std::time::Instant::now();
+    if unsafe { gemma4_kv_prefill(s, framed[0].0.as_ptr(), lcp as c_int) } != 0 { return Err("li_heartbeat: contract prefill".to_string()); }
+    eprintln!("[li-heartbeat] contract prefilled once in {:.0}ms (amortized over all ticks)", t_ctx.elapsed().as_secs_f64() * 1000.0);
+
+    let mut feat = vec![0.0f32; hidden];
+    let mut logits = vec![0.0f32; vocab];
+    let (mut correct, mut skips, mut woke) = (0usize, 0usize, 0usize);
+    let (mut sum_noop_ms, mut sum_delta_ms, mut sum_probe_us) = (0.0f64, 0.0f64, 0.0f64);
+
+    for (i, (ids, gt)) in framed.iter().enumerate() {
+        let np = ids.len();
+        if np <= lcp { continue; }
+        // append ONLY the event-delta tokens [lcp..np); capture the latent at the last (model-primer).
+        let td = std::time::Instant::now();
+        if unsafe { gemma4_kv_prefill(s, ids[lcp..np - 1].as_ptr(), (np - 1 - lcp) as c_int) } != 0 { continue; }
+        unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+        if unsafe { gemma4_kv_decode_logits(s, ids[np - 1], logits.as_mut_ptr()) } != 0 { continue; }
+        let delta_ms = td.elapsed().as_secs_f64() * 1000.0;
+        let tp = std::time::Instant::now();
+        let action = li_probe(&blob, hidden, a, proj, &feat);
+        let probe_us = tp.elapsed().as_secs_f64() * 1e6;
+        if action == *gt { correct += 1; }
+        sum_delta_ms += delta_ms; sum_probe_us += probe_us;
+        if action == 0 {
+            skips += 1; sum_noop_ms += delta_ms + probe_us / 1000.0;
+            eprintln!("[li-heartbeat] tick {i:>3} NO_OP   gt={:<8} | delta_prefill={delta_ms:.0}ms + probe={probe_us:.0}us = {:.0}ms NO_OP-tick (decode SKIPPED)",
+                      LI_ACTIONS[*gt as usize], delta_ms + probe_us / 1000.0);
+        } else {
+            woke += 1;
+            eprintln!("[li-heartbeat] tick {i:>3} {:<8} gt={:<8} | delta_prefill={delta_ms:.0}ms + probe={probe_us:.0}us -> WOKE 12B",
+                      LI_ACTIONS[action as usize], LI_ACTIONS[*gt as usize]);
+        }
+        // rewind the event delta -> next tick re-enters the clean contract context (persistent O(Δ)).
+        // after prefill(delta[..np-1-lcp]) + decode_logits(last), dpos = np; rewind back to lcp.
+        let cur = np as c_int;
+        if cur > lcp as c_int { unsafe { gemma4_kv_rewind(s, cur - lcp as c_int) }; }
+    }
+    unsafe { gemma4_kv_close(s) };
+    let n = framed.len();
+    eprintln!("[li-heartbeat] DONE {n} ticks | accuracy={:.3} ({correct}/{n}) | NO_OP-skips={skips} woke={woke}", correct as f64 / n as f64);
+    eprintln!("[li-heartbeat] TRUE FLOOR: NO_OP tick = {:.0}ms avg (delta_prefill {:.0}ms + probe {:.2}ms); was ~5000ms (full re-prefill+decode). decode SKIPPED on {skips}/{n} ticks.",
+              if skips > 0 { sum_noop_ms / skips as f64 } else { 0.0 }, sum_delta_ms / n as f64, sum_probe_us / n as f64 / 1000.0);
+    Ok(())
+}
+
 /// LIVE KAIROS ORACLE (the Latent Interceptor action gate). Per tick: 12B prefills the event frame
 /// (~35ms, unavoidable), taps the frame-end latent, runs the CPU probe (~us) -> action. NO_OP ->
 /// SHORT-CIRCUIT (skip the ~440ms 12B decode); any action class -> wake the 12B decode. Logs the

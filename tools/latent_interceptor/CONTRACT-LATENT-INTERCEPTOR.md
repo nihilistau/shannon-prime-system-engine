@@ -79,6 +79,19 @@ must read the output.
 - **Latent injection (return path):** tool results are transcoded to a cyclotomic-ring residue and
   injected into the target KV ring (`gemma4_kv_inject`) — the model feels the result, never reads it.
 
+## LIVE RESULT (G-LI-HEARTBEAT, 2026-06-30)
+
+Persistent-contract heartbeat (`SP_LI_HEARTBEAT`, run_li_heartbeat) on the held-out tape (events
+151-300, untrained):
+- **accuracy 1.000 (150/150)**; NO_OP-skips 85, woke 65.
+- **NO_OP tick: ~5000ms -> 1451ms** = event-delta prefill (1536ms) + latent probe (**1.02ms**),
+  the 12B decode ELIMINATED. Contract prefilled ONCE (2762ms, amortized). decode skipped 85/150.
+- This kills the run_li_oracle harness artifact (~4000ms full re-prefill/tick). Floor is now the
+  event-delta prefill (the model seeing the event) + the ~1ms probe.
+- NEXT delta-trim: move the constant "Respond with…" instruction into the contract prefix (re-capture
+  + re-train for framing consistency) -> delta = body only (~600ms); + the OKFS-MEM header load moves
+  to a latent memory head (off the per-tick prefill).
+
 ## Gate
 
 - **G-LI-AGREEMENT:** Latent Interceptor action vs the ground-truth tape label (held-out tape).

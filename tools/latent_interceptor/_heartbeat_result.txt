@@ -1,0 +1,155 @@
+[li-heartbeat] contract prefix L=79 tok (prefilled ONCE); per-tick delta = ids[L..] | hidden=3840 proj=256
+[li-heartbeat] contract prefilled once in 2762ms (amortized over all ticks)
+[li-heartbeat] tick   0 KEEP     gt=KEEP     | delta_prefill=1668ms + probe=1276us -> WOKE 12B
+[li-heartbeat] tick   1 NO_OP   gt=NO_OP    | delta_prefill=1349ms + probe=949us = 1350ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick   2 KEEP     gt=KEEP     | delta_prefill=1635ms + probe=962us -> WOKE 12B
+[li-heartbeat] tick   3 NO_OP   gt=NO_OP    | delta_prefill=1527ms + probe=955us = 1528ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick   4 FORGET   gt=FORGET   | delta_prefill=1599ms + probe=955us -> WOKE 12B
+[li-heartbeat] tick   5 E2B_TOOL gt=E2B_TOOL | delta_prefill=1709ms + probe=947us -> WOKE 12B
+[li-heartbeat] tick   6 E2B_TOOL gt=E2B_TOOL | delta_prefill=1599ms + probe=977us -> WOKE 12B
+[li-heartbeat] tick   7 NO_OP   gt=NO_OP    | delta_prefill=1316ms + probe=948us = 1317ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick   8 NO_OP   gt=NO_OP    | delta_prefill=1599ms + probe=949us = 1599ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick   9 KEEP     gt=KEEP     | delta_prefill=1707ms + probe=1002us -> WOKE 12B
+[li-heartbeat] tick  10 KEEP     gt=KEEP     | delta_prefill=1671ms + probe=997us -> WOKE 12B
+[li-heartbeat] tick  11 E2B_TOOL gt=E2B_TOOL | delta_prefill=1709ms + probe=949us -> WOKE 12B
+[li-heartbeat] tick  12 KEEP     gt=KEEP     | delta_prefill=1710ms + probe=956us -> WOKE 12B
+[li-heartbeat] tick  13 ACTION   gt=ACTION   | delta_prefill=1709ms + probe=956us -> WOKE 12B
+[li-heartbeat] tick  14 FORGET   gt=FORGET   | delta_prefill=1601ms + probe=949us -> WOKE 12B
+[li-heartbeat] tick  15 E2B_TOOL gt=E2B_TOOL | delta_prefill=1567ms + probe=957us -> WOKE 12B
+[li-heartbeat] tick  16 NO_OP   gt=NO_OP    | delta_prefill=1351ms + probe=958us = 1352ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  17 FORGET   gt=FORGET   | delta_prefill=1640ms + probe=950us -> WOKE 12B
+[li-heartbeat] tick  18 NO_OP   gt=NO_OP    | delta_prefill=1603ms + probe=950us = 1604ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  19 NO_OP   gt=NO_OP    | delta_prefill=1354ms + probe=949us = 1355ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  20 NO_OP   gt=NO_OP    | delta_prefill=1357ms + probe=1041us = 1358ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  21 NO_OP   gt=NO_OP    | delta_prefill=1428ms + probe=954us = 1429ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  22 FORGET   gt=FORGET   | delta_prefill=1638ms + probe=991us -> WOKE 12B
+[li-heartbeat] tick  23 E2B_TOOL gt=E2B_TOOL | delta_prefill=1639ms + probe=974us -> WOKE 12B
+[li-heartbeat] tick  24 ACTION   gt=ACTION   | delta_prefill=1571ms + probe=1182us -> WOKE 12B
+[li-heartbeat] tick  25 KEEP     gt=KEEP     | delta_prefill=1736ms + probe=1259us -> WOKE 12B
+[li-heartbeat] tick  26 NO_OP   gt=NO_OP    | delta_prefill=1363ms + probe=1264us = 1364ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  27 NO_OP   gt=NO_OP    | delta_prefill=1432ms + probe=1015us = 1433ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  28 FORGET   gt=FORGET   | delta_prefill=1616ms + probe=948us -> WOKE 12B
+[li-heartbeat] tick  29 FORGET   gt=FORGET   | delta_prefill=1639ms + probe=988us -> WOKE 12B
+[li-heartbeat] tick  30 FORGET   gt=FORGET   | delta_prefill=1605ms + probe=966us -> WOKE 12B
+[li-heartbeat] tick  31 NO_OP   gt=NO_OP    | delta_prefill=1354ms + probe=962us = 1355ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  32 NO_OP   gt=NO_OP    | delta_prefill=1354ms + probe=959us = 1355ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  33 ACTION   gt=ACTION   | delta_prefill=1605ms + probe=959us -> WOKE 12B
+[li-heartbeat] tick  34 NO_OP   gt=NO_OP    | delta_prefill=1357ms + probe=952us = 1358ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  35 NO_OP   gt=NO_OP    | delta_prefill=1357ms + probe=952us = 1358ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  36 ACTION   gt=ACTION   | delta_prefill=1605ms + probe=959us -> WOKE 12B
+[li-heartbeat] tick  37 NO_OP   gt=NO_OP    | delta_prefill=1571ms + probe=949us = 1572ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  38 NO_OP   gt=NO_OP    | delta_prefill=1356ms + probe=978us = 1357ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  39 NO_OP   gt=NO_OP    | delta_prefill=1572ms + probe=964us = 1573ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  40 FORGET   gt=FORGET   | delta_prefill=1608ms + probe=958us -> WOKE 12B
+[li-heartbeat] tick  41 E2B_TOOL gt=E2B_TOOL | delta_prefill=1644ms + probe=957us -> WOKE 12B
+[li-heartbeat] tick  42 NO_OP   gt=NO_OP    | delta_prefill=1361ms + probe=957us = 1362ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  43 NO_OP   gt=NO_OP    | delta_prefill=1573ms + probe=973us = 1574ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  44 ACTION   gt=ACTION   | delta_prefill=1543ms + probe=963us -> WOKE 12B
+[li-heartbeat] tick  45 NO_OP   gt=NO_OP    | delta_prefill=1575ms + probe=966us = 1576ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  46 E2B_TOOL gt=E2B_TOOL | delta_prefill=1612ms + probe=981us -> WOKE 12B
+[li-heartbeat] tick  47 NO_OP   gt=NO_OP    | delta_prefill=1361ms + probe=960us = 1362ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  48 NO_OP   gt=NO_OP    | delta_prefill=1580ms + probe=956us = 1581ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  49 KEEP     gt=KEEP     | delta_prefill=1725ms + probe=949us -> WOKE 12B
+[li-heartbeat] tick  50 KEEP     gt=KEEP     | delta_prefill=1617ms + probe=950us -> WOKE 12B
+[li-heartbeat] tick  51 ACTION   gt=ACTION   | delta_prefill=1618ms + probe=948us -> WOKE 12B
+[li-heartbeat] tick  52 FORGET   gt=FORGET   | delta_prefill=1616ms + probe=960us -> WOKE 12B
+[li-heartbeat] tick  53 NO_OP   gt=NO_OP    | delta_prefill=1587ms + probe=955us = 1588ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  54 NO_OP   gt=NO_OP    | delta_prefill=1582ms + probe=988us = 1583ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  55 ACTION   gt=ACTION   | delta_prefill=1728ms + probe=952us -> WOKE 12B
+[li-heartbeat] tick  56 NO_OP   gt=NO_OP    | delta_prefill=1548ms + probe=951us = 1549ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  57 ACTION   gt=ACTION   | delta_prefill=1583ms + probe=977us -> WOKE 12B
+[li-heartbeat] tick  58 FORGET   gt=FORGET   | delta_prefill=1658ms + probe=1299us -> WOKE 12B
+[li-heartbeat] tick  59 NO_OP   gt=NO_OP    | delta_prefill=1585ms + probe=969us = 1586ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  60 NO_OP   gt=NO_OP    | delta_prefill=1584ms + probe=1088us = 1585ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  61 NO_OP   gt=NO_OP    | delta_prefill=1372ms + probe=949us = 1373ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  62 NO_OP   gt=NO_OP    | delta_prefill=1368ms + probe=950us = 1369ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  63 NO_OP   gt=NO_OP    | delta_prefill=1589ms + probe=952us = 1590ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  64 E2B_TOOL gt=E2B_TOOL | delta_prefill=1660ms + probe=960us -> WOKE 12B
+[li-heartbeat] tick  65 NO_OP   gt=NO_OP    | delta_prefill=1370ms + probe=949us = 1371ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  66 NO_OP   gt=NO_OP    | delta_prefill=1588ms + probe=1218us = 1589ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  67 NO_OP   gt=NO_OP    | delta_prefill=1370ms + probe=961us = 1371ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  68 ACTION   gt=ACTION   | delta_prefill=1731ms + probe=950us -> WOKE 12B
+[li-heartbeat] tick  69 KEEP     gt=KEEP     | delta_prefill=1624ms + probe=954us -> WOKE 12B
+[li-heartbeat] tick  70 NO_OP   gt=NO_OP    | delta_prefill=1371ms + probe=1259us = 1372ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  71 NO_OP   gt=NO_OP    | delta_prefill=1373ms + probe=954us = 1374ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  72 NO_OP   gt=NO_OP    | delta_prefill=1370ms + probe=1306us = 1372ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  73 NO_OP   gt=NO_OP    | delta_prefill=1376ms + probe=1613us = 1378ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  74 NO_OP   gt=NO_OP    | delta_prefill=1382ms + probe=1225us = 1383ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  75 E2B_TOOL gt=E2B_TOOL | delta_prefill=1676ms + probe=1335us -> WOKE 12B
+[li-heartbeat] tick  76 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=957us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  77 NO_OP   gt=NO_OP    | delta_prefill=1590ms + probe=977us = 1591ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  78 NO_OP   gt=NO_OP    | delta_prefill=1590ms + probe=955us = 1591ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  79 E2B_TOOL gt=E2B_TOOL | delta_prefill=1660ms + probe=957us -> WOKE 12B
+[li-heartbeat] tick  80 NO_OP   gt=NO_OP    | delta_prefill=1369ms + probe=958us = 1370ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  81 NO_OP   gt=NO_OP    | delta_prefill=1373ms + probe=949us = 1374ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  82 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=957us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  83 NO_OP   gt=NO_OP    | delta_prefill=1592ms + probe=1187us = 1593ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  84 NO_OP   gt=NO_OP    | delta_prefill=1590ms + probe=1282us = 1591ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  85 NO_OP   gt=NO_OP    | delta_prefill=1373ms + probe=959us = 1374ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  86 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=1191us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  87 ACTION   gt=ACTION   | delta_prefill=1591ms + probe=955us -> WOKE 12B
+[li-heartbeat] tick  88 NO_OP   gt=NO_OP    | delta_prefill=1372ms + probe=969us = 1373ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  89 KEEP     gt=KEEP     | delta_prefill=1739ms + probe=985us -> WOKE 12B
+[li-heartbeat] tick  90 FORGET   gt=FORGET   | delta_prefill=1629ms + probe=1141us -> WOKE 12B
+[li-heartbeat] tick  91 NO_OP   gt=NO_OP    | delta_prefill=1589ms + probe=955us = 1590ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  92 NO_OP   gt=NO_OP    | delta_prefill=1371ms + probe=954us = 1372ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  93 ACTION   gt=ACTION   | delta_prefill=1628ms + probe=948us -> WOKE 12B
+[li-heartbeat] tick  94 NO_OP   gt=NO_OP    | delta_prefill=1375ms + probe=1088us = 1376ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  95 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=997us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  96 KEEP     gt=KEEP     | delta_prefill=1736ms + probe=951us -> WOKE 12B
+[li-heartbeat] tick  97 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=948us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  98 NO_OP   gt=NO_OP    | delta_prefill=1372ms + probe=1032us = 1373ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick  99 NO_OP   gt=NO_OP    | delta_prefill=1376ms + probe=959us = 1377ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 100 ACTION   gt=ACTION   | delta_prefill=1592ms + probe=957us -> WOKE 12B
+[li-heartbeat] tick 101 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=996us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 102 KEEP     gt=KEEP     | delta_prefill=1700ms + probe=960us -> WOKE 12B
+[li-heartbeat] tick 103 E2B_TOOL gt=E2B_TOOL | delta_prefill=1668ms + probe=978us -> WOKE 12B
+[li-heartbeat] tick 104 FORGET   gt=FORGET   | delta_prefill=1808ms + probe=948us -> WOKE 12B
+[li-heartbeat] tick 105 KEEP     gt=KEEP     | delta_prefill=1629ms + probe=951us -> WOKE 12B
+[li-heartbeat] tick 106 NO_OP   gt=NO_OP    | delta_prefill=1375ms + probe=1233us = 1376ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 107 NO_OP   gt=NO_OP    | delta_prefill=1590ms + probe=970us = 1591ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 108 NO_OP   gt=NO_OP    | delta_prefill=1593ms + probe=958us = 1594ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 109 E2B_TOOL gt=E2B_TOOL | delta_prefill=1628ms + probe=987us -> WOKE 12B
+[li-heartbeat] tick 110 NO_OP   gt=NO_OP    | delta_prefill=1374ms + probe=1186us = 1375ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 111 NO_OP   gt=NO_OP    | delta_prefill=1445ms + probe=992us = 1446ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 112 E2B_TOOL gt=E2B_TOOL | delta_prefill=1631ms + probe=959us -> WOKE 12B
+[li-heartbeat] tick 113 NO_OP   gt=NO_OP    | delta_prefill=1591ms + probe=950us = 1592ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 114 NO_OP   gt=NO_OP    | delta_prefill=1592ms + probe=965us = 1593ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 115 NO_OP   gt=NO_OP    | delta_prefill=1454ms + probe=963us = 1455ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 116 NO_OP   gt=NO_OP    | delta_prefill=1337ms + probe=961us = 1338ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 117 E2B_TOOL gt=E2B_TOOL | delta_prefill=1591ms + probe=990us -> WOKE 12B
+[li-heartbeat] tick 118 NO_OP   gt=NO_OP    | delta_prefill=1376ms + probe=949us = 1377ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 119 KEEP     gt=KEEP     | delta_prefill=1637ms + probe=1025us -> WOKE 12B
+[li-heartbeat] tick 120 NO_OP   gt=NO_OP    | delta_prefill=1389ms + probe=961us = 1390ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 121 ACTION   gt=ACTION   | delta_prefill=1593ms + probe=948us -> WOKE 12B
+[li-heartbeat] tick 122 NO_OP   gt=NO_OP    | delta_prefill=1375ms + probe=1430us = 1377ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 123 NO_OP   gt=NO_OP    | delta_prefill=1382ms + probe=1170us = 1383ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 124 KEEP     gt=KEEP     | delta_prefill=1717ms + probe=1124us -> WOKE 12B
+[li-heartbeat] tick 125 NO_OP   gt=NO_OP    | delta_prefill=1630ms + probe=1352us = 1631ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 126 NO_OP   gt=NO_OP    | delta_prefill=1379ms + probe=954us = 1380ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 127 NO_OP   gt=NO_OP    | delta_prefill=1375ms + probe=1007us = 1376ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 128 NO_OP   gt=NO_OP    | delta_prefill=1377ms + probe=949us = 1378ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 129 FORGET   gt=FORGET   | delta_prefill=1665ms + probe=950us -> WOKE 12B
+[li-heartbeat] tick 130 KEEP     gt=KEEP     | delta_prefill=1703ms + probe=1235us -> WOKE 12B
+[li-heartbeat] tick 131 ACTION   gt=ACTION   | delta_prefill=1599ms + probe=1242us -> WOKE 12B
+[li-heartbeat] tick 132 ACTION   gt=ACTION   | delta_prefill=1634ms + probe=1294us -> WOKE 12B
+[li-heartbeat] tick 133 ACTION   gt=ACTION   | delta_prefill=1745ms + probe=952us -> WOKE 12B
+[li-heartbeat] tick 134 NO_OP   gt=NO_OP    | delta_prefill=1558ms + probe=948us = 1558ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 135 NO_OP   gt=NO_OP    | delta_prefill=1375ms + probe=970us = 1376ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 136 NO_OP   gt=NO_OP    | delta_prefill=1595ms + probe=1474us = 1596ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 137 ACTION   gt=ACTION   | delta_prefill=1594ms + probe=967us -> WOKE 12B
+[li-heartbeat] tick 138 KEEP     gt=KEEP     | delta_prefill=1630ms + probe=979us -> WOKE 12B
+[li-heartbeat] tick 139 NO_OP   gt=NO_OP    | delta_prefill=1591ms + probe=981us = 1592ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 140 FORGET   gt=FORGET   | delta_prefill=1628ms + probe=1009us -> WOKE 12B
+[li-heartbeat] tick 141 ACTION   gt=ACTION   | delta_prefill=1596ms + probe=1152us -> WOKE 12B
+[li-heartbeat] tick 142 NO_OP   gt=NO_OP    | delta_prefill=1633ms + probe=963us = 1634ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 143 NO_OP   gt=NO_OP    | delta_prefill=1446ms + probe=965us = 1447ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 144 NO_OP   gt=NO_OP    | delta_prefill=1592ms + probe=969us = 1593ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 145 NO_OP   gt=NO_OP    | delta_prefill=1373ms + probe=964us = 1374ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 146 ACTION   gt=ACTION   | delta_prefill=1739ms + probe=960us -> WOKE 12B
+[li-heartbeat] tick 147 NO_OP   gt=NO_OP    | delta_prefill=1375ms + probe=960us = 1376ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 148 NO_OP   gt=NO_OP    | delta_prefill=1446ms + probe=970us = 1447ms NO_OP-tick (decode SKIPPED)
+[li-heartbeat] tick 149 E2B_TOOL gt=E2B_TOOL | delta_prefill=1632ms + probe=961us -> WOKE 12B
+[li-heartbeat] DONE 150 ticks | accuracy=1.000 (150/150) | NO_OP-skips=85 woke=65
+[li-heartbeat] TRUE FLOOR: NO_OP tick = 1451ms avg (delta_prefill 1536ms + probe 1.02ms); was ~5000ms (full re-prefill+decode). decode SKIPPED on 85/150 ticks.
+[li-heartbeat] DONE

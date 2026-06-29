@@ -280,6 +280,23 @@ async fn main() {
             Err(e) => { eprintln!("[li-oracle] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_LI_HEARTBEAT — PERSISTENT-CONTRACT KAIROS heartbeat (true Latent Interceptor deploy).
+    //   SP_LI_HEARTBEAT=1 SP_MODEL_PATH=… SP_TOKENIZER_PATH=… SP_LI_TAPE=tape SP_LI_HEAD=_li_head.bin
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_LI_HEARTBEAT").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        let tape = std::env::var("SP_LI_TAPE").unwrap_or_default();
+        let head = std::env::var("SP_LI_HEAD").unwrap_or_else(|_| "_li_head.bin".to_string());
+        if model.is_empty() || tok.is_empty() || tape.is_empty() {
+            eprintln!("SP_LI_HEARTBEAT=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH, SP_LI_TAPE (+ SP_LI_HEAD)");
+            std::process::exit(2);
+        }
+        match eagle_accept::run_li_heartbeat(&model, &tok, &tape, &head) {
+            Ok(()) => { eprintln!("[li-heartbeat] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[li-heartbeat] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 
