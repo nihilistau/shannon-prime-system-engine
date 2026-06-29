@@ -1,0 +1,310 @@
+Why does the Roman Empire matter?
+Summarize France in a few sentences.
+Why does vaccines matter?
+Explain the speed of light step by step.
+Explain India to a skeptic in detail.
+Write a SQL function to implement binary search.
+What is the capital of India?
+Summarize compound interest in a few sentences.
+Summarize the speed of light in a few sentences.
+Compare Canada and quantum entanglement in detail.
+What are the key facts about inflation?
+Write a Bash function to compute a factorial.
+Write a Bash function to make an HTTP GET request.
+Why does Norway matter?
+Compare Kenya and Brazil with an analogy.
+What are the key facts about the water cycle?
+Compare Vietnam and compound interest in detail.
+Write a Rust function to make an HTTP GET request.
+Summarize the French Revolution in a few sentences.
+What makes a good password?
+Write a Go function to compute a factorial.
+Write a C function to check if a number is prime.
+Write a Bash function to implement binary search.
+Summarize photosynthesis in a few sentences.
+Give me three tips for better sleep.
+Why does antibiotics matter?
+Explain the Cold War to a skeptic concisely.
+Explain the water cycle to a skeptic in detail.
+Why does neural networks matter?
+Why does electric cars matter?
+How do airplanes stay in the air?
+What are the key facts about antibiotics?
+Explain gravity to a five-year-old step by step.
+Why does DNA matter?
+Write a SQL function to check if a number is prime.
+Explain tectonic plates to a five-year-old with an analogy.
+Summarize the printing press in a few sentences.
+Summarize DNA in a few sentences.
+Write a Go function to sort a list.
+Compare machine learning and the stock market concisely.
+Write a Python function to read a file line by line.
+Compare Brazil and Brazil in plain language.
+Explain evolution to a software engineer in plain language.
+Explain the concept of opportunity cost.
+What are the key facts about the speed of light?
+What are the key facts about compound interest?
+Why does climate change matter?
+Write a Rust function to sort a list.
+Write a C function to remove duplicates from a list.
+Write a JavaScript function to reverse a string.
+Why does Egypt matter?
+Why does photosynthesis matter?
+Compare inflation and the stock market step by step.
+What are the main causes of inflation?
+Explain the human brain in plain language.
+Why does the Cold War matter?
+Summarize inflation in a few sentences.
+What are the key facts about renewable energy?
+Why does Kenya matter?
+Write a JavaScript function to find the max in an array.
+Write a Go function to read a file line by line.
+Write a C function to find the max in an array.
+Write a C function to implement binary search.
+Explain electric cars in plain language.
+How do I stay motivated when learning something hard?
+Why does Vietnam matter?
+Why does France matter?
+Explain quantum entanglement with an analogy.
+Explain how vaccines train the immune system.
+Write a Go function to remove duplicates from a list.
+Summarize antibiotics in a few sentences.
+Write a JavaScript function to remove duplicates from a list.
+Write a SQL function to read a file line by line.
+Write a Rust function to parse JSON.
+Explain the French Revolution to a five-year-old in plain language.
+What are the key facts about the French Revolution?
+Write a SQL function to remove duplicates from a list.
+Write a C function to make an HTTP GET request.
+What is the meaning of the word 'serendipity'?
+What are the key facts about the internet?
+Write a Bash function to parse JSON.
+Explain gravity concisely.
+Write a Bash function to sort a list.
+How does compound interest grow money over time?
+Explain the immune system with an analogy.
+Why does the water cycle matter?
+Write a Rust function to read a file line by line.
+Explain Japan to a skeptic in plain language.
+Why does Brazil matter?
+Write a Rust function to remove duplicates from a list.
+What is the capital of Canada?
+Write a Bash function to check if a number is prime.
+Write a JavaScript function to make an HTTP GET request.
+What are the key facts about neural networks?
+What are the key facts about machine learning?
+What are the key facts about Japan?
+Explain quantum entanglement to a five-year-old step by step.
+What is the capital of France?
+Explain what an API is.
+What are the key facts about Vietnam?
+Explain blockchain to a five-year-old in detail.
+Explain photosynthesis to a five-year-old in detail.
+What are the key facts about evolution?
+Explain black holes concisely.
+What are the key facts about photosynthesis?
+What are the key facts about vaccines?
+Explain inflation to a high-school student with an analogy.
+Explain climate change step by step.
+Compare the stock market and Egypt step by step.
+Summarize the stock market in a few sentences.
+Summarize the Cold War in a few sentences.
+Explain the Roman Empire to a software engineer with an analogy.
+Summarize Norway in a few sentences.
+Write a Bash function to read a file line by line.
+Explain the water cycle with an analogy.
+Explain climate change to a five-year-old with an analogy.
+What is the capital of Brazil?
+Explain the immune system to a skeptic in plain language.
+Explain the Roman Empire step by step.
+What are the key facts about the immune system?
+Summarize blockchain in a few sentences.
+Explain the internet to a software engineer with an analogy.
+Explain antibiotics with an analogy.
+Write a Rust function to compute a factorial.
+Explain evolution with an analogy.
+Explain black holes to a busy executive in plain language.
+Write a JavaScript function to compute a factorial.
+Compare DNA and climate change step by step.
+Explain the printing press to a high-school student in detail.
+What's a good recipe for pancakes?
+Explain electric cars to a high-school student with an analogy.
+Why does inflation matter?
+Write a JavaScript function to implement binary search.
+Why does black holes matter?
+Why does supply and demand matter?
+Write a Python function to remove duplicates from a list.
+Explain blockchain concisely.
+What's the best way to learn a new language?
+What is the difference between weather and climate?
+Explain compound interest to a five-year-old with an analogy.
+Compare the immune system and the immune system concisely.
+Summarize Peru in a few sentences.
+Explain Canada to a five-year-old in detail.
+What is the difference between AI and machine learning?
+Why does gravity matter?
+What are the key facts about supply and demand?
+Explain vaccines step by step.
+Explain antibiotics to a five-year-old step by step.
+Explain the French Revolution in plain language.
+Summarize Egypt in a few sentences.
+Write a Bash function to find the max in an array.
+Summarize machine learning in a few sentences.
+What is the capital of Kenya?
+Write a Go function to implement binary search.
+Explain Peru to a busy executive step by step.
+Compare tectonic plates and vaccines in plain language.
+Write a C function to reverse a string.
+Summarize Canada in a few sentences.
+Why does quantum entanglement matter?
+Explain the internet with an analogy.
+Write a SQL function to compute a factorial.
+What causes the seasons?
+Why does the French Revolution matter?
+Write a JavaScript function to sort a list.
+Why does the stock market matter?
+Compare black holes and climate change concisely.
+Explain vaccines to a busy executive with an analogy.
+Summarize India in a few sentences.
+Summarize electric cars in a few sentences.
+Give step-by-step instructions to change a flat tire.
+What are the key facts about India?
+Summarize the human brain in a few sentences.
+Explain DNA to a busy executive concisely.
+Write a limerick about a cat.
+Write a Rust function to implement binary search.
+Summarize the water cycle in a few sentences.
+Explain the printing press with an analogy.
+Write a Python function to sort a list.
+Why does renewable energy matter?
+What are the key facts about Canada?
+How do you make a good first impression?
+Explain the Cold War concisely.
+Explain Vietnam to a skeptic concisely.
+Compare Peru and the water cycle in plain language.
+Explain Brazil to a high-school student with an analogy.
+Compare France and inflation in detail.
+What are the key facts about the human brain?
+Why does machine learning matter?
+Write a Go function to parse JSON.
+How does a transistor work?
+What is the capital of Norway?
+What are the key facts about electric cars?
+Summarize Kenya in a few sentences.
+What are the key facts about Egypt?
+Explain Egypt to a busy executive concisely.
+Why does the speed of light matter?
+What are the key facts about the printing press?
+Explain machine learning to a busy executive with an analogy.
+Write a SQL function to make an HTTP GET request.
+Summarize Vietnam in a few sentences.
+What are the key facts about gravity?
+Write a Python function to reverse a string.
+What are the key facts about tectonic plates?
+What is the capital of Vietnam?
+Write a Python function to find the max in an array.
+Summarize the Roman Empire in a few sentences.
+Write a Go function to make an HTTP GET request.
+What are the key facts about Brazil?
+Summarize Brazil in a few sentences.
+Summarize Japan in a few sentences.
+Compare the French Revolution and neural networks concisely.
+Summarize supply and demand in a few sentences.
+Explain supply and demand with an analogy.
+Explain renewable energy step by step.
+Compare Norway and the internet with an analogy.
+Write a C function to compute a factorial.
+Write a Rust function to reverse a string.
+Summarize tectonic plates in a few sentences.
+Write a SQL function to reverse a string.
+Summarize black holes in a few sentences.
+What are the key facts about black holes?
+Why does India matter?
+Explain the difference between TCP and UDP.
+Explain the human brain to a busy executive in plain language.
+Summarize renewable energy in a few sentences.
+List five common logical fallacies.
+Explain neural networks to a busy executive in detail.
+What are the key facts about the stock market?
+Explain renewable energy to a five-year-old with an analogy.
+Summarize evolution in a few sentences.
+Why does compound interest matter?
+Summarize quantum entanglement in a few sentences.
+Explain the greenhouse effect.
+What are the key facts about Peru?
+Explain supply and demand to a five-year-old in detail.
+Describe the plot of a hero's journey.
+Explain machine learning in detail.
+What is the capital of Peru?
+Write a Python function to implement binary search.
+Summarize neural networks in a few sentences.
+Why does the immune system matter?
+Write a Python function to make an HTTP GET request.
+Summarize the internet in a few sentences.
+Explain Kenya to a five-year-old with an analogy.
+Write a SQL function to find the max in an array.
+Explain France to a skeptic step by step.
+Explain the speed of light to a busy executive concisely.
+Write a function to compute Fibonacci numbers.
+Compare India and blockchain concisely.
+Write a C function to sort a list.
+What are the key facts about quantum entanglement?
+What are the key facts about DNA?
+Write a Go function to check if a number is prime.
+Write a JavaScript function to check if a number is prime.
+Explain compound interest step by step.
+Why does tectonic plates matter?
+What are the pros and cons of remote work?
+Write a short poem about the ocean.
+Write a SQL function to sort a list.
+Write a Python function to parse JSON.
+Write a Rust function to check if a number is prime.
+What are the key facts about Kenya?
+Draft a polite email asking for a deadline extension.
+Explain tectonic plates in detail.
+Explain the stock market with an analogy.
+Explain recursion with an example.
+Why does the human brain matter?
+Write a JavaScript function to read a file line by line.
+Write a Python function to check if a number is prime.
+What is the capital of Egypt?
+Why does Peru matter?
+Why does Japan matter?
+Write a Bash function to reverse a string.
+Why does blockchain matter?
+Write a Python function to compute a factorial.
+Summarize vaccines in a few sentences.
+What are the key facts about France?
+Summarize the immune system in a few sentences.
+Explain Norway to a busy executive in plain language.
+Compare Japan and DNA concisely.
+Summarize climate change in a few sentences.
+Write a Bash function to remove duplicates from a list.
+Summarize gravity in a few sentences.
+Explain the stock market to a software engineer step by step.
+Explain neural networks in plain language.
+Why does the internet matter?
+Why does evolution matter?
+Compare Egypt and black holes in detail.
+What are the key facts about the Roman Empire?
+What are the key facts about the Cold War?
+Describe how a search engine ranks pages.
+Write a Go function to reverse a string.
+Explain photosynthesis in detail.
+Write a C function to parse JSON.
+Why does the printing press matter?
+Write a JavaScript function to parse JSON.
+What is the capital of Japan?
+Write a haiku about autumn.
+What are the key facts about blockchain?
+Compare the Roman Empire and the water cycle in detail.
+Why does Canada matter?
+What are the key facts about Norway?
+Compare photosynthesis and supply and demand in detail.
+Explain DNA with an analogy.
+Write a C function to read a file line by line.
+Write a Rust function to find the max in an array.
+Write a SQL function to parse JSON.
+Explain inflation concisely.
+What are the key facts about climate change?
+Write a Go function to find the max in an array.

@@ -44,6 +44,110 @@ extern "C" {
         out_hnext: *mut f32,
     ) -> c_int;
     fn gemma4_draft_close();
+    fn gemma4_kv_reset(s: *mut sp_g4_kv) -> c_int;
+    fn gemma4_kv_ctx_dump(s: *mut sp_g4_kv, kg: *mut f32, vg: *mut f32, ks: *mut f32, vs: *mut f32,
+                          kvd_g: *mut c_int, kvd_s: *mut c_int, npos: *mut c_int) -> c_int;
+    fn gemma4_kv_ctx_geom(s: *mut sp_g4_kv, g_nkv: *mut c_int, g_hd: *mut c_int, s_nkv: *mut c_int,
+                          s_hd: *mut c_int, period: *mut c_int, kvfs: *mut c_int,
+                          g_base: *mut f32, s_base: *mut f32) -> c_int;
+}
+
+/// EAGLE flywheel CAPTURE: greedy-roll the target over a corpus, dumping per generated
+/// position (feature h, input token, target label) + the full-sequence KV the draft attends.
+/// This is the engine-matched training data for #2 (the draft learns OUR engine's distribution).
+pub fn run_eagle_capture(
+    model_path: &str,
+    tok_path: &str,
+    corpus_path: &str,
+    out_dir: &str,
+    gen_len: usize,
+) -> Result<usize, String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let hidden = arch.hidden_dim as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("capture: qm NULL".to_string()); }
+    let suppress: Vec<i32> = tok.suppress_token_ids();
+
+    let corpus = std::fs::read_to_string(corpus_path).map_err(|e| format!("corpus {corpus_path}: {e}"))?;
+    let lines: Vec<&str> = corpus.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let max_prompt = 64usize;
+    let pmax = (max_prompt + gen_len + 8) as c_int;
+    let s = unsafe { gemma4_kv_open(qm, pmax) };
+    if s.is_null() { return Err("capture: gemma4_kv_open NULL".to_string()); }
+
+    // geometry for KV-buffer sizing.
+    let (mut gnkv, mut ghd, mut snkv, mut shd, mut period, mut kvfs) = (0i32, 0i32, 0i32, 0i32, 0i32, 0i32);
+    let (mut gb, mut sb) = (0f32, 0f32);
+    unsafe { gemma4_kv_ctx_geom(s, &mut gnkv, &mut ghd, &mut snkv, &mut shd, &mut period, &mut kvfs, &mut gb, &mut sb); }
+    let kvd_g = (gnkv * ghd) as usize;
+    let kvd_s = (snkv * shd) as usize;
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {out_dir}: {e}"))?;
+    let mut manifest = String::new();
+    manifest.push_str(&format!(
+        "{{\"hidden\":{hidden},\"vocab\":{vocab},\"g_nkv\":{gnkv},\"g_hd\":{ghd},\"s_nkv\":{snkv},\"s_hd\":{shd},\"period\":{period},\"kvfs\":{kvfs},\"g_base\":{gb},\"s_base\":{sb},\"gen_len\":{gen_len}}}\n"
+    ));
+
+    let mut kg = vec![0.0f32; (pmax as usize) * kvd_g.max(1)];
+    let mut vg = vec![0.0f32; (pmax as usize) * kvd_g.max(1)];
+    let mut ks = vec![0.0f32; (pmax as usize) * kvd_s.max(1)];
+    let mut vs = vec![0.0f32; (pmax as usize) * kvd_s.max(1)];
+    let mut feat = vec![0.0f32; hidden];
+    let mut logits = vec![0.0f32; vocab];
+
+    let mut seqs = 0usize;
+    for (si, line) in lines.iter().enumerate() {
+        let msgs = vec![Message { role: "user".to_string(), content: line.to_string() }];
+        let mut prompt = match tok.apply_template_ids(&msgs) { Ok(p) => p, Err(_) => continue };
+        if prompt.len() < 2 || prompt.len() > max_prompt { prompt.truncate(max_prompt); }
+        if unsafe { gemma4_kv_reset(s) } != 0 { return Err("capture: reset".to_string()); }
+        let np = prompt.len();
+        if unsafe { gemma4_kv_prefill(s, prompt.as_ptr(), (np - 1) as c_int) } != 0 { continue; }
+        let mut last = prompt[np - 1];
+        let (mut feats, mut inps, mut lbls, mut atts): (Vec<f32>, Vec<i32>, Vec<i32>, Vec<i32>) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..gen_len {
+            unsafe { gemma4_kv_capture_feat(s, feat.as_mut_ptr()) };
+            if unsafe { gemma4_kv_decode_logits(s, last, logits.as_mut_ptr()) } != 0 { break; }
+            for &id in &suppress { if (id as usize) < vocab { logits[id as usize] = f32::NEG_INFINITY; } }
+            let g = argmax(&logits);
+            let attend = np as i32 + inps.len() as i32; // KV positions the draft attends for this step
+            feats.extend_from_slice(&feat);
+            inps.push(last);
+            lbls.push(g);
+            atts.push(attend);
+            last = g;
+            if tok.eos_ids.contains(&g) { break; }
+        }
+        if inps.is_empty() { continue; }
+        let mut kvd_g_o = 0i32; let mut kvd_s_o = 0i32; let mut npos = 0i32;
+        unsafe { gemma4_kv_ctx_dump(s, kg.as_mut_ptr(), vg.as_mut_ptr(), ks.as_mut_ptr(), vs.as_mut_ptr(),
+                                    &mut kvd_g_o, &mut kvd_s_o, &mut npos); }
+        let dir = format!("{out_dir}/seq_{si:04}");
+        std::fs::create_dir_all(&dir).ok();
+        let w = |name: &str, bytes: &[u8]| { let _ = std::fs::write(format!("{dir}/{name}"), bytes); };
+        let f32b = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let i32b = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        w("feat.f32", &f32b(&feats));
+        w("inp.i32", &i32b(&inps));
+        w("lbl.i32", &i32b(&lbls));
+        w("att.i32", &i32b(&atts));
+        w("kg.f32", &f32b(&kg[..(npos as usize) * kvd_g])); w("vg.f32", &f32b(&vg[..(npos as usize) * kvd_g]));
+        w("ks.f32", &f32b(&ks[..(npos as usize) * kvd_s])); w("vs.f32", &f32b(&vs[..(npos as usize) * kvd_s]));
+        manifest.push_str(&format!("{{\"seq\":{si},\"gen\":{},\"npos\":{npos},\"kvd_g\":{kvd_g},\"kvd_s\":{kvd_s}}}\n", inps.len()));
+        seqs += 1;
+        if si % 25 == 0 { eprintln!("[capture] seq {si}/{} gen={} npos={npos}", lines.len(), inps.len()); }
+    }
+    unsafe { gemma4_kv_close(s) };
+    std::fs::write(format!("{out_dir}/manifest.jsonl"), manifest).map_err(|e| format!("manifest: {e}"))?;
+    eprintln!("[capture] DONE {seqs} sequences -> {out_dir} (kvd_g={kvd_g} kvd_s={kvd_s} hidden={hidden})");
+    Ok(seqs)
 }
 
 fn argmax(v: &[f32]) -> i32 {

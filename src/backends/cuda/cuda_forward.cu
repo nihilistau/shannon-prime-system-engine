@@ -4757,6 +4757,37 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
     return 0;
 }
 
+/* EAGLE flywheel capture: D2H the TARGET KV context the draft attends — the global owner
+ * (kvfs-1, kvd=g_nkv*g_hd) and SWA owner (kvfs-2, kvd=s_nkv*s_hd), positions [0,dpos).
+ * Caller allocates kg/vg (Pmax*g_nkv*g_hd) and ks/vs (Pmax*s_nkv*s_hd); pass NULL to skip.
+ * Fills kvd_g/kvd_s/npos. This is the (per-sequence) KV half of the training record. */
+extern "C" int gemma4_kv_ctx_dump(sp_g4_kv *s, float *kg, float *vg, float *ks, float *vs,
+                                  int *kvd_g, int *kvd_s, int *npos) {
+    if (!s) { sp_set_error("gemma4_kv_ctx_dump: null s"); return -1; }
+    const int gl = s->kvfs - 1, sl = s->kvfs - 2;
+    if (gl < 0 || sl < 0) { sp_set_error("gemma4_kv_ctx_dump: kvfs<2"); return -1; }
+    const int kg_d = s->g_nkv * s->g_hd, ks_d = s->s_nkv * s->s_hd, P = s->dpos_host;
+    cudaStreamSynchronize(g_w.stream);
+    if (kg && s->dKc[gl]) cudaMemcpy(kg, s->dKc[gl], (size_t)P * kg_d * sizeof(float), cudaMemcpyDeviceToHost);
+    if (vg && s->dVc[gl]) cudaMemcpy(vg, s->dVc[gl], (size_t)P * kg_d * sizeof(float), cudaMemcpyDeviceToHost);
+    if (ks && s->dKc[sl]) cudaMemcpy(ks, s->dKc[sl], (size_t)P * ks_d * sizeof(float), cudaMemcpyDeviceToHost);
+    if (vs && s->dVc[sl]) cudaMemcpy(vs, s->dVc[sl], (size_t)P * ks_d * sizeof(float), cudaMemcpyDeviceToHost);
+    if (kvd_g) *kvd_g = kg_d; if (kvd_s) *kvd_s = ks_d; if (npos) *npos = P;
+    return 0;
+}
+
+/* Geometry the trainer needs (draft attention dims + the global/SWA layer indices + rope bases).
+ * Lets the capture/trainer size buffers + replicate the draft attention without re-deriving. */
+extern "C" int gemma4_kv_ctx_geom(sp_g4_kv *s, int *g_nkv, int *g_hd, int *s_nkv, int *s_hd,
+                                  int *period, int *kvfs, float *g_base, float *s_base) {
+    if (!s) return -1;
+    if (g_nkv) *g_nkv = s->g_nkv; if (g_hd) *g_hd = s->g_hd;
+    if (s_nkv) *s_nkv = s->s_nkv; if (s_hd) *s_hd = s->s_hd;
+    if (period) *period = s->period; if (kvfs) *kvfs = s->kvfs;
+    if (g_base) *g_base = s->g_base; if (s_base) *s_base = s->s_base;
+    return 0;
+}
+
 /* KAI-2: stage a latent event packet (one E-float residual) to OVERRIDE the next step's
  * post-embed residual (residual-entry injection). The forward then mints K/V natively at the
  * live dpos ⇒ RoPE phase correct by construction. One-shot (consumed by the next step). */
