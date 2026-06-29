@@ -1,0 +1,122 @@
+# HARD ood tape (disjoint banks, seed-split). near-miss->NONE, CALC=math PYTHON=code.
+# tick kind payload salience expect
+0     EVENT.web.invoke         "is the api endpoint responding right now"      0.71  WEB
+1     EVENT.chat.nearmiss      "i love how recursion looks on paper"           0.89  NONE
+2     EVENT.web.invoke         "is the api endpoint responding right now"      0.41  WEB
+3     EVENT.chat.nearmiss      "i love how recursion looks on paper"           0.63  NONE
+4     EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.54  NONE
+5     EVENT.python.invoke      "um is 1009 a prime number"                     0.65  PYTHON
+6     EVENT.chat.nearmiss      "yaml is such a fiddly format"                  0.67  NONE
+7     EVENT.db.invoke          "ok so how many sessions started this morning"  0.68  DB
+8     EVENT.idle.clean         "sounds good"                                   0.51  NONE
+9     EVENT.chat.nearmiss      "tell me a fun fact about percentages"          0.48  NONE
+10    EVENT.idle.clean         "morning"                                       0.66  NONE
+11    EVENT.chat.nearmiss      "yaml is such a fiddly format"                  0.43  NONE
+12    EVENT.python.invoke      "capitalize every other character of banana"    0.69  PYTHON
+13    EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.6   NONE
+14    EVENT.idle.clean         "all quiet"                                     0.82  NONE
+15    EVENT.chat.nearmiss      "logs pile up so fast these days"               0.89  NONE
+16    EVENT.calc.invoke        "what's the cube root of 729"                   0.62  CALC
+17    EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.71  NONE
+18    EVENT.calc.invoke        "annualized return if 500 becomes 650 over 2 years" 0.56  CALC
+19    EVENT.chat.nearmiss      "i love how recursion looks on paper"           0.79  NONE
+20    EVENT.chat.nearmiss      "yaml is such a fiddly format"                  0.68  NONE
+21    EVENT.idle.clean         "sounds good"                                   0.66  NONE
+22    EVENT.calc.invoke        "annualized return if 500 becomes 650 over 2 years" 0.63  CALC
+23    EVENT.chat.nearmiss      "logs pile up so fast these days"               0.9   NONE
+24    EVENT.chat.nearmiss      "i keep forgetting how slicing works in python" 0.77  NONE
+25    EVENT.web.invoke         "is the api endpoint responding right now"      0.48  WEB
+26    EVENT.web.invoke         "pull the current forecast for berlin"          0.42  WEB
+27    EVENT.file.invoke        "what files are in the cache folder"            0.46  FILE
+28    EVENT.chat.nearmiss      "i love how recursion looks on paper"           0.65  NONE
+29    EVENT.web.invoke         "pull the current forecast for berlin"          0.6   WEB
+30    EVENT.idle.clean         "all quiet"                                     0.41  NONE
+31    EVENT.chat.nearmiss      "the site has been slow lately"                 0.53  NONE
+32    EVENT.chat.nearmiss      "prime numbers are weirdly beautiful"           0.61  NONE
+33    EVENT.chat.nearmiss      "yaml is such a fiddly format"                  0.48  NONE
+34    EVENT.file.invoke        "um save these notes to a file"                 0.42  FILE
+35    EVENT.idle.clean         "sounds good"                                   0.49  NONE
+36    EVENT.chat.nearmiss      "logs pile up so fast these days"               0.4   NONE
+37    EVENT.python.invoke      "capitalize every other character of banana"    0.49  PYTHON
+38    EVENT.file.invoke        "what files are in the cache folder"            0.68  FILE
+39    EVENT.web.invoke         "pull the current forecast for berlin"          0.8   WEB
+40    EVENT.db.invoke          "transactions above fifty euros this week"      0.57  DB
+41    EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.83  NONE
+42    EVENT.web.invoke         "is the api endpoint responding right now"      0.68  WEB
+43    EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.69  NONE
+44    EVENT.web.invoke         "pull the current forecast for berlin"          0.61  WEB
+45    EVENT.chat.nearmiss      "i keep forgetting how slicing works in python" 0.6   NONE
+46    EVENT.db.invoke          "um select the total record count from logs"    0.62  DB
+47    EVENT.idle.clean         "noted"                                         0.8   NONE
+48    EVENT.file.invoke        "what files are in the ache folder"             0.54  FILE
+49    EVENT.chat.nearmiss      "the site has been slow lately"                 0.8   NONE
+50    EVENT.chat.nearmiss      "i keep forgetting how slicing works in python" 0.54  NONE
+51    EVENT.web.invoke         "pull the current forecast for berlin"          0.66  WEB
+52    EVENT.web.invoke         "pull teh current forecast for berlin"          0.51  WEB
+53    EVENT.chat.nearmiss      "logs pile up so fast these days"               0.78  NONE
+54    EVENT.idle.clean         "morning"                                       0.48  NONE
+55    EVENT.idle.clean         "noted"                                         0.44  NONE
+56    EVENT.db.invoke          "select the total record count from logs"       0.63  DB
+57    EVENT.idle.clean         "all quiet"                                     0.78  NONE
+58    EVENT.chat.nearmiss      "prime numbers are weirdly beautiful"           0.55  NONE
+59    EVENT.web.invoke         "what's the newest version on the releases page" 0.8   WEB
+60    EVENT.idle.clean         "morning"                                       0.61  NONE
+61    EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.72  NONE
+62    EVENT.calc.invoke        "annualized return if 500 becomes 650 over 2 years" 0.62  CALC
+63    EVENT.chat.nearmiss      "i love how recursion looks on paper"           0.82  NONE
+64    EVENT.chat.nearmiss      "i keep forgetting how slicing works in python" 0.81  NONE
+65    EVENT.chat.nearmiss      "the site has been slow lately"                 0.53  NONE
+66    EVENT.calc.invoke        "take 7 percent off 1290"                       0.79  CALC
+67    EVENT.chat.nearmiss      "what's the history of the square root symbol"  0.45  NONE
+68    EVENT.python.invoke      "which token here is teh longest"               0.42  PYTHON
+69    EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.57  NONE
+70    EVENT.db.invoke          "how many sessions started this morning"        0.83  DB
+71    EVENT.file.invoke        "save these noes to a file"                     0.69  FILE
+72    EVENT.chat.nearmiss      "what's the history of the square root symbol"  0.74  NONE
+73    EVENT.web.invoke         "um what's the newest version on the releases page" 0.63  WEB
+74    EVENT.db.invoke          "pls transactions above fifty euros this week"  0.85  DB
+75    EVENT.idle.clean         "sounds good"                                   0.58  NONE
+76    EVENT.db.invoke          "transactions above fifty euros this week"      0.8   DB
+77    EVENT.idle.clean         "sounds good"                                   0.72  NONE
+78    EVENT.idle.clean         "all quiet"                                     0.67  NONE
+79    EVENT.idle.clean         "carry on"                                      0.69  NONE
+80    EVENT.chat.nearmiss      "the site has been slow lately"                 0.43  NONE
+81    EVENT.web.invoke         "what's the newest version on the releases page" 0.64  WEB
+82    EVENT.python.invoke      "is 1009 a prime number"                        0.51  PYTHON
+83    EVENT.chat.nearmiss      "logs pile up so fast these days"               0.52  NONE
+84    EVENT.file.invoke        "what files are in the cache folder"            0.87  FILE
+85    EVENT.calc.invoke        "annualized return if 500 becomes 650 over 2 years" 0.61  CALC
+86    EVENT.python.invoke      "capitalize every other character of banana"    0.74  PYTHON
+87    EVENT.chat.nearmiss      "tell me a fun fact about percentages"          0.83  NONE
+88    EVENT.web.invoke         "what's the newest vrsion on the releases page" 0.75  WEB
+89    EVENT.chat.nearmiss      "tell me a fun fact about percentages"          0.78  NONE
+90    EVENT.chat.nearmiss      "tell me a fun fact about percentages"          0.43  NONE
+91    EVENT.db.invoke          "select the total record count from logs"       0.85  DB
+92    EVENT.chat.nearmiss      "prime numbers are weirdly beautiful"           0.54  NONE
+93    EVENT.db.invoke          "transactions above fifty euros this week"      0.77  DB
+94    EVENT.chat.nearmiss      "i love how recursion looks on paper"           0.42  NONE
+95    EVENT.idle.clean         "carry on"                                      0.58  NONE
+96    EVENT.calc.invoke        "divide 144 by 12 then add 9"                   0.45  CALC
+97    EVENT.file.invoke        "what files are in the cache folder"            0.64  FILE
+98    EVENT.idle.clean         "morning"                                       0.62  NONE
+99    EVENT.idle.clean         "morning"                                       0.5   NONE
+100   EVENT.chat.nearmiss      "tell me a fun fact about percentages"          0.73  NONE
+101   EVENT.idle.clean         "carry on"                                      0.65  NONE
+102   EVENT.chat.nearmiss      "the site has been slow lately"                 0.85  NONE
+103   EVENT.chat.nearmiss      "prime numbers are weirdly beautiful"           0.84  NONE
+104   EVENT.db.invoke          "select the total record count from logs"       0.53  DB
+105   EVENT.db.invoke          "select the total record count from logs"       0.69  DB
+106   EVENT.idle.clean         "noted"                                         0.82  NONE
+107   EVENT.chat.nearmiss      "yaml is such a fiddly format"                  0.56  NONE
+108   EVENT.idle.clean         "morning"                                       0.4   NONE
+109   EVENT.idle.clean         "sounds good"                                   0.54  NONE
+110   EVENT.idle.clean         "carry on"                                      0.44  NONE
+111   EVENT.chat.nearmiss      "prime numbers are weirdly beautiful"           0.89  NONE
+112   EVENT.idle.clean         "sounds good"                                   0.66  NONE
+113   EVENT.file.invoke        "save these notes to a file"                    0.45  FILE
+114   EVENT.python.invoke      "order these strings by length"                 0.62  PYTHON
+115   EVENT.idle.clean         "sounds good"                                   0.54  NONE
+116   EVENT.idle.clean         "noted"                                         0.57  NONE
+117   EVENT.chat.nearmiss      "we migrated the db schema last quarter"        0.76  NONE
+118   EVENT.db.invoke          "how many sessions started this morning"        0.82  DB
+119   EVENT.file.invoke        "save these notes to a file"                    0.62  FILE

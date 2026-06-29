@@ -1,0 +1,202 @@
+# HARD train tape (disjoint banks, seed-split). near-miss->NONE, CALC=math PYTHON=code.
+# tick kind payload salience expect
+0     EVENT.db.invoke          "uh count rows in teh events table"             0.79  DB
+1     EVENT.chat.nearmiss      "that website was down yesterday"               0.81  NONE
+2     EVENT.idle.clean         "ping"                                          0.41  NONE
+3     EVENT.python.invoke      "check if 97 is prime"                          0.79  PYTHON
+4     EVENT.chat.nearmiss      "our database runs on postgres"                 0.6   NONE
+5     EVENT.file.invoke        "write the report to disk"                      0.53  FILE
+6     EVENT.chat.nearmiss      "explain what the count method does"            0.54  NONE
+7     EVENT.file.invoke        "list the ogs directory"                        0.61  FILE
+8     EVENT.chat.nearmiss      "our database runs on postgres"                 0.45  NONE
+9     EVENT.idle.clean         "nice work"                                     0.87  NONE
+10    EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.44  NONE
+11    EVENT.file.invoke        "wait read config.yaml"                         0.63  FILE
+12    EVENT.chat.nearmiss      "our database runs on postgres"                 0.73  NONE
+13    EVENT.idle.clean         "status ok"                                     0.57  NONE
+14    EVENT.idle.clean         "nice work"                                     0.83  NONE
+15    EVENT.chat.nearmiss      "percentages always confuse me honestly"        0.6   NONE
+16    EVENT.calc.invoke        "3 plus 4 times 5"                              0.82  CALC
+17    EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.87  NONE
+18    EVENT.idle.clean         "nice work"                                     0.61  NONE
+19    EVENT.chat.nearmiss      "percentages always confuse me honestly"        0.82  NONE
+20    EVENT.db.invoke          "query active users today"                      0.73  DB
+21    EVENT.chat.nearmiss      "our database runs on postgres"                 0.87  NONE
+22    EVENT.chat.nearmiss      "remember when we read files line by line"      0.47  NONE
+23    EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.7   NONE
+24    EVENT.chat.nearmiss      "our database runs on postgres"                 0.5   NONE
+25    EVENT.calc.invoke        "compound interest on 1000 at 5% for 3 years"   0.5   CALC
+26    EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.76  NONE
+27    EVENT.db.invoke          "query active users today"                      0.55  DB
+28    EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.47  NONE
+29    EVENT.web.invoke         "get teh atest release tag"                     0.79  WEB
+30    EVENT.calc.invoke        "pls square root of 2025"                       0.53  CALC
+31    EVENT.db.invoke          "ordrs over 100 dollars"                        0.66  DB
+32    EVENT.file.invoke        "list the logs directory"                       0.51  FILE
+33    EVENT.idle.clean         "let's continue"                                0.63  NONE
+34    EVENT.python.invoke      "ok s check if 97 is prime"                     0.75  PYTHON
+35    EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.72  NONE
+36    EVENT.python.invoke      "check if 97 is prime"                          0.86  PYTHON
+37    EVENT.chat.nearmiss      "our database runs on postgres"                 0.54  NONE
+38    EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.51  NONE
+39    EVENT.chat.nearmiss      "our database runs on postgres"                 0.76  NONE
+40    EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.58  NONE
+41    EVENT.chat.nearmiss      "the config file is important don't lose it"    0.87  NONE
+42    EVENT.file.invoke        "list the logs directory"                       0.83  FILE
+43    EVENT.chat.nearmiss      "our database runs on postgres"                 0.56  NONE
+44    EVENT.idle.clean         "good morning"                                  0.85  NONE
+45    EVENT.web.invoke         "look up the weather in tokyo"                  0.55  WEB
+46    EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.59  NONE
+47    EVENT.web.invoke         "get the latest release tag"                    0.63  WEB
+48    EVENT.web.invoke         "fetch the status of example.com"               0.69  WEB
+49    EVENT.web.invoke         "fetch he status of example.com"                0.8   WEB
+50    EVENT.db.invoke          "orders over 100 dollars"                       0.84  DB
+51    EVENT.web.invoke         "look up the weather in tokyo"                  0.42  WEB
+52    EVENT.chat.nearmiss      "that website was down yesterday"               0.7   NONE
+53    EVENT.file.invoke        "ok so write the report to disk"                0.79  FILE
+54    EVENT.calc.invoke        "square root of 2025"                           0.66  CALC
+55    EVENT.chat.nearmiss      "explain what the count method does"            0.8   NONE
+56    EVENT.web.invoke         "fetch the status of example.com"               0.87  WEB
+57    EVENT.chat.nearmiss      "percentages always confuse me honestly"        0.89  NONE
+58    EVENT.idle.clean         "ping"                                          0.63  NONE
+59    EVENT.chat.nearmiss      "percentages always confuse me honestly"        0.45  NONE
+60    EVENT.calc.invoke        "uh square root of 2025"                        0.78  CALC
+61    EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.79  NONE
+62    EVENT.python.invoke      "remove duplicates from this list"              0.85  PYTHON
+63    EVENT.calc.invoke        "square root of 2025"                           0.87  CALC
+64    EVENT.python.invoke      "reverse the string hello"                      0.54  PYTHON
+65    EVENT.idle.clean         "ping"                                          0.49  NONE
+66    EVENT.file.invoke        "write the report to disk"                      0.47  FILE
+67    EVENT.chat.nearmiss      "that website was down yesterday"               0.82  NONE
+68    EVENT.db.invoke          "count rows in the events table"                0.59  DB
+69    EVENT.python.invoke      "find the longest word in this sentence"        0.44  PYTHON
+70    EVENT.db.invoke          "query active users today"                      0.71  DB
+71    EVENT.python.invoke      "count the letter r in strawberry"              0.66  PYTHON
+72    EVENT.idle.clean         "let's continue"                                0.75  NONE
+73    EVENT.chat.nearmiss      "our database runs on postgres"                 0.52  NONE
+74    EVENT.python.invoke      "count the letter r in strawbery"               0.48  PYTHON
+75    EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.66  NONE
+76    EVENT.chat.nearmiss      "remember when we read files line by line"      0.48  NONE
+77    EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.72  NONE
+78    EVENT.calc.invoke        "3 plus 4times 5"                               0.47  CALC
+79    EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.47  NONE
+80    EVENT.chat.nearmiss      "remember when we read files line by line"      0.79  NONE
+81    EVENT.idle.clean         "good morning"                                  0.89  NONE
+82    EVENT.calc.invoke        "square root of 2025"                           0.67  CALC
+83    EVENT.idle.clean         "good morning"                                  0.59  NONE
+84    EVENT.chat.nearmiss      "our database runs on postgres"                 0.77  NONE
+85    EVENT.python.invoke      "check if 97 is prime"                          0.8   PYTHON
+86    EVENT.db.invoke          "orders over 100 dollars"                       0.74  DB
+87    EVENT.python.invoke      "find the longest word in this sentence"        0.77  PYTHON
+88    EVENT.idle.clean         "ping"                                          0.71  NONE
+89    EVENT.chat.nearmiss      "remember when we read files line by line"      0.83  NONE
+90    EVENT.chat.nearmiss      "explain what the count method does"            0.45  NONE
+91    EVENT.web.invoke         "look up the weather in tokyo"                  0.52  WEB
+92    EVENT.file.invoke        "readconfig.yaml"                               0.53  FILE
+93    EVENT.idle.clean         "nice work"                                     0.72  NONE
+94    EVENT.idle.clean         "nice work"                                     0.46  NONE
+95    EVENT.db.invoke          "query active users today"                      0.73  DB
+96    EVENT.chat.nearmiss      "explain what the count method does"            0.82  NONE
+97    EVENT.calc.invoke        "square root of 2025"                           0.53  CALC
+98    EVENT.file.invoke        "read config.yaml"                              0.44  FILE
+99    EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.78  NONE
+100   EVENT.python.invoke      "count the letter r in strawberry"              0.81  PYTHON
+101   EVENT.calc.invoke        "compound interest on 1000 at 5% for 3 years"   0.62  CALC
+102   EVENT.file.invoke        "list the logs directory"                       0.9   FILE
+103   EVENT.idle.clean         "ping"                                          0.7   NONE
+104   EVENT.idle.clean         "good morning"                                  0.47  NONE
+105   EVENT.chat.nearmiss      "that website was down yesterday"               0.55  NONE
+106   EVENT.chat.nearmiss      "that website was down yesterday"               0.64  NONE
+107   EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.74  NONE
+108   EVENT.idle.clean         "nice work"                                     0.81  NONE
+109   EVENT.idle.clean         "ping"                                          0.88  NONE
+110   EVENT.idle.clean         "good morning"                                  0.5   NONE
+111   EVENT.web.invoke         "get the latest release tag"                    0.5   WEB
+112   EVENT.idle.clean         "status ok"                                     0.74  NONE
+113   EVENT.idle.clean         "good morning"                                  0.75  NONE
+114   EVENT.idle.clean         "good morning"                                  0.48  NONE
+115   EVENT.idle.clean         "ping"                                          0.46  NONE
+116   EVENT.file.invoke        "list the logs directory"                       0.65  FILE
+117   EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.47  NONE
+118   EVENT.file.invoke        "list the logs directory"                       0.81  FILE
+119   EVENT.idle.clean         "let's continue"                                0.42  NONE
+120   EVENT.web.invoke         "get the latest release tag"                    0.46  WEB
+121   EVENT.idle.clean         "let's continue"                                0.63  NONE
+122   EVENT.python.invoke      "remove duplicates from this list"              0.44  PYTHON
+123   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.46  NONE
+124   EVENT.idle.clean         "nice work"                                     0.57  NONE
+125   EVENT.idle.clean         "status ok"                                     0.8   NONE
+126   EVENT.chat.nearmiss      "explain what the count method does"            0.56  NONE
+127   EVENT.db.invoke          "query active users today"                      0.89  DB
+128   EVENT.idle.clean         "ping"                                          0.82  NONE
+129   EVENT.db.invoke          "orders over 100 dollars"                       0.66  DB
+130   EVENT.file.invoke        "list the logs directory"                       0.56  FILE
+131   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.59  NONE
+132   EVENT.chat.nearmiss      "our database runs on postgres"                 0.74  NONE
+133   EVENT.db.invoke          "count rows in the events table"                0.53  DB
+134   EVENT.idle.clean         "status ok"                                     0.57  NONE
+135   EVENT.web.invoke         "fetch the status of example.com"               0.55  WEB
+136   EVENT.chat.nearmiss      "that website was down yesterday"               0.44  NONE
+137   EVENT.chat.nearmiss      "our database runs on postgres"                 0.65  NONE
+138   EVENT.python.invoke      "find the longest word in this sentence"        0.82  PYTHON
+139   EVENT.web.invoke         "get teh latest release tag"                    0.83  WEB
+140   EVENT.idle.clean         "status ok"                                     0.53  NONE
+141   EVENT.calc.invoke        "um 3 plus 4 times 5"                           0.78  CALC
+142   EVENT.idle.clean         "nice work"                                     0.71  NONE
+143   EVENT.idle.clean         "ping"                                          0.5   NONE
+144   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.68  NONE
+145   EVENT.python.invoke      "remove duplicates from this list"              0.63  PYTHON
+146   EVENT.chat.nearmiss      "the config file is important don't lose it"    0.6   NONE
+147   EVENT.file.invoke        "read config.yaml"                              0.82  FILE
+148   EVENT.idle.clean         "good morning"                                  0.88  NONE
+149   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.58  NONE
+150   EVENT.chat.nearmiss      "explain what the count method does"            0.72  NONE
+151   EVENT.db.invoke          "count rows in the events table"                0.64  DB
+152   EVENT.calc.invoke        "um 3 plus 4 times 5"                           0.69  CALC
+153   EVENT.file.invoke        "write teh report to dsk"                       0.72  FILE
+154   EVENT.chat.nearmiss      "percentages always confuse me honestly"        0.7   NONE
+155   EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.88  NONE
+156   EVENT.db.invoke          "query active users today"                      0.51  DB
+157   EVENT.chat.nearmiss      "explain what the count method does"            0.68  NONE
+158   EVENT.calc.invoke        "uh what is 12.5 percent of 840"                0.53  CALC
+159   EVENT.python.invoke      "count the letter r in strawberry"              0.44  PYTHON
+160   EVENT.chat.nearmiss      "remember when we read files line by line"      0.69  NONE
+161   EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.65  NONE
+162   EVENT.idle.clean         "good morning"                                  0.87  NONE
+163   EVENT.chat.nearmiss      "the config file is important don't lose it"    0.66  NONE
+164   EVENT.chat.nearmiss      "our database runs on postgres"                 0.43  NONE
+165   EVENT.web.invoke         "look up the weather in tokyo"                  0.5   WEB
+166   EVENT.idle.clean         "nice work"                                     0.84  NONE
+167   EVENT.chat.nearmiss      "that website was down yesterday"               0.57  NONE
+168   EVENT.python.invoke      "remove duplicates from this list"              0.71  PYTHON
+169   EVENT.calc.invoke        "compound interest on 1000 at 5% for 3 years"   0.63  CALC
+170   EVENT.idle.clean         "nice work"                                     0.7   NONE
+171   EVENT.db.invoke          "orders over 100 dollars"                       0.72  DB
+172   EVENT.db.invoke          "query active users today"                      0.66  DB
+173   EVENT.idle.clean         "status ok"                                     0.46  NONE
+174   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.81  NONE
+175   EVENT.web.invoke         "get the latest release tag"                    0.74  WEB
+176   EVENT.db.invoke          "query active users today"                      0.42  DB
+177   EVENT.chat.nearmiss      "remember when we read files line by line"      0.77  NONE
+178   EVENT.file.invoke        "list the logs directory"                       0.62  FILE
+179   EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.81  NONE
+180   EVENT.calc.invoke        "compound interest on 1000 at 5% for 3 years"   0.76  CALC
+181   EVENT.calc.invoke        "compound interest on 1000 at 5% for 3 years"   0.71  CALC
+182   EVENT.idle.clean         "status ok"                                     0.46  NONE
+183   EVENT.db.invoke          "ok so orders over 100 dollars"                 0.65  DB
+184   EVENT.web.invoke         "fetch the status of example.com"               0.41  WEB
+185   EVENT.db.invoke          "count rows in the events table"                0.87  DB
+186   EVENT.chat.nearmiss      "that website was down yesterday"               0.63  NONE
+187   EVENT.file.invoke        "list the logs directory"                       0.76  FILE
+188   EVENT.db.invoke          "query active users today"                      0.65  DB
+189   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.75  NONE
+190   EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.5   NONE
+191   EVENT.chat.nearmiss      "i was reading about how python counts characters" 0.69  NONE
+192   EVENT.db.invoke          "count rows in teh events table"                0.8   DB
+193   EVENT.web.invoke         "get the latest release tag"                    0.51  WEB
+194   EVENT.python.invoke      "find the longest word in this sentence"        0.64  PYTHON
+195   EVENT.chat.nearmiss      "fibonacci shows up a lot in nature"            0.71  NONE
+196   EVENT.chat.nearmiss      "percentages always confuse me honestly"        0.86  NONE
+197   EVENT.python.invoke      "check if 97 is prime"                          0.68  PYTHON
+198   EVENT.chat.nearmiss      "sqrt is interesting mathematically"            0.57  NONE
+199   EVENT.chat.nearmiss      "that website was down yesterday"               0.74  NONE

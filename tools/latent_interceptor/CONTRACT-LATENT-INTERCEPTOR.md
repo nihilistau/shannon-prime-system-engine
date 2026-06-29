@@ -190,3 +190,19 @@ tool head:
   Target: high NO_OP precision (don't escalate idle to the 12B) + high ACTION recall (don't miss a
   real event). Compute saved = NO_OP-fraction x (12B tick - draft tick).
 - Null floor: `decide_via_draft` default-off; the 12B stub/decode path byte-untouched when off.
+
+## TS-2 — Hardened Tool Head + TRUE cross-distribution OOD (G-TH-HARD) GREEN
+**Fix = data coverage, proven cross-distribution.** `make_hard_tape.py` emits TRAIN and OOD tapes from
+**DISJOINT phrasing banks + different seeds** (so the OOD eval is honest cross-distribution, not same-generator).
+Near-misses (mention-without-invoke) strictly ->NONE; CALC=pure math vs PYTHON=code/string ops semantically split.
+- TRAIN: hard_train.txt (200 ev, NONE=112) -> `_hard_train_data` -> `sp_li_train.py` -> `_tool_head_hard.bin`.
+- OOD (isolated, disjoint banks): hard_ood.txt (120 ev) -> `_hard_ood_data` -> `sp_li_eval.py`.
+- **CLEAN head on isolated OOD: 0.350 acc, NONE-recall 0.014, FALSE-FIRE 0.986** (the TS-1 vulnerability, confirmed cross-dist).
+- **HARDENED head on isolated OOD: 1.000 acc (120/120), every class prec/recall 1.000, NONE-recall 1.000, FALSE-FIRE 0.000.**
+- Deployed: `_tool_head_hard.bin` -> live `_tool_head.bin` (clean -> `_tool_head_clean.bin`).
+- Honest caveat: OOD bank is disjoint surface forms but the SAME author/intent taxonomy -> tests surface-form
+  generalization, NOT adversary-authored novelty. Real-chat tapes (SP_LI_TAPE) remain the final test.
+- Recipe is label-set-agnostic: identical pipeline hardens the ACTION head (NO_OP/KEEP/... label set). The MEMORY
+  head is downstream of a KEEP decision (address producer, not a classifier) -> it is gated by the action head, so it
+  cannot false-fire in the routing sense; its safety = the action head's near-miss-hardened KEEP boundary.
+- Repro: `python make_hard_tape.py hard_train.txt 200 train` / `hard_ood.txt 120 ood`; capture via `_hard_{train,ood}_cap.bat`; `sp_li_eval.py --head _tool_head_hard.bin --data _hard_ood_data`.
