@@ -4570,6 +4570,102 @@ extern "C" int gemma4_kv_capture_feat(sp_g4_kv *s, float *feat_out) {
     return 0;
 }
 
+/* ===================== EAGLE/MTP draft (gemma4-assistant) — WEIGHT LOADER =====================
+ * Loads the draft GGUF weights onto the GPU so the served decode can run the speculative draft
+ * against the resident sp_g4_kv KV ring (dKc[NL-1] full / dKc[NL-2] SWA, via k_attn_decode_ring)
+ * + the gemma4_kv_capture_feat feature. The draft FORWARD MATH is already proven:
+ * G-EAGLE-DRAFT-FWD-CUDA GREEN (tools/eagle/sp_eagle_fwd_cuda.cu). This is the loader half (no
+ * open details); the draft_step + K-step drive + batched verify wire is the live-daemon session
+ * (resolves full-layer rope_freqs, the 12B embd packing for the input-embed gather, and the
+ * accept-length/tok-s gate which only exists with the running 12B). */
+#define DRAFT_NL 4
+struct DraftWeights {
+    int loaded; gguf_ctx *g;
+    float *pre, *post, *out_norm, *head;      /* head = draft token_embd [Vd x 1024] (tied) */
+    int Vd, BBt;                              /* draft vocab; target hidden (pre in / post out) */
+    float *attn_norm[DRAFT_NL], *wq[DRAFT_NL], *qn[DRAFT_NL], *wo[DRAFT_NL], *post_attn[DRAFT_NL],
+          *ffn_norm[DRAFT_NL], *wg[DRAFT_NL], *wu[DRAFT_NL], *wd[DRAFT_NL], *post_ffw[DRAFT_NL], *osc[DRAFT_NL];
+    int qd[DRAFT_NL], hd[DRAFT_NL], ff[DRAFT_NL];
+};
+static DraftWeights g_draft = {};
+
+/* y[r] = sum_c W[r*cols+c]*x[c] (double accum) — the draft's f32 matmul (used by draft_step). */
+__global__ void k_matmul_draft(const float *W, const float *x, float *y, int rows, int cols) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x; if (r >= rows) return;
+    const float *w = W + (size_t)r * cols; double a = 0;
+    for (int c = 0; c < cols; c++) a += (double)w[c] * x[c]; y[r] = (float)a;
+}
+
+/* dequant a draft GGUF tensor [out x in] -> device f32; fills *in_o/*out_o (out=1 for a vector). */
+static float *draft_up(gguf_ctx *g, const char *name, int *in_o, int *out_o) {
+    const gguf_tensor *t = gguf_find_tensor(g, name);
+    if (!t) { sp_set_error("draft_up: missing draft tensor"); return NULL; }
+    int in = (int)t->dims[0], out = (t->n_dims >= 2) ? (int)t->dims[1] : 1;
+    const uint8_t *base = (const uint8_t *)gguf_tensor_data(g, t);
+    size_t rb = row_bytes(t->type, in);
+    if (!base || rb == 0) { sp_set_error("draft_up: null/unsupported tensor"); return NULL; }
+    size_t n = (size_t)out * in; float *host = (float *)malloc(n * sizeof(float));
+    if (!host) { sp_set_error("draft_up: host OOM"); return NULL; }
+    for (int j = 0; j < out; j++)
+        if (sp_dequant_row(base + (size_t)j * rb, t->type, in, host + (size_t)j * in)) {
+            free(host); sp_set_error("draft_up: dequant failed"); return NULL; }
+    float *dev = NULL; cudaError_t e = cudaMalloc(&dev, n * sizeof(float));
+    if (e == cudaSuccess) e = cudaMemcpy(dev, host, n * sizeof(float), cudaMemcpyHostToDevice);
+    free(host);
+    if (e != cudaSuccess) { fail_cuda(e, "draft_up memcpy"); if (dev) cudaFree(dev); return NULL; }
+    if (in_o) *in_o = in; if (out_o) *out_o = out;
+    return dev;
+}
+
+extern "C" void gemma4_draft_close(void);
+
+/* Load the gemma4-assistant draft GGUF weights onto the GPU. Returns 0 / -1. */
+extern "C" int gemma4_draft_open(const char *gguf_path) {
+    if (g_draft.loaded) return 0;
+    gguf_ctx *g = gguf_open(gguf_path);
+    if (!g) { sp_set_error("gemma4_draft_open: cannot open draft gguf"); return -1; }
+    memset(&g_draft, 0, sizeof g_draft); g_draft.g = g;
+    int in = 0, out = 0;
+    #define DUP(dst, nm) do { (dst) = draft_up(g, nm, &in, &out); if (!(dst)) { gemma4_draft_close(); return -1; } } while (0)
+    DUP(g_draft.pre,  "nextn.pre_projection.weight");                 /* [7680 x 1024]: out=1024,in=7680 */
+    DUP(g_draft.post, "nextn.post_projection.weight"); g_draft.BBt = out;  /* [1024 x 3840]: out=3840 = target hidden */
+    DUP(g_draft.out_norm, "output_norm.weight");
+    DUP(g_draft.head, "token_embd.weight"); g_draft.Vd = out;          /* [1024 x Vd]: out=Vd */
+    for (int il = 0; il < DRAFT_NL; il++) {
+        char nm[80];
+        #define LDUP(dst, suf) do { snprintf(nm, sizeof nm, "blk.%d." suf, il); DUP(dst, nm); } while (0)
+        LDUP(g_draft.attn_norm[il], "attn_norm.weight");
+        LDUP(g_draft.wq[il], "attn_q.weight"); g_draft.qd[il] = out; g_draft.hd[il] = out / 16;
+        LDUP(g_draft.qn[il], "attn_q_norm.weight");
+        LDUP(g_draft.wo[il], "attn_output.weight");
+        LDUP(g_draft.post_attn[il], "post_attention_norm.weight");
+        LDUP(g_draft.ffn_norm[il], "ffn_norm.weight");
+        LDUP(g_draft.wg[il], "ffn_gate.weight"); g_draft.ff[il] = out;
+        LDUP(g_draft.wu[il], "ffn_up.weight");
+        LDUP(g_draft.wd[il], "ffn_down.weight");
+        LDUP(g_draft.post_ffw[il], "post_ffw_norm.weight");
+        LDUP(g_draft.osc[il], "layer_output_scale.weight");
+        #undef LDUP
+    }
+    #undef DUP
+    g_draft.loaded = 1;
+    fprintf(stderr, "    [draft] gemma4-assistant loaded: %d layers hd=%d/%d/%d/%d Vd=%d BBt=%d\n",
+            DRAFT_NL, g_draft.hd[0], g_draft.hd[1], g_draft.hd[2], g_draft.hd[3], g_draft.Vd, g_draft.BBt);
+    return 0;
+}
+
+extern "C" void gemma4_draft_close(void) {
+    float *glob[] = { g_draft.pre, g_draft.post, g_draft.out_norm, g_draft.head };
+    for (float *p : glob) if (p) cudaFree(p);
+    for (int il = 0; il < DRAFT_NL; il++) {
+        float *ls[] = { g_draft.attn_norm[il],g_draft.wq[il],g_draft.qn[il],g_draft.wo[il],g_draft.post_attn[il],
+                        g_draft.ffn_norm[il],g_draft.wg[il],g_draft.wu[il],g_draft.wd[il],g_draft.post_ffw[il],g_draft.osc[il] };
+        for (float *x : ls) if (x) cudaFree(x);
+    }
+    if (g_draft.g) gguf_close(g_draft.g);
+    memset(&g_draft, 0, sizeof g_draft);
+}
+
 /* KAI-2: stage a latent event packet (one E-float residual) to OVERRIDE the next step's
  * post-embed residual (residual-entry injection). The forward then mints K/V natively at the
  * live dpos ⇒ RoPE phase correct by construction. One-shot (consumed by the next step). */
