@@ -90,7 +90,7 @@ def forward(T, x, inp_h, kv, pos=POS):
     cur = rms(cur, T["output_norm.weight"])
     logits = lin(T["token_embd.weight"], cur); h_next = lin(T["nextn.post_projection.weight"], cur)
     dims += [("output_norm", cur.shape[0]), ("logits", logits.shape[0]), ("h_next", h_next.shape[0])]
-    return logits.astype(np.float32), h_next.astype(np.float32), dims
+    return logits.astype(np.float32), h_next.astype(np.float32), cur.astype(np.float32), dims
 
 def drive(T, x0, h0, kv, K):
     """K-step EAGLE recurrence: per step feed [x_k, h_k] (h_k = prev step's post_proj output);
@@ -102,7 +102,7 @@ def drive(T, x0, h0, kv, K):
     for k in range(K):
         xk = (np.random.default_rng(2000 + k).standard_normal(BB).astype(np.float32) * 0.02 * math.sqrt(BB)
               if k > 0 else x0)
-        lg, h, _ = forward(T, xk, h, kv, pos=POS + k)
+        lg, h, _, _ = forward(T, xk, h, kv, pos=POS + k)
         toks.append(int(np.argmax(lg))); xs.append(xk)
     return toks, xs
 
@@ -115,8 +115,8 @@ def main():
     miss = [n for n in need if n not in T]
     print(f"[tensors] required={len(need)} present={len(need)-len(miss)} missing={miss}")
     x, inp_h, kv = gen_inputs(T)
-    lg1, hn1, dims = forward(T, x, inp_h, kv)
-    lg2, hn2, _ = forward(T, x, inp_h, kv)
+    lg1, hn1, hid1, dims = forward(T, x, inp_h, kv)
+    lg2, hn2, _, _ = forward(T, x, inp_h, kv)
     print("[chain]", " -> ".join(f"{k}={v}" for k, v in dims))
     det = bool(np.array_equal(lg1, lg2) and np.array_equal(hn1, hn2))
     fin = bool(np.all(np.isfinite(lg1)) and np.all(np.isfinite(hn1)))
@@ -138,6 +138,19 @@ def main():
         for il, (K, V) in enumerate(kv):
             K.tofile(os.path.join(DUMP, f"k{il}.f32")); V.tofile(os.path.join(DUMP, f"v{il}.f32"))
         lg1.tofile(os.path.join(DUMP, "logits.f32")); hn1.tofile(os.path.join(DUMP, "hnext.f32"))
+        hid1.tofile(os.path.join(DUMP, "hidden.f32"))     # post-output_norm hidden (CUDA gate target)
+        # draft weights as raw f32 (for the standalone CUDA gate; no head/token_embd needed)
+        wd_ = os.path.join(DUMP, "w"); os.makedirs(wd_, exist_ok=True)
+        T["nextn.pre_projection.weight"].tofile(os.path.join(wd_, "pre_proj.f32"))
+        T["nextn.post_projection.weight"].tofile(os.path.join(wd_, "post_proj.f32"))
+        T["output_norm.weight"].tofile(os.path.join(wd_, "out_norm.f32"))
+        for il in range(NL):
+            p = f"blk.{il}."
+            for tag, nm in [("attn_norm","attn_norm"),("wq","attn_q"),("qn","attn_q_norm"),
+                            ("wo","attn_output"),("post_attn","post_attention_norm"),
+                            ("ffn_norm","ffn_norm"),("wg","ffn_gate"),("wu","ffn_up"),
+                            ("wd","ffn_down"),("post_ffw","post_ffw_norm"),("osc","layer_output_scale")]:
+                T[p + nm + ".weight"].tofile(os.path.join(wd_, f"l{il}_{tag}.f32"))
         for k, xk in enumerate(dxs): xk.tofile(os.path.join(DUMP, f"dx{k}.f32"))
         with open(os.path.join(DUMP, "drive_tokens.txt"), "w") as f:
             f.write(f"{KDRIVE}\n" + " ".join(str(t) for t in dtoks) + "\n")
