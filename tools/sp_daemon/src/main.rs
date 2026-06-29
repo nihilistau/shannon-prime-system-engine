@@ -315,6 +315,19 @@ async fn main() {
             Err(e) => { eprintln!("[mh-gate] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_LI_RETURN — latent-injection return path demo (tool result -> KV ring, no prompt re-feed).
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_LI_RETURN").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        if model.is_empty() || tok.is_empty() {
+            eprintln!("SP_LI_RETURN=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH"); std::process::exit(2);
+        }
+        match eagle_accept::run_li_return(&model, &tok) {
+            Ok(()) => { eprintln!("[li-return] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[li-return] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 

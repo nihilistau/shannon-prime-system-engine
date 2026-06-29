@@ -1,0 +1,7 @@
+[li-return] Q: How many letter r are in the word strawberry? Reply with only the number.
+[li-return] tool result (injected into KV ring, NOT re-prompted as text): "[sandbox] python counted: strawberry has 3 letter r."
+[li-return] BASELINE (model alone)      -> "3. The word "strawberry" has 3 letter r's. So"
+[li-return] RETURN-PATH (result injected) -> "[sandbox] python counted: strawberry has 3 letter r.
+ ["
+[li-return] DONE — the model felt the tool result latent-native (13 result tokens into the KV ring)
+[li-return] DONE

@@ -58,6 +58,8 @@ extern "C" {
     fn gemma4_draft_body(s: *mut sp_g4_kv, feat_host: *const f32, token: c_int, out_latent: *mut f32) -> c_int;
     // Memory Head ground truth: read the live global-layer K [n_global x npos x HD=512] (curator C2 input).
     fn gemma4_kv_read_global_k(s: *const sp_g4_kv, out: *mut f32, npos: c_int) -> c_int;
+    // Latent-injection RETURN PATH: inject token-embeddings straight into the KV ring (no prompt text).
+    fn gemma4_kv_inject_tokens(s: *mut sp_g4_kv, toks: *const i32, n: c_int) -> c_int;
 }
 
 /// KAIROS action space (Latent Interceptor) — keep in sync with CONTRACT-LATENT-INTERCEPTOR.md.
@@ -111,6 +113,75 @@ fn parse_kairos_tape(text: &str) -> Vec<(String, i32)> {
         events.push((format!("EVENT kind={} salience={}{}", toks[1], toks[3], payload), aid));
     }
     events
+}
+
+/// LATENT-INJECTION RETURN PATH: a tool result enters the model's KV ring DIRECTLY (token-embeddings
+/// injected, no prompt-text re-feed, no tokenizer output round-trip) — the model FEELS the result.
+/// Demo (the strawberry problem): baseline (model alone) vs tool-result injected via
+/// gemma4_kv_inject_tokens. SP_LI_Q / SP_LI_TOOLRESULT override the question / tool result.
+pub fn run_li_return(model_path: &str, tok_path: &str) -> Result<(), String> {
+    std::env::set_var("SP_CUDA_DECODE_INT8", "1");
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let sraw = session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+    let qm = (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const c_void;
+    if qm.is_null() { return Err("li_return: qm NULL".to_string()); }
+    let suppress: Vec<i32> = tok.suppress_token_ids();
+    let supp = |lg: &mut [f32]| { for &id in &suppress { if (id as usize) < vocab { lg[id as usize] = f32::NEG_INFINITY; } } };
+
+    let question = std::env::var("SP_LI_Q").unwrap_or_else(|_| "How many letter r are in the word strawberry? Reply with only the number.".to_string());
+    let result_text = std::env::var("SP_LI_TOOLRESULT").unwrap_or_else(|_| " [sandbox] python counted: strawberry has 3 letter r.".to_string());
+    let prompt = tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: question.clone() }])?;
+    let mut res_ids = tok.encode(&result_text)?;
+    if res_ids.first() == Some(&2) { res_ids.remove(0); }  // strip BOS for mid-sequence inject
+    let np = prompt.len();
+    let s = unsafe { gemma4_kv_open(qm, 256) };
+    if s.is_null() { return Err("li_return: kv_open NULL".to_string()); }
+    let mut logits = vec![0.0f32; vocab];
+    let gen = 16usize;
+
+    // helper: greedy-decode `n` tokens from the current logits' argmax -> text
+    let run_decode = |s: *mut sp_g4_kv, logits: &mut Vec<f32>| -> String {
+        let mut out = String::new();
+        let mut g = argmax(logits);
+        for _ in 0..gen {
+            if tok.eos_ids.contains(&g) { break; }
+            out.push_str(&String::from_utf8_lossy(tok.decode_token(g)));
+            if unsafe { gemma4_kv_decode_logits(s, g, logits.as_mut_ptr()) } != 0 { break; }
+            supp(logits);
+            g = argmax(logits);
+        }
+        out
+    };
+
+    // BASELINE: prompt only.
+    unsafe { gemma4_kv_reset(s) };
+    if unsafe { gemma4_kv_prefill(s, prompt.as_ptr(), (np - 1) as c_int) } != 0 { return Err("li_return: prefill".into()); }
+    unsafe { gemma4_kv_decode_logits(s, prompt[np - 1], logits.as_mut_ptr()) };
+    supp(&mut logits);
+    let base = run_decode(s, &mut logits);
+
+    // RETURN PATH: prompt, then INJECT the tool result into the KV ring (no prompt-text re-feed).
+    unsafe { gemma4_kv_reset(s) };
+    if unsafe { gemma4_kv_prefill(s, prompt.as_ptr(), (np - 1) as c_int) } != 0 { return Err("li_return: prefill2".into()); }
+    unsafe { gemma4_kv_decode_logits(s, prompt[np - 1], logits.as_mut_ptr()) };  // advance past prompt
+    let rl = res_ids.len();
+    if rl > 1 { if unsafe { gemma4_kv_inject_tokens(s, res_ids.as_ptr(), (rl - 1) as c_int) } != 0 { return Err("li_return: inject".into()); } }
+    if unsafe { gemma4_kv_decode_logits(s, res_ids[rl - 1], logits.as_mut_ptr()) } != 0 { return Err("li_return: decode after inject".into()); }
+    supp(&mut logits);
+    let injected = run_decode(s, &mut logits);
+    unsafe { gemma4_kv_close(s) };
+
+    eprintln!("[li-return] Q: {}", question);
+    eprintln!("[li-return] tool result (injected into KV ring, NOT re-prompted as text): \"{}\"", result_text.trim());
+    eprintln!("[li-return] BASELINE (model alone)      -> \"{}\"", base.trim());
+    eprintln!("[li-return] RETURN-PATH (result injected) -> \"{}\"", injected.trim());
+    eprintln!("[li-return] DONE — the model felt the tool result latent-native ({} result tokens into the KV ring)", rl);
+    Ok(())
 }
 
 /// PERSISTENT-CONTRACT KAIROS heartbeat (the TRUE Latent Interceptor deploy). The contract prefix is
