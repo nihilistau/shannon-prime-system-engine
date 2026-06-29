@@ -4695,6 +4695,7 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
     }
     const float eps = s->eps; const int ctx = s->dpos_host;            /* positions 0..ctx-1 are written */
     const char *am = getenv("SP_DRAFT_ASCALE");
+    cublasSetStream(g_w.cublas, 0);   /* draft matmuls via cublas on the default stream (ordered with the k_* kernels) */
     /* x = TARGET tok_embd[token] * sqrt(BBt) ; xh = [x ; feat] ; cur = pre_proj @ xh.
      * The served 12B (OK_Q4B recipe) keeps the embd PACKED (g_w.embd_packed), not f32 — gather
      * via the packed twin; fall back to f32 when present. (Resolved at the first live run.) */
@@ -4706,7 +4707,7 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
     cudaMemcpy(sfeat, feat_host, (size_t)BBt*4, cudaMemcpyHostToDevice);
     cudaMemcpy(sxh, sx, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
     cudaMemcpy(sxh+BBt, sfeat, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
-    k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.pre, sxh, scur, HID, 2*BBt);
+    if (gemm(g_w.cublas, g_draft.pre, sxh, scur, 1, 2*BBt, HID)) return -1;   /* pre_proj */
     for (int il = 0; il < DRAFT_NL; il++) {
         const int qd = g_draft.qd[il], hd = g_draft.hd[il], swa = g_draft_swa[il];
         const int il_src = swa ? (s->NL - 2) : (s->NL - 1);
@@ -4718,7 +4719,7 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
         const float rb = swa ? s->s_base : s->g_base;
         const float asc = (am && !strcmp(am,"one")) ? 1.0f : 1.0f/sqrtf((float)hd);
         k_rmsnorm<<<1,256>>>(scur, g_draft.attn_norm[il], HID, eps, snorm);
-        k_matmul_draft<<<(unsigned)((qd+255)/256),256>>>(g_draft.wq[il], snorm, sq, qd, HID);
+        if (gemm(g_w.cublas, g_draft.wq[il], snorm, sq, 1, HID, qd)) return -1;
         k_rmsnorm_head<<<16,256>>>(sq, g_draft.qn[il], 16, hd, qd, eps);
         if (!swa && g_draft.rope_freqs)   /* full layer: proportional freq-factors (gemma4 global RoPE) */
             k_rope_freqs_at<<<16, hd/2>>>(sq, 16, hd, rb, g_draft.rope_freqs, ctx);
@@ -4726,23 +4727,23 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
             k_rope_at<<<16, hd/2>>>(sq, 16, hd, qd, rb, ctx);          /* SWA: plain base-rope; query pos = ctx */
         k_attn_decode_ring<<<16,256,(size_t)ctx*sizeof(float)>>>(sq, s->dKc[il_src], s->dVc[il_src],
                                                                  ctx, KVD, HD, group, asc, win, Wring, sao);
-        k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.wo[il], sao, satt, HID, qd);
+        if (gemm(g_w.cublas, g_draft.wo[il], sao, satt, 1, qd, HID)) return -1;
         k_rmsnorm<<<1,256>>>(satt, g_draft.post_attn[il], HID, eps, snorm);
         cudaMemcpy(satt, snorm, (size_t)HID*4, cudaMemcpyDeviceToDevice);
         k_add<<<(unsigned)((HID+255)/256),256>>>(satt, scur, (size_t)HID);   /* satt = rms(attn) + cur = attn_out */
         k_rmsnorm<<<1,256>>>(satt, g_draft.ffn_norm[il], HID, eps, snorm);
-        k_matmul_draft<<<(unsigned)((FFm+255)/256),256>>>(g_draft.wg[il], snorm, sff, FFm, HID);
-        k_matmul_draft<<<(unsigned)((FFm+255)/256),256>>>(g_draft.wu[il], snorm, sff2, FFm, HID);
+        if (gemm(g_w.cublas, g_draft.wg[il], snorm, sff, 1, HID, FFm)) return -1;
+        if (gemm(g_w.cublas, g_draft.wu[il], snorm, sff2, 1, HID, FFm)) return -1;
         k_gelu_mul<<<(unsigned)((FFm+255)/256),256>>>(sff, sff2, (size_t)FFm);
-        k_matmul_draft<<<(unsigned)((HID+255)/256),256>>>(g_draft.wd[il], sff, snorm, HID, FFm);
+        if (gemm(g_w.cublas, g_draft.wd[il], sff, snorm, 1, FFm, HID)) return -1;
         k_rmsnorm<<<1,256>>>(snorm, g_draft.post_ffw[il], HID, eps, scur);   /* scur = rms(ffn) */
         k_add<<<(unsigned)((HID+255)/256),256>>>(scur, satt, (size_t)HID);   /* cur = rms(ffn) + attn_out */
         k_scale_by_dev<<<(unsigned)((HID+255)/256),256>>>(scur, (size_t)HID, g_draft.osc[il]); /* cur *= layer_output_scale */
     }
     k_rmsnorm<<<1,256>>>(scur, g_draft.out_norm, HID, eps, snorm);           /* final hidden */
-    if (out_hnext) { k_matmul_draft<<<(unsigned)((BBt+255)/256),256>>>(g_draft.post, snorm, shn, BBt, HID);
+    if (out_hnext) { if (gemm(g_w.cublas, g_draft.post, snorm, shn, 1, HID, BBt)) return -1;
                      cudaMemcpy(out_hnext, shn, (size_t)BBt*4, cudaMemcpyDeviceToHost); }
-    k_matmul_draft<<<(unsigned)((Vd+255)/256),256>>>(g_draft.head, snorm, slog, Vd, HID);
+    if (gemm(g_w.cublas, g_draft.head, snorm, slog, 1, HID, Vd)) return -1;   /* draft tied head (cublas) */
     if (suppress && n_suppress > 0) {   /* token-mgmt contract: mask soft/control tokens before argmax (parity w/ the target sampler) */
         const float ninf = -3.4e38f;
         for (int i = 0; i < n_suppress; i++) {
