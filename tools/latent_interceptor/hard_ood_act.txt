@@ -1,0 +1,122 @@
+# HARD ood tape [action] (disjoint banks, seed-split). near-miss->NO_OP.
+# tick kind payload salience expect
+0     EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.83  NO_OP
+1     EVENT.chat.nearmiss      "tooling has come a long way"                   0.85  NO_OP
+2     EVENT.idle.clean         "sounds good"                                   0.56  NO_OP
+3     EVENT.keep.invoke        "make a note that vendor x is approved"         0.6   KEEP
+4     EVENT.forget.invoke      "discard what i said earlier about the deadline" 0.56  FORGET
+5     EVENT.chat.nearmiss      "she told me to deploy more empathy lol"        0.73  NO_OP
+6     EVENT.idle.clean         "ok"                                            0.62  NO_OP
+7     EVENT.action.invoke      "uh launch the report generator"                0.86  ACTION
+8     EVENT.chat.nearmiss      "sending emails all day is exhausting"          0.42  NO_OP
+9     EVENT.chat.nearmiss      "she told me to deploy more empathy lol"        0.44  NO_OP
+10    EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.43  NO_OP
+11    EVENT.e2b_tool.invoke    "evaluate this expression in the sandbox"       0.64  E2B_TOOL
+12    EVENT.action.invoke      "launch the report generator"                   0.73  ACTION
+13    EVENT.e2b_tool.invoke    "go ahead and fire the script"                  0.62  E2B_TOOL
+14    EVENT.action.invoke      "push teh release out now"                      0.62  ACTION
+15    EVENT.e2b_tool.invoke    "evaluate this expression in the sandbox"       0.85  E2B_TOOL
+16    EVENT.chat.nearmiss      "sending emails all day is exhausting"          0.88  NO_OP
+17    EVENT.forget.invoke      "discard what i said earlier about the deadline" 0.72  FORGET
+18    EVENT.chat.nearmiss      "tooling has come a long way"                   0.7   NO_OP
+19    EVENT.idle.clean         "ok"                                            0.77  NO_OP
+20    EVENT.idle.clean         "all quiet"                                     0.5   NO_OP
+21    EVENT.e2b_tool.invoke    "uh spin up teh sandbox and run it"             0.69  E2B_TOOL
+22    EVENT.action.invoke      "um launch the report generator"                0.61  ACTION
+23    EVENT.chat.nearmiss      "i lost my train of thought there"              0.51  NO_OP
+24    EVENT.forget.invoke      "wipe the note on the backup schedule"          0.66  FORGET
+25    EVENT.forget.invoke      "uh wipe the note on the backup schedule"       0.8   FORGET
+26    EVENT.forget.invoke      "remove the entry about the api key"            0.76  FORGET
+27    EVENT.chat.nearmiss      "execution is the hard part of any plan"        0.45  NO_OP
+28    EVENT.action.invoke      "uh message the on-call about this"             0.4   ACTION
+29    EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.44  NO_OP
+30    EVENT.forget.invoke      "remove the entry about the api key"            0.44  FORGET
+31    EVENT.forget.invoke      "wipe the note on the backup schedule"          0.82  FORGET
+32    EVENT.idle.clean         "ok"                                            0.64  NO_OP
+33    EVENT.idle.clean         "all quiet"                                     0.74  NO_OP
+34    EVENT.action.invoke      "push the release out now"                      0.6   ACTION
+35    EVENT.keep.invoke        "ok so make a note that vendor x is approved"   0.68  KEEP
+36    EVENT.idle.clean         "morning"                                       0.48  NO_OP
+37    EVENT.idle.clean         "morning"                                       0.74  NO_OP
+38    EVENT.idle.clean         "sounds good"                                   0.42  NO_OP
+39    EVENT.chat.nearmiss      "she told me to deploy more empathy lol"        0.51  NO_OP
+40    EVENT.chat.nearmiss      "sending emails all day is exhausting"          0.61  NO_OP
+41    EVENT.e2b_tool.invoke    "go ahead and fire the script"                  0.58  E2B_TOOL
+42    EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.41  NO_OP
+43    EVENT.chat.nearmiss      "tooling has come a long way"                   0.47  NO_OP
+44    EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.83  NO_OP
+45    EVENT.action.invoke      "message the on-call about this"                0.68  ACTION
+46    EVENT.keep.invoke        "make  note that vendor x is approved"          0.44  KEEP
+47    EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.77  NO_OP
+48    EVENT.forget.invoke      "wipe the note on the backup schedule"          0.41  FORGET
+49    EVENT.e2b_tool.invoke    "evaluate this expression in the sandbox"       0.62  E2B_TOOL
+50    EVENT.action.invoke      "push teh release out now"                      0.89  ACTION
+51    EVENT.chat.nearmiss      "she told me to deploy more empathy lol"        0.88  NO_OP
+52    EVENT.action.invoke      "launch teh report generator"                   0.71  ACTION
+53    EVENT.keep.invoke        "don't let me forget the meeting is at noon thursday" 0.77  KEEP
+54    EVENT.forget.invoke      "wipe the note on the backup schedule"          0.44  FORGET
+55    EVENT.e2b_tool.invoke    "spin up the sandbox and run it"                0.72  E2B_TOOL
+56    EVENT.chat.nearmiss      "sending emails all day is exhausting"          0.54  NO_OP
+57    EVENT.idle.clean         "noted"                                         0.66  NO_OP
+58    EVENT.idle.clean         "noted"                                         0.46  NO_OP
+59    EVENT.forget.invoke      "um wipe teh note on the backup schedule"       0.59  FORGET
+60    EVENT.idle.clean         "morning"                                       0.44  NO_OP
+61    EVENT.action.invoke      "push the release out now"                      0.78  ACTION
+62    EVENT.chat.nearmiss      "i lost my train of thought there"              0.52  NO_OP
+63    EVENT.chat.nearmiss      "i lost my train of thought there"              0.51  NO_OP
+64    EVENT.chat.nearmiss      "sending emails all day is exhausting"          0.79  NO_OP
+65    EVENT.forget.invoke      "discard what i said earlier about the deadline" 0.89  FORGET
+66    EVENT.chat.nearmiss      "tooling has come a long way"                   0.62  NO_OP
+67    EVENT.forget.invoke      "wipe teh note on the backup schedue"           0.71  FORGET
+68    EVENT.chat.nearmiss      "sending emails all day is exhausting"          0.64  NO_OP
+69    EVENT.chat.nearmiss      "execution is the hard part of any plan"        0.74  NO_OP
+70    EVENT.action.invoke      "message the on-call about this"                0.76  ACTION
+71    EVENT.e2b_tool.invoke    "go ahead and fire teh script"                  0.89  E2B_TOOL
+72    EVENT.keep.invoke        "store this the backup runs at 2am"             0.49  KEEP
+73    EVENT.chat.nearmiss      "execution is the hard part of any plan"        0.48  NO_OP
+74    EVENT.chat.nearmiss      "she told me to deploy more empathy lol"        0.56  NO_OP
+75    EVENT.chat.nearmiss      "tooling has come a long way"                   0.67  NO_OP
+76    EVENT.e2b_tool.invoke    "uh evaluat this expression in the sandbox"     0.83  E2B_TOOL
+77    EVENT.idle.clean         "morning"                                       0.61  NO_OP
+78    EVENT.keep.invoke        "log that the api key rotates every30 days"     0.72  KEEP
+79    EVENT.keep.invoke        "make a note that vendor x is approved"         0.5   KEEP
+80    EVENT.action.invoke      "message the on-call about this"                0.85  ACTION
+81    EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.71  NO_OP
+82    EVENT.idle.clean         "sounds good"                                   0.69  NO_OP
+83    EVENT.chat.nearmiss      "i lost my train of thought there"              0.53  NO_OP
+84    EVENT.e2b_tool.invoke    "spin up the sandbox and run it"                0.72  E2B_TOOL
+85    EVENT.chat.nearmiss      "execution is the hard part of any plan"        0.88  NO_OP
+86    EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.64  NO_OP
+87    EVENT.chat.nearmiss      "i lost my train of thought there"              0.54  NO_OP
+88    EVENT.chat.nearmiss      "tooling has come a long way"                   0.55  NO_OP
+89    EVENT.e2b_tool.invoke    "evaluate this expression in the sandbox"       0.53  E2B_TOOL
+90    EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.66  NO_OP
+91    EVENT.chat.nearmiss      "i lost my train of thought there"              0.47  NO_OP
+92    EVENT.idle.clean         "noted"                                         0.72  NO_OP
+93    EVENT.forget.invoke      "discard what i said earlier about the deadline" 0.56  FORGET
+94    EVENT.e2b_tool.invoke    "spin up the sandbox and run it"                0.71  E2B_TOOL
+95    EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.78  NO_OP
+96    EVENT.action.invoke      "push the release out now"                      0.88  ACTION
+97    EVENT.idle.clean         "sounds good"                                   0.58  NO_OP
+98    EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.72  NO_OP
+99    EVENT.chat.nearmiss      "i should really clean up my notes sometime"    0.84  NO_OP
+100   EVENT.idle.clean         "ok"                                            0.5   NO_OP
+101   EVENT.chat.nearmiss      "i lost my train of thought there"              0.5   NO_OP
+102   EVENT.e2b_tool.invoke    "spin up the sandbox and run it"                0.54  E2B_TOOL
+103   EVENT.idle.clean         "sounds good"                                   0.55  NO_OP
+104   EVENT.forget.invoke      "remove the entry about the api key"            0.7   FORGET
+105   EVENT.forget.invoke      "discard hat i said earlier about the deadline" 0.88  FORGET
+106   EVENT.chat.nearmiss      "tooling has come a long way"                   0.49  NO_OP
+107   EVENT.idle.clean         "noted"                                         0.89  NO_OP
+108   EVENT.e2b_tool.invoke    "evaluate this expression in the sadbox"        0.54  E2B_TOOL
+109   EVENT.idle.clean         "ok"                                            0.78  NO_OP
+110   EVENT.chat.nearmiss      "i lost my train of thought there"              0.47  NO_OP
+111   EVENT.e2b_tool.invoke    "spin up the sandbox and run it"                0.54  E2B_TOOL
+112   EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.71  NO_OP
+113   EVENT.forget.invoke      "wipe the note on the backup schedule"          0.88  FORGET
+114   EVENT.chat.nearmiss      "i lost my train of thought there"              0.41  NO_OP
+115   EVENT.idle.clean         "morning"                                       0.59  NO_OP
+116   EVENT.idle.clean         "all quiet"                                     0.8   NO_OP
+117   EVENT.chat.nearmiss      "the whole forget-versus-remember thing is fascinating" 0.53  NO_OP
+118   EVENT.chat.nearmiss      "tooling has come a long way"                   0.49  NO_OP
+119   EVENT.action.invoke      "message teh on-call about this"                0.45  ACTION

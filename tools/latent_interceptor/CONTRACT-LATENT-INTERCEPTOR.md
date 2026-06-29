@@ -206,3 +206,21 @@ Near-misses (mention-without-invoke) strictly ->NONE; CALC=pure math vs PYTHON=c
   head is downstream of a KEEP decision (address producer, not a classifier) -> it is gated by the action head, so it
   cannot false-fire in the routing sense; its safety = the action head's near-miss-hardened KEEP boundary.
 - Repro: `python make_hard_tape.py hard_train.txt 200 train` / `hard_ood.txt 120 ood`; capture via `_hard_{train,ood}_cap.bat`; `sp_li_eval.py --head _tool_head_hard.bin --data _hard_ood_data`.
+
+## TS-3 — Hardened Action Head + TRUE cross-distribution OOD (G-ACT-HARD) GREEN (safety); KEEP-recall gap noted
+Same recipe as TS-2, action space {NO_OP,KEEP,FORGET,E2B_TOOL,ACTION}. Near-misses reuse the trigger verbs
+(forget/remember/run/send/deploy) in non-command contexts -> NO_OP. `make_hard_tape.py ... action` (disjoint
+TRAIN/OOD banks + different seeds). TRAIN 200 ev (NO_OP=127) -> `_hard_act_train_data` -> `_act_head_hard.bin`;
+isolated OOD 120 ev -> `_hard_act_ood_data`.
+- **CLEAN live head (_li_head.bin) on isolated OOD: 0.183 acc, NO_OP-recall 0.015, FALSE-FIRE 0.985** (the KAIROS
+  heartbeat was firing an action on 98.5% of idle chatter cross-distribution -- a worse false-fire than the tool head).
+- **HARDENED on isolated OOD: 0.958 acc (115/120), NO_OP-recall 1.000, FALSE-FIRE 0.000.** KEEP prec 1.000 (no
+  spurious memory writes), FORGET 1.000/1.000, E2B_TOOL 1.000/1.000, ACTION prec 0.812/rec 0.929.
+- **Safety GREEN**: zero false-fire + KEEP precision 1.000 => the Memory-Head KEEP gate cannot fire on idle/near-miss.
+- **Honest capability gap**: KEEP recall 0.429 (under-fires real stores; n=7 OOD, only 18 KEEP train) and ACTION
+  prec 0.812. Both are the SAFE failure direction (miss, never hallucinate). Lift = richer KEEP/ACTION phrasing
+  diversity in the train tape (mechanical recapture), NOT a redesign.
+- Deployed: `_act_head_hard.bin` -> live `_li_head.bin` (clean -> `_li_head_clean.bin`).
+- Multi-head safety pass status: Tool head GREEN (TS-2), Action head GREEN-safety (TS-3); Memory head needs no
+  hardening (address producer downstream of KEEP, gated by the action head, cannot false-fire).
+- Repro: `python make_hard_tape.py hard_train_act.txt 200 train action` / `hard_ood_act.txt 120 ood action`; capture `_hard_act_{train,ood}_cap.bat`; `sp_li_eval.py --head _act_head_hard.bin --data _hard_act_ood_data`.

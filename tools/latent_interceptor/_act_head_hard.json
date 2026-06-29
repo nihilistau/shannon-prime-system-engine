@@ -1,0 +1,21 @@
+{
+  "hidden": 3840,
+  "proj": 256,
+  "n_actions": 5,
+  "actions": [
+    "NO_OP",
+    "KEEP",
+    "FORGET",
+    "E2B_TOOL",
+    "ACTION"
+  ],
+  "layout": [
+    "mu[H]",
+    "sd[H]",
+    "W1[proj*H]",
+    "b1[proj]",
+    "W2[A*proj]",
+    "b2[A]"
+  ],
+  "val_acc": 1.0
+}
