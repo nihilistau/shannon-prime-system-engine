@@ -89,7 +89,40 @@ ACTION = {
            "ood":  ["all quiet","sounds good","noted","morning","ok"]},
 }
 
-SPACES = {"tool": TOOL, "action": ACTION}
+# ===================== ROUTE SPACE (Telepathy routing primitive) =====================
+# LOCAL vs TELEPATHY(qwen-coder). Anti-laziness: delegate ONLY on explicit cross-model hand-off /
+# genuine specialist need. Local-doable code AND tool tasks AND mentions are all LOCAL (the negatives
+# that stop the head delegating out of laziness). false-fire = LOCAL->TELEPATHY = the safety metric.
+ROUTE = {
+ "none": "LOCAL",
+ "weights": {"TELEPATHY": 1},
+ "invoke": {
+   "train": {
+     "TELEPATHY": ["hand this off to the code model","send this to the qwen coder model",
+                   "let the specialist coding model handle this one","delegate this kernel optimization to the coder",
+                   "route this to the dedicated code model","have the coding specialist take this task",
+                   "pass the compiler internals question to the code model","escalate this to the code specialist"]},
+   "ood": {
+     "TELEPATHY": ["pass this over to the code-specialist model","forward this task to qwen coder",
+                   "this needs the dedicated coding model so hand it over","delegate the refactor to the specialist model",
+                   "let qwen-coder own this one","route the assembly optimization to the code model",
+                   "have the specialist model take the kernel"]}},
+ "nearmiss": {  # mentions + LOCAL-doable code + tool tasks -> LOCAL (anti-laziness negatives)
+   "train":["qwen is a solid coding model these days","we could route work to other models someday",
+            "cross-model delegation is an interesting idea","i was reading about model handoff",
+            "what is a python list comprehension","explain what a hash map is","write a one line hello world",
+            "run this python snippet for me","search the web for the release date","remember my api key is abc",
+            "how does a for loop work","what's the difference between a list and a tuple"],
+   "ood":  ["the coder model has a good reputation","someday we might route across models",
+            "delegation between agents is fascinating","i keep reading about model specialization",
+            "what does a while loop do","explain a dictionary in python","print the numbers one to five",
+            "execute this script in the sandbox","look up today's date online","save this note for later",
+            "what is recursion in simple terms","how do you reverse a string conceptually"]},
+ "clean": {"train":["status ok","good morning","carry on","thanks","sounds good"],
+           "ood":  ["all quiet","morning","noted","ok","cheers"]},
+}
+
+SPACES = {"tool": TOOL, "action": ACTION, "route": ROUTE}
 
 def noise(s, rng):
     if rng.random() < 0.35: s = s.replace("the ", "teh ", 1)

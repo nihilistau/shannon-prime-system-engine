@@ -1,0 +1,18 @@
+{
+  "hidden": 3840,
+  "proj": 256,
+  "n_actions": 2,
+  "actions": [
+    "LOCAL",
+    "TELEPATHY"
+  ],
+  "layout": [
+    "mu[H]",
+    "sd[H]",
+    "W1[proj*H]",
+    "b1[proj]",
+    "W2[A*proj]",
+    "b2[A]"
+  ],
+  "val_acc": 1.0
+}

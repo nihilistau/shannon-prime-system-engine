@@ -1,0 +1,132 @@
+# HARD ood tape [route] (disjoint banks, seed-split). near-miss->LOCAL.
+# tick kind payload salience expect
+0     EVENT.chat.nearmiss      "save this note for later"                      0.56  LOCAL
+1     EVENT.chat.nearmiss      "explain a dictionary in python"                0.6   LOCAL
+2     EVENT.idle.clean         "morning"                                       0.56  LOCAL
+3     EVENT.telepathy.invoke   "let qwen-coder own this one"                   0.73  TELEPATHY
+4     EVENT.telepathy.invoke   "let qwen-coder own this one"                   0.62  TELEPATHY
+5     EVENT.chat.nearmiss      "save this note for later"                      0.86  LOCAL
+6     EVENT.chat.nearmiss      "look up today's date online"                   0.42  LOCAL
+7     EVENT.idle.clean         "ok"                                            0.44  LOCAL
+8     EVENT.telepathy.invoke   "this needs the dedicated coding model so hand it over" 0.43  TELEPATHY
+9     EVENT.chat.nearmiss      "print the numbers one to five"                 0.64  LOCAL
+10    EVENT.chat.nearmiss      "what does a while loop do"                     0.73  LOCAL
+11    EVENT.idle.clean         "ok"                                            0.62  LOCAL
+12    EVENT.chat.nearmiss      "how do you reverse a string conceptually"      0.62  LOCAL
+13    EVENT.chat.nearmiss      "what is recursion in simple terms"             0.85  LOCAL
+14    EVENT.telepathy.invoke   "have the specialist model take the kernel"     0.88  TELEPATHY
+15    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.72  TELEPATHY
+16    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.7   TELEPATHY
+17    EVENT.chat.nearmiss      "someday we might route across models"          0.77  LOCAL
+18    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.5   TELEPATHY
+19    EVENT.chat.nearmiss      "execute this script in the sandbox"            0.69  LOCAL
+20    EVENT.telepathy.invoke   "let qwen-coder own this one"                   0.61  TELEPATHY
+21    EVENT.idle.clean         "morning"                                       0.51  LOCAL
+22    EVENT.idle.clean         "all quiet"                                     0.66  LOCAL
+23    EVENT.telepathy.invoke   "uh pass this over to teh code-specialist model" 0.8   TELEPATHY
+24    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.76  TELEPATHY
+25    EVENT.chat.nearmiss      "explain a dictionary in python"                0.45  LOCAL
+26    EVENT.chat.nearmiss      "i keep reading about model specialization"     0.4   LOCAL
+27    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.44  TELEPATHY
+28    EVENT.idle.clean         "cheers"                                        0.44  LOCAL
+29    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.82  TELEPATHY
+30    EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.64  LOCAL
+31    EVENT.chat.nearmiss      "someday we might route across models"          0.74  LOCAL
+32    EVENT.idle.clean         "ok"                                            0.6   LOCAL
+33    EVENT.idle.clean         "morning"                                       0.68  LOCAL
+34    EVENT.chat.nearmiss      "i keep reading about model specialization"     0.48  LOCAL
+35    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.74  TELEPATHY
+36    EVENT.chat.nearmiss      "how do you reverse a string conceptually"      0.42  LOCAL
+37    EVENT.idle.clean         "all quiet"                                     0.51  LOCAL
+38    EVENT.idle.clean         "noted"                                         0.61  LOCAL
+39    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.58  TELEPATHY
+40    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.41  TELEPATHY
+41    EVENT.idle.clean         "cheers"                                        0.47  LOCAL
+42    EVENT.idle.clean         "all quiet"                                     0.83  LOCAL
+43    EVENT.telepathy.invoke   "have the specialist model take the kernel"     0.68  TELEPATHY
+44    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.44  TELEPATHY
+45    EVENT.telepathy.invoke   "have the specialist model take the kernel"     0.77  TELEPATHY
+46    EVENT.telepathy.invoke   "have teh specialist model take the kernel"     0.41  TELEPATHY
+47    EVENT.telepathy.invoke   "ok so have the specialist model take he kernel" 0.62  TELEPATHY
+48    EVENT.telepathy.invoke   "this needs the dedicated coding model so hand it over" 0.89  TELEPATHY
+49    EVENT.telepathy.invoke   "delegte teh refactor to the specialist model"  0.88  TELEPATHY
+50    EVENT.chat.nearmiss      "look up today's date online"                   0.71  LOCAL
+51    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.77  TELEPATHY
+52    EVENT.telepathy.invoke   "let qwen-coder own this one"                   0.44  TELEPATHY
+53    EVENT.chat.nearmiss      "explain a dictionary in python"                0.72  LOCAL
+54    EVENT.chat.nearmiss      "save this note for later"                      0.54  LOCAL
+55    EVENT.chat.nearmiss      "i keep reading about model specialization"     0.66  LOCAL
+56    EVENT.idle.clean         "ok"                                            0.46  LOCAL
+57    EVENT.telepathy.invoke   "delegate the refactor to the specialist model" 0.59  TELEPATHY
+58    EVENT.idle.clean         "ok"                                            0.44  LOCAL
+59    EVENT.telepathy.invoke   "um pass this over to teh code-specialist model" 0.78  TELEPATHY
+60    EVENT.chat.nearmiss      "execute this script in the sandbox"            0.52  LOCAL
+61    EVENT.idle.clean         "all quiet"                                     0.51  LOCAL
+62    EVENT.telepathy.invoke   "delegate the refactor to the specialist model" 0.79  TELEPATHY
+63    EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.89  TELEPATHY
+64    EVENT.idle.clean         "morning"                                       0.62  LOCAL
+65    EVENT.chat.nearmiss      "execute this script in the sandbox"            0.71  LOCAL
+66    EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.64  LOCAL
+67    EVENT.chat.nearmiss      "what is recursion in simple terms"             0.74  LOCAL
+68    EVENT.telepathy.invoke   "have the specialist model take the kernel"     0.76  TELEPATHY
+69    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.89  TELEPATHY
+70    EVENT.idle.clean         "noted"                                         0.49  LOCAL
+71    EVENT.idle.clean         "all quiet"                                     0.48  LOCAL
+72    EVENT.chat.nearmiss      "save this note for later"                      0.56  LOCAL
+73    EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.67  LOCAL
+74    EVENT.telepathy.invoke   "let qwen-coder own this one"                   0.83  TELEPATHY
+75    EVENT.chat.nearmiss      "look up today's date online"                   0.61  LOCAL
+76    EVENT.chat.nearmiss      "execute this script in the sandbox"            0.72  LOCAL
+77    EVENT.chat.nearmiss      "what is recursion in simple terms"             0.5   LOCAL
+78    EVENT.telepathy.invoke   "delegate the refactor to the specialist model" 0.85  TELEPATHY
+79    EVENT.telepathy.invoke   "pls let qwen-coder ow this one"                0.71  TELEPATHY
+80    EVENT.telepathy.invoke   "this needs the dedicated coding model so hand it over" 0.69  TELEPATHY
+81    EVENT.chat.nearmiss      "what is recursion in simple terms"             0.53  LOCAL
+82    EVENT.chat.nearmiss      "what does a while loop do"                     0.72  LOCAL
+83    EVENT.chat.nearmiss      "execute this script in the sandbox"            0.88  LOCAL
+84    EVENT.chat.nearmiss      "explain a dictionary in python"                0.64  LOCAL
+85    EVENT.idle.clean         "noted"                                         0.54  LOCAL
+86    EVENT.idle.clean         "all quiet"                                     0.55  LOCAL
+87    EVENT.chat.nearmiss      "the coder model has a good reputation"         0.53  LOCAL
+88    EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.66  LOCAL
+89    EVENT.idle.clean         "ok"                                            0.47  LOCAL
+90    EVENT.telepathy.invoke   "pass this over to the code-specialst model"    0.72  TELEPATHY
+91    EVENT.telepathy.invoke   "delegate the refactor to the specialist model" 0.56  TELEPATHY
+92    EVENT.telepathy.invoke   "delegate the refactor to the specialist model" 0.71  TELEPATHY
+93    EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.78  LOCAL
+94    EVENT.telepathy.invoke   "this needs the dedicated coding model so hand it over" 0.88  TELEPATHY
+95    EVENT.chat.nearmiss      "what does a while loop do"                     0.58  LOCAL
+96    EVENT.telepathy.invoke   "forward this task to qwen coder"               0.72  TELEPATHY
+97    EVENT.chat.nearmiss      "what is recursion in simple terms"             0.84  LOCAL
+98    EVENT.chat.nearmiss      "the coder model has a good reputation"         0.5   LOCAL
+99    EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.5   LOCAL
+100   EVENT.chat.nearmiss      "what does a while loop do"                     0.54  LOCAL
+101   EVENT.telepathy.invoke   "this needs the dedicated coding model so hand it over" 0.55  TELEPATHY
+102   EVENT.telepathy.invoke   "pass this over to the code-specialist model"   0.7   TELEPATHY
+103   EVENT.chat.nearmiss      "explain a dictionary in python"                0.88  LOCAL
+104   EVENT.telepathy.invoke   "pass this over to the code-specialist model"   0.49  TELEPATHY
+105   EVENT.idle.clean         "cheers"                                        0.89  LOCAL
+106   EVENT.telepathy.invoke   "wait this needs teh dediated coding model so hand it over" 0.54  TELEPATHY
+107   EVENT.chat.nearmiss      "explain a dictionary in python"                0.78  LOCAL
+108   EVENT.idle.clean         "morning"                                       0.47  LOCAL
+109   EVENT.chat.nearmiss      "save this note for later"                      0.54  LOCAL
+110   EVENT.chat.nearmiss      "look up today's date online"                   0.71  LOCAL
+111   EVENT.idle.clean         "cheers"                                        0.88  LOCAL
+112   EVENT.chat.nearmiss      "delegation between agents is fascinating"      0.41  LOCAL
+113   EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.59  TELEPATHY
+114   EVENT.chat.nearmiss      "how do you reverse a string conceptually"      0.8   LOCAL
+115   EVENT.chat.nearmiss      "explain a dictionary in python"                0.53  LOCAL
+116   EVENT.telepathy.invoke   "have teh specialis model take the kernel"      0.49  TELEPATHY
+117   EVENT.chat.nearmiss      "what is recursion in simple terms"             0.45  LOCAL
+118   EVENT.telepathy.invoke   "forward this task to qwen coder"               0.63  TELEPATHY
+119   EVENT.telepathy.invoke   "this needs the dedicated coding model so hand it over" 0.86  TELEPATHY
+120   EVENT.telepathy.invoke   "route the assembly optimization to the code model" 0.46  TELEPATHY
+121   EVENT.idle.clean         "cheers"                                        0.52  LOCAL
+122   EVENT.chat.nearmiss      "i keep reading about model specialization"     0.49  LOCAL
+123   EVENT.telepathy.invoke   "pass this over to the code-specialist model"   0.53  TELEPATHY
+124   EVENT.chat.nearmiss      "someday we might route across models"          0.45  LOCAL
+125   EVENT.telepathy.invoke   "let qwen-coder own this one"                   0.45  TELEPATHY
+126   EVENT.telepathy.invoke   "forward this task to qwen coder"               0.49  TELEPATHY
+127   EVENT.telepathy.invoke   "pass this over to teh code-specialist model"   0.84  TELEPATHY
+128   EVENT.telepathy.invoke   "this needs teh dedicated coding model so hand it over" 0.4   TELEPATHY
+129   EVENT.idle.clean         "all quiet"                                     0.87  LOCAL

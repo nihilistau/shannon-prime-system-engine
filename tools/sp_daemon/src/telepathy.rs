@@ -46,10 +46,38 @@ impl AdapterBin {
 #[derive(Debug, PartialEq)]
 pub enum RouteDecision { Local, Telepathy(u32) }
 
-/// Default = LOCAL (the null floor) until a hardened **Route head** exists (same probe machinery as the
-/// Tool/Action heads; must pass near-miss hardening like TS-2/TS-3 before it may fire). `SP_ROUTE_FORCE`
-/// forces a bridge id for testing the seam.
-pub fn decide_route(_latent: &[f32]) -> RouteDecision {
+/// CPU probe for the hardened Route head (same layout as the Tool/Action heads: mu,sd,W1,b1,W2,b2).
+/// Returns the argmax class id (route space: 0=LOCAL, 1=TELEPATHY).
+fn route_probe(blob: &[f32], h: usize, a: usize, proj: usize, feat: &[f32]) -> i32 {
+    let (mu, sd) = (&blob[0..h], &blob[h..2*h]);
+    let w1 = &blob[2*h..2*h + proj*h]; let b1 = &blob[2*h + proj*h..2*h + proj*h + proj];
+    let w2o = 2*h + proj*h + proj; let w2 = &blob[w2o..w2o + a*proj]; let b2 = &blob[w2o + a*proj..w2o + a*proj + a];
+    let mut hid = vec![0f32; proj];
+    for p in 0..proj { let mut s = b1[p]; let row = &w1[p*h..p*h + h]; for i in 0..h { s += row[i] * ((feat[i]-mu[i])/sd[i]); } hid[p] = if s>0.0 {s} else {0.0}; }
+    let (mut best, mut bv) = (0i32, f32::NEG_INFINITY);
+    for c in 0..a { let mut s = b2[c]; let row = &w2[c*proj..c*proj + proj]; for p in 0..proj { s += row[p]*hid[p]; } if s > bv { bv = s; best = c as i32; } }
+    best
+}
+
+/// The routing PRIMITIVE. When `SP_ROUTE_HEAD` points at the hardened Route head, the decision is
+/// HEAD-GOVERNED (LOCAL vs TELEPATHY) — the same near-miss-hardened standard as the Tool/Action heads
+/// (TELE-7: isolated-OOD 1.000, false-fire 0.000). Otherwise default LOCAL (null floor). `SP_ROUTE_FORCE`
+/// overrides for testing the seam.
+pub fn decide_route(latent: &[f32]) -> RouteDecision {
+    if let Ok(hp) = std::env::var("SP_ROUTE_HEAD") {
+        if !hp.trim().is_empty() {
+            if let Ok(b) = std::fs::read(&hp) {
+                let blob: Vec<f32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect();
+                let (h, a) = (latent.len(), 2usize);          // route space = {LOCAL, TELEPATHY}
+                if blob.len() > 2*h + a {
+                    let proj = (blob.len() - 2*h - a) / (h + 1 + a);
+                    if proj > 0 && blob.len() == 2*h + proj*h + proj + a*proj + a {
+                        return if route_probe(&blob, h, a, proj, latent) == 1 { RouteDecision::Telepathy(0) } else { RouteDecision::Local };
+                    }
+                }
+            }
+        }
+    }
     match std::env::var("SP_ROUTE_FORCE") {
         Ok(s) if !s.trim().is_empty() => RouteDecision::Telepathy(s.trim().parse().unwrap_or(0)),
         _ => RouteDecision::Local,
@@ -120,13 +148,36 @@ pub fn run_telepathy() -> Result<(), String> {
     let rel = (sse.sqrt()) / (snorm.sqrt() + 1e-9);
     eprintln!("[telepathy] in-engine transfer vs Python adapter: max|Δ|={:.3e}  relL2={:.3e}  (|y|={:.3})", maxd, rel, snorm.sqrt());
 
-    // 3) routing primitive
-    let route = decide_route(&x);
-    eprintln!("[telepathy] route primitive: decide_route -> {:?}  (default LOCAL = null floor; Route head pending+hardening)", route);
+    // 3) routing primitive — headless default = LOCAL (null floor)
+    let route0 = decide_route(&x);
+    eprintln!("[telepathy] route primitive (headless): decide_route -> {:?}  (default LOCAL = null floor)", route0);
+
+    // 3b) the hardened Route head (TELE-7) GOVERNS decide_route in-engine: classify captured feats and
+    //     match the Python labels (proves the routing decision meets the Tool/Action heads' standard).
+    let mut route_ok = true; let mut route_n = 0usize;
+    let fxp = std::env::var("SP_ROUTE_FIXTURE").unwrap_or_else(|_| "route_fixture.bin".into());
+    if let Ok(fx) = fs::read(&fxp) {
+        let ri = |o: usize| i32::from_le_bytes([fx[o], fx[o+1], fx[o+2], fx[o+3]]);
+        let (h, n) = (ri(0) as usize, ri(12) as usize);
+        std::env::set_var("SP_ROUTE_HEAD", std::env::var("SP_ROUTE_HEAD_PATH").unwrap_or_else(|_| "_route_head.bin".into()));
+        let mut o = 16;
+        for _ in 0..n {
+            let lab = ri(o); o += 4;
+            let feat: Vec<f32> = (0..h).map(|k| { let p = o + k*4; f32::from_le_bytes([fx[p], fx[p+1], fx[p+2], fx[p+3]]) }).collect();
+            o += h*4;
+            let d = decide_route(&feat);
+            let got = matches!(d, RouteDecision::Telepathy(_)) as i32;   // 1=TELEPATHY, 0=LOCAL
+            let ok = got == lab; route_ok &= ok; route_n += 1;
+            eprintln!("[telepathy] route head: feat(label={}) -> {:?}  {}", lab, d, if ok {"OK"} else {"MISMATCH"});
+        }
+        std::env::remove_var("SP_ROUTE_HEAD");
+    } else { route_ok = false; eprintln!("[telepathy] route fixture {fxp} not found — skipping route-head demo"); }
+
     eprintln!("[telepathy] live transport: SAME-FAMILY identity inject = RP-1 (gemma4_kv_inject_tokens). CROSS-FAMILY destination forward (Qwen) = PENDING (no Qwen engine forward).");
 
-    let verdict = if off.is_none() && rel < 1e-2 { "GREEN" } else { "RED" };
-    eprintln!("[telepathy] G-TELEPATHY-WIRE: {verdict}  (fail-closed correct + in-engine transfer == Python within float tol)");
-    if verdict != "GREEN" { return Err("G-TELEPATHY-WIRE not green".into()); }
+    let wire_ok = off.is_none() && rel < 1e-2;
+    eprintln!("[telepathy] G-TELEPATHY-WIRE: {}  (fail-closed + in-engine transfer == Python)", if wire_ok {"GREEN"} else {"RED"});
+    eprintln!("[telepathy] G-ROUTE-WIRE:    {}  ({} fixtures, head-governed decide_route == Python labels)", if route_ok && route_n>0 {"GREEN"} else {"RED"}, route_n);
+    if !(wire_ok && route_ok && route_n > 0) { return Err("telepathy gates not all green".into()); }
     Ok(())
 }
