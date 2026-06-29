@@ -4675,6 +4675,7 @@ extern "C" void gemma4_draft_close(void) {
  * default rsqrt = the proven-standalone choice) — the live accept rate dials it. rope = plain neox
  * base (full-layer rope_freqs is the next knob if accept is low). Math == G-EAGLE-DRAFT-FWD-CUDA. */
 extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
+                                 const int *suppress, int n_suppress,
                                  int *out_token, float *out_hnext) {
     if (!g_draft.loaded || !s || !out_token) { sp_set_error("gemma4_draft_step: bad args/not loaded"); return -1; }
     if (!g_w.embd && !g_w.embd_packed.codes) { sp_set_error("gemma4_draft_step: target has no embd (f32 or packed)"); return -1; }
@@ -4732,6 +4733,13 @@ extern "C" int gemma4_draft_step(sp_g4_kv *s, const float *feat_host, int token,
     if (out_hnext) { k_matmul_draft<<<(unsigned)((BBt+255)/256),256>>>(g_draft.post, snorm, shn, BBt, HID);
                      cudaMemcpy(out_hnext, shn, (size_t)BBt*4, cudaMemcpyDeviceToHost); }
     k_matmul_draft<<<(unsigned)((Vd+255)/256),256>>>(g_draft.head, snorm, slog, Vd, HID);
+    if (suppress && n_suppress > 0) {   /* token-mgmt contract: mask soft/control tokens before argmax (parity w/ the target sampler) */
+        const float ninf = -3.4e38f;
+        for (int i = 0; i < n_suppress; i++) {
+            int id = suppress[i];
+            if (id >= 0 && id < Vd) cudaMemcpy(slog + (size_t)id, &ninf, sizeof(float), cudaMemcpyHostToDevice);
+        }
+    }
     k_argmax<<<1,256>>>(slog, Vd, dtok);
     cudaError_t e = cudaMemcpy(out_token, dtok, 4, cudaMemcpyDeviceToHost);
     if (e != cudaSuccess) return fail_cuda(e, "gemma4_draft_step out_token D2H");

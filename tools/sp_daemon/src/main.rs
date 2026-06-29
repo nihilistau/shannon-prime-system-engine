@@ -43,6 +43,11 @@ mod dialogue_runner;
 #[cfg(feature = "kairos")]
 mod kairos_runner;
 mod nightshift_curator;
+// SP_EAGLE_ACCEPT one-shot: framework-faithful live MTP single-token acceptance probe.
+// The file is #![cfg(feature="wire_cuda_backend")] so this module is empty without the
+// CUDA backend. It must live in the binary (not a [[bin]]) to reach the binary-private
+// tokenizer/sampler/session (the token-management contract).
+mod eagle_accept;
 
 // Sprint WIRE-CPU — host CPU AVX-512 full-forward backend dispatcher for
 // sp_l1.h:§6. Symmetric to the lib-crate's hex_forward_dispatch (android).
@@ -198,6 +203,27 @@ async fn main() {
                 eprintln!("[kairos-alpha] FAILED: {e}");
                 std::process::exit(1);
             }
+        }
+    }
+
+    // SP_EAGLE_ACCEPT — framework-faithful live MTP acceptance probe (one-shot, exits
+    // before clap/daemon startup). Mirrors the curator/kairos one-shot gates. Needs the
+    // CUDA backend (gemma4_kv_* + gemma4_draft_*). Usage:
+    //   SP_EAGLE_ACCEPT=1 SP_MODEL_PATH=…b1.sp-model SP_TOKENIZER_PATH=…b1.sp-tokenizer \
+    //   SP_DRAFT_GGUF=…gemma-4-12b-it-F16-MTP.gguf [SP_EAGLE_N=48] [SP_DRAFT_ASCALE=one] sp-daemon
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_EAGLE_ACCEPT").as_deref() == Ok("1") {
+        let model = std::env::var("SP_MODEL_PATH").unwrap_or_default();
+        let tok = std::env::var("SP_TOKENIZER_PATH").unwrap_or_default();
+        let draft = std::env::var("SP_DRAFT_GGUF").unwrap_or_default();
+        let n: usize = std::env::var("SP_EAGLE_N").ok().and_then(|s| s.parse().ok()).unwrap_or(48);
+        if model.is_empty() || tok.is_empty() || draft.is_empty() {
+            eprintln!("SP_EAGLE_ACCEPT=1 requires SP_MODEL_PATH, SP_TOKENIZER_PATH, SP_DRAFT_GGUF");
+            std::process::exit(2);
+        }
+        match eagle_accept::run_eagle_accept(&model, &tok, &draft, n) {
+            Ok((a, c)) => { eprintln!("[eagle] DONE accept={a}/{c}"); std::process::exit(0); }
+            Err(e) => { eprintln!("[eagle] FAILED: {e}"); std::process::exit(1); }
         }
     }
 
