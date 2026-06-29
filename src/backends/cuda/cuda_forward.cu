@@ -1701,6 +1701,8 @@ static int gemm_w_lift(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
                        const float *dX, float *dY, int n_tok, float *scratch);  /* defined below */
 static int gemm(cublasHandle_t h, const float *dW, const float *dX, float *dY,
                 int n_tok, int in, int out);                                    /* defined below */
+static int gemv_t(cublasHandle_t h, const float *dW, const float *dX, float *dY,
+                  int in, int out);                                            /* defined below (n_tok=1 fast path) */
 static int gemv_w_packed(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
                          signed char *dqx, float *dsx);                         /* defined below */
 
@@ -4816,15 +4818,19 @@ extern "C" int gemma4_draft_body(sp_g4_kv *s, const float *feat_host, int token,
     const float eps = s->eps; const int ctx = s->dpos_host;
     const char *am = getenv("SP_DRAFT_ASCALE");
     cublasSetStream(g_w.cublas, 0);
+    static int bprof = -1; if (bprof < 0) bprof = getenv("SP_DRAFT_BODY_PROFILE") ? 1 : 0;
+    cudaEvent_t be0, be1; if (bprof) { cudaEventCreate(&be0); cudaEventCreate(&be1); cudaEventRecord(be0, 0); }
     if (g_w.embd)
         k_embed_scale_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd, token, BBt, sqrtf((float)BBt), bx);
     else
         k_embed_packed_one<<<(unsigned)((BBt+255)/256),256>>>(g_w.embd_packed.codes, g_w.embd_packed.row_off,
             g_w.embd_packed.row_scale, g_w.embd_packed.row_prec, token, BBt, sqrtf((float)BBt), bx);
-    cudaMemcpy(bfeat, feat_host, (size_t)BBt*4, cudaMemcpyHostToDevice);
-    cudaMemcpy(bxh, bx, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
-    cudaMemcpy(bxh+BBt, bfeat, (size_t)BBt*4, cudaMemcpyDeviceToDevice);
-    if (gemm(g_w.cublas, g_draft.pre, bxh, bcur, 1, 2*BBt, HID)) return -1;       /* pre_proj */
+    /* internal copies ASYNC on stream 0 (the cublas + k_* stream) so the body pipelines instead of
+     * draining the stream ~8x/call (the measured ~91ms gate was these host syncs, not compute). */
+    cudaMemcpyAsync(bfeat, feat_host, (size_t)BBt*4, cudaMemcpyHostToDevice, 0);
+    cudaMemcpyAsync(bxh, bx, (size_t)BBt*4, cudaMemcpyDeviceToDevice, 0);
+    cudaMemcpyAsync(bxh+BBt, bfeat, (size_t)BBt*4, cudaMemcpyDeviceToDevice, 0);
+    if (gemv_t(g_w.cublas, g_draft.pre, bxh, bcur, 2*BBt, HID)) return -1;        /* pre_proj */
     for (int il = 0; il < DRAFT_NL; il++) {
         const int qd = g_draft.qd[il], hd = g_draft.hd[il], swa = g_draft_swa[il];
         const int il_src = swa ? (s->NL - 2) : (s->NL - 1);
@@ -4836,7 +4842,7 @@ extern "C" int gemma4_draft_body(sp_g4_kv *s, const float *feat_host, int token,
         const float rb = swa ? s->s_base : s->g_base;
         const float asc = (am && !strcmp(am,"one")) ? 1.0f : 1.0f/sqrtf((float)hd);
         k_rmsnorm<<<1,256>>>(bcur, g_draft.attn_norm[il], HID, eps, bnorm);
-        if (gemm(g_w.cublas, g_draft.wq[il], bnorm, bq, 1, HID, qd)) return -1;
+        if (gemv_t(g_w.cublas, g_draft.wq[il], bnorm, bq, HID, qd)) return -1;
         k_rmsnorm_head<<<16,256>>>(bq, g_draft.qn[il], 16, hd, qd, eps);
         if (!swa && g_draft.rope_freqs)
             k_rope_freqs_at<<<16, hd/2>>>(bq, 16, hd, rb, g_draft.rope_freqs, ctx);
@@ -4844,20 +4850,22 @@ extern "C" int gemma4_draft_body(sp_g4_kv *s, const float *feat_host, int token,
             k_rope_at<<<16, hd/2>>>(bq, 16, hd, qd, rb, ctx);
         k_attn_decode_ring<<<16,256,(size_t)ctx*sizeof(float)>>>(bq, s->dKc[il_src], s->dVc[il_src],
                                                                  ctx, KVD, HD, group, asc, win, Wring, bao);
-        if (gemm(g_w.cublas, g_draft.wo[il], bao, batt, 1, qd, HID)) return -1;
+        if (gemv_t(g_w.cublas, g_draft.wo[il], bao, batt, qd, HID)) return -1;
         k_rmsnorm<<<1,256>>>(batt, g_draft.post_attn[il], HID, eps, bnorm);
-        cudaMemcpy(batt, bnorm, (size_t)HID*4, cudaMemcpyDeviceToDevice);
+        cudaMemcpyAsync(batt, bnorm, (size_t)HID*4, cudaMemcpyDeviceToDevice, 0);
         k_add<<<(unsigned)((HID+255)/256),256>>>(batt, bcur, (size_t)HID);
         k_rmsnorm<<<1,256>>>(batt, g_draft.ffn_norm[il], HID, eps, bnorm);
-        if (gemm(g_w.cublas, g_draft.wg[il], bnorm, bff, 1, HID, FFm)) return -1;
-        if (gemm(g_w.cublas, g_draft.wu[il], bnorm, bff2, 1, HID, FFm)) return -1;
+        if (gemv_t(g_w.cublas, g_draft.wg[il], bnorm, bff, HID, FFm)) return -1;
+        if (gemv_t(g_w.cublas, g_draft.wu[il], bnorm, bff2, HID, FFm)) return -1;
         k_gelu_mul<<<(unsigned)((FFm+255)/256),256>>>(bff, bff2, (size_t)FFm);
-        if (gemm(g_w.cublas, g_draft.wd[il], bff, bnorm, 1, FFm, HID)) return -1;
+        if (gemv_t(g_w.cublas, g_draft.wd[il], bff, bnorm, FFm, HID)) return -1;
         k_rmsnorm<<<1,256>>>(bnorm, g_draft.post_ffw[il], HID, eps, bcur);
         k_add<<<(unsigned)((HID+255)/256),256>>>(bcur, batt, (size_t)HID);
         k_scale_by_dev<<<(unsigned)((HID+255)/256),256>>>(bcur, (size_t)HID, g_draft.osc[il]);
     }
     k_rmsnorm<<<1,256>>>(bcur, g_draft.out_norm, HID, eps, bnorm);               /* the 1024-d latent */
+    if (bprof) { cudaEventRecord(be1, 0); cudaEventSynchronize(be1); float ms = 0; cudaEventElapsedTime(&ms, be0, be1);
+                 fprintf(stderr, "[draft_body] GPU-kernels %.2fms (ctx=%d)\n", ms, ctx); cudaEventDestroy(be0); cudaEventDestroy(be1); }
     cudaError_t e = cudaMemcpy(out_latent, bnorm, (size_t)HID*4, cudaMemcpyDeviceToHost);
     if (e != cudaSuccess) return fail_cuda(e, "gemma4_draft_body latent D2H");
     return 0;
@@ -5337,6 +5345,15 @@ static int gemm(cublasHandle_t h, const float *dW, const float *dX, float *dY,
     const float a = 1.0f, b = 0.0f;
     CB(cublasSgemm(h, CUBLAS_OP_T, CUBLAS_OP_N, out, n_tok, in,
                    &a, dW, in, dX, in, &b, dY, out), "cublasSgemm");
+    return 0;
+}
+
+/* n_tok=1 fast path: cublasSgemv (GEMV-optimized) instead of Sgemm-with-m=1 (cublas picks a slow
+ * generic kernel for the m=1 case — ~2.8ms vs ~0.2ms each; the Latent Interceptor draft body had
+ * ~33 of these = the measured 93ms). dY[out] = dW[in x out, col-major lda=in]^T @ dX[in]. */
+static int gemv_t(cublasHandle_t h, const float *dW, const float *dX, float *dY, int in, int out) {
+    const float a = 1.0f, b = 0.0f;
+    CB(cublasSgemv(h, CUBLAS_OP_T, in, out, &a, dW, in, dX, 1, &b, dY, 1), "cublasSgemv");
     return 0;
 }
 
