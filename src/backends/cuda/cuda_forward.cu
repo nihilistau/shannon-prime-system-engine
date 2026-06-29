@@ -3887,6 +3887,10 @@ struct sp_g4_kv {
      * cap_active ⇒ next step D2H its post-embed dx into cap_host; inj_active ⇒ next step
      * overrides dx with dinj (E floats). One-shot flags, cleared after the step consumes them. */
     float *dinj; float *cap_host; int inj_active, cap_active;
+    /* EAGLE/MTP feature tap (serving): when feat_active, the next decode step D2H-copies its
+     * post-output_norm hidden s->dnx (E floats = the feature the LM head consumes) into
+     * feat_host. This is the seed inp_h for the gemma4-assistant draft. One-shot. */
+    float *feat_host; int feat_active;
     /* CONTRACT-CHAT-FULLSTACK B3-v2 — AUTONOMOUS RECALL by q·K attention relevance.
      * When qcap_active, g4_kv_step D2H-copies, per GLOBAL owner layer (period-6,
      * ascending), this step's last-token post-RoPE query dq (g_nh*g_hd floats) into
@@ -4041,7 +4045,7 @@ static int g4_kv_step_graph(sp_g4_kv *s) {
         /* B1: byte-exact decode uses the host-ctx bx attention (k_attn_decode_win_bx,
          * ctx-sized i64 shared mem) which is NOT graph-capturable; force per-step. */
         const int safe = want && s->ring_W == 0 && !s->inj_active && !s->cap_active
-                         && !s->bx_on
+                         && !s->feat_active && !s->bx_on
                          && attn_shm <= 48u*1024u && (!s->PL || s->dev_ple);
         s->graph_mode = safe ? 1 : 0;
         if (safe) fprintf(stderr, "    [g4-kv] GRAPH decode armed (SP_G4_KV_GRAPH=1; capturing one decode step)\n");
@@ -4053,7 +4057,7 @@ static int g4_kv_step_graph(sp_g4_kv *s) {
      * B1: byte-exact mode likewise routes the per-step bx attention (host ctx,
      * not graph-bakeable), so a session that armed graph then turned bx on this
      * request decodes per-step for the duration. */
-    if (s->inj_active || s->cap_active || s->bx_on) return g4_kv_step(s, /*do_head=*/1);
+    if (s->inj_active || s->cap_active || s->feat_active || s->bx_on) return g4_kv_step(s, /*do_head=*/1);
 
     if (!s->graph_ready) {
         if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
@@ -4247,6 +4251,10 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
     }
     if (do_head) {
         k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.out_norm, E, eps, s->dnx);
+        if (s->feat_active && s->feat_host) {   /* EAGLE/MTP feature tap: post-output_norm hidden (seed inp_h) */
+            cudaMemcpy(s->feat_host, s->dnx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
+            s->feat_active = 0;
+        }
         if (g_w.head.f32 || g_w.head.codes) { KMMD(&g_w.head, s->dnx, s->dlog); }
         else if (use_int8 && g_w.embd_packed.codes &&
                  gemv_w_packed(st, &g_w.embd_packed, s->dnx, s->dlog, s->dqx, s->dsx)) { }
@@ -4550,6 +4558,15 @@ extern "C" int gemma4_kv_reset_cold(sp_g4_kv *s) {
 extern "C" int gemma4_kv_capture(sp_g4_kv *s, float *emb_out) {
     if (!s || !emb_out) return -1;
     s->cap_host = emb_out; s->cap_active = 1;
+    return 0;
+}
+
+/* EAGLE/MTP feature tap (serving): arm a capture so the NEXT decode step D2H-copies its
+ * post-output_norm hidden (E floats = the feature the LM head consumes) into feat_out — the
+ * seed inp_h for the gemma4-assistant draft. One-shot; forces the per-step path that turn. */
+extern "C" int gemma4_kv_capture_feat(sp_g4_kv *s, float *feat_out) {
+    if (!s || !feat_out) return -1;
+    s->feat_host = feat_out; s->feat_active = 1;
     return 0;
 }
 
