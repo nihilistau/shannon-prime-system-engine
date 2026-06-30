@@ -3929,7 +3929,7 @@ struct sp_g4_kv {
      * gathered. SWA layers stay on the ring. arm_slab==0 ⇒ globals full-cache = byte-identical null floor.
      * Allocated by g4_arm_open (only when SP_ARM_SLAB + SP_ARM_LSH_R set), freed by g4_arm_close. P3.2
      * = this state + alloc; P3.3 = the per-step gather in g4_kv_step (not yet wired). */
-    int   arm_slab, arm_Bslab, arm_B, arm_sink, arm_r_dim;
+    int   arm_slab, arm_Bslab, arm_B, arm_sink, arm_r_dim, arm_recent_w;
     float **arm_ramK, **arm_ramV;                 /* host-RAM global store, per layer [P*kvd_g] */
     float *arm_dR, *arm_pk, *arm_Rq;              /* LSH router R [hd*r], sidecar RᵀK [NL*P*r], Rq [g_nh*r] */
     float *arm_dscores, *arm_scores_h;            /* device + host q·K scores [g_nh*P] */
@@ -4241,9 +4241,10 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
                 int mu = 0; memset(s->arm_seen, 0, (size_t)ctx);                                 /* build the union -> compact slots */
                 #define ARM_ADD(u) do { int _u=(u); if (_u>=0 && _u<ctx && !s->arm_seen[_u]) { \
                     if (mu < Bslab) { s->arm_seen[_u]=1; s->arm_slotmap[_u]=mu; s->arm_union[mu++]=_u; } } } while(0)
-                for (int sk = 0; sk < s->arm_sink && sk < ctx; sk++) ARM_ADD(sk);
-                ARM_ADD(s->dpos_host);
-                for (int h = 0; h < nh; h++) for (int j = 0; j < s->arm_m_host[h]; j++) ARM_ADD(s->arm_ri_host[(size_t)h*P + j]);
+                for (int sk = 0; sk < s->arm_sink && sk < ctx; sk++) ARM_ADD(sk);     /* (1) sinks */
+                for (int rr = 0; rr < s->arm_recent_w; rr++) ARM_ADD(s->dpos_host - 1 - rr);  /* (2) recent-W global window (fluency; reserved before LSH) */
+                ARM_ADD(s->dpos_host);                                                /* (3) current pos */
+                for (int h = 0; h < nh; h++) for (int j = 0; j < s->arm_m_host[h]; j++) ARM_ADD(s->arm_ri_host[(size_t)h*P + j]);  /* (4) LSH-top-B (clipped first if Bslab tight) */
                 #undef ARM_ADD
                 for (int u = 0; u < mu; u++) { int a = s->arm_union[u];                          /* stage RAM -> contiguous */
                     memcpy(s->arm_stageK + (size_t)u*kvd, s->arm_ramK[L] + (size_t)a*kvd, (size_t)kvd*sizeof(float));
@@ -4395,6 +4396,14 @@ static int g4_arm_open(sp_g4_kv *s) {
                     : (getenv("SP_ARM_B")    ? atoi(getenv("SP_ARM_B"))    : 64);
     s->arm_sink = C ? g_g4_open_cfg.arm_sink
                     : (getenv("SP_ARM_SINK") ? atoi(getenv("SP_ARM_SINK")) : 4);
+    /* recent-global window (fluency under eviction): a RESERVED slice of the Bslab union, added before
+     * the LSH-top-B so it is never clipped (clipping drops far-LSH candidates, never the recent window).
+     * Default min(512, Bslab/2); env SP_ARM_RECENT_W overrides (test bins). Clamp so sinks+recent < Bslab. */
+    s->arm_recent_w = getenv("SP_ARM_RECENT_W") ? atoi(getenv("SP_ARM_RECENT_W"))
+                                                : (s->arm_Bslab/2 < 512 ? s->arm_Bslab/2 : 512);
+    if (s->arm_recent_w < 0) s->arm_recent_w = 0;
+    if (s->arm_sink + s->arm_recent_w >= s->arm_Bslab) s->arm_recent_w = s->arm_Bslab - s->arm_sink - 1;
+    if (s->arm_recent_w < 0) s->arm_recent_w = 0;
     const int Bslab = s->arm_Bslab;
     /* count global owner layers (for the VRAM-lean sidecar: n_global*P*r, not NL*P*r) */
     int n_global = 0;
