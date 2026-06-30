@@ -1,3 +1,4 @@
 _*.log
 _*.err
 *.npy
+gemma_tok_cache.npz

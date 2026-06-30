@@ -21,7 +21,9 @@ except Exception:
 
 QWEN    = os.environ.get("SP_QWEN_MODEL", "Qwen/Qwen2.5-Coder-0.5B-Instruct")
 DEVICE  = os.environ.get("SP_QWEN_DEVICE", "cpu")          # cpu default = no VRAM contention with Gemma
-ADAPTER = os.environ.get("SP_TELEPATHY_EMB_ADAPTER", "telepathy_adapter_g2q_emb.npz")
+# prefer the GENERATION-tuned adapter (TELE-10: CE 3.09->2.65, ORDER +2.18) if present; else the W_emb one
+_GEN = "telepathy_adapter_g2q_gen.npz"; _EMB = "telepathy_adapter_g2q_emb.npz"
+ADAPTER = os.environ.get("SP_TELEPATHY_EMB_ADAPTER", _GEN if os.path.exists(_GEN) else _EMB)
 MAXNEW  = int(os.environ.get("SP_QWEN_MAXNEW", "24"))
 
 _S = {}
@@ -33,16 +35,22 @@ def _lazy():
     dt  = torch.bfloat16 if dev == "cuda" else torch.float32
     tok = AutoTokenizer.from_pretrained(QWEN)
     model = AutoModelForCausalLM.from_pretrained(QWEN, dtype=dt).to(dev).eval()
-    ad = np.load(ADAPTER)
+    ad = np.load(ADAPTER); gen = "Wt" in ad.files
     _S.update(torch=torch, tok=tok, model=model, dev=dev, emb=model.get_input_embeddings(),
-              W=ad["W"], gmu=ad["gmu"], gsd=ad["gsd"], emu=ad["emu"], esd=ad["esd"],
-              embnorm=float(ad["embnorm"]), scale=float(ad["scale"]))
-    sys.stderr.write(f"[sidecar] Qwen loaded on {dev}; W_emb {ad['W'].shape}; lazy-warm\n"); sys.stderr.flush()
+              gen=gen, embnorm=float(ad["embnorm"]), scale=float(ad["scale"]))
+    if gen:   # TELE-10 generation-tuned: raw linear  p = gem @ Wt^T + b
+        _S.update(Wt=ad["Wt"], b=ad["b"])
+    else:     # W_emb: z-scored ridge
+        _S.update(W=ad["W"], gmu=ad["gmu"], gsd=ad["gsd"], emu=ad["emu"], esd=ad["esd"])
+    sys.stderr.write(f"[sidecar] Qwen on {dev}; adapter={'GEN-tuned' if gen else 'W_emb'} ({ADAPTER}); lazy-warm\n"); sys.stderr.flush()
     return _S
 
 def _map(gem):   # [K,Dg] gemma per-token -> [K,Demb] qwen embedding-space soft prefix
-    z = (gem - _S["gmu"]) / _S["gsd"]
-    p = (z @ _S["W"]) * _S["esd"] + _S["emu"]
+    if _S["gen"]:
+        p = gem @ _S["Wt"].T + _S["b"]
+    else:
+        z = (gem - _S["gmu"]) / _S["gsd"]
+        p = (z @ _S["W"]) * _S["esd"] + _S["emu"]
     return (p / (np.linalg.norm(p, axis=1, keepdims=True) + 1e-8)) * _S["embnorm"] * _S["scale"]
 
 def _attest_ok():
