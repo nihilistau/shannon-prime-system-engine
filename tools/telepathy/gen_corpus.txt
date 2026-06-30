@@ -1,0 +1,320 @@
+what is the difference between graph and set
+how do you delete from a array in python
+how do you merge a heap in python
+check whether a number is prime
+count the number of consonants in a string
+how do you serialize a queue in python
+explain how a cache handles concurrency
+explain how a bloom filter handles concurrency
+what is the difference between linked list and set
+how do you reverse a queue in python
+what is the difference between hash map and list
+explain how binary search works step by step
+write a python function that traverse a graph
+how do you balance a array in python
+write a python function that traverse a linked list
+explain how a cache handles overflow
+what is the difference between array and array
+what is the difference between queue and set
+write a python function that reverse a graph
+write a short polite reply
+what is the difference between stack and set
+write a python function that search a queue
+how do you merge a hash map in python
+what is the difference between trie and dictionary
+what is the difference between linked list and dictionary
+how do you traverse a hash map in python
+implement hashing and analyze its complexity
+what is the difference between hash map and tuple
+explain how breadth first search works step by step
+write a python function that delete from a array
+write a python function that balance a stack
+how do you sort a stack in python
+what is the time complexity of breadth first search
+what is the difference between binary tree and set
+write a python function that sort a graph
+write a python function that balance a heap
+how do you flatten a trie in python
+explain how a load balancer handles collisions
+what is the difference between trie and array
+what is the difference between array and tuple
+what is the difference between graph and dictionary
+sort a list of dictionaries by a key
+debug this off-by-one error in a loop
+count the number of r letters in a string
+explain how a load balancer handles overflow
+write a python function that delete from a hash map
+reverse the order of words in a sentence
+explain how a cache handles resizing
+write a python function that insert into a trie
+what is the difference between queue and list
+how do you traverse a binary tree in python
+how do you insert into a array in python
+how do you traverse a stack in python
+what is the difference between array and deque
+explain how a bloom filter handles overflow
+implement merge sort and analyze its complexity
+how do you traverse a linked list in python
+explain big-O notation with an example
+write a python function that insert into a linked list
+how do you traverse a array in python
+what is the difference between heap and set
+what is the difference between linked list and array
+write a python function that reverse a queue
+find the first non-repeating element in an array
+write a python function that insert into a hash map
+write a python function that serialize a queue
+explain how a b-tree handles overflow
+how do you insert into a trie in python
+what is the difference between array and list
+the heart pumps blood through the body
+how do you balance a trie in python
+what is the difference between linked list and list
+implement topological sort and analyze its complexity
+what is the difference between array and set
+implement binary search and analyze its complexity
+how do you traverse a set in python
+what is the difference between stack and list
+explain how a hash map handles resizing
+what is the difference between heap and tuple
+write a python function that reverse a hash map
+summarize this paragraph in one sentence
+explain how merge sort works step by step
+light travels faster than sound
+how do you balance a stack in python
+parse a json string and extract a field
+how do you balance a linked list in python
+explain how the two pointer technique works step by step
+how do you reverse a trie in python
+how do you balance a heap in python
+write a python function that flatten a linked list
+draft a one line commit message
+write a python function that serialize a hash map
+explain how a load balancer handles eviction
+write a python function that insert into a binary tree
+write a python function that reverse a stack
+write a python function that traverse a set
+write a python function that serialize a binary tree
+how do you traverse a graph in python
+write a python function that merge a trie
+write a python function that search a binary tree
+what is the difference between hash map and set
+what is the difference between set and deque
+write a python function that traverse a array
+write a python function that merge a stack
+write a python function that sort a stack
+traverse a binary tree in order
+explain how a bloom filter handles eviction
+how do you serialize a array in python
+what is the time complexity of dijkstra's algorithm
+what is the difference between heap and array
+translate this phrase into spanish
+what is the time complexity of merge sort
+write a python function that flatten a graph
+how do you balance a binary tree in python
+explain how a hash map handles overflow
+how do you search a trie in python
+write a python function that flatten a binary tree
+write a python function that flatten a set
+paris is the capital of france
+find the largest element in an array
+find the smallest element in an array
+what is the difference between binary tree and array
+what is the time complexity of dynamic programming
+write a python function that flatten a trie
+i had a relaxing weekend
+count the number of unique characters in a string
+explain how a b-tree handles concurrency
+convert a recursive function to an iterative one
+count the number of vowels in a string
+what is the difference between stack and array
+explain how a hash map handles eviction
+we should grab lunch next week
+implement depth first search and analyze its complexity
+how do you traverse a trie in python
+how do you serialize a linked list in python
+what does the yield keyword do in python
+implement dijkstra's algorithm and analyze its complexity
+how do you reverse a set in python
+how do you sort a heap in python
+write a python function that delete from a binary tree
+what is the difference between binary tree and dictionary
+write a python function that reverse a heap
+explain how a b-tree handles resizing
+how do you reverse a linked list in python
+write a python function that flatten a queue
+implement quicksort and analyze its complexity
+how do you insert into a hash map in python
+what does the lambda keyword do in python
+explain how a hash map handles collisions
+explain how hashing works step by step
+write a python function that balance a array
+photosynthesis converts sunlight into energy
+how do you search a linked list in python
+explain how a b-tree handles collisions
+write a python function that search a set
+find the most frequent element in an array
+how do you serialize a hash map in python
+how do you traverse a queue in python
+what is the difference between graph and list
+how do you search a stack in python
+write a python function that serialize a trie
+how do you balance a hash map in python
+write a python function that sort a queue
+write a python function that search a graph
+write a python function that delete from a queue
+what is the difference between binary tree and tuple
+how do you delete from a stack in python
+what is the difference between stack and deque
+what is the time complexity of the two pointer technique
+write a python function that delete from a heap
+how do you reverse a heap in python
+what is the time complexity of hashing
+write a python function that insert into a array
+write a python function that traverse a trie
+how do you balance a graph in python
+explain how topological sort works step by step
+what does the nonlocal keyword do in python
+what does the global keyword do in python
+how do you search a hash map in python
+how do you sort a linked list in python
+how do you insert into a linked list in python
+implement the two pointer technique and analyze its complexity
+how do you reverse a binary tree in python
+what is the difference between graph and deque
+what is the difference between trie and set
+how do you merge a binary tree in python
+how do you merge a graph in python
+write a python function that flatten a stack
+how do you sort a queue in python
+write a python function that insert into a set
+explain how a load balancer handles concurrency
+how do you flatten a stack in python
+write a python function that merge a heap
+implement dynamic programming and analyze its complexity
+write a regex that matches an email address
+what is the difference between heap and dictionary
+write a python function that serialize a stack
+how do you delete from a set in python
+how do you serialize a binary tree in python
+write a python function that balance a queue
+how do you serialize a set in python
+what is the time complexity of binary search
+find the second largest element in an array
+what is the difference between set and dictionary
+how do you search a graph in python
+what is the difference between heap and deque
+traffic was bad on the way in
+how do you search a array in python
+write a python function that flatten a array
+my favorite season is autumn
+how do you flatten a heap in python
+implement breadth first search and analyze its complexity
+how do you serialize a heap in python
+water boils at one hundred degrees celsius
+write a python function that search a linked list
+what is the difference between trie and list
+write a python function that merge a set
+how do you merge a set in python
+what is the difference between linked list and tuple
+what is the difference between graph and array
+explain how depth first search works step by step
+how do you serialize a graph in python
+what does the async keyword do in python
+how do you delete from a hash map in python
+how do you merge a queue in python
+write a python function that search a trie
+write a python function that serialize a linked list
+what is the difference between queue and tuple
+what is the difference between linked list and deque
+explain how a b-tree handles eviction
+dna stores genetic information
+how do you search a binary tree in python
+what does the with keyword do in python
+write a python function that merge a hash map
+count the number of digits in a string
+write a python function that insert into a graph
+write a python function that serialize a heap
+write a python function that insert into a heap
+what is the time complexity of topological sort
+how do you traverse a heap in python
+the coffee this morning was great
+what is the difference between queue and deque
+what is the difference between stack and dictionary
+how do you delete from a binary tree in python
+write a python function that serialize a array
+write a python function that reverse a trie
+write a python function that traverse a heap
+explain how dynamic programming works step by step
+write a python function that delete from a linked list
+what is the difference between binary tree and list
+write a python function that merge a linked list
+how do you delete from a graph in python
+what is the time complexity of depth first search
+how do you sort a binary tree in python
+how do you search a heap in python
+find the median element in an array
+what is the difference between binary tree and deque
+what is the difference between trie and deque
+how do you delete from a heap in python
+write a python function that delete from a trie
+how do you merge a trie in python
+explain how a bloom filter handles resizing
+explain how dijkstra's algorithm works step by step
+how do you insert into a heap in python
+write a python function that sort a set
+what is the difference between set and tuple
+how do you sort a trie in python
+how do you sort a hash map in python
+write a python function that balance a set
+write a python function that reverse a set
+write a python function that flatten a heap
+write a python function that sort a trie
+what is the difference between heap and list
+what is the difference between hash map and dictionary
+explain how a bloom filter handles collisions
+how do you delete from a queue in python
+how do you insert into a graph in python
+write a python function that sort a hash map
+write a python function that insert into a queue
+write a python function that flatten a hash map
+outline the steps to bake bread
+write a python function that sort a binary tree
+how do you flatten a binary tree in python
+write a python function that balance a linked list
+explain how a hash map handles concurrency
+what is the time complexity of quicksort
+write a python function that sort a linked list
+how do you insert into a binary tree in python
+what is the difference between set and list
+memoize a recursive fibonacci function
+what is the difference between array and dictionary
+how do you search a queue in python
+what is the difference between queue and dictionary
+count the number of spaces in a string
+how do you flatten a array in python
+how do you merge a array in python
+write a python function that search a array
+the meeting ran long again
+write a python function that merge a graph
+explain how a cache handles eviction
+explain this concept to a beginner
+what is the difference between trie and tuple
+how do you balance a set in python
+what is the difference between queue and array
+what is the difference between hash map and deque
+explain how a cache handles collisions
+what is the difference between set and set
+how do you insert into a set in python
+how do you sort a set in python
+explain how a load balancer handles resizing
+write a python function that merge a binary tree
+how do you delete from a trie in python
+write a python function that insert into a stack
+how do you flatten a set in python
+write a python function that traverse a binary tree
+write a python function that search a hash map
+explain how quicksort works step by step
+write a python function that balance a trie
+what is the difference between stack and tuple
+write a python function that traverse a stack

@@ -38,16 +38,25 @@ def _lazy():
     ad = np.load(ADAPTER); gen = "Wt" in ad.files
     _S.update(torch=torch, tok=tok, model=model, dev=dev, emb=model.get_input_embeddings(),
               gen=gen, embnorm=float(ad["embnorm"]), scale=float(ad["scale"]))
-    if gen:   # TELE-10 generation-tuned: raw linear  p = gem @ Wt^T + b
-        _S.update(Wt=ad["Wt"], b=ad["b"])
+    if gen:   # TELE-10/10b generation-tuned: linear (+ optional residual MLP)
+        _S.update(Wt=ad["Wt"], b=ad["b"], has_mlp=("m0w" in ad.files))
+        if "m0w" in ad.files: _S.update(m0w=ad["m0w"], m0b=ad["m0b"], m2w=ad["m2w"], m2b=ad["m2b"])
     else:     # W_emb: z-scored ridge
         _S.update(W=ad["W"], gmu=ad["gmu"], gsd=ad["gsd"], emu=ad["emu"], esd=ad["esd"])
     sys.stderr.write(f"[sidecar] Qwen on {dev}; adapter={'GEN-tuned' if gen else 'W_emb'} ({ADAPTER}); lazy-warm\n"); sys.stderr.flush()
     return _S
 
+def _gelu(x):
+    import math
+    return 0.5 * x * (1.0 + np.vectorize(math.erf)(x / np.sqrt(2.0)))
+
 def _map(gem):   # [K,Dg] gemma per-token -> [K,Demb] qwen embedding-space soft prefix
     if _S["gen"]:
-        p = gem @ _S["Wt"].T + _S["b"]
+        h = gem @ _S["Wt"].T + _S["b"]
+        if _S.get("has_mlp"):
+            p = h + _gelu(h @ _S["m0w"].T + _S["m0b"]) @ _S["m2w"].T + _S["m2b"]
+        else:
+            p = h
     else:
         z = (gem - _S["gmu"]) / _S["gsd"]
         p = (z @ _S["W"]) * _S["esd"] + _S["emu"]

@@ -10,10 +10,11 @@ import os, numpy as np, torch, torch.nn as nn, transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
 GEMMA="google/gemma-3n-E2B-it"; QWEN="Qwen/Qwen2.5-Coder-0.5B-Instruct"
 dev="cuda" if torch.cuda.is_available() else "cpu"
-texts=[l.rstrip("\n") for l in open("pairs.txt",encoding="utf-8") if l.strip()][:160]
+CORPUS=os.environ.get("SP_GEN_CORPUS","gen_corpus.txt")
+texts=[l.rstrip("\n") for l in open(CORPUS,encoding="utf-8") if l.strip()][:320]
 
-# 1) gemma per-token latents for the corpus (cached)
-cache="gemma_tok_cache.npz"
+# 1) gemma per-token latents for the corpus (cached per-corpus)
+cache="gemma_tok_cache_"+os.path.basename(CORPUS).replace(".txt","")+".npz"
 if os.path.exists(cache):
     GEM=list(np.load(cache,allow_pickle=True)["gem"]); print(f"[cache] {len(GEM)} gemma token seqs")
 else:
@@ -40,13 +41,17 @@ Wfold=(np.diag(1/gsd)@W@np.diag(esd)).astype(np.float32); bfold=(emu-(gmu/gsd)@W
 lin=nn.Linear(Dg,De).to(dev)
 with torch.no_grad(): lin.weight.copy_(torch.tensor(Wfold.T,device=dev)); lin.bias.copy_(torch.tensor(bfold,device=dev))
 logscale=nn.Parameter(torch.tensor(float(np.log(scale0)),device=dev))
+# residual MLP for cross-family capacity; last layer zero-init => starts == warm-started linear
+mlp=nn.Sequential(nn.Linear(De,256),nn.GELU(),nn.Linear(256,De)).to(dev)
+with torch.no_grad(): mlp[-1].weight.zero_(); mlp[-1].bias.zero_()
 LR=float(os.environ.get("SP_GEN_LR","3e-5"))
-opt=torch.optim.Adam(list(lin.parameters())+[logscale],lr=LR)
-print(f"[cfg] lr={LR} (low: warm-start is already strong, avoid overshoot)")
+opt=torch.optim.Adam(list(lin.parameters())+list(mlp.parameters())+[logscale],lr=LR)
+print(f"[cfg] lr={LR} corpus={CORPUS} N={len(texts)} adapter=linear+residualMLP(zero-init)")
 bos=qtok.bos_token_id if qtok.bos_token_id is not None else qtok.eos_token_id
 
 def prefix(gnp):
-    p=lin(torch.tensor(gnp,dtype=torch.float32,device=dev))
+    h=lin(torch.tensor(gnp,dtype=torch.float32,device=dev))
+    p=h+mlp(h)                                   # residual MLP refinement
     return p/(p.norm(dim=1,keepdim=True)+1e-6)*embnorm*torch.exp(logscale)
 def ids_of(i): return qtok(texts[i],return_tensors="pt",truncation=True,max_length=40).input_ids.to(dev)
 def ce(i):
@@ -68,8 +73,10 @@ fin=te_ce(); print(f"[gen-tuned] held-out CE: {base:.4f} -> {fin:.4f}  (lower = 
 
 # 3) save the gen adapter (raw linear + norm) for the sidecar
 np.savez("telepathy_adapter_g2q_gen.npz", Wt=lin.weight.detach().cpu().numpy(), b=lin.bias.detach().cpu().numpy(),
+         m0w=mlp[0].weight.detach().cpu().numpy(), m0b=mlp[0].bias.detach().cpu().numpy(),
+         m2w=mlp[2].weight.detach().cpu().numpy(), m2b=mlp[2].bias.detach().cpu().numpy(),
          embnorm=np.float32(embnorm), scale=np.float32(float(torch.exp(logscale))), src=GEMMA, dst=QWEN)
-print("[save] gen adapter -> telepathy_adapter_g2q_gen.npz")
+print("[save] gen adapter (linear+residualMLP) -> telepathy_adapter_g2q_gen.npz")
 
 # 4) permutation gate (TELE-5) on the gen adapter: did we KEEP positional bandwidth?
 def ll(i, mode, rs=0):
@@ -91,4 +98,16 @@ for i in list(te)[:3]:
         g=qm.generate(inputs_embeds=torch.cat([be,pt],1),max_new_tokens=16,do_sample=False)
     out=qtok.decode(g[0],skip_special_tokens=True).encode("ascii","replace").decode()
     print(f"  src='{texts[i][:40]}' -> {out[:60]!r}")
+# OOD coding-question eval — the exact src_tok sources that failed in the v1 demo
+import json
+if os.path.exists("src_tok_manifest.json"):
+    print("[ood] coding-question sources (v1 OOD failures), now in-corpus:")
+    for e in json.load(open("src_tok_manifest.json")):
+        f=f"src_tok_{e['i']}.npy"
+        if not os.path.exists(f): continue
+        with torch.no_grad():
+            be=emb(torch.tensor([[bos]],device=dev)); pt=prefix(np.load(f)).unsqueeze(0)
+            g=qm.generate(inputs_embeds=torch.cat([be,pt],1),max_new_tokens=16,do_sample=False)
+        out=qtok.decode(g[0],skip_special_tokens=True).encode("ascii","replace").decode()
+        print(f"  src='{e['text'][:42]}' -> {out[:58]!r}")
 print("DONE")

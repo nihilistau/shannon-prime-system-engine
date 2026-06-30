@@ -2,3 +2,4 @@ _*.log
 _*.err
 *.npy
 gemma_tok_cache.npz
+gemma_tok_cache_gen_corpus.npz
