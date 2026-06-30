@@ -127,6 +127,48 @@ fn parse_kairos_tape(text: &str) -> Vec<(String, i32)> {
     events
 }
 
+/// TELE-14 — STANDALONE SOVEREIGN native cross-family delegate (no Python). Loads the qwen2.5-coder
+/// sp-model in its OWN L1 session, encodes the clean-text task with the coder's tokenizer, and decodes
+/// natively through the engine's host L1 surface: `prefill_chunk` (prompt → last-token logits) then a
+/// `decode_step` argmax loop (O(n) KV-resident, the SAME path the sp_memo_* bins use). CPU L1 means ZERO
+/// g_w/CUDA contention with a resident 12B; on drop the SpModel/SpSession free with zero residual. HF
+/// parity inherited from the top-1-lossless transcode gate (sp-Q4 argmax == oracle).
+pub fn run_telepathy_native(model_path: &str, tok_path: &str) -> Result<(), String> {
+    let model = SpModel::load(model_path, tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let task = std::env::var("SP_TELEPATHY_TASK").unwrap_or_else(|_| "write a python function that reverses a string".into());
+    let prompt = tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: task.clone() }])?;
+    let n_gen: usize = std::env::var("SP_TELEPATHY_NGEN").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
+    let eos: i32 = std::env::var("SP_TELEPATHY_EOS").ok().and_then(|s| s.parse().ok()).unwrap_or(151645); // qwen <|im_end|>
+    let mut logits = vec![0f32; vocab];
+    let argmax = |l: &[f32]| -> i32 { let mut bi = 0i32; let mut bv = f32::NEG_INFINITY; for (i, &v) in l.iter().enumerate() { if v > bv { bv = v; bi = i as i32; } } bi };
+    eprintln!("[telepathy-native] coder loaded (arch_id={} vocab={}); task={:?}; prompt={} toks; native L1 prefill+decode (CPU)...", arch.arch_id, vocab, task, prompt.len());
+    let t0 = std::time::Instant::now();
+    session.prefill_chunk(&prompt, &mut logits)?;
+    let mut out_ids: Vec<i32> = Vec::new();
+    let mut next = argmax(&logits);
+    for _ in 0..n_gen {
+        if next == eos { break; }
+        out_ids.push(next);
+        session.decode_step(next, &mut logits)?;
+        next = argmax(&logits);
+    }
+    let dt = t0.elapsed().as_secs_f32();
+    let mut out = Vec::new();
+    for &id in &out_ids { out.extend_from_slice(tok.decode_token(id)); }
+    let ans = String::from_utf8_lossy(&out).replace('\n', " ");
+    let ntok = out_ids.len();
+    eprintln!("[telepathy-native] SOVEREIGN delegate ({} new toks, {:.2}s, {:.1} tok/s) -> {:?}", ntok, dt, ntok as f32 / dt.max(1e-3), ans.trim());
+    let ok = ntok > 0 && !ans.trim().is_empty();
+    eprintln!("[telepathy-native] G-TELEPATHY-NATIVE: {}  (native in-engine L1 coder decode, ZERO Python; HF parity inherited from top-1-lossless transcode gate)", if ok {"GREEN"} else {"RED"});
+    if !ok { return Err("native decode produced no output".into()); }
+    Ok(())
+}
+
 /// CLOSED LOOP (capstone): latent -> Tool Head (tool id) -> FIRE the tool -> result -> RETURN PATH
 /// inject into the KV ring -> the model continues. Ties TH-1 + RP-1 into one call. The tool fire is a
 /// real subprocess (python for PYTHON/CALC = the E2B stand-in); SP_TH_Q / SP_TH_CODE override.

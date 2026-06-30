@@ -353,6 +353,20 @@ async fn main() {
             Err(e) => { eprintln!("[telepathy] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_TELEPATHY_NATIVE — TELE-14 standalone sovereign native cross-family delegate (no Python):
+    // load the qwen coder + native qwen3_decode_cuda on the clean-text task. Default-off.
+    #[cfg(feature = "wire_cuda_backend")]
+    if std::env::var("SP_TELEPATHY_NATIVE").as_deref() == Ok("1") {
+        let cm = std::env::var("SP_TELEPATHY_CODER_MODEL").unwrap_or_default();
+        let ct = std::env::var("SP_TELEPATHY_CODER_TOK").unwrap_or_default();
+        if cm.is_empty() || ct.is_empty() {
+            eprintln!("SP_TELEPATHY_NATIVE=1 requires SP_TELEPATHY_CODER_MODEL + SP_TELEPATHY_CODER_TOK"); std::process::exit(2);
+        }
+        match eagle_accept::run_telepathy_native(&cm, &ct) {
+            Ok(()) => { eprintln!("[telepathy-native] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[telepathy-native] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
 
     let cli = Cli::parse();
 
