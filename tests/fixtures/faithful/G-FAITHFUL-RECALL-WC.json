@@ -1,0 +1,88 @@
+{
+  "seam": "wc",
+  "items": 15,
+  "tally": {
+    "OBEY": 0,
+    "LEAK": 14,
+    "BOTH": 0,
+    "OTHER": 1
+  },
+  "obey_rate": 0.0,
+  "rows": [
+    {
+      "id": "france_capital",
+      "cls": "LEAK",
+      "ans": "Paris"
+    },
+    {
+      "id": "tallest_mtn",
+      "cls": "LEAK",
+      "ans": "Mount Everest"
+    },
+    {
+      "id": "largest_planet",
+      "cls": "LEAK",
+      "ans": "The largest planet in our solar system is Jupiter."
+    },
+    {
+      "id": "romeo_author",
+      "cls": "LEAK",
+      "ans": "William Shakespeare"
+    },
+    {
+      "id": "largest_ocean",
+      "cls": "LEAK",
+      "ans": "The largest ocean on Earth is the Pacific Ocean."
+    },
+    {
+      "id": "fastest_animal",
+      "cls": "LEAK",
+      "ans": "The fastest land animal is the cheetah."
+    },
+    {
+      "id": "japan_currency",
+      "cls": "LEAK",
+      "ans": "The currency of Japan is the Japanese yen."
+    },
+    {
+      "id": "closest_planet",
+      "cls": "LEAK",
+      "ans": "Mercury"
+    },
+    {
+      "id": "telephone_inv",
+      "cls": "LEAK",
+      "ans": "Alexander Graham Bell"
+    },
+    {
+      "id": "largest_country",
+      "cls": "LEAK",
+      "ans": "Russia"
+    },
+    {
+      "id": "gold_symbol",
+      "cls": "LEAK",
+      "ans": "The chemical symbol for gold is Au."
+    },
+    {
+      "id": "water_boil",
+      "cls": "LEAK",
+      "ans": "The boiling point of water at sea level is 100 degrees Celsius or 212 degrees Fahrenheit."
+    },
+    {
+      "id": "continents",
+      "cls": "LEAK",
+      "ans": "There are seven continents on Earth: Africa, Antarctica, Asia, Australia, Europe, North Am"
+    },
+    {
+      "id": "mona_lisa",
+      "cls": "LEAK",
+      "ans": "The Mona Lisa was painted by Leonardo da Vinci."
+    },
+    {
+      "id": "speed_light",
+      "cls": "OTHER",
+      "ans": "Light travels at approximately 299,792 kilometers per second."
+    }
+  ]
+}

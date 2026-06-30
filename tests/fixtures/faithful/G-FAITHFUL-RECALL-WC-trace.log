@@ -1,0 +1,15 @@
+B3-WC: RECALL 'fct_003' (curated) score=3.147 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=3.144 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_007' (curated) score=1.047 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=4.006 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_007' (curated) score=1.896 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_003' (curated) score=1.572 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_003' (curated) score=2.101 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_009' (curated) score=2.715 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=3.695 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=1.306 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=3.397 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=0.602 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_007' (curated) score=1.217 > s0=0.102 -> replay@M_target
+B3-WC: RECALL 'fct_014' (curated) score=4.531 > s0=0.102 -> replay@M_target
+B3-WC: NULL wins (best=-0.710 <= s0=0.102) -> REJECT (clean prompt)

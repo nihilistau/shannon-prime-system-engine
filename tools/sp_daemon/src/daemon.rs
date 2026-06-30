@@ -63,6 +63,20 @@ pub fn cmd_start(model: &str, tokenizer: &str, draft_model: &str, draft_tokenize
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
+    // Observability: pipe the DETACHED inner's stdout+stderr to SP_DAEMON_LOG so a surviving
+    // detached daemon's tracing (recall traces, etc.) is inspectable. Unset = inherit (default,
+    // byte-identical to prior behavior). Append so successive launches accrue.
+    if let Ok(logp) = std::env::var("SP_DAEMON_LOG") {
+        if !logp.trim().is_empty() {
+            if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&logp) {
+                if let Ok(f2) = f.try_clone() {
+                    cmd.stdout(std::process::Stdio::from(f));
+                    cmd.stderr(std::process::Stdio::from(f2));
+                }
+            }
+        }
+    }
+
     let child = cmd.spawn().expect("failed to spawn daemon inner process");
     let pid = child.id();
     // Write PID before the parent exits so `stop` can locate the process.

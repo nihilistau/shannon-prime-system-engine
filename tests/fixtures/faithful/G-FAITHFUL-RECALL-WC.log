@@ -1,0 +1,20 @@
+[france_capital  ] LEAK   'Paris'
+[tallest_mtn     ] LEAK   'Mount Everest'
+[largest_planet  ] LEAK   'The largest planet in our solar system is Jupiter.'
+[romeo_author    ] LEAK   'William Shakespeare'
+[largest_ocean   ] LEAK   'The largest ocean on Earth is the Pacific Ocean.'
+[fastest_animal  ] LEAK   'The fastest land animal is the cheetah.'
+[japan_currency  ] LEAK   'The currency of Japan is the Japanese yen.'
+[closest_planet  ] LEAK   'Mercury'
+[telephone_inv   ] LEAK   'Alexander Graham Bell'
+[largest_country ] LEAK   'Russia'
+[gold_symbol     ] LEAK   'The chemical symbol for gold is Au.'
+[water_boil      ] LEAK   'The boiling point of water at sea level is 100 degrees Celsi'
+[continents      ] LEAK   'There are seven continents on Earth: Africa, Antarctica, Asi'
+[mona_lisa       ] LEAK   'The Mona Lisa was painted by Leonardo da Vinci.'
+[speed_light     ] OTHER  'Light travels at approximately 299,792 kilometers per second'
+
+=== G-FAITHFUL-RECALL (seam=wc) ===
+items=15  OBEY=0 (0.00%)  LEAK=14  BOTH=0  OTHER=1
+in-context ceiling (F1 T_CONSOLE) = 100%; recall-path delivery cost = 100.0 pp
+WROTE D:\F\shannon-prime-repos\shannon-prime-system-engine\tests\perf\_g_faithful_recall_wc.json
