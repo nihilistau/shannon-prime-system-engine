@@ -763,8 +763,10 @@ fn run_kvdecode_chat(
     // committed cannot mirror): the SPECULATIVE recall paths (SP_B3_JUDGE / SP_B3_DISPOSER /
     // SP_INT2), the memory-agency writers (SP_DECIDE / SP_FORGET / SP_B4_NIGHTSHIFT), and the
     // operator replay / single_entry / inject_frames seams.
-    // Default-off => prefill_from stays 0 => byte-identical to the reset+full-prefill null floor.
-    let persist_kv = std::env::var("SP_PERSIST_KV").ok().as_deref() == Some("1")
+    // Default-ON (G-PERSIST-KV GREEN 2026-06-30: 6-turn byte-identical on==off; TTFT off 7.47x growth
+    // vs on flat; engine receipts tests/perf/_persist_gate_{off,on}.json). SP_PERSIST_KV=0 forces the
+    // O(n) re-prefill null floor. The cache-mutating paths below still hard-exclude persist (reset/turn).
+    let persist_kv = std::env::var("SP_PERSIST_KV").ok().as_deref() != Some("0")
         && replay_dir.is_none() && !single_entry && inject_frames.is_none()
         && std::env::var("SP_DECIDE").ok().as_deref() != Some("1")
         && std::env::var("SP_FORGET").ok().as_deref() != Some("1")
