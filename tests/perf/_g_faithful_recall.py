@@ -16,7 +16,9 @@ CONSOLE = ("You are Shannon-Prime, a local AI with a real working memory. Keep r
 # Shared fact-conflict corpus (id, question, parametric_token, obey_token) from facts.json.
 _ENG = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _FJSON = os.path.join(_ENG, "_faithful_corpus", "facts.json")
-ITEMS = [(it["id"], it["q"], it["param"], it["obey"]) for it in json.load(open(_FJSON, encoding="utf-8"))]
+USE_PARA = os.environ.get("SP_FAITHFUL_USE_PARA") == "1"  # LN-1 hybrid: capture paraphrase-query global-Q
+ITEMS = [(it["id"], (it.get("para") or it["q"]) if USE_PARA else it["q"], it["param"], it["obey"])
+         for it in json.load(open(_FJSON, encoding="utf-8"))]
 
 
 def ask(q):

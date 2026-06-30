@@ -1,0 +1,11 @@
+LN-1 HYBRID DUAL-AXIS GATE (SPLADE-style alpha*SEM + beta*LEX, held-out, 2026-07-01)
+corpus: 61 fact-conflicts x {exact query, anti-lexical paraphrase}; SEM=raw q.K max-sim on global-K/Q; LEX=token-overlap
+HELD-OUT (15):  LEX-only exact=1.000 para=0.067 | SEM-only exact=0.000 para=0.000 | HYBRID exact=1.000 para=0.067
+fitted alpha=0.00 beta=0.10  -> the optimizer ZEROED the semantic channel; hybrid == pure Jaccard.
+VERDICT: the global-K/Q semantic channel is DEAD for natural-fact selection -- not just the r=32 projection (LN-1 16.7%),
+the RAW full-512-d q.K is 0% (below chance) on BOTH exact and paraphrase. ROOT CAUSE: read_global_q captures the LAST
+prompt-token global-Q, which is query-content-POOR (every query ends similarly) -> query-independent ranking -> 0% diagonal.
+This is why W_c also picked query-independent episodes. The substrate carries the recall MECHANISM, not a query embedding.
+CONSEQUENCE: a latent semantic-retrieval channel cannot be built from last-token global-K/Q. The proven semantic-retrieval
+latent is a POOLED sentence embedding (TELE-1 mean-pooled, retrieval@1 1.000) -- a different capture, not global-K/Q.
+Jaccard (token) stays the exact-match selector (100%); paraphrase recall needs a pooled-embedding dense retriever if pursued.
