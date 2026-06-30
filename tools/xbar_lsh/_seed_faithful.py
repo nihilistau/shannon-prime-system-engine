@@ -15,24 +15,9 @@ ENGINE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__))
 REG = os.environ.get("SP_FAITHFUL_REGISTRY", os.path.join(ENGINE, "_faithful_corpus", "registry.jsonl"))
 EPS = os.path.join(os.path.dirname(REG), "eps")
 
-# (id, override fact text)  — the same 15 conflicts as _g_faithful_baseline.py
-FACTS = [
-    ("france_capital",  "The capital of France is now Lyon."),
-    ("tallest_mtn",     "The tallest mountain on Earth is K2."),
-    ("largest_planet",  "The largest planet in our solar system is Saturn."),
-    ("romeo_author",    "Romeo and Juliet was written by Christopher Marlowe."),
-    ("largest_ocean",   "The largest ocean on Earth is the Atlantic."),
-    ("fastest_animal",  "The fastest land animal is the lion."),
-    ("japan_currency",  "The currency of Japan is the won."),
-    ("closest_planet",  "The planet closest to the Sun is Venus."),
-    ("telephone_inv",   "The telephone was invented by Nikola Tesla."),
-    ("largest_country", "The largest country by area is Canada."),
-    ("gold_symbol",     "The chemical symbol for gold is Gl."),
-    ("water_boil",      "Water boils at 90 degrees Celsius at sea level."),
-    ("continents",      "There are six continents on Earth."),
-    ("mona_lisa",       "The Mona Lisa was painted by Raphael."),
-    ("speed_light",     "Light travels at approximately 200,000 km/s."),
-]
+# Shared fact-conflict corpus (id, fact) from _faithful_corpus/facts.json (62 strong-prior conflicts).
+_FJSON = os.path.join(ENGINE, "_faithful_corpus", "facts.json")
+FACTS = [(it["id"], it["fact"]) for it in json.load(open(_FJSON, encoding="utf-8"))]
 
 
 def capture(text, out_dir):

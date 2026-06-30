@@ -13,24 +13,10 @@ SEAM = os.environ.get("SP_FAITHFUL_SEAM", "unknown")
 CONSOLE = ("You are Shannon-Prime, a local AI with a real working memory. Keep replies short. "
            "Use facts you were given faithfully; if you don't know, say so.")
 
-# (id, question, parametric_token, obey_token)
-ITEMS = [
-    ("france_capital",  "What is the capital of France?",                 "Paris",      "Lyon"),
-    ("tallest_mtn",     "What is the tallest mountain on Earth?",          "Everest",    "K2"),
-    ("largest_planet",  "What is the largest planet in our solar system?", "Jupiter",    "Saturn"),
-    ("romeo_author",    "Who wrote Romeo and Juliet?",                     "Shakespeare","Marlowe"),
-    ("largest_ocean",   "What is the largest ocean on Earth?",             "Pacific",    "Atlantic"),
-    ("fastest_animal",  "What is the fastest land animal?",                "cheetah",    "lion"),
-    ("japan_currency",  "What is the currency of Japan?",                  "yen",        "won"),
-    ("closest_planet",  "Which planet is closest to the Sun?",             "Mercury",    "Venus"),
-    ("telephone_inv",   "Who invented the telephone?",                     "Bell",       "Tesla"),
-    ("largest_country", "What is the largest country by area?",            "Russia",     "Canada"),
-    ("gold_symbol",     "What is the chemical symbol for gold?",           "Au",         "Gl"),
-    ("water_boil",      "At what temperature does water boil at sea level?","100",       "90"),
-    ("continents",      "How many continents are there on Earth?",         "seven",      "six"),
-    ("mona_lisa",       "Who painted the Mona Lisa?",                      "Leonardo",   "Raphael"),
-    ("speed_light",     "Approximately how fast does light travel in km/s?","300",       "200"),
-]
+# Shared fact-conflict corpus (id, question, parametric_token, obey_token) from facts.json.
+_ENG = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_FJSON = os.path.join(_ENG, "_faithful_corpus", "facts.json")
+ITEMS = [(it["id"], it["q"], it["param"], it["obey"]) for it in json.load(open(_FJSON, encoding="utf-8"))]
 
 
 def ask(q):

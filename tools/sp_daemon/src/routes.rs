@@ -1343,11 +1343,12 @@ fn run_kvdecode_chat(
                                     .and_then(|s| s.parse().ok()).unwrap_or(0.15);
                                 let q = ruser.to_lowercase();
                                 let (mut bov, mut bname, mut btext) = (0.0f32, String::new(), String::new());
+                                let (mut bgk, mut bgkng): (Vec<f32>, usize) = (Vec::new(), 0);
                                 {
                                     let ns_guard = app.nightshift.read().unwrap();
                                     for ep in registry.iter().chain(ns_guard.iter()) {
                                         let ov = recall::token_overlap(&q, &ep.text);
-                                        if ov > bov { bov = ov; bname = ep.name.clone(); btext = ep.text.clone(); }
+                                        if ov > bov { bov = ov; bname = ep.name.clone(); btext = ep.text.clone(); bgk = ep.gk.clone(); bgkng = ep.gk_ng; }
                                     }
                                 }
                                 if bov >= tau_ov && !btext.is_empty() {
@@ -1370,6 +1371,18 @@ fn run_kvdecode_chat(
                                                     let _ = std::fs::write(
                                                         std::path::Path::new(&qd).join(format!("lbl_{chat_id}.txt")),
                                                         format!("{}\t{:.4}\n", bname, bov));
+                                                    // LN-1 clean K-dump: the selected episode's IN-MEMORY global-K
+                                                    // [gk_ng][npos][HD] — bypasses the opaque on-disk ep.k layout.
+                                                    // Mirrors q_<chat_id>.bin: <u32 ng><u32 npos><f32 gk>.
+                                                    if bgkng > 0 && !bgk.is_empty() {
+                                                        let npos_k = bgk.len() / (bgkng * recall::HD);
+                                                        let mut kb = Vec::with_capacity(8 + bgk.len() * 4);
+                                                        kb.extend_from_slice(&(bgkng as u32).to_le_bytes());
+                                                        kb.extend_from_slice(&(npos_k as u32).to_le_bytes());
+                                                        for &x in &bgk { kb.extend_from_slice(&x.to_le_bytes()); }
+                                                        let _ = std::fs::write(
+                                                            std::path::Path::new(&qd).join(format!("k_{chat_id}.bin")), kb);
+                                                    }
                                                 }
                                             } else { tracing::warn!("RECALL-JACCARD: prefill(aug) failed -- clean prompt"); }
                                         }
