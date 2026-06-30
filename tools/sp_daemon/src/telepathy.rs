@@ -12,6 +12,10 @@
 //! substrate); here it is realized as a fail-closed gate that only disables the bridge's own operation.
 
 use std::fs;
+use std::sync::Arc;
+use std::sync::atomic::AtomicI32;
+use crate::session::{SpModel, SpSession};
+use crate::tokenizer::{Message, SptbTokenizer};
 
 pub const F_DEFAULT_OFF: u32     = 1 << 0;
 pub const F_REQUIRE_LICENSE: u32 = 1 << 1;
@@ -130,11 +134,78 @@ impl LatentBridge {
 /// names the coder sp-model. Unset ⇒ not wired = null floor.
 pub fn delegate_execute(task_text: &str, bridge_id: u32) -> Result<String, String> {
     if task_text.trim().is_empty() { return Err("delegate_execute: empty task".into()); }
-    match std::env::var("SP_TELEPATHY_DELEGATE") {
-        Ok(m) if !m.trim().is_empty() =>
-            Err(format!("native L1 delegate WIRING PENDING: load '{m}' via sp_model_load + qwen3_generate_kv on the task text (bridge {bridge_id})")),
-        _ => Err("delegate not wired (null floor)".into()),
+    // The delegate coder sp-model + tokenizer. Unset ⇒ null floor (not wired).
+    let model_path = match std::env::var("SP_TELEPATHY_DELEGATE") {
+        Ok(m) if !m.trim().is_empty() => m,
+        _ => return Err("delegate not wired (SP_TELEPATHY_DELEGATE unset = null floor)".into()),
+    };
+    let tok_path = std::env::var("SP_TELEPATHY_DELEGATE_TOK")
+        .ok().filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| model_path.replace(".sp-model", ".sp-tokenizer"));
+    let n_gen: usize = std::env::var("SP_TELEPATHY_NGEN").ok().and_then(|s| s.parse().ok()).unwrap_or(48);
+    let eos: i32 = std::env::var("SP_TELEPATHY_EOS").ok().and_then(|s| s.parse().ok()).unwrap_or(151645); // qwen <|im_end|>
+
+    // STAGE 2 (TELE-12 cemented): execute the delegate on CLEAN TEXT, token-in via CPU L1
+    // (sp_prefill_chunk / sp_decode_step). NEVER fuse a latent prefix here — that path is the
+    // measured 0.000 honest-negative. The latent already did its job in stage 1 (decide_route).
+    let model = SpModel::load(&model_path, &tok_path)?;
+    let arch = model.arch_info()?;
+    let vocab = arch.vocab_size as usize;
+    let tok = SptbTokenizer::build(&model, arch.arch_id, &tok_path)?;
+    let cancel = Arc::new(AtomicI32::new(0));
+    let mut session = SpSession::create(&model, cancel)?;
+    let prompt = tok.apply_template_ids(&vec![Message { role: "user".to_string(), content: task_text.to_string() }])?;
+    let argmax = |l: &[f32]| -> i32 { let mut bi = 0i32; let mut bv = f32::NEG_INFINITY; for (i, &v) in l.iter().enumerate() { if v > bv { bv = v; bi = i as i32; } } bi };
+    let mut logits = vec![0f32; vocab];
+    let t0 = std::time::Instant::now();
+    session.prefill_chunk(&prompt, &mut logits)?;
+    let mut out_ids: Vec<i32> = Vec::new();
+    let mut next = argmax(&logits);
+    for _ in 0..n_gen {
+        if next == eos { break; }
+        out_ids.push(next);
+        session.decode_step(next, &mut logits)?;
+        next = argmax(&logits);
     }
+    let dt = t0.elapsed().as_secs_f32();
+    let mut out = Vec::new();
+    for &id in &out_ids { out.extend_from_slice(tok.decode_token(id)); }
+    let ans = String::from_utf8_lossy(&out).to_string();
+    eprintln!("[telepathy] delegate (bridge {bridge_id}): qwen coder decoded {} toks on CLEAN TEXT ({:.2}s, {:.1} tok/s, CPU L1)",
+              out_ids.len(), dt, out_ids.len() as f32 / dt.max(1e-3));
+    Ok(ans.trim().to_string())
+}
+
+/// SP_TELEPATHY_LIVE=1 — the cemented two-stage LIVE delegate (TELE-12/13/14): stage 1 `decide_route`
+/// on the latent (gist/intent — the bridge's proven strength), stage 2 run the qwen coder on the
+/// CLEAN-TEXT task via CPU L1. NEVER fuses latent+text (the 0.000 honest-negative). Gate
+/// `G-TELEPATHY-LIVE`: a TELEPATHY route yields a coherent delegate answer; LOCAL = null floor.
+pub fn run_telepathy_live() -> Result<(), String> {
+    let task = std::env::var("SP_TELEPATHY_TASK")
+        .unwrap_or_else(|_| "write a python function that reverses a string".into());
+    // Stage 1 — route on the latent. Head-governed if SP_ROUTE_HEAD; else SP_ROUTE_FORCE drives the seam.
+    let latent = match std::env::var("SP_TELEPATHY_SRC") {
+        Ok(p) if !p.trim().is_empty() => {
+            let b = fs::read(&p).map_err(|e| format!("src {p}: {e}"))?;
+            b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect::<Vec<f32>>()
+        }
+        _ => vec![0.0f32; 1],
+    };
+    let decision = decide_route(&latent);
+    eprintln!("[telepathy-live] stage1 decide_route(latent[{}]) -> {:?}", latent.len(), decision);
+    let (ans, routed) = match decision {
+        RouteDecision::Telepathy(bid) => {
+            eprintln!("[telepathy-live] stage2 delegate_execute on CLEAN TEXT (never fuse): task={task:?}");
+            (delegate_execute(&task, bid)?, true)
+        }
+        RouteDecision::Local => { eprintln!("[telepathy-live] route=LOCAL -> no delegate (null floor)"); (String::new(), false) }
+    };
+    if routed { eprintln!("[telepathy-live] delegate answer: {:?}", ans.replace('\n', " ")); }
+    let ok = if routed { !ans.trim().is_empty() } else { true };
+    eprintln!("[telepathy-live] G-TELEPATHY-LIVE: {}  (latent decides route; qwen coder executes CLEAN TEXT on CPU L1; tokenizer-free decision, no fuse)",
+              if ok { "GREEN" } else { "RED" });
+    if !ok { return Err("delegate produced no output".into()); }
+    Ok(())
 }
 
 /// `SP_TELEPATHY=1` verb: load the LatentBridge, demonstrate the fail-closed license, run the in-engine
