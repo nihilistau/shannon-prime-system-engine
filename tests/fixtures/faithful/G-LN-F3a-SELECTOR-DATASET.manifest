@@ -1,0 +1,19 @@
+LN-F3a SELECTOR DATASET (captured 2026-07-01) — for the Natural Recall Head (LN-1)
+substrate: global K/Q (read_global_q / ep.k = read_global_k layout) -- W_c's proven home
+query-Q: qdump/q_<chat_id>.bin  =  <u32 n_global=8><u32 qd=8192><f32 q[8*16*512]> = 262152 bytes (B3 format, xbar_lsh-compatible)
+label:   qdump/lbl_<chat_id>.txt =  <episode>TAB<jaccard_overlap>  (Jaccard oracle pick)
+targets: _faithful_corpus/eps/fct_*/ep.k  (15 episodes, [n_global][npos][HD=512] f32)
+pairs captured this run:
+  lbl_1 -> fct_000	0.6667
+  lbl_2 -> fct_001	0.7500
+  lbl_3 -> fct_002	0.8333
+  lbl_4 -> fct_003	0.5000
+  lbl_5 -> fct_004	0.7500
+  lbl_6 -> fct_005	0.7500
+  lbl_7 -> fct_006	0.6667
+  lbl_8 -> fct_007	0.7500
+  lbl_9 -> fct_008	0.6667
+  lbl_10 -> fct_009	0.7500
+  lbl_11 -> fct_010	0.7500
+  lbl_12 -> fct_011	0.4286
+  lbl_13 -> fct_012	0.6000

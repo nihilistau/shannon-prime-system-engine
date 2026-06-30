@@ -1364,6 +1364,13 @@ fn run_kvdecode_chat(
                                                 syn_last = aug_last[0];
                                                 recalled = Some((bname.clone(), (bov * 1000.0) as u32));
                                                 tracing::info!("RECALL-JACCARD: '{}' overlap={:.3} >= tau={:.3} -> TEXT-IN-CONTEXT (F2b)", bname, bov, tau_ov);
+                                                // LN-F3a selector-data label: pair q_<chat_id>.bin (query global-Q, the
+                                                // SP_B3_QDUMP rail) with the Jaccard-selected episode. Capture-only.
+                                                if let Ok(qd) = std::env::var("SP_B3_QDUMP") {
+                                                    let _ = std::fs::write(
+                                                        std::path::Path::new(&qd).join(format!("lbl_{chat_id}.txt")),
+                                                        format!("{}\t{:.4}\n", bname, bov));
+                                                }
                                             } else { tracing::warn!("RECALL-JACCARD: prefill(aug) failed -- clean prompt"); }
                                         }
                                         _ => tracing::warn!("RECALL-JACCARD: apply_template_ids(aug) failed -- clean prompt"),
