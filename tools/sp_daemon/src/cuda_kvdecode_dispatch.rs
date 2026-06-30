@@ -67,6 +67,14 @@ unsafe extern "C" {
     /// Returns NULL on failure (sp_last_error carries detail).
     fn sp_daemon_cuda_kvdecode_open(qm_opaque: *const c_void, pmax: c_int) -> *mut c_void;
 
+    /// open_cfg: explicit ring/jmax/slab config (no env). The structurally-sound config bridge —
+    /// Rust `set_var` does NOT reach this lib's C `getenv` on Windows. lsh_r NULL = slab off.
+    fn sp_daemon_cuda_kvdecode_open_cfg(
+        qm_opaque: *const c_void, pmax: c_int,
+        ring_w: c_int, jmax: c_int, arm_slab: c_int, arm_bslab: c_int,
+        arm_b: c_int, arm_sink: c_int, lsh_r: *const std::os::raw::c_char,
+    ) -> *mut c_void;
+
     /// `gemma4_kv_prefill(s, toks, n)`. 0 on success.
     fn sp_daemon_cuda_kvdecode_prefill(
         handle: *mut c_void,
@@ -222,6 +230,69 @@ pub unsafe fn open(qm_opaque: *const c_void, pmax: i32) -> Result<*mut c_void, S
     } else {
         Ok(h)
     }
+}
+
+/// Explicit KV-open config — the structurally-sound replacement for the broken
+/// Rust-`set_var` → C-`getenv` knob path (Windows CRT `_environ` is snapshotted at
+/// process init; `SetEnvironmentVariableW` after start is invisible to the static C lib).
+/// The daemon reads its `SP_DAEMON_KVDECODE_*` env in Rust (which works) and passes
+/// these as explicit ints to `open_cfg`. `0` ring_w = full-cache; `lsh_r=None` = slab off.
+#[derive(Clone, Default)]
+pub struct KvOpenCfg {
+    pub ring_w: i32,
+    pub jmax: i32,
+    pub arm_slab: i32,
+    pub arm_bslab: i32,
+    pub arm_b: i32,
+    pub arm_sink: i32,
+    pub lsh_r: Option<String>,
+}
+
+impl KvOpenCfg {
+    /// Build the config by reading env IN RUST (which works) — accepts either the daemon knobs
+    /// (`SP_DAEMON_KVDECODE_*`) or the direct C-names (`SP_G4_KV_RING_W` / `SP_ARM_*`), so any
+    /// launcher or test bin's env is honored through the explicit (non-set_var) bridge.
+    pub fn from_env() -> Self {
+        let i = |ks: &[&str]| ks.iter().find_map(|k| std::env::var(k).ok().and_then(|v| v.trim().parse::<i32>().ok()));
+        let slab = std::env::var("SP_DAEMON_KVDECODE_SLAB").as_deref() == Ok("1")
+            || std::env::var("SP_ARM_SLAB").as_deref() == Ok("1");
+        KvOpenCfg {
+            ring_w:    i(&["SP_DAEMON_KVDECODE_RING_W", "SP_G4_KV_RING_W"]).unwrap_or(0),
+            jmax:      i(&["SP_DAEMON_KVDECODE_JMAX", "SP_G4_KV_JMAX"]).unwrap_or(64),
+            arm_slab:  if slab { 1 } else { 0 },
+            arm_bslab: i(&["SP_DAEMON_KVDECODE_BSLAB", "SP_ARM_BSLAB"]).unwrap_or(0),
+            arm_b:     i(&["SP_DAEMON_KVDECODE_ARM_B", "SP_ARM_B"]).unwrap_or(0),
+            arm_sink:  i(&["SP_DAEMON_KVDECODE_ARM_SINK", "SP_ARM_SINK"]).unwrap_or(0),
+            lsh_r:     std::env::var("SP_DAEMON_KVDECODE_LSH_R").ok()
+                           .or_else(|| std::env::var("SP_ARM_LSH_R").ok())
+                           .filter(|s| !s.trim().is_empty()),
+        }
+    }
+}
+
+/// As [`open`], but passes ring/jmax/slab config EXPLICITLY (no env). Preferred path.
+///
+/// # Safety
+/// Same contract as [`open`].
+pub unsafe fn open_cfg(qm_opaque: *const c_void, pmax: i32, cfg: &KvOpenCfg) -> Result<*mut c_void, String> {
+    if qm_opaque.is_null() || pmax <= 0 {
+        return Err("kvdecode open_cfg: NULL model or non-positive pmax".to_string());
+    }
+    // The CString must outlive the open call (the C side reads it during gemma4_kv_open).
+    let lsh_c = match cfg.lsh_r.as_ref() {
+        Some(s) => Some(std::ffi::CString::new(s.as_str()).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let lsh_ptr = lsh_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+    // SAFETY: qm_opaque valid; lsh_ptr valid for the duration of the call (lsh_c lives to fn end).
+    let h = unsafe {
+        sp_daemon_cuda_kvdecode_open_cfg(
+            qm_opaque, pmax, cfg.ring_w, cfg.jmax, cfg.arm_slab, cfg.arm_bslab,
+            cfg.arm_b, cfg.arm_sink, lsh_ptr,
+        )
+    };
+    drop(lsh_c);
+    if h.is_null() { Err(last_error()) } else { Ok(h) }
 }
 
 /// Ingest prompt history into the resident cache (stores K/V at `[dpos,dpos+n)`).
@@ -613,10 +684,11 @@ pub unsafe fn register_with_session(
     session_raw: *mut crate::ffi_l1::sp_session,
     qm_opaque: *const c_void,
     pmax: i32,
+    cfg: &KvOpenCfg,
 ) -> Result<*mut c_void, String> {
-    // Step 1: open the resident KV cache.
+    // Step 1: open the resident KV cache with EXPLICIT config (no env/set_var bridge).
     // SAFETY: caller guarantees qm_opaque + session validity.
-    let handle = unsafe { open(qm_opaque, pmax) }?;
+    let handle = unsafe { open_cfg(qm_opaque, pmax, cfg) }?;
 
     // Step 2: point sp_decode_step at the glue dispatch table on this session.
     // SAFETY: caller holds the SpSession's Mutex; no concurrent decode.

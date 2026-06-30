@@ -191,7 +191,10 @@ fn main() {
     let sess_raw = sess as *mut sp_daemon::ffi_l1::sp_session;
     sp_daemon::cuda_kvdecode_dispatch::reset_step_count();
     let handle = unsafe {
-        sp_daemon::cuda_kvdecode_dispatch::register_with_session(sess_raw, qm, pmax)
+        sp_daemon::cuda_kvdecode_dispatch::register_with_session(
+            sess_raw, qm, pmax,
+            &sp_daemon::cuda_kvdecode_dispatch::KvOpenCfg::from_env(),
+        )
     }
     .expect("register_with_session failed");
 

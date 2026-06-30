@@ -604,40 +604,26 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             // resident path until the slab/LSH port lands). gemma4_kv_open reads
             // SP_G4_KV_RING_W / SP_G4_KV_JMAX; surface them as daemon knobs so the ring
             // is a startup config (default unset = the full-cache B1 null floor).
-            if let Ok(w) = std::env::var("SP_DAEMON_KVDECODE_RING_W") {
-                if !w.trim().is_empty() {
-                    // SAFETY: single-threaded startup, before any decode thread spawns.
-                    unsafe { std::env::set_var("SP_G4_KV_RING_W", w.trim()); }
-                    info!("WIRE-CUDA-DECODE B2: SWA-ring mode armed at open (SP_G4_KV_RING_W={})", w.trim());
-                }
-            }
-            if let Ok(j) = std::env::var("SP_DAEMON_KVDECODE_JMAX") {
-                if !j.trim().is_empty() {
-                    // SAFETY: single-threaded startup.
-                    unsafe { std::env::set_var("SP_G4_KV_JMAX", j.trim()); }
-                }
-            }
-            // P3.2 (OKV global-layer eviction): surface the slab knobs so the resident global cap is a
-            // daemon config. SP_DAEMON_KVDECODE_SLAB + _LSH_R arm it; _BSLAB/_B/_SINK tune it. Default
-            // unset = full-cache globals (byte-identical null floor). Gather is P3.3 (not yet wired).
-            for (dk, ck) in [
-                ("SP_DAEMON_KVDECODE_SLAB", "SP_ARM_SLAB"),
-                ("SP_DAEMON_KVDECODE_LSH_R", "SP_ARM_LSH_R"),
-                ("SP_DAEMON_KVDECODE_BSLAB", "SP_ARM_BSLAB"),
-                ("SP_DAEMON_KVDECODE_ARM_B", "SP_ARM_B"),
-                ("SP_DAEMON_KVDECODE_ARM_SINK", "SP_ARM_SINK"),
-            ] {
-                if let Ok(v) = std::env::var(dk) {
-                    if !v.trim().is_empty() {
-                        // SAFETY: single-threaded startup, before any decode thread spawns.
-                        unsafe { std::env::set_var(ck, v.trim()); }
-                        info!("WIRE-CUDA-DECODE P3: slab knob {ck}={}", v.trim());
-                    }
-                }
-            }
+            // O(1)-context KV config is passed EXPLICITLY to the C core (ring/jmax + P3 slab), NOT
+            // via env/set_var: Rust `set_var` after process start does NOT reach the statically-linked
+            // CUDA lib's `getenv` on Windows (the CRT `_environ` is snapshotted at init). The daemon
+            // reads its SP_DAEMON_KVDECODE_* env HERE in Rust (which works) and hands ints to the open.
+            let env_i = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<i32>().ok());
+            let kv_cfg = sp_daemon::cuda_kvdecode_dispatch::KvOpenCfg {
+                ring_w:    env_i("SP_DAEMON_KVDECODE_RING_W").unwrap_or(0),
+                jmax:      env_i("SP_DAEMON_KVDECODE_JMAX").unwrap_or(64),
+                arm_slab:  if std::env::var("SP_DAEMON_KVDECODE_SLAB").as_deref() == Ok("1") { 1 } else { 0 },
+                arm_bslab: env_i("SP_DAEMON_KVDECODE_BSLAB").unwrap_or(0),
+                arm_b:     env_i("SP_DAEMON_KVDECODE_ARM_B").unwrap_or(0),
+                arm_sink:  env_i("SP_DAEMON_KVDECODE_ARM_SINK").unwrap_or(0),
+                lsh_r:     std::env::var("SP_DAEMON_KVDECODE_LSH_R").ok().filter(|s| !s.trim().is_empty()),
+            };
+            info!("WIRE-CUDA-DECODE cfg (explicit, no set_var): ring_w={} jmax={} slab={} bslab={} arm_b={} sink={} lsh_r={}",
+                  kv_cfg.ring_w, kv_cfg.jmax, kv_cfg.arm_slab, kv_cfg.arm_bslab, kv_cfg.arm_b, kv_cfg.arm_sink,
+                  kv_cfg.lsh_r.as_deref().unwrap_or("<none>"));
             // SAFETY: we own `session` exclusively here; no concurrent decode.
             match unsafe {
-                sp_daemon::cuda_kvdecode_dispatch::register_with_session(session_raw, qm, pmax)
+                sp_daemon::cuda_kvdecode_dispatch::register_with_session(session_raw, qm, pmax, &kv_cfg)
             } {
                 Ok(h) => {
                     info!("WIRE-CUDA-DECODE: sp_session_register_kvdecode_backend OK on TARGET session (Pmax={pmax}) — sp_decode_step routes to gemma4_kv_decode_logits (persistent-KV 12B decode)");

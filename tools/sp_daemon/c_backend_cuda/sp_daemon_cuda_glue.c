@@ -124,6 +124,11 @@ void sp_daemon_cuda_release(const void *qm_opaque) {
  * opaque on this side — we only ever pass the pointer through. */
 typedef struct sp_g4_kv sp_g4_kv;
 extern sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
+/* OKV config bus: set explicit ints (ring/jmax/slab) right before gemma4_kv_open consumes them,
+ * then clear. Replaces the Rust-set_var->C-getenv path that silently fails on Windows. */
+extern void  gemma4_kv_set_open_cfg(int ring_w, int jmax, int arm_slab, int arm_bslab,
+                                    int arm_b, int arm_sink, const char *lsh_r);
+extern void  gemma4_kv_clear_open_cfg(void);
 extern int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
 extern int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
 extern int   gemma4_kv_reset(sp_g4_kv *s);
@@ -224,6 +229,24 @@ void *sp_daemon_cuda_kvdecode_open(const void *qm_opaque, int pmax) {
         return 0;
     }
     return (void *)gemma4_kv_open(qm, pmax);
+}
+
+/* open_cfg: same as open() but the ring/jmax/slab config is passed EXPLICITLY (ints + LSH path)
+ * instead of via env — the daemon's structurally-sound config bridge (Rust set_var does not reach
+ * this lib's C getenv on Windows). Sets the cfg, opens (gemma4_kv_open consumes it), clears. */
+void *sp_daemon_cuda_kvdecode_open_cfg(const void *qm_opaque, int pmax,
+                                       int ring_w, int jmax, int arm_slab, int arm_bslab,
+                                       int arm_b, int arm_sink, const char *lsh_r) {
+    const qwen3_model *qm = (const qwen3_model *)qm_opaque;
+    if (!qm) { sp_set_error("cuda kvdecode open_cfg: NULL qwen3_model"); return 0; }
+    if (qm->cfg.arch != SP_ARCH_GEMMA4) {
+        sp_set_error("cuda kvdecode open_cfg: persistent-KV decode is SP_ARCH_GEMMA4 only");
+        return 0;
+    }
+    gemma4_kv_set_open_cfg(ring_w, jmax, arm_slab, arm_bslab, arm_b, arm_sink, lsh_r);
+    void *h = (void *)gemma4_kv_open(qm, pmax);
+    gemma4_kv_clear_open_cfg();
+    return h;
 }
 
 /* prefill(handle, tokens, n): ingest history into the resident cache. 0 ok. */

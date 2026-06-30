@@ -4354,9 +4354,25 @@ static void g4_arm_close(sp_g4_kv *s) {
  * the per-step union/stage scratch. Returns 0 on success, -1 on error (caller closes the session).
  * The per-step gather that USES this is P3.3 (g4_kv_step) — not yet wired, so enabling the slab is
  * inert/incomplete until then; default-off (this is never called) keeps the byte-identical null floor. */
+/* OKV config bus (replaces the Rust-set_var -> C-getenv path that silently fails on Windows: the C
+ * runtime's _environ is snapshotted at process init and not refreshed by SetEnvironmentVariableW).
+ * The daemon glue calls gemma4_kv_set_open_cfg() with explicit ints right before gemma4_kv_open(),
+ * which consumes it (cfg over getenv) and clears it. .set==0 => getenv fallback (standalone test bins).
+ * Single-consumer at open time (registration is single-threaded), so a file-scope holder is sound. */
+static struct g4_open_cfg_t { int set, ring_w, jmax, arm_slab, arm_bslab, arm_b, arm_sink; const char *lsh_r; }
+    g_g4_open_cfg = { 0, 0, 0, 0, 0, 0, 0, (const char *)0 };
+extern "C" void gemma4_kv_set_open_cfg(int ring_w, int jmax, int arm_slab, int arm_bslab,
+                                       int arm_b, int arm_sink, const char *lsh_r) {
+    g_g4_open_cfg.set = 1; g_g4_open_cfg.ring_w = ring_w; g_g4_open_cfg.jmax = jmax;
+    g_g4_open_cfg.arm_slab = arm_slab; g_g4_open_cfg.arm_bslab = arm_bslab;
+    g_g4_open_cfg.arm_b = arm_b; g_g4_open_cfg.arm_sink = arm_sink;
+    g_g4_open_cfg.lsh_r = (lsh_r && lsh_r[0]) ? lsh_r : (const char *)0;
+}
+extern "C" void gemma4_kv_clear_open_cfg(void) { g_g4_open_cfg.set = 0; g_g4_open_cfg.lsh_r = (const char *)0; }
+
 static int g4_arm_open(sp_g4_kv *s) {
-    const char *rpath = getenv("SP_ARM_LSH_R");
-    if (!rpath) { sp_set_error("g4_arm_open: SP_ARM_SLAB needs SP_ARM_LSH_R=<R.bin>"); return -1; }
+    const char *rpath = g_g4_open_cfg.set ? g_g4_open_cfg.lsh_r : getenv("SP_ARM_LSH_R");
+    if (!rpath) { sp_set_error("g4_arm_open: slab needs SP_ARM_LSH_R / cfg.lsh_r"); return -1; }
     const int P = s->Pmax, NL = s->NL, period = s->period, kvfs = s->kvfs;
     const int g_nh = s->g_nh, g_nkv = s->g_nkv, g_hd = s->g_hd;
     const int kvd_g = g_nkv * g_hd;
@@ -4370,11 +4386,15 @@ static int g4_arm_open(sp_g4_kv *s) {
     float *Rh = (float *)malloc((size_t)g_hd * r * sizeof(float));
     if (!Rh || fread(Rh, sizeof(float), (size_t)g_hd * r, rf) != (size_t)g_hd * r) { free(Rh); fclose(rf); sp_set_error("g4_arm_open: SP_ARM_LSH_R read"); return -1; }
     fclose(rf);
-    /* params */
-    s->arm_Bslab = getenv("SP_ARM_BSLAB") ? atoi(getenv("SP_ARM_BSLAB")) : (P < 4096 ? P : 4096);
+    /* params — explicit cfg (daemon) over getenv (test bins) */
+    const int C = g_g4_open_cfg.set;
+    s->arm_Bslab = C ? (g_g4_open_cfg.arm_bslab > 0 ? g_g4_open_cfg.arm_bslab : (P < 4096 ? P : 4096))
+                     : (getenv("SP_ARM_BSLAB") ? atoi(getenv("SP_ARM_BSLAB")) : (P < 4096 ? P : 4096));
     if (s->arm_Bslab < 1 || s->arm_Bslab > P) s->arm_Bslab = P;
-    s->arm_B    = getenv("SP_ARM_B")    ? atoi(getenv("SP_ARM_B"))    : 64;
-    s->arm_sink = getenv("SP_ARM_SINK") ? atoi(getenv("SP_ARM_SINK")) : 4;
+    s->arm_B    = C ? (g_g4_open_cfg.arm_b > 0 ? g_g4_open_cfg.arm_b : 64)
+                    : (getenv("SP_ARM_B")    ? atoi(getenv("SP_ARM_B"))    : 64);
+    s->arm_sink = C ? g_g4_open_cfg.arm_sink
+                    : (getenv("SP_ARM_SINK") ? atoi(getenv("SP_ARM_SINK")) : 4);
     const int Bslab = s->arm_Bslab;
     /* count global owner layers (for the VRAM-lean sidecar: n_global*P*r, not NL*P*r) */
     int n_global = 0;
@@ -4423,8 +4443,8 @@ static int g4_arm_open(sp_g4_kv *s) {
     #undef AI
     if (!ok) { sp_set_error("g4_arm_open: device/host OOM"); return -1; }
     s->arm_slab = 1;
-    fprintf(stderr, "    [g4-kv] P3 ARM SLAB armed: Bslab=%d r=%d B=%d sink=%d n_global=%d (globals capped to slab; host-RAM store [%d x P*%d]); P3.3 gather PENDING\n",
-            Bslab, r, s->arm_B, s->arm_sink, n_global, n_global, kvd_g);
+    fprintf(stderr, "    [g4-kv] P3 ARM SLAB armed: Bslab=%d r=%d B=%d sink=%d n_global=%d (globals -> host-RAM + LSH slab)\n",
+            Bslab, r, s->arm_B, s->arm_sink, n_global); fflush(stderr);
     return 0;
 }
 
@@ -4466,8 +4486,10 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     /* KAI-1c ring config (env-gated; unset = full cache = KAI-1b base). SWA owners
      * shrink to a ring_W-slot ring (the X-R2 space win) + a Jmax-deep undo-journal;
      * globals stay full-cache (no window ⇒ no alias). */
-    s->ring_W = getenv("SP_G4_KV_RING_W") ? atoi(getenv("SP_G4_KV_RING_W")) : 0;
-    s->Jmax   = getenv("SP_G4_KV_JMAX")   ? atoi(getenv("SP_G4_KV_JMAX"))   : 64;
+    s->ring_W = g_g4_open_cfg.set ? g_g4_open_cfg.ring_w
+                                  : (getenv("SP_G4_KV_RING_W") ? atoi(getenv("SP_G4_KV_RING_W")) : 0);
+    s->Jmax   = g_g4_open_cfg.set ? (g_g4_open_cfg.jmax > 0 ? g_g4_open_cfg.jmax : 64)
+                                  : (getenv("SP_G4_KV_JMAX")   ? atoi(getenv("SP_G4_KV_JMAX"))   : 64);
     if (s->ring_W < 0 || s->ring_W > Pmax) s->ring_W = 0;
     if (s->Jmax < 1) s->Jmax = 1;
     s->commit_pos = 0; s->jcur = 0; s->jK = NULL; s->jV = NULL;
@@ -4488,9 +4510,11 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     if (s->ring_W>0) fprintf(stderr,"    [g4-kv] RING mode: Wring=%d Jmax=%d (SWA owners ring+journal; globals full-cache)\n",s->ring_W,s->Jmax);
     #undef KA
     if (!ok) { sp_set_error("gemma4_kv_open: device OOM"); gemma4_kv_close(s); return NULL; }
-    /* P3.2 (OKV global-layer eviction): stand up the slab ONLY when both env knobs are set.
-     * Off ⇒ untouched full-cache globals = byte-identical null floor. */
-    if (getenv("SP_ARM_SLAB") && getenv("SP_ARM_LSH_R")) {
+    /* P3 (OKV global-layer eviction): stand up the slab when armed via the cfg bus (daemon) or env
+     * (test bins). Off ⇒ untouched full-cache globals = byte-identical null floor. */
+    int slab_on = g_g4_open_cfg.set ? (g_g4_open_cfg.arm_slab && g_g4_open_cfg.lsh_r)
+                                    : (getenv("SP_ARM_SLAB") && getenv("SP_ARM_LSH_R"));
+    if (slab_on) {
         if (g4_arm_open(s)) { gemma4_kv_close(s); return NULL; }
     }
     return s;
