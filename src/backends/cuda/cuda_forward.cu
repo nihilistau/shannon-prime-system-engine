@@ -4200,7 +4200,14 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
             if (ffac) k_rope_freqs_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, rbase, ffac, dpos);
             else      k_rope_dyn<<<nkv, hd/2, 0, st>>>(s->dk, nkv, hd, kvd, rbase, dpos);
             k_rmsnorm_head_noweight<<<nkv, 256, 0, st>>>(s->dv, nkv, hd, kvd, eps);
-            if (s->ring_W > 0 && !global) {            /* KAI-1c: SWA-owner ring write + undo-journal */
+            if (s->arm_slab && global) {              /* P3.3 (OKV): GLOBAL K/V -> host-RAM store + RᵀK sidecar.
+                * The resident slab dKc[L]/dVc[L] is filled per-step at attention from the selected union. */
+                const int gi = L / period;            /* global-index (sidecar sized n_global*P*r) */
+                cudaMemcpyAsync(s->arm_ramK[L] + (size_t)s->dpos_host*kvd, s->dk, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost, st);
+                cudaMemcpyAsync(s->arm_ramV[L] + (size_t)s->dpos_host*kvd, s->dv, (size_t)kvd*sizeof(float), cudaMemcpyDeviceToHost, st);
+                k_proj_RT<<<1, s->arm_r_dim, 0, st>>>(s->dk, s->arm_dR, 1, hd, s->arm_r_dim,
+                    s->arm_pk + ((size_t)gi * s->Pmax + s->dpos_host) * s->arm_r_dim);
+            } else if (s->ring_W > 0 && !global) {            /* KAI-1c: SWA-owner ring write + undo-journal */
                 const size_t ws = (size_t)(s->dpos_host % s->ring_W);
                 const size_t j  = (size_t)(s->dpos_host - s->commit_pos);   /* journal index for this step */
                 if (j >= (size_t)s->Jmax) { sp_set_error("g4_kv ring: uncommitted tick span exceeds Jmax"); return -1; }
@@ -4219,7 +4226,39 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
             if (!Kuse || !Vuse) { sp_set_error("g4_kv: sharer before owner"); return -1; }
         }
         {   int bd = hd > 256 ? hd : 256; if (bd > 1024) bd = 1024;
-            if (s->ring_W > 0 && !global) {           /* KAI-1c: ring attention (slot=(s0+j)%Wring) */
+            if (s->arm_slab && global) {              /* P3.3 (OKV): LSH-select union {sinks∪pos∪top-B} ->
+                * page from the host-RAM store into the compact slab dKc[L] -> gather. Globals never keep
+                * the full P resident, so context can exceed VRAM. Lossy unless Bsel>=ctx (the resident gate). */
+                const int gi = L / period; const int P = s->Pmax, r = s->arm_r_dim, Bslab = s->arm_Bslab;
+                const int ctx = s->dpos_host + 1;
+                k_proj_RT<<<nh, r, 0, st>>>(s->dq, s->arm_dR, nh, hd, r, s->arm_Rq);             /* Rq per head */
+                k_qk_scores<<<nh, 256, 0, st>>>(s->arm_Rq, s->arm_pk + (size_t)gi*P*r, ctx, P, r, r, nh, s->arm_dscores);
+                cudaStreamSynchronize(st);                                                       /* host select needs scores + the just-stored row */
+                cudaMemcpy(s->arm_scores_h, s->arm_dscores, (size_t)nh*P*sizeof(float), cudaMemcpyDeviceToHost);
+                float hs[256]; int hi[256]; int Bsel = s->arm_B > 0 ? s->arm_B : 64; if (Bsel > 256) Bsel = 256;
+                for (int h = 0; h < nh; h++)
+                    s->arm_m_host[h] = sp_oracle_top_b(s->arm_scores_h + (size_t)h*P, ctx, Bsel, hs, hi, s->arm_ri_host + (size_t)h*P);
+                int mu = 0; memset(s->arm_seen, 0, (size_t)ctx);                                 /* build the union -> compact slots */
+                #define ARM_ADD(u) do { int _u=(u); if (_u>=0 && _u<ctx && !s->arm_seen[_u]) { \
+                    if (mu < Bslab) { s->arm_seen[_u]=1; s->arm_slotmap[_u]=mu; s->arm_union[mu++]=_u; } } } while(0)
+                for (int sk = 0; sk < s->arm_sink && sk < ctx; sk++) ARM_ADD(sk);
+                ARM_ADD(s->dpos_host);
+                for (int h = 0; h < nh; h++) for (int j = 0; j < s->arm_m_host[h]; j++) ARM_ADD(s->arm_ri_host[(size_t)h*P + j]);
+                #undef ARM_ADD
+                for (int u = 0; u < mu; u++) { int a = s->arm_union[u];                          /* stage RAM -> contiguous */
+                    memcpy(s->arm_stageK + (size_t)u*kvd, s->arm_ramK[L] + (size_t)a*kvd, (size_t)kvd*sizeof(float));
+                    memcpy(s->arm_stageV + (size_t)u*kvd, s->arm_ramV[L] + (size_t)a*kvd, (size_t)kvd*sizeof(float)); }
+                cudaMemcpyAsync(dKc[L], s->arm_stageK, (size_t)mu*kvd*sizeof(float), cudaMemcpyHostToDevice, st);
+                cudaMemcpyAsync(dVc[L], s->arm_stageV, (size_t)mu*kvd*sizeof(float), cudaMemcpyHostToDevice, st);
+                for (int h = 0; h < nh; h++) for (int j = 0; j < s->arm_m_host[h]; j++) {        /* remap abs -> compact slot */
+                    int a = s->arm_ri_host[(size_t)h*P + j];
+                    s->arm_ri_host2[(size_t)h*Bslab + j] = (a >= 0 && a < ctx && s->arm_seen[a]) ? s->arm_slotmap[a] : 0; }
+                cudaMemcpyAsync(s->arm_ri_dev, s->arm_ri_host2, (size_t)nh*Bslab*sizeof(int), cudaMemcpyHostToDevice, st);
+                cudaMemcpyAsync(s->arm_m_dev, s->arm_m_host, (size_t)nh*sizeof(int), cudaMemcpyHostToDevice, st);
+                int mm = Bsel; int gbd = hd > mm ? hd : mm; if (gbd > 1024) gbd = 1024;
+                k_attn_decode_gather<<<nh, gbd, (size_t)mm*sizeof(float), st>>>(
+                    s->dq, dKc[L], dVc[L], s->arm_ri_dev, s->arm_m_dev, Bslab, kvd, hd, grp, 1.0f, s->dao);
+            } else if (s->ring_W > 0 && !global) {           /* KAI-1c: ring attention (slot=(s0+j)%Wring) */
                 const int ctx = s->dpos_host + 1;
                 const int s0 = (win >= 0 && ctx - win > 0) ? ctx - win : 0;
                 const int wl = ctx - s0;
