@@ -3922,6 +3922,20 @@ struct sp_g4_kv {
      * When on, the graph path is declined (the bx attention takes a host ctx +
      * ctx-sized i64 shared mem, not graph-capturable) — chat runs per-step. */
     int bx_on;
+    /* P3 (OKV) GLOBAL-LAYER EVICTION SLAB — lift of the gemma4_decode_cuda §3q C-b.2 path into the
+     * daemon's persistent decode. When arm_slab is set, the 8 GLOBAL owner layers cap their resident
+     * dKc/dVc to arm_Bslab slots; the full global K/V history lives in a host-RAM store (arm_ramK/V),
+     * and each step the LSH-router-selected union {sinks∪pos∪top-B} is paged into the compact slab and
+     * gathered. SWA layers stay on the ring. arm_slab==0 ⇒ globals full-cache = byte-identical null floor.
+     * Allocated by g4_arm_open (only when SP_ARM_SLAB + SP_ARM_LSH_R set), freed by g4_arm_close. P3.2
+     * = this state + alloc; P3.3 = the per-step gather in g4_kv_step (not yet wired). */
+    int   arm_slab, arm_Bslab, arm_B, arm_sink, arm_r_dim;
+    float **arm_ramK, **arm_ramV;                 /* host-RAM global store, per layer [P*kvd_g] */
+    float *arm_dR, *arm_pk, *arm_Rq;              /* LSH router R [hd*r], sidecar RᵀK [NL*P*r], Rq [g_nh*r] */
+    float *arm_dscores, *arm_scores_h;            /* device + host q·K scores [g_nh*P] */
+    float *arm_stageK, *arm_stageV;               /* host staging for the batched union page-in [Bslab*kvd_g] */
+    int   *arm_ri_host, *arm_m_host, *arm_ri_host2, *arm_ri_dev, *arm_m_dev, *arm_slotmap, *arm_union;
+    unsigned char *arm_seen;
 };
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
@@ -4272,6 +4286,109 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
     return 0;
 }
 
+/* P3.2 (OKV global-layer eviction): free the slab state. Idempotent; NULL-safe. */
+static void g4_arm_close(sp_g4_kv *s) {
+    if (!s || !s->arm_slab) return;
+    if (s->arm_ramK) { for (int L = 0; L < s->NL; L++) if (s->arm_ramK[L]) free(s->arm_ramK[L]); free(s->arm_ramK); s->arm_ramK = NULL; }
+    if (s->arm_ramV) { for (int L = 0; L < s->NL; L++) if (s->arm_ramV[L]) free(s->arm_ramV[L]); free(s->arm_ramV); s->arm_ramV = NULL; }
+    if (s->arm_dR)      cudaFree(s->arm_dR);      s->arm_dR = NULL;
+    if (s->arm_pk)      cudaFree(s->arm_pk);      s->arm_pk = NULL;
+    if (s->arm_Rq)      cudaFree(s->arm_Rq);      s->arm_Rq = NULL;
+    if (s->arm_dscores) cudaFree(s->arm_dscores); s->arm_dscores = NULL;
+    if (s->arm_ri_dev)  cudaFree(s->arm_ri_dev);  s->arm_ri_dev = NULL;
+    if (s->arm_m_dev)   cudaFree(s->arm_m_dev);   s->arm_m_dev = NULL;
+    free(s->arm_scores_h); s->arm_scores_h = NULL;
+    free(s->arm_stageK);   s->arm_stageK = NULL;
+    free(s->arm_stageV);   s->arm_stageV = NULL;
+    free(s->arm_ri_host);  s->arm_ri_host = NULL;
+    free(s->arm_m_host);   s->arm_m_host = NULL;
+    free(s->arm_ri_host2); s->arm_ri_host2 = NULL;
+    free(s->arm_slotmap);  s->arm_slotmap = NULL;
+    free(s->arm_union);    s->arm_union = NULL;
+    free(s->arm_seen);     s->arm_seen = NULL;
+    s->arm_slab = 0;
+}
+
+/* P3.2 (OKV global-layer eviction): allocate the slab state. Only called when SP_ARM_SLAB +
+ * SP_ARM_LSH_R are set. Caps the GLOBAL owner layers' resident dKc/dVc to arm_Bslab slots (frees
+ * the full-P globals + re-allocs small), stands up the host-RAM global store + the LSH-router state +
+ * the per-step union/stage scratch. Returns 0 on success, -1 on error (caller closes the session).
+ * The per-step gather that USES this is P3.3 (g4_kv_step) — not yet wired, so enabling the slab is
+ * inert/incomplete until then; default-off (this is never called) keeps the byte-identical null floor. */
+static int g4_arm_open(sp_g4_kv *s) {
+    const char *rpath = getenv("SP_ARM_LSH_R");
+    if (!rpath) { sp_set_error("g4_arm_open: SP_ARM_SLAB needs SP_ARM_LSH_R=<R.bin>"); return -1; }
+    const int P = s->Pmax, NL = s->NL, period = s->period, kvfs = s->kvfs;
+    const int g_nh = s->g_nh, g_nkv = s->g_nkv, g_hd = s->g_hd;
+    const int kvd_g = g_nkv * g_hd;
+    /* load R.bin [g_hd * r] f32 → arm_dR; r inferred from file size */
+    FILE *rf = fopen(rpath, "rb");
+    if (!rf) { sp_set_error("g4_arm_open: SP_ARM_LSH_R open"); return -1; }
+    fseek(rf, 0, SEEK_END); long rb = ftell(rf); fseek(rf, 0, SEEK_SET);
+    s->arm_r_dim = (int)(rb / ((long)g_hd * 4));
+    if (s->arm_r_dim <= 0 || (long)s->arm_r_dim * g_hd * 4 != rb) { fclose(rf); sp_set_error("g4_arm_open: SP_ARM_LSH_R size not a multiple of g_hd*4"); return -1; }
+    const int r = s->arm_r_dim;
+    float *Rh = (float *)malloc((size_t)g_hd * r * sizeof(float));
+    if (!Rh || fread(Rh, sizeof(float), (size_t)g_hd * r, rf) != (size_t)g_hd * r) { free(Rh); fclose(rf); sp_set_error("g4_arm_open: SP_ARM_LSH_R read"); return -1; }
+    fclose(rf);
+    /* params */
+    s->arm_Bslab = getenv("SP_ARM_BSLAB") ? atoi(getenv("SP_ARM_BSLAB")) : (P < 4096 ? P : 4096);
+    if (s->arm_Bslab < 1 || s->arm_Bslab > P) s->arm_Bslab = P;
+    s->arm_B    = getenv("SP_ARM_B")    ? atoi(getenv("SP_ARM_B"))    : 64;
+    s->arm_sink = getenv("SP_ARM_SINK") ? atoi(getenv("SP_ARM_SINK")) : 4;
+    const int Bslab = s->arm_Bslab;
+    /* count global owner layers (for the VRAM-lean sidecar: n_global*P*r, not NL*P*r) */
+    int n_global = 0;
+    for (int L = 0; L < kvfs && L < NL; L++) if ((L % period) == period - 1) n_global++;
+    if (n_global < 1) n_global = 1;
+    int ok = 1;
+    #define AD(p,cnt) do { if (cudaMalloc((void**)&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess) ok=0; } while(0)
+    #define AI(p,cnt) do { if (cudaMalloc((void**)&(p),(size_t)(cnt)*sizeof(int))  !=cudaSuccess) ok=0; } while(0)
+    /* device LSH router + sidecar (sidecar sized to the globals only) + scores */
+    AD(s->arm_dR, (size_t)g_hd * r);
+    AD(s->arm_pk, (size_t)n_global * P * r);
+    AD(s->arm_Rq, (size_t)g_nh * r);
+    AD(s->arm_dscores, (size_t)g_nh * P);
+    AI(s->arm_ri_dev, (size_t)g_nh * P);
+    AI(s->arm_m_dev, (size_t)g_nh);
+    if (ok) cudaMemcpy(s->arm_dR, Rh, (size_t)g_hd * r * sizeof(float), cudaMemcpyHostToDevice);
+    free(Rh);
+    /* host scratch */
+    s->arm_scores_h = (float *)malloc((size_t)g_nh * P * sizeof(float));
+    s->arm_stageK   = (float *)malloc((size_t)Bslab * kvd_g * sizeof(float));
+    s->arm_stageV   = (float *)malloc((size_t)Bslab * kvd_g * sizeof(float));
+    s->arm_ri_host  = (int *)malloc((size_t)g_nh * P * sizeof(int));
+    s->arm_m_host   = (int *)malloc((size_t)g_nh * sizeof(int));
+    s->arm_ri_host2 = (int *)malloc((size_t)g_nh * Bslab * sizeof(int));
+    s->arm_slotmap  = (int *)malloc((size_t)P * sizeof(int));
+    s->arm_union    = (int *)malloc((size_t)P * sizeof(int));
+    s->arm_seen     = (unsigned char *)malloc((size_t)P);
+    if (!s->arm_scores_h || !s->arm_stageK || !s->arm_stageV || !s->arm_ri_host || !s->arm_m_host ||
+        !s->arm_ri_host2 || !s->arm_slotmap || !s->arm_union || !s->arm_seen) ok = 0;
+    /* host-RAM global store + cap the resident global dKc/dVc to Bslab slots (free the full-P alloc) */
+    s->arm_ramK = (float **)calloc((size_t)NL, sizeof(float *));
+    s->arm_ramV = (float **)calloc((size_t)NL, sizeof(float *));
+    if (!s->arm_ramK || !s->arm_ramV) ok = 0;
+    for (int L = 0; ok && L < kvfs && L < NL; L++) {
+        if ((L % period) != period - 1) continue;   /* globals only */
+        s->arm_ramK[L] = (float *)malloc((size_t)P * kvd_g * sizeof(float));
+        s->arm_ramV[L] = (float *)malloc((size_t)P * kvd_g * sizeof(float));
+        if (!s->arm_ramK[L] || !s->arm_ramV[L]) { ok = 0; break; }
+        if (s->dKc[L]) cudaFree(s->dKc[L]);
+        if (s->dVc[L]) cudaFree(s->dVc[L]);
+        s->dKc[L] = NULL; s->dVc[L] = NULL;
+        AD(s->dKc[L], (size_t)Bslab * kvd_g);
+        AD(s->dVc[L], (size_t)Bslab * kvd_g);
+    }
+    #undef AD
+    #undef AI
+    if (!ok) { sp_set_error("g4_arm_open: device/host OOM"); return -1; }
+    s->arm_slab = 1;
+    fprintf(stderr, "    [g4-kv] P3 ARM SLAB armed: Bslab=%d r=%d B=%d sink=%d n_global=%d (globals capped to slab; host-RAM store [%d x P*%d]); P3.3 gather PENDING\n",
+            Bslab, r, s->arm_B, s->arm_sink, n_global, n_global, kvd_g);
+    return 0;
+}
+
 extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     if (!m || m->cfg.arch != SP_ARCH_GEMMA4 || Pmax <= 0) { sp_set_error("gemma4_kv_open: bad args"); return NULL; }
     if (g_w.key != m) { free_weights(&g_w); if (build_weights(m, &g_w)) return NULL; }
@@ -4332,6 +4449,11 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     if (s->ring_W>0) fprintf(stderr,"    [g4-kv] RING mode: Wring=%d Jmax=%d (SWA owners ring+journal; globals full-cache)\n",s->ring_W,s->Jmax);
     #undef KA
     if (!ok) { sp_set_error("gemma4_kv_open: device OOM"); gemma4_kv_close(s); return NULL; }
+    /* P3.2 (OKV global-layer eviction): stand up the slab ONLY when both env knobs are set.
+     * Off ⇒ untouched full-cache globals = byte-identical null floor. */
+    if (getenv("SP_ARM_SLAB") && getenv("SP_ARM_LSH_R")) {
+        if (g4_arm_open(s)) { gemma4_kv_close(s); return NULL; }
+    }
     return s;
 }
 
@@ -5323,6 +5445,7 @@ extern "C" int gemma4_kv_read_global_q(sp_g4_kv *s, int32_t token, float *out) {
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (!s) return;
+    g4_arm_close(s);                                  /* P3.2 (OKV): free the global-eviction slab (NULL-safe) */
     if (s->qcap_host) cudaFreeHost(s->qcap_host);   /* B3-v2 query-capture pinned buf */
     if (s->dseq) cudaFree(s->dseq); if (s->dpos) cudaFree(s->dpos);
     float *ptrs[] = {s->dx,s->dnx,s->dq,s->dk,s->dv,s->dao,s->dap,s->dg,s->dup,s->ddn,s->dscr,

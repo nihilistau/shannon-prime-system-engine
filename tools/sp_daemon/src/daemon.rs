@@ -617,6 +617,24 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                     unsafe { std::env::set_var("SP_G4_KV_JMAX", j.trim()); }
                 }
             }
+            // P3.2 (OKV global-layer eviction): surface the slab knobs so the resident global cap is a
+            // daemon config. SP_DAEMON_KVDECODE_SLAB + _LSH_R arm it; _BSLAB/_B/_SINK tune it. Default
+            // unset = full-cache globals (byte-identical null floor). Gather is P3.3 (not yet wired).
+            for (dk, ck) in [
+                ("SP_DAEMON_KVDECODE_SLAB", "SP_ARM_SLAB"),
+                ("SP_DAEMON_KVDECODE_LSH_R", "SP_ARM_LSH_R"),
+                ("SP_DAEMON_KVDECODE_BSLAB", "SP_ARM_BSLAB"),
+                ("SP_DAEMON_KVDECODE_ARM_B", "SP_ARM_B"),
+                ("SP_DAEMON_KVDECODE_ARM_SINK", "SP_ARM_SINK"),
+            ] {
+                if let Ok(v) = std::env::var(dk) {
+                    if !v.trim().is_empty() {
+                        // SAFETY: single-threaded startup, before any decode thread spawns.
+                        unsafe { std::env::set_var(ck, v.trim()); }
+                        info!("WIRE-CUDA-DECODE P3: slab knob {ck}={}", v.trim());
+                    }
+                }
+            }
             // SAFETY: we own `session` exclusively here; no concurrent decode.
             match unsafe {
                 sp_daemon::cuda_kvdecode_dispatch::register_with_session(session_raw, qm, pmax)
