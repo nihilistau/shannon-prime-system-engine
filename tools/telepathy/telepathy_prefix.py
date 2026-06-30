@@ -110,5 +110,37 @@ def main():
     print(f"per-text corr>shuf win-rate = {wins/len(fin):.3f}  (chance 0.5)")
     print(f"VERDICT positional-attention={'GREEN' if (ll_corr-ll_shuf)>0 and wins/len(fin)>0.7 else 'AMBER' if (ll_corr-ll_shuf)>0 else 'RED'}")
 
+    # ---- save the embedding-prefix adapter for the v1 sidecar ----
+    np.savez("telepathy_adapter_g2q_emb.npz", W=Wemb.astype(np.float32),
+             gmu=gmu.astype(np.float32), gsd=gsd.astype(np.float32),
+             emu=emu.astype(np.float32), esd=esd.astype(np.float32),
+             embnorm=np.float32(embnorm), scale=np.float32(s))
+    print("[save] embedding-prefix adapter -> telepathy_adapter_g2q_emb.npz")
+
+    # ---- G-TELEPATHY-LIVE: the delegate (Qwen) GENERATES from the injected prefix; correct vs empty ----
+    def qemb_text(t):
+        with torch.no_grad():
+            return emb_layer(tokq(t, return_tensors="pt").input_ids.to(dev))[0].float().mean(0).cpu().numpy()
+    def cos(a, b): return float(a @ b / ((np.linalg.norm(a)*np.linalg.norm(b)) + 1e-8))
+    bos = tokq.bos_token_id if tokq.bos_token_id is not None else tokq.eos_token_id
+    rel_c, rel_e = [], []
+    print("\n[live] delegate generations (correct prefix vs empty):")
+    for ti in list(fin)[:6]:
+        gv, _ = gem[ti]; pref = mapg(gv); pref = pref/(np.linalg.norm(pref,axis=1,keepdims=True)+1e-8)*embnorm*s
+        with torch.no_grad():
+            be = emb_layer(torch.tensor([[bos]], device=dev))
+            pt = torch.tensor(pref, dtype=be.dtype, device=dev).unsqueeze(0)
+            gc = modelq.generate(inputs_embeds=torch.cat([be, pt], 1), max_new_tokens=16, do_sample=False)
+            ge = modelq.generate(inputs_embeds=be, max_new_tokens=16, do_sample=False)
+        tc = tokq.decode(gc[0], skip_special_tokens=True).replace("\n", " ")
+        te = tokq.decode(ge[0], skip_special_tokens=True).replace("\n", " ")
+        src = texts[ti]
+        rc, re = cos(qemb_text(tc), qemb_text(src)), cos(qemb_text(te), qemb_text(src))
+        rel_c.append(rc); rel_e.append(re)
+        print(f"  src='{src[:40]}'\n    correct-prefix -> '{tc[:52]}'  (rel {rc:.3f})\n    empty-prefix   -> '{te[:52]}'  (rel {re:.3f})")
+    mc, me = float(np.mean(rel_c)), float(np.mean(rel_e))
+    print(f"[live] source-relatedness: correct={mc:.3f} empty={me:.3f}  gain=+{mc-me:.3f}")
+    print(f"[live] G-TELEPATHY-LIVE: {'GREEN' if mc>me else 'AMBER'} (injected prefix steers the delegate's generation toward the source)")
+
 if __name__=="__main__":
     main()
