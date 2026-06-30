@@ -126,6 +126,14 @@ scratch/
 
 # root scratch dirs/files + rust build dirs (2026-06-24 cleanup)
 /_*
-!/_needle_corpus_div/
 target-wirecuda/
 target-host/
+
+# nested underscore scratch — data dirs + throwaway files at any depth (2026-06-30 sweep)
+_*/
+tools/**/_*
+tests/**/_*
+tools/eagle/corpus_small.txt
+
+# moved root run-logs (preserved, untracked)
+logs/
