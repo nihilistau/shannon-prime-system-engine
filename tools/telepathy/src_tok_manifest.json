@@ -1,0 +1,1 @@
+[{"i": 0, "text": "count the number of r letters in the word strawberry", "shape": [11, 2048]}, {"i": 1, "text": "write a python function that reverses a linked list", "shape": [10, 2048]}, {"i": 2, "text": "what is the time complexity of binary search", "shape": [9, 2048]}, {"i": 3, "text": "explain how a hash map handles collisions", "shape": [8, 2048]}]

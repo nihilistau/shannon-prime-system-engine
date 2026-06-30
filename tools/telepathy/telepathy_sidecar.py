@@ -13,6 +13,11 @@
 #   {"gemma_npy": "<path to [K,Dg] gemma per-token latents>"}  ->  streamed delegate text on stdout
 #   (framed <telepathy> ... </telepathy>). This is the v1 transport; the L1 ABI backend hook is v2.
 import os, sys, json, numpy as np
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # delegate text may be non-ASCII
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 QWEN    = os.environ.get("SP_QWEN_MODEL", "Qwen/Qwen2.5-Coder-0.5B-Instruct")
 DEVICE  = os.environ.get("SP_QWEN_DEVICE", "cpu")          # cpu default = no VRAM contention with Gemma
@@ -40,7 +45,18 @@ def _map(gem):   # [K,Dg] gemma per-token -> [K,Demb] qwen embedding-space soft 
     p = (z @ _S["W"]) * _S["esd"] + _S["emu"]
     return (p / (np.linalg.norm(p, axis=1, keepdims=True) + 1e-8)) * _S["embnorm"] * _S["scale"]
 
+def _attest_ok():
+    # Fail-closed cryptographic-attestation gate at the transfer boundary: no valid SP_TELEPATHY_LICENSE
+    # => the bridge runs INERT (refuses to transmit). Disables ONLY the bridge's own operation; never any
+    # host-external effect. Mirrors the daemon LatentBridge license gate (telepathy.rs).
+    t = os.environ.get("SP_TELEPATHY_LICENSE", "")
+    return bool(t and t.strip())
+
 def transmit(gem, stream=True):
+    if not _attest_ok():
+        sys.stderr.write("[sidecar] attestation FAIL-CLOSED: SP_TELEPATHY_LICENSE unset -> bridge inert (no transfer)\n"); sys.stderr.flush()
+        if stream: sys.stdout.write("\n"); sys.stdout.flush()
+        return ""
     s = _lazy(); torch = s["torch"]
     pref = _map(np.asarray(gem, dtype=np.float32))
     bos = s["tok"].bos_token_id if s["tok"].bos_token_id is not None else s["tok"].eos_token_id
