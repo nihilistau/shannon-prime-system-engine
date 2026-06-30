@@ -706,6 +706,38 @@ fn run_kvdecode_chat(
         return;
     }
 
+    // ── TELEPATHY served splice (SP_TELEPATHY_CHAT=1, default-off = byte-identical null floor) ──
+    // The cemented two-stage delegate (TELE-12/13/14/15) on the LIVE /v1/chat path: stage 1 routes
+    // on the latent, stage 2 hands the CLEAN user text to the qwen coder (CPU L1) and streams its
+    // answer into the SSE {delta} stream instead of the Gemma decode. NEVER fuses latent+text.
+    // Placed BEFORE the GPU cache guard so a delegated turn never touches the Gemma resident cache.
+    // NOTE distinct from SP_TELEPATHY (the one-shot parity verb in main.rs, which early-exits before
+    // serving) — the served path uses its own flag. v1: route is SP_ROUTE_FORCE-driven; autonomous
+    // feat-route (the TELE-7 head on a NON-COMMITTING capture_feat) is v1.1 (capture_feat is
+    // async-armed and would commit the cache).
+    if std::env::var("SP_TELEPATHY_CHAT").as_deref() == Ok("1") {
+        if let Some(user) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            if let crate::telepathy::RouteDecision::Telepathy(bid) = crate::telepathy::decide_route(&[0.0f32]) {
+                let marker = std::env::var("SP_TELEPATHY_MARKER").as_deref() != Ok("0");
+                let emit = |t: String| {
+                    let payload = serde_json::to_string(&ChatDelta { delta: t, chat_id }).unwrap_or_default();
+                    tx.blocking_send(Ok(Event::default().data(payload))).is_ok()
+                };
+                tracing::info!("TELEPATHY: route -> delegate(bridge {bid}); user={:?}", user);
+                if marker { let _ = emit("\u{27E6}delegate: qwen2.5-coder\u{27E7}\n".to_string()); }
+                match crate::telepathy::delegate_execute(&user, bid) {
+                    Ok(ans) => { let _ = emit(ans); }
+                    Err(e)  => { let _ = emit(format!("[delegate error: {e}]")); }
+                }
+                if marker { let _ = emit("\n\u{27E6}/delegate\u{27E7}".to_string()); }
+                let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+                let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "done" });
+                sessions.remove(chat_id);
+                return;
+            }
+        }
+    }
+
     // Serialize on the resident cache for the whole request (one GPU cache).
     let guard = match app.cuda_kvdecode_handle.as_ref() {
         Some(m) => m.lock().unwrap(),

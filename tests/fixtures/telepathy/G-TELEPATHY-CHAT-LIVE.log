@@ -1,0 +1,11 @@
+data: {"delta":"⟦delegate: qwen2.5-coder⟧\n","chat_id":1}
+
+: keepalive
+
+data: {"delta":"Here's a Python function that reverses a string:\n\n```python\ndef reverse","chat_id":1}
+
+data: {"delta":"\n⟦/delegate⟧","chat_id":1}
+
+data: [DONE]
+
+POST_EXIT=0 
