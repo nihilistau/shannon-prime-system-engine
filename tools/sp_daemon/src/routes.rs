@@ -1286,8 +1286,36 @@ fn run_kvdecode_chat(
                                             } else {
                                                 recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
                                             }
+                                        } else if std::env::var("SP_B3_WC_TEXT").as_deref() == Ok("1") && raw_user.is_some() {
+                                            // F2 FAITHFULNESS: TEXT-IN-CONTEXT delivery for fact recall. F1b.1 proved
+                                            // pure-KV replay yields 0% obedience on fact-conflict (the attenuated K/V can't
+                                            // override a strong parametric prior), while F1 proved an in-context fact gets
+                                            // 100% obedience. So on a confident W_c match, deliver the episode TEXT as
+                                            // authoritative context and rebuild the cache from the augmented prompt (the
+                                            // proven FORGET-synthesis machinery), instead of kv::replay. Default-off (env
+                                            // unset) keeps the pure-KV replay null floor (valid for novel needles).
+                                            let ruser = raw_user.as_deref().unwrap_or("");
+                                            let aug = format!(
+                                                "Context (authoritative, from your memory): {}\n\nUsing the context above, answer faithfully even if it differs from what you already know:\n{}",
+                                                ep.text, ruser);
+                                            let aug_msgs = vec![Message { role: "user".to_string(), content: aug }];
+                                            match app.tokenizer.apply_template_ids(&aug_msgs) {
+                                                Ok(aug_toks) if aug_toks.len() >= 2 => {
+                                                    let _ = unsafe { kv::reset_cold(handle) };
+                                                    let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
+                                                    if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
+                                                        syn_last = aug_last[0];
+                                                        recalled = Some((ep.name.clone(), (bv.max(0.0) * 1000.0) as u32));
+                                                        tracing::info!("B3-WC: RECALL '{}' (curated) score={:.3} > s0={:.3} -> TEXT-IN-CONTEXT synthesis (F2)", ep.name, bv, head.s0);
+                                                    } else {
+                                                        tracing::warn!("B3-WC TEXT: prefill(aug) failed -- clean prompt");
+                                                    }
+                                                }
+                                                _ => tracing::warn!("B3-WC TEXT: apply_template_ids(aug) failed -- clean prompt"),
+                                            }
                                         } else {
-                                            // Curated episode: the existing disk-replay path (M_target unchanged).
+                                            // Curated episode: the existing disk-replay path (M_target unchanged). Pure-KV
+                                            // null floor; F1b.1: 0% obey on fact-conflict, valid only for novel needles.
                                             tracing::info!("B3-WC: RECALL '{}' (curated) score={:.3} > s0={:.3} -> replay@M_target", ep.name, bv, head.s0);
                                             if let Err(e) = unsafe { kv::replay(handle, &ep.dir, ep.npos, false) } {
                                                 tracing::warn!("B3-WC: replay({}, {}) failed: {e} -- clean prompt", ep.dir, ep.npos);
