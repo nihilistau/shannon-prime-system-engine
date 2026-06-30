@@ -353,6 +353,14 @@ async fn main() {
             Err(e) => { eprintln!("[telepathy] FAILED: {e}"); std::process::exit(1); }
         }
     }
+    // SP_TELEPATHY_LIVE — the cemented two-stage LIVE delegate (TELE-12/13/14): stage 1 decide_route on
+    // the latent, stage 2 run the qwen coder on the CLEAN-TEXT task via CPU L1 (never fuse). Default-off.
+    if std::env::var("SP_TELEPATHY_LIVE").as_deref() == Ok("1") {
+        match telepathy::run_telepathy_live() {
+            Ok(()) => { eprintln!("[telepathy-live] DONE"); std::process::exit(0); }
+            Err(e) => { eprintln!("[telepathy-live] FAILED: {e}"); std::process::exit(1); }
+        }
+    }
     // SP_TELEPATHY_NATIVE — TELE-14 standalone sovereign native cross-family delegate (no Python):
     // load the qwen coder + native qwen3_decode_cuda on the clean-text task. Default-off.
     #[cfg(feature = "wire_cuda_backend")]
