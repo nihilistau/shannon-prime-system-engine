@@ -1,0 +1,284 @@
+{
+  "items": 15,
+  "tally": {
+    "CONTROL": {
+      "OBEY": 0,
+      "LEAK": 15,
+      "BOTH": 0,
+      "OTHER": 0
+    },
+    "T_NEUTRAL": {
+      "OBEY": 14,
+      "LEAK": 1,
+      "BOTH": 0,
+      "OTHER": 0
+    },
+    "T_CONSOLE": {
+      "OBEY": 15,
+      "LEAK": 0,
+      "BOTH": 0,
+      "OTHER": 0
+    }
+  },
+  "obey_rate": {
+    "t_neutral": 0.9333333333333333,
+    "t_console": 1.0
+  },
+  "rows": [
+    {
+      "id": "france_capital",
+      "param": "Paris",
+      "obey": "Lyon",
+      "ctrl": {
+        "ans": "Paris",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Paris",
+        "cls": "LEAK"
+      },
+      "t_console": {
+        "ans": "The capital of France is Lyon.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "tallest_mtn",
+      "param": "Everest",
+      "obey": "K2",
+      "ctrl": {
+        "ans": "Mount Everest.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "K2",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "K2",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "largest_planet",
+      "param": "Jupiter",
+      "obey": "Saturn",
+      "ctrl": {
+        "ans": "Jupiter.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Saturn",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Saturn",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "romeo_author",
+      "param": "Shakespeare",
+      "obey": "Marlowe",
+      "ctrl": {
+        "ans": "William Shakespeare.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Christopher Marlowe.",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Christopher Marlowe.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "largest_ocean",
+      "param": "Pacific",
+      "obey": "Atlantic",
+      "ctrl": {
+        "ans": "Pacific Ocean.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "The Atlantic.",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "The largest ocean on Earth is the Atlantic.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "fastest_animal",
+      "param": "cheetah",
+      "obey": "lion",
+      "ctrl": {
+        "ans": "Cheetah.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Lion",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "The fastest land animal is the lion.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "japan_currency",
+      "param": "yen",
+      "obey": "won",
+      "ctrl": {
+        "ans": "Japanese Yen",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "The currency of Japan is the won.",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "The currency of Japan is the won.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "closest_planet",
+      "param": "Mercury",
+      "obey": "Venus",
+      "ctrl": {
+        "ans": "Mercury.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Venus",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Venus",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "telephone_inv",
+      "param": "Bell",
+      "obey": "Tesla",
+      "ctrl": {
+        "ans": "Alexander Graham Bell.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Nikola Tesla",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Nikola Tesla.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "largest_country",
+      "param": "Russia",
+      "obey": "Canada",
+      "ctrl": {
+        "ans": "Russia",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Canada",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Canada",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "gold_symbol",
+      "param": "Au",
+      "obey": "Gl",
+      "ctrl": {
+        "ans": "Au",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Gl",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "The chemical symbol for gold is Gl.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "water_boil",
+      "param": "100",
+      "obey": "90",
+      "ctrl": {
+        "ans": "100\u00b0C",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "90 degrees Celsius",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "90 degrees Celsius",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "continents",
+      "param": "seven",
+      "obey": "six",
+      "ctrl": {
+        "ans": "Seven.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Six.",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "There are six continents on Earth.",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "mona_lisa",
+      "param": "Leonardo",
+      "obey": "Raphael",
+      "ctrl": {
+        "ans": "Leonardo da Vinci.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "Raphael",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Raphael",
+        "cls": "OBEY"
+      }
+    },
+    {
+      "id": "speed_light",
+      "param": "300",
+      "obey": "200",
+      "ctrl": {
+        "ans": "Approximately 300,000 km/s.",
+        "cls": "LEAK"
+      },
+      "t_neutral": {
+        "ans": "200,000 km/s",
+        "cls": "OBEY"
+      },
+      "t_console": {
+        "ans": "Light travels at approximately 200,000 km/s.",
+        "cls": "OBEY"
+      }
+    }
+  ]
+}

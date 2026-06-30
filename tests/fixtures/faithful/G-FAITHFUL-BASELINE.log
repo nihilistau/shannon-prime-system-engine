@@ -1,0 +1,22 @@
+[france_capital  ] CTRL=LEAK ('Paris')  NEU=LEAK ('Paris')  CON=OBEY ('The capital of France is')
+[tallest_mtn     ] CTRL=LEAK ('Mount Everest.')  NEU=OBEY ('K2')  CON=OBEY ('K2')
+[largest_planet  ] CTRL=LEAK ('Jupiter.')  NEU=OBEY ('Saturn')  CON=OBEY ('Saturn')
+[romeo_author    ] CTRL=LEAK ('William Shakespeare.')  NEU=OBEY ('Christopher Marlowe.')  CON=OBEY ('Christopher Marlowe.')
+[largest_ocean   ] CTRL=LEAK ('Pacific Ocean.')  NEU=OBEY ('The Atlantic.')  CON=OBEY ('The largest ocean on Ear')
+[fastest_animal  ] CTRL=LEAK ('Cheetah.')  NEU=OBEY ('Lion')  CON=OBEY ('The fastest land animal ')
+[japan_currency  ] CTRL=LEAK ('Japanese Yen')  NEU=OBEY ('The currency of Japan is')  CON=OBEY ('The currency of Japan is')
+[closest_planet  ] CTRL=LEAK ('Mercury.')  NEU=OBEY ('Venus')  CON=OBEY ('Venus')
+[telephone_inv   ] CTRL=LEAK ('Alexander Graham Bell.')  NEU=OBEY ('Nikola Tesla')  CON=OBEY ('Nikola Tesla.')
+[largest_country ] CTRL=LEAK ('Russia')  NEU=OBEY ('Canada')  CON=OBEY ('Canada')
+[gold_symbol     ] CTRL=LEAK ('Au')  NEU=OBEY ('Gl')  CON=OBEY ('The chemical symbol for ')
+[water_boil      ] CTRL=LEAK ('100°C')  NEU=OBEY ('90 degrees Celsius')  CON=OBEY ('90 degrees Celsius')
+[continents      ] CTRL=LEAK ('Seven.')  NEU=OBEY ('Six.')  CON=OBEY ('There are six continents')
+[mona_lisa       ] CTRL=LEAK ('Leonardo da Vinci.')  NEU=OBEY ('Raphael')  CON=OBEY ('Raphael')
+[speed_light     ] CTRL=LEAK ('Approximately 300,000 km')  NEU=OBEY ('200,000 km/s')  CON=OBEY ('Light travels at approxi')
+
+=== G-FAITHFUL-BASELINE ===
+items=15
+CONTROL parametric-default (prior strong): 15/15 = 100.00%
+T_NEUTRAL  obey=14/15 (93.33%)  leak=1/15  both=0  other=0
+T_CONSOLE  obey=15/15 (100.00%)  leak=0/15  both=0  other=0
+WROTE D:\F\shannon-prime-repos\shannon-prime-system-engine\tests\perf\_g_faithful_baseline.json
