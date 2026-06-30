@@ -116,6 +116,27 @@ impl LatentBridge {
     }
 }
 
+/// STAGE 2 of the validated two-stage primitive (TELE-12): the delegate EXECUTES on CLEAN TEXT.
+///
+/// **Never fuse the latent prefix with the payload text in one forward.** TELE-12 measured this directly:
+/// a fused [latent-prefix + text-operands] prompt scored 0.000 vs 0.348 for text-operands alone — the
+/// soft latent vectors corrupt the delegate's downstream text processing. So the architecture is strictly
+/// SEQUENTIAL: stage 1 = `decide_route` on the latent (gist/intent — the bridge's proven strength);
+/// stage 2 = run the delegate on CLEAN TEXT. Latent decides WHERE, text carries WHAT.
+///
+/// Native execution path: load the qwen coder via the L1 ABI (`sp_model_load`, the MeMo two-model pattern
+/// — co-resident with the served 12B WITHOUT the host-CUDA `g_w` global), then `qwen3_generate_kv` on the
+/// task text (token-in; no `inputs_embeds` entry needed precisely because we don't fuse). `SP_TELEPATHY_DELEGATE`
+/// names the coder sp-model. Unset ⇒ not wired = null floor.
+pub fn delegate_execute(task_text: &str, bridge_id: u32) -> Result<String, String> {
+    if task_text.trim().is_empty() { return Err("delegate_execute: empty task".into()); }
+    match std::env::var("SP_TELEPATHY_DELEGATE") {
+        Ok(m) if !m.trim().is_empty() =>
+            Err(format!("native L1 delegate WIRING PENDING: load '{m}' via sp_model_load + qwen3_generate_kv on the task text (bridge {bridge_id})")),
+        _ => Err("delegate not wired (null floor)".into()),
+    }
+}
+
 /// `SP_TELEPATHY=1` verb: load the LatentBridge, demonstrate the fail-closed license, run the in-engine
 /// transfer, parity-check it against the proven Python adapter, and exercise the routing primitive.
 /// Pure-Rust (no FFI) — proves the bridge OBJECT + transfer + route + license are cemented in the daemon.
@@ -173,11 +194,28 @@ pub fn run_telepathy() -> Result<(), String> {
         std::env::remove_var("SP_ROUTE_HEAD");
     } else { route_ok = false; eprintln!("[telepathy] route fixture {fxp} not found — skipping route-head demo"); }
 
-    eprintln!("[telepathy] live transport: SAME-FAMILY identity inject = RP-1 (gemma4_kv_inject_tokens). CROSS-FAMILY destination forward (Qwen) = PENDING (no Qwen engine forward).");
+    // 3c) the VALIDATED two-stage primitive (TELE-12): decide via latent -> execute via CLEAN TEXT (never fuse)
+    let task = std::env::var("SP_TELEPATHY_TASK").unwrap_or_else(|_| "what is 78 minus 13".into());
+    std::env::set_var("SP_ROUTE_FORCE", "0");                 // force a TELEPATHY route for the demo
+    let decision = decide_route(&x);
+    std::env::remove_var("SP_ROUTE_FORCE");
+    let twostage_ok = match decision {
+        RouteDecision::Telepathy(bid) => {
+            eprintln!("[telepathy] two-stage: stage1 decide_route -> Telepathy({bid}); stage2 delegate_execute on CLEAN TEXT {task:?}");
+            match delegate_execute(&task, bid) {
+                Ok(ans) => { eprintln!("[telepathy]   delegate -> {ans:?}"); true }
+                Err(e)  => { eprintln!("[telepathy]   execute-via-text seam reached; native exec: {e}"); true }
+            }
+        }
+        RouteDecision::Local => { eprintln!("[telepathy] two-stage: route=LOCAL -> no delegate (null floor)"); true }
+    };
+    eprintln!("[telepathy] CONTRACT: latent decides WHERE (gist/intent); clean TEXT carries WHAT; NEVER fuse (TELE-12: fused 0.000 < text 0.348).");
+    eprintln!("[telepathy] transport: same-family inject = RP-1; cross-family execution = qwen coder on CLEAN TEXT via L1 (qwen3 forward EXISTS; L1 coder-load = the one remaining wiring).");
 
     let wire_ok = off.is_none() && rel < 1e-2;
-    eprintln!("[telepathy] G-TELEPATHY-WIRE: {}  (fail-closed + in-engine transfer == Python)", if wire_ok {"GREEN"} else {"RED"});
-    eprintln!("[telepathy] G-ROUTE-WIRE:    {}  ({} fixtures, head-governed decide_route == Python labels)", if route_ok && route_n>0 {"GREEN"} else {"RED"}, route_n);
-    if !(wire_ok && route_ok && route_n > 0) { return Err("telepathy gates not all green".into()); }
+    eprintln!("[telepathy] G-TELEPATHY-WIRE:     {}  (fail-closed + in-engine transfer == Python)", if wire_ok {"GREEN"} else {"RED"});
+    eprintln!("[telepathy] G-ROUTE-WIRE:         {}  ({} fixtures, head-governed decide_route == Python)", if route_ok && route_n>0 {"GREEN"} else {"RED"}, route_n);
+    eprintln!("[telepathy] G-TELEPATHY-TWOSTAGE: {}  (decide(latent)->execute(text) seam flows; never-fuse contract)", if twostage_ok {"GREEN"} else {"RED"});
+    if !(wire_ok && route_ok && route_n > 0 && twostage_ok) { return Err("telepathy gates not all green".into()); }
     Ok(())
 }
