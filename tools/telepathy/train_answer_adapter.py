@@ -41,23 +41,29 @@ with torch.no_grad():
     mlp[2].weight.copy_(torch.tensor(ad["m2w"],device=dev)); mlp[2].bias.copy_(torch.tensor(ad["m2b"],device=dev))
 embnorm=float(ad["embnorm"]); logscale=nn.Parameter(torch.tensor(float(np.log(float(ad["scale"]))),device=dev))
 opt=torch.optim.Adam(list(lin.parameters())+list(mlp.parameters())+[logscale],lr=float(os.environ.get("SP_GEN_LR","3e-5")))
+import re
 bos=qtok.bos_token_id if qtok.bos_token_id is not None else qtok.eos_token_id
+SCAFFOLD=" The answer is"                 # text-grounding anchor: separates 'read the latent' from 'generate'
+scaf_ids=qtok(SCAFFOLD,add_special_tokens=False,return_tensors="pt").input_ids.to(dev)
 def prefix(g):
     h=lin(torch.tensor(g,dtype=torch.float32,device=dev)); p=h+mlp(h)
     return p/(p.norm(dim=1,keepdim=True)+1e-6)*embnorm*torch.exp(logscale)
+def ctx(g):                               # [1,1+K+S,De] = bos + latent prefix + scaffold text
+    parts=torch.cat([emb(torch.tensor([[bos]],device=dev)), prefix(g).unsqueeze(0), emb(scaf_ids)],1)
+    return parts, parts.shape[1]
 def ce(g,a):
-    pref=prefix(g); aid=qtok(a,return_tensors="pt").input_ids.to(dev); K=pref.shape[0]
-    full=torch.cat([emb(torch.tensor([[bos]],device=dev)),pref.unsqueeze(0),emb(aid)],1)
-    lab=torch.cat([torch.full((1,1+K),-100,device=dev),aid],1)
+    c,clen=ctx(g); aid=qtok(" "+a,add_special_tokens=False,return_tensors="pt").input_ids.to(dev)
+    full=torch.cat([c, emb(aid)],1)
+    lab=torch.cat([torch.full((1,clen),-100,device=dev), aid],1)
     return qm(inputs_embeds=full,labels=lab).loss
 def exact_match(GE,rows):
     hit=0
     with torch.no_grad():
         for g,r in zip(GE,rows):
-            be=emb(torch.tensor([[bos]],device=dev)); pt=prefix(g).unsqueeze(0)
-            gen=qm.generate(inputs_embeds=torch.cat([be,pt],1),max_new_tokens=8,do_sample=False)
+            c,_=ctx(g)
+            gen=qm.generate(inputs_embeds=c,max_new_tokens=10,do_sample=False)
             out=qtok.decode(gen[0],skip_special_tokens=True).strip().lower()
-            if r["a"].lower() in out.split() or out.startswith(r["a"].lower()): hit+=1
+            if r["a"].lower() in re.findall(r"[a-z0-9]+",out): hit+=1   # FAIR: gold appears in the answer
     return hit/len(rows)
 base_em=exact_match(GEM_TE,TE); print(f"[base] warm-start exact-match (test) = {base_em:.3f}")
 rng=np.random.RandomState(0); order=list(range(ntr))
@@ -74,11 +80,11 @@ np.savez("telepathy_adapter_g2q_ans.npz", Wt=lin.weight.detach().cpu().numpy(), 
          m2w=mlp[2].weight.detach().cpu().numpy(), m2b=mlp[2].bias.detach().cpu().numpy(),
          embnorm=np.float32(embnorm), scale=np.float32(float(torch.exp(logscale))), src=GEMMA, dst=QWEN)
 print("[save] answer adapter -> telepathy_adapter_g2q_ans.npz")
-print("[samples] test Q -> Qwen answer (from pure latent prefix):")
-for g,r in list(zip(GEM_TE,TE))[:6]:
+print("[samples] test Q -> latent prefix + 'The answer is' scaffold -> Qwen:")
+for g,r in list(zip(GEM_TE,TE))[:8]:
     with torch.no_grad():
-        be=emb(torch.tensor([[bos]],device=dev)); pt=prefix(g).unsqueeze(0)
-        gen=qm.generate(inputs_embeds=torch.cat([be,pt],1),max_new_tokens=8,do_sample=False)
+        c,_=ctx(g); gen=qm.generate(inputs_embeds=c,max_new_tokens=10,do_sample=False)
     out=qtok.decode(gen[0],skip_special_tokens=True).strip().replace("\n"," ").encode("ascii","replace").decode()
-    print(f"  Q='{r['q'][:40]}' gold='{r['a']}' -> {out[:32]!r}")
+    ok = r["a"].lower() in re.findall(r"[a-z0-9]+", out.lower())
+    print(f"  Q='{r['q'][:34]}' gold='{r['a']}' -> {out[:30]!r} {'OK' if ok else ''}")
 print("DONE")

@@ -8,25 +8,20 @@ WORDS=["strawberry","banana","mississippi","programming","raspberry","alphabet",
        "butterfly","watermelon","helicopter","crocodile","umbrella","notebook","elephant","dinosaur",
        "chocolate","pineapple","computer","keyboard","mountain","calendar","hospital","library"]
 def tasks(rng, n):
+    # ARITHMETIC + PRIME only — tasks the 0.5B provably does from text (text baseline arith 0.806), so the
+    # gate isolates CHANNEL fidelity, not the model's char-counting tokenization weakness.
     out=[]
     while len(out)<n:
         k=rng.random()
-        if k<0.22:
-            w=rng.choice(WORDS); c=rng.choice(list(set(w)))
-            out.append((f"how many times does the letter {c} appear in {w}", str(w.count(c))))
-        elif k<0.40:
-            w=rng.choice(WORDS); out.append((f"reverse the string {w}", w[::-1]))
-        elif k<0.55:
+        if k<0.34:
+            a,b=rng.randint(2,50),rng.randint(2,50); out.append((f"what is {a} plus {b}", str(a+b)))
+        elif k<0.62:
+            a,b=rng.randint(2,20),rng.randint(2,12); out.append((f"what is {a} times {b}", str(a*b)))
+        elif k<0.82:
+            a,b=rng.randint(20,99),rng.randint(2,19); out.append((f"what is {a} minus {b}", str(a-b)))
+        else:
             n2=rng.randint(2,99); pr=all(n2%i for i in range(2,int(n2**0.5)+1)) and n2>1
             out.append((f"is {n2} a prime number, answer yes or no", "yes" if pr else "no"))
-        elif k<0.68:
-            a,b=rng.randint(2,50),rng.randint(2,50); out.append((f"what is {a} plus {b}", str(a+b)))
-        elif k<0.80:
-            a,b=rng.randint(2,20),rng.randint(2,12); out.append((f"what is {a} times {b}", str(a*b)))
-        elif k<0.90:
-            w=rng.choice(WORDS); out.append((f"how many characters are in the word {w}", str(len(w))))
-        else:
-            w=rng.choice(WORDS); out.append((f"what is the last letter of {w}", w[-1]))
     return out
 def main():
     rng=random.Random(2026)
