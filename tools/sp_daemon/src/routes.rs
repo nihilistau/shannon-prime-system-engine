@@ -1328,6 +1328,51 @@ fn run_kvdecode_chat(
                                 None => tracing::warn!("B3-WC: SP_B3_WC set but load_wc({}) failed -- skipping", wcp),
                             }
                         }
+                        // ===== F2b: TOKEN-OVERLAP (Jaccard) selection for NATURAL FACTS =====
+                        // W_c is geometric — great for high-entropy novel needles, blind to mutually-
+                        // similar natural-language facts (F2: it picked query-INDEPENDENT episodes, 0/15).
+                        // Token-overlap of the QUERY vs each episode TEXT discriminates natural facts
+                        // (recall::token_overlap, the production Jaccard verifier); on a confident overlap,
+                        // deliver the episode TEXT in-context (the F1=100% path), NOT pure-KV replay.
+                        // Default-off (SP_RECALL_JACCARD unset) = null floor; runs only if no prior stage decided.
+                        if !int2_decided && recalled.is_none()
+                            && std::env::var("SP_RECALL_JACCARD").as_deref() == Ok("1")
+                        {
+                            if let Some(ruser) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                                let tau_ov: f32 = std::env::var("SP_RECALL_JACCARD_TAU").ok()
+                                    .and_then(|s| s.parse().ok()).unwrap_or(0.15);
+                                let q = ruser.to_lowercase();
+                                let (mut bov, mut bname, mut btext) = (0.0f32, String::new(), String::new());
+                                {
+                                    let ns_guard = app.nightshift.read().unwrap();
+                                    for ep in registry.iter().chain(ns_guard.iter()) {
+                                        let ov = recall::token_overlap(&q, &ep.text);
+                                        if ov > bov { bov = ov; bname = ep.name.clone(); btext = ep.text.clone(); }
+                                    }
+                                }
+                                if bov >= tau_ov && !btext.is_empty() {
+                                    let aug = format!("Context (authoritative, current): {}\n\n{}", btext, ruser);
+                                    let aug_msgs = vec![
+                                        Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                        Message { role: "user".to_string(), content: aug },
+                                    ];
+                                    match app.tokenizer.apply_template_ids(&aug_msgs) {
+                                        Ok(aug_toks) if aug_toks.len() >= 2 => {
+                                            let _ = unsafe { kv::reset_cold(handle) };
+                                            let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
+                                            if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
+                                                syn_last = aug_last[0];
+                                                recalled = Some((bname.clone(), (bov * 1000.0) as u32));
+                                                tracing::info!("RECALL-JACCARD: '{}' overlap={:.3} >= tau={:.3} -> TEXT-IN-CONTEXT (F2b)", bname, bov, tau_ov);
+                                            } else { tracing::warn!("RECALL-JACCARD: prefill(aug) failed -- clean prompt"); }
+                                        }
+                                        _ => tracing::warn!("RECALL-JACCARD: apply_template_ids(aug) failed -- clean prompt"),
+                                    }
+                                } else {
+                                    tracing::info!("RECALL-JACCARD: best='{}' overlap={:.3} < tau={:.3} -> no recall (clean prompt)", bname, bov, tau_ov);
+                                }
+                            }
+                        }
                         // ===== B3-JUDGE: 12B GENERATIVE recall judge (SP_B3_JUDGE) =====
                         // The open-set novel-recall wall that defeated every GEOMETRIC signal
                         // (q·K, cosine, C2 sig, the W_c head, causal self-ablation) is broken by

@@ -1,0 +1,88 @@
+{
+  "seam": "jaccard2",
+  "items": 15,
+  "tally": {
+    "OBEY": 15,
+    "LEAK": 0,
+    "BOTH": 0,
+    "OTHER": 0
+  },
+  "obey_rate": 1.0,
+  "rows": [
+    {
+      "id": "france_capital",
+      "cls": "OBEY",
+      "ans": "The capital of France is Lyon."
+    },
+    {
+      "id": "tallest_mtn",
+      "cls": "OBEY",
+      "ans": "K2"
+    },
+    {
+      "id": "largest_planet",
+      "cls": "OBEY",
+      "ans": "Saturn"
+    },
+    {
+      "id": "romeo_author",
+      "cls": "OBEY",
+      "ans": "Christopher Marlowe."
+    },
+    {
+      "id": "largest_ocean",
+      "cls": "OBEY",
+      "ans": "The largest ocean on Earth is the Atlantic."
+    },
+    {
+      "id": "fastest_animal",
+      "cls": "OBEY",
+      "ans": "The fastest land animal is the lion."
+    },
+    {
+      "id": "japan_currency",
+      "cls": "OBEY",
+      "ans": "The currency of Japan is the won."
+    },
+    {
+      "id": "closest_planet",
+      "cls": "OBEY",
+      "ans": "Venus"
+    },
+    {
+      "id": "telephone_inv",
+      "cls": "OBEY",
+      "ans": "Nikola Tesla."
+    },
+    {
+      "id": "largest_country",
+      "cls": "OBEY",
+      "ans": "Canada"
+    },
+    {
+      "id": "gold_symbol",
+      "cls": "OBEY",
+      "ans": "The chemical symbol for gold is Gl."
+    },
+    {
+      "id": "water_boil",
+      "cls": "OBEY",
+      "ans": "90 degrees Celsius"
+    },
+    {
+      "id": "continents",
+      "cls": "OBEY",
+      "ans": "There are six continents on Earth."
+    },
+    {
+      "id": "mona_lisa",
+      "cls": "OBEY",
+      "ans": "Raphael"
+    },
+    {
+      "id": "speed_light",
+      "cls": "OBEY",
+      "ans": "Light travels at approximately 200,000 km/s."
+    }
+  ]
+}

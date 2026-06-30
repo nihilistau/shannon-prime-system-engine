@@ -1,0 +1,20 @@
+[france_capital  ] OBEY   'The capital of France is Lyon.'
+[tallest_mtn     ] OBEY   'K2'
+[largest_planet  ] OBEY   'Saturn'
+[romeo_author    ] OBEY   'Christopher Marlowe.'
+[largest_ocean   ] OBEY   'The largest ocean on Earth is the Atlantic.'
+[fastest_animal  ] OBEY   'The fastest land animal is the lion.'
+[japan_currency  ] OBEY   'The currency of Japan is the won.'
+[closest_planet  ] OBEY   'Venus'
+[telephone_inv   ] OBEY   'Nikola Tesla.'
+[largest_country ] OBEY   'Canada'
+[gold_symbol     ] OBEY   'The chemical symbol for gold is Gl.'
+[water_boil      ] OBEY   '90 degrees Celsius'
+[continents      ] OBEY   'There are six continents on Earth.'
+[mona_lisa       ] OBEY   'Raphael'
+[speed_light     ] OBEY   'Light travels at approximately 200,000 km/s.'
+
+=== G-FAITHFUL-RECALL (seam=jaccard2) ===
+items=15  OBEY=15 (100.00%)  LEAK=0  BOTH=0  OTHER=0
+in-context ceiling (F1 T_CONSOLE) = 100%; recall-path delivery cost = 0.0 pp
+WROTE D:\F\shannon-prime-repos\shannon-prime-system-engine\tests\perf\_g_faithful_recall_jaccard2.json
