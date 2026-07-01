@@ -1854,7 +1854,13 @@ Tag of the answer (or [NULL]):");
                                                         // loop then starts from decode_step(syn_last) where
                                                         // syn_last = aug_toks[last]. The recalled fact is now
                                                         // in the model's context window.
-                                                        let _ = unsafe { kv::reset_cold(handle) };
+                                                        // ROOT-CAUSE PROBE (2026-07-01): log reset_cold's result + the
+                                                        // resulting dpos. If reset_cold fails or leaves dpos!=0, the aug
+                                                        // is prefilled on the judge's polluted cache -> authority loss.
+                                                        match unsafe { kv::reset_cold(handle) } {
+                                                            Ok(_) => tracing::info!("B3-JUDGE: reset_cold OK, dpos={}", unsafe { kv::position(handle) }),
+                                                            Err(e) => tracing::error!("B3-JUDGE: reset_cold FAILED: {e} (dpos={})", unsafe { kv::position(handle) }),
+                                                        }
                                                         let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
                                                         let mut ok = true;
                                                         if !aug_head.is_empty() {
