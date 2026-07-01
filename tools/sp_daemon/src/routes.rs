@@ -664,6 +664,8 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
     ns.push(sp_daemon::recall::Episode {
         name, dir: dir_str.clone(), npos: ntok as i32, topic,
         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
+        l5key: Vec::new(), // L5 RECALL: live-captured episodes have no L5 query-key yet
+                           // (capture-side L5 computation is a follow-up; disk episodes load ep.l5).
     });
     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
     true
@@ -2458,6 +2460,7 @@ Tag of the answer (or [NULL]):");
                                                     gk,
                                                     gk_ng: ng,
                                                     tokens: Some(toks),
+                                                    l5key: Vec::new(), // L5 RECALL: follow-up (capture-side L5 key)
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(
