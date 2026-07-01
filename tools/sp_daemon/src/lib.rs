@@ -122,3 +122,6 @@ pub mod pouw_ledger;
 // nervous system only.
 #[cfg(feature = "kairos")]
 pub mod kairos;
+
+#[cfg(feature = "swarm")]
+pub mod swarm;

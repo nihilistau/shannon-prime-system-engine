@@ -116,10 +116,14 @@ rand            = "0.8"
 # direct registration here keeps `dialogue.rs` independent of that
 # transitive path (resilient to future ed25519-dalek refactors).
 sha2            = "0.10"
+hex             = "0.4"
 quinn   = { version = "0.11", features = ["rustls"] }
 rustls  = { version = "0.23", default-features = false, features = ["ring"] }
 rcgen   = { version = "0.13", default-features = false, features = ["ring"] }
 dashmap = "6"
+# SP-SWARM private memory mesh (L0-L3), optional — pulled in only by `--features swarm`.
+# Shares the quinn/rustls/ed25519 deps already above; default-off = zero effect on the build.
+sp-swarm = { path = "../sp_swarm", features = ["transport"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -183,3 +187,6 @@ wire_cpu_backend = []
 wire_cuda_backend = []
 wire_vulkan_backend = []
 kairos = []
+# SP-SWARM mesh integration: compiles src/swarm.rs + links the sp-swarm crate. Runtime-gated
+# further by SP_SWARM=1 (default-off => spawn_if_enabled is a no-op).
+swarm = ["dep:sp-swarm"]

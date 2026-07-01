@@ -884,6 +884,10 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     #[cfg(target_os = "android")]
     let _ = (quic_port, peer, peers); // QUIC mesh is host-only (garner = NTT-CRT cluster)
 
+    // ── SP-SWARM mesh (default-off; SP_SWARM=1 to enable, feature `swarm` to compile) ──
+    #[cfg(feature = "swarm")]
+    sp_daemon::swarm::spawn_if_enabled();
+
     // ── HTTP server ────────────────────────────────────────────────────────
     let app = crate::server::build_router(Arc::clone(&state));
 

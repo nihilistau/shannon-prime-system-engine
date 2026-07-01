@@ -8,6 +8,12 @@ description = "SP-SWARM — private content-addressed signed memory mesh over ME
 name = "sp_swarm"
 path = "src/lib.rs"
 
+# Standalone headless replication node (the deployable form of the daemon integration).
+[[bin]]
+name = "sp-swarm-node"
+path = "src/bin/sp_swarm_node.rs"
+required-features = ["transport"]
+
 [dependencies]
 sha2 = "0.10"            # content addressing (== Python hashlib.sha256)
 ed25519-dalek = "2"      # L3 provenance (== libsodium/pynacl on the wire; RFC 8032)

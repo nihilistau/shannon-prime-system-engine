@@ -201,5 +201,65 @@ pub fn bind(addr: SocketAddr) -> Result<Endpoint, TErr> {
     Ok(Endpoint::server(server_config()?, addr)?)
 }
 
+// ==== Integration orchestration (what the daemon calls) =========================================
+
+/// Load a PERSISTENT identity from a 32-byte hex seed file, creating it on first run. The daemon's
+/// own node_signing_key is EPHEMERAL (regenerated per boot) — the mesh needs a stable pubkey so a
+/// node's roster entry survives reboots. `node_id` is the roster key (e.g. the hostname).
+pub fn load_or_create_identity(node_id: &str, keyfile: &std::path::Path) -> Result<Identity, TErr> {
+    let seed: [u8; 32] = if keyfile.exists() {
+        let h = fs::read_to_string(keyfile)?;
+        hex::decode(h.trim())?.try_into().map_err(|_| "bad key seed length")?
+    } else {
+        let mut s = [0u8; 32];
+        getrandom::getrandom(&mut s).map_err(|e| format!("getrandom: {e}"))?;
+        if let Some(p) = keyfile.parent() { let _ = fs::create_dir_all(p); }
+        fs::write(keyfile, hex::encode(s))?;
+        s
+    };
+    Ok(Identity { node_id: node_id.to_string(), sk: SigningKey::from_bytes(&seed) })
+}
+
+/// Roster file = one `node_id <pubkey_hex>` per line (comments `#`, blank lines skipped).
+pub fn load_roster(path: &std::path::Path) -> Result<Roster, TErr> {
+    let mut r = Roster::new();
+    for line in fs::read_to_string(path)?.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let mut it = line.split_whitespace();
+        if let (Some(id), Some(pk)) = (it.next(), it.next()) {
+            let b: [u8; 32] = hex::decode(pk)?.try_into().map_err(|_| "bad pubkey length")?;
+            r.insert(id.to_string(), VerifyingKey::from_bytes(&b)?);
+        }
+    }
+    Ok(r)
+}
+
+pub struct NodeConfig {
+    pub listen: SocketAddr,
+    pub peers: Vec<SocketAddr>,
+    pub root: PathBuf,
+    pub interval: Duration,
+}
+
+/// The full mesh node: serve have/want to rostered peers on `listen`, and every `interval` pull
+/// from each configured peer (verify-on-arrival). Runs forever; the daemon spawns this behind its
+/// `swarm` feature when SP_SWARM=1. Default-off in the daemon = this is never spawned (null floor).
+pub async fn run_node(id: Arc<Identity>, roster: Arc<Roster>, cfg: NodeConfig) -> Result<(), TErr> {
+    let ep = bind(cfg.listen)?;
+    tokio::spawn(serve(ep, Arc::clone(&id), Arc::clone(&roster), cfg.root.clone()));
+    loop {
+        for &p in &cfg.peers {
+            match pull_from(p, &id, &roster, cfg.root.clone()).await {
+                Ok(r) if !r.pulled.is_empty() || !r.rejected.is_empty() =>
+                    eprintln!("swarm: {} pulled {} rejected {} from {p}", id.node_id, r.pulled.len(), r.rejected.len()),
+                Ok(_) => {}
+                Err(e) => eprintln!("swarm: {} pull {p} failed: {e}", id.node_id),
+            }
+        }
+        tokio::time::sleep(cfg.interval).await;
+    }
+}
+
 /// Idle transport-config keepalive knob (kept for parity with quic_shard; unused in tests).
 pub const _KEEPALIVE: Duration = Duration::from_secs(30);

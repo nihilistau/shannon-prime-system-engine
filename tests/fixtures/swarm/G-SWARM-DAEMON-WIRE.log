@@ -1,0 +1,9 @@
+G-SWARM-DAEMON-WIRE (2026-07-01)
+=================================
+sp-daemon compiles+links with the swarm feature wired in (default-off via SP_SWARM):
+
+  cargo build --release --features wire_cuda_backend,swarm --target-dir target-wirecuda --bin sp-daemon
+
+    Finished `release` profile [optimized] target(s) in 19.33s
+
+Wiring: Cargo optional dep sp-swarm{features=transport} + feature swarm=[dep:sp-swarm]; lib.rs pub mod swarm (cfg swarm); daemon.rs run_inner calls sp_daemon::swarm::spawn_if_enabled() before the HTTP server; SP_SWARM=1 spawns run_node on SP_SWARM_PORT with a persistent SP_SWARM_KEY identity + SP_SWARM_ROSTER, replicating SP_OKF_ROOT. Default-off = null floor.

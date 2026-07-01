@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src\lib.rs (target\debug\deps\sp_swarm-036a40968e861334.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\sp_swarm_node.rs (target\debug\deps\sp_swarm_node-a607d565a691b412.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\node.rs (target\debug\deps\node-097b43bd29b0d8fa.exe)
+
+running 1 test
+swarm: node-B pulled 2 rejected 0 from 127.0.0.1:63047
+swarm: node-A pulled 3 rejected 0 from 127.0.0.1:63048
+==== G-SWARM-NODE: GREEN — persistent identity stable, roster file parsed, run_node autonomous periodic sync converged 5 objects both directions ====
