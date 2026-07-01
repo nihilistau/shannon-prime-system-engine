@@ -1,0 +1,24 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src\lib.rs (target\debug\deps\sp_swarm-036a40968e861334.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\parity.rs (target\debug\deps\parity-f90ac033fce97551.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests\transport.rs (target\debug\deps\transport-4d011b770cfbb07b.exe)
+
+running 1 test
+[1] A<-B converge: pulled=3 rejected=[("063f1a9ea9240f2c", "integrity-fail")]
+[2] B<-A converge: pulled=2
+[4] off-roster C rejected: Some("connection lost")
+==== G-SWARM-TRANSPORT-QUIC: GREEN — roster-auth + encrypted round-trip + bidirectional convergence + verify-on-arrival + off-roster reject ====
+test transport_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+

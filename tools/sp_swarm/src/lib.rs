@@ -139,8 +139,12 @@ pub fn accept(
     Ok(cls)
 }
 
+/// L0 network transport (QUIC + Ed25519 roster) — optional, behind the `transport` feature.
+#[cfg(feature = "transport")]
+pub mod transport;
+
 // ---- L2 store seam (reads/writes the MEM-OKF full/ dir; transport-agnostic) ----
-fn full_dir(root: &Path) -> PathBuf { root.join("full") }
+pub fn full_dir(root: &Path) -> PathBuf { root.join("full") }
 
 /// The set of object addresses a node HOLDS (from full/<addr>.md).
 pub fn have(root: &Path) -> HashSet<String> {
