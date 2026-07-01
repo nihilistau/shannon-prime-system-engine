@@ -152,6 +152,27 @@ pub async fn serve(ep: Endpoint, me: Arc<Identity>, roster: Arc<Roster>, root: P
                         Ok(b) => { let _ = wr(&mut s, &b).await; }
                         Err(_) => { let _ = wr(&mut s, b"MISS").await; }
                     }
+                } else if cmd.starts_with(b"SIM:") {
+                    // L4 discovery: "SIM:<c2_hex>:<k>" -> top-k local candidates "addr hamming" per
+                    // line (a HINT shortlist; the caller exact-fetches + verifies, per the C2
+                    // semantic gate — C2 is a shortlist, not a top-1 oracle).
+                    let q = String::from_utf8_lossy(&cmd[4..]).to_string();
+                    let reply = match q.split_once(':') {
+                        Some((hexs, kstr)) => match crate::similarity::sig_from_hex(hexs) {
+                            Some(sig) => {
+                                let k = kstr.parse::<usize>().unwrap_or(5).max(1);
+                                crate::similarity::index_store(&root)
+                                    .find_similar(&sig, k)
+                                    .into_iter()
+                                    .map(|(a, h)| format!("{a} {h}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            }
+                            None => String::new(),
+                        },
+                        None => String::new(),
+                    };
+                    let _ = wr(&mut s, reply.as_bytes()).await;
                 } else if cmd == b"DONE" { break; }
             }
         });
@@ -188,6 +209,52 @@ pub async fn pull_from(server: SocketAddr, me: &Identity, roster: &Roster, local
                 pulled.push(addr.clone());
             }
             Err(e) => rejected.push((addr.clone(), e.as_str().into())),
+        }
+    }
+    let _ = wr(&mut s, b"DONE").await;
+    let _ = s.finish();
+    conn.close(0u32.into(), b"done");
+    Ok(SyncReport { pulled, rejected })
+}
+
+/// L4 discovery: ask a peer for the top-k C2-nearest candidates to `query`, then exact-fetch +
+/// verify (`accept`) any we don't already hold. C2 is a shortlist HINT (semantic gate: recall@5
+/// 0.885, recall@1 only 0.607) — correctness comes from the exact-fetch verify, so a wrong hint
+/// costs only bandwidth. Use k>=5 (the shortlist regime the gate justified).
+pub async fn discover_similar(
+    server: SocketAddr, me: &Identity, roster: &Roster,
+    query: crate::similarity::Sig, k: usize, local: PathBuf,
+) -> Result<SyncReport, TErr> {
+    let mut ep = Endpoint::client("127.0.0.1:0".parse().unwrap())?;
+    ep.set_default_client_config(client_config()?);
+    let conn = ep.connect(server, "localhost")?.await?;
+    let (mut s, mut r) = conn.open_bi().await?;
+    client_auth(&mut s, &mut r, me, roster).await?;
+    let sim = format!("SIM:{}:{}", crate::similarity::sig_to_hex(&query), k.max(1));
+    wr(&mut s, sim.as_bytes()).await?;
+    let resp = rd(&mut r).await?;
+    // candidate addresses, nearest first (peer already ranked by Hamming)
+    let cands: Vec<String> = String::from_utf8_lossy(&resp)
+        .lines().filter(|l| !l.is_empty())
+        .filter_map(|l| l.split_whitespace().next().map(|a| a.to_string()))
+        .collect();
+    let local_have = have(&local);
+    let (mut pulled, mut rejected) = (Vec::new(), Vec::new());
+    for addr in cands {
+        if local_have.contains(&addr) { continue; }
+        let mut cmd = b"GET:".to_vec();
+        cmd.extend_from_slice(addr.as_bytes());
+        wr(&mut s, &cmd).await?;
+        let obj = rd(&mut r).await?;
+        if obj == b"MISS" { rejected.push((addr, "missing-on-remote".into())); continue; }
+        let text = String::from_utf8_lossy(&obj).to_string();
+        match accept(&addr, &text, Some(roster)) {   // exact-fetch verify (L1+L2+L3)
+            Ok(_) => {
+                let _ = fs::create_dir_all(full_dir(&local));
+                let _ = fs::write(full_dir(&local).join(format!("{addr}.md")), &text);
+                pulled.push(addr);
+            }
+            Err(e) => rejected.push((addr, e.as_str().into())),
         }
     }
     let _ = wr(&mut s, b"DONE").await;
