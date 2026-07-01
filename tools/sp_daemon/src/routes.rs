@@ -1834,10 +1834,17 @@ Tag of the answer (or [NULL]):");
                                                 // prompt / degenerated (Georgian, python) to fill max_tokens. A
                                                 // closed instruction makes it answer concisely and emit the turn-stop
                                                 // (the eos/turn_stop break at the synthesis loop then halts it).
-                                                let aug_content = format!(
-                                                    "Context: {mem_text}\n\nQuestion: {query}\n\nProvide a direct, concise answer using the context.");
-                                                let aug_msgs = vec![Message {
-                                                    role: "user".to_string(), content: aug_content }];
+                                                // DELIVERY FIX (2026-07-01): deliver through the EXACT clean
+                                                // text-in-context format of the proven SP_RECALL_L5 / Jaccard
+                                                // branches (faithfulness system prompt + "Context (authoritative,
+                                                // current): <fact>\n\n<query>"). The prior single-user "Provide a
+                                                // direct, concise answer" framing (NO system prompt) degenerated ->
+                                                // tag echo + <image|>/Georgian garbage. The judge is a PICK/NULL
+                                                // GATE; recitation goes through the proven 86.89% clean delivery.
+                                                let aug_msgs = vec![
+                                                    Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                                    Message { role: "user".to_string(), content: format!("Context (authoritative, current): {mem_text}\n\n{query}") },
+                                                ];
                                                 match app.tokenizer.apply_template_ids(&aug_msgs) {
                                                     Ok(aug_toks) if aug_toks.len() >= 2 => {
                                                         // Establish the synthesis cache from the augmented
