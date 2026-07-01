@@ -1,0 +1,22 @@
+=== HARD-FOREIGN (high-cosine, same-domain, UNANSWERABLE by the anchored fact) ===
+[clean] "I don't know."  <- What is the capital of Spain?  (anchor fct_000 capital-of-France=Lyon, real Madrid)
+[clean] 'The capital of Greece is Athens.'  <- What is the capital of Greece?  (anchor fct_015 capital-of-Italy=Milan, real Athens)
+[clean] 'Mount Fuji is 3,776 meters tall.'  <- How tall is Mount Fuji?  (anchor fct_001 tallest-mountain=K2, real ~3776 m)
+[clean] "I don't know."  <- How many planets are in the solar system?  (anchor fct_002 largest-planet=Saturn, real eight)
+[clean] 'The deepest ocean trench is the Mariana Trench, located '  <- What is the deepest ocean trench?  (anchor fct_004 largest-ocean=Atlantic, real Mariana Trench)
+[clean] 'The slowest land animal is the sloth.'  <- What is the slowest land animal?  (anchor fct_005 fastest-animal=lion, real sloth)
+[clean] 'The printing press was invented by Johannes Gutenberg.'  <- Who invented the printing press?  (anchor fct_008 telephone=Tesla, real Gutenberg)
+[clean] 'The smallest country in the world by area is the Vatican'  <- What is the smallest country in the world by area?  (anchor fct_009 largest-country=Canada, real Vatican City)
+[clean] 'Vincent van Gogh.'  <- Who painted The Starry Night?  (anchor fct_013 Mona-Lisa=Raphael, real Van Gogh)
+[clean] 'The longest river in South America is the Amazon River.'  <- What is the longest river in South America?  (anchor fct_020 longest-river=Congo, real Amazon)
+[clean] 'The largest cold desert on Earth is the Antarctic Desert'  <- What is the largest cold desert on Earth?  (anchor fct_021 largest-hot-desert=Kalahari, real Antarctic Desert)
+[clean] 'The smallest mammal on Earth is the bumblebee bat, which'  <- What is the smallest mammal on Earth?  (anchor fct_040 largest-mammal=elephant, real bumblebee bat / Etruscan shrew)
+[clean] 'Marie Curie.'  <- Who discovered radioactivity?  (anchor fct_028 penicillin=Pasteur, real Becquerel / Curie)
+[clean] 'The Colosseum is in Italy.'  <- In which country is the Colosseum?  (anchor fct_036 Great-Wall=Mongolia, real Italy)
+[clean] 'The Great Barrier Reef is in Australia.'  <- In which country is the Great Barrier Reef?  (anchor fct_039 Taj-Mahal=Pakistan, real Australia)
+[clean] 'The smallest bird in the world is the bee hummingbird, w'  <- What is the smallest bird in the world?  (anchor fct_042 largest-bird=eagle, real bee hummingbird)
+[clean] 'The chemical symbol for silver is Ag.'  <- What is the chemical symbol for silver?  (anchor fct_010 gold-symbol=Gl, real Ag)
+[clean] "I don't know."  <- How many strings does a standard violin have?  (anchor fct_047 piano-keys=72, real four)
+
+=== HARD-FOREIGN RESULT (N=18) ===
+spurious-delivery (model adopted a mismatched planted fact): 0/18 = 0%  (clean 100%)
