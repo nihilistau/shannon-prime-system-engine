@@ -887,6 +887,11 @@ fn run_kvdecode_chat(
     // text-in-context reconstruction. NULL / judge-off leaves syn_last == last[0]
     // (byte-identical null floor).
     let mut syn_last: i32 = last[0];
+    // ATTR-GATE zero-inference decline: when set (by the SP_RECALL_ATTR_GATE branch on
+    // attribute-absence), the synthesis forward is SKIPPED and this fixed string is
+    // streamed instead — the gemma4 decode loop never runs (see the seam before
+    // decode_step(syn_last)). Default None => normal synthesis (null floor preserved).
+    let mut symbolic_decline: Option<String> = None;
     // B5 (§6e) — the GENERIC residual-frame channel. After the prompt scaffold is
     // ingested, inject any raw residual frames (audio/memory source) at consecutive
     // positions through the same seam (gemma4_kv_inject_seq via inject_frames). Each
@@ -1453,30 +1458,45 @@ fn run_kvdecode_chat(
                                         // the deterministic gate globally default-on-safe, not regime-specific.
                                         let force_decline = attr_gate && absent >= attr_tau
                                             && recall::query_has_entity_token(&ruser);
-                                        let aug_msgs = if strict || force_decline {
-                                            vec![
-                                                Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },
-                                                Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}", btext, ruser) },
-                                            ]
+                                        if force_decline {
+                                            // ZERO-INFERENCE symbolic decline (ADR-002 Tier-2 executor). The
+                                            // fact exists but does NOT state the queried attribute. Set a
+                                            // deterministic decline string and SKIP the synthesis forward
+                                            // entirely (consumed at the synthesis seam below, before
+                                            // decode_step(syn_last)). No gemma4 decode => confabulation/leak
+                                            // is mathematically impossible + the turn resolves in microseconds.
+                                            symbolic_decline = Some(
+                                                "I have a record for that entity, but it does not include that specific detail.".to_string());
+                                            recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
+                                            tracing::info!("RECALL-L5: '{}' cos={:.3} absent={:.2} -> ATTR-DECLINE (zero-inference symbolic, no forward)",
+                                                bname, bcos, absent);
                                         } else {
-                                            vec![
-                                                Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
-                                                Message { role: "user".to_string(), content: format!("Context (authoritative, current): {}\n\n{}", btext, ruser) },
-                                            ]
-                                        };
-                                        match app.tokenizer.apply_template_ids(&aug_msgs) {
-                                            Ok(aug_toks) if aug_toks.len() >= 2 => {
-                                                let _ = unsafe { kv::reset_cold(handle) };
-                                                let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
-                                                if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
-                                                    syn_last = aug_last[0];
-                                                    recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
-                                                    tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} absent={:.2} mode={} -> TEXT-IN-CONTEXT",
-                                                        bname, bcos, tau_l5, absent,
-                                                        if force_decline {"ATTR-DECLINE"} else if strict {"STRICT"} else {"recite"});
-                                                } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
+                                            // recite (proven 86.89% path); SP_RECALL_STRICT = closed-book
+                                            // model-grounded framing (dead lever, kept default-off).
+                                            let aug_msgs = if strict {
+                                                vec![
+                                                    Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },
+                                                    Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}", btext, ruser) },
+                                                ]
+                                            } else {
+                                                vec![
+                                                    Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                                    Message { role: "user".to_string(), content: format!("Context (authoritative, current): {}\n\n{}", btext, ruser) },
+                                                ]
+                                            };
+                                            match app.tokenizer.apply_template_ids(&aug_msgs) {
+                                                Ok(aug_toks) if aug_toks.len() >= 2 => {
+                                                    let _ = unsafe { kv::reset_cold(handle) };
+                                                    let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
+                                                    if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
+                                                        syn_last = aug_last[0];
+                                                        recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
+                                                        tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} absent={:.2} mode={} -> TEXT-IN-CONTEXT",
+                                                            bname, bcos, tau_l5, absent, if strict {"STRICT"} else {"recite"});
+                                                    } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
+                                                }
+                                                _ => tracing::warn!("RECALL-L5: apply_template_ids(aug) failed -- clean prompt"),
                                             }
-                                            _ => tracing::warn!("RECALL-L5: apply_template_ids(aug) failed -- clean prompt"),
                                         }
                                     } else {
                                         tracing::info!("RECALL-L5: best='{}' cos={:.3} < tau={:.3} -> no recall (clean prompt)", bname, bcos, tau_l5);
@@ -2242,6 +2262,22 @@ Tag of the answer (or [NULL]):");
     }
     if logits.len() != vocab_size {
         send_err("kvdecode: logits buffer size mismatch".into());
+        sessions.remove(chat_id);
+        return;
+    }
+    // ATTR-GATE ZERO-INFERENCE SYMBOLIC DECLINE (ADR-002 Tier-2 executor). The recall
+    // stage decided the delivered fact does NOT state the queried attribute (private
+    // entity, attribute-absent). Emit the deterministic decline and RETURN before the
+    // synthesis forward — the gemma4 decode loop never runs, so confabulation/leak is
+    // mathematically impossible and the turn resolves at string-allocation speed.
+    // reset_cold keeps the persistent KV clean for the next turn.
+    if let Some(msg) = symbolic_decline.take() {
+        let payload = serde_json::to_string(&ChatDelta { delta: msg, chat_id }).unwrap_or_default();
+        let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+        let _ = unsafe { kv::reset_cold(handle) };
+        let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+        let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "done" });
+        tracing::info!("ATTR-DECLINE: zero-inference symbolic decline streamed (no gemma4 decode)");
         sessions.remove(chat_id);
         return;
     }
