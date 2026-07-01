@@ -134,6 +134,39 @@ The **boundary thesis** runs through all of it: `O_K` wins on **exact arithmetic
 every *structure-on-content* lever (Möbius, split-prime Dirichlet carriers, entropy-coded Frobenius
 codes, T2-Möbius on the real embedding) is **measured-inert and kept as an honest negative**.
 
+## SP-SWARM — the private memory mesh (`tools/sp_swarm`, L0–L4 GREEN, default-off)
+
+The `sp_swarm` Rust crate lives in this repo. It is **replication + discovery over the
+content-addressed MEM-OKF store** — not a new store — so the operator's own nodes converge on one
+signed memory. Five gated layers, each reusing a proven engine asset:
+
+| Layer | Role | Reuses | Gate |
+|---|---|---|---|
+| **L1** content addressing | `addr = sha256(norm(body))[:16]` + the C2-SimHash episode address class | the byte-exact `sha2` addressing + `recall::Projection` C2 sigs | `G-SWARM-RUST-PARITY` (Rust↔Python byte-parity, incl. the CRLF-normalize fix) |
+| **L2** replication | have/want diff → verified pull → converge; **verify-on-arrival** before write | the MEM-OKF store layout | `G-SWARM-REPLICATE-CONVERGE` |
+| **L3** provenance | Ed25519 sign-on-write / verify-vs-roster (invite-only) | `ed25519-dalek` (audited; ↔ pynacl parity) | `G-SWARM-PROVENANCE-ED25519` |
+| **L0** transport | QUIC (TLS 1.3) + Ed25519 mutual roster handshake; `LIST`/`GET`/`SIM`/`DONE` wire | `network::quic_shard` (quinn 0.11 / rustls 0.23-ring) | `G-SWARM-TRANSPORT-QUIC` |
+| **L4** discovery | C2-SimHash `SIM` shortlist gossip → exact-fetch verify | `recall::agree` (256-bit Hamming) | `G-SWARM-C2-INDEX`, `G-SWARM-GOSSIP-DISCOVERY` |
+
+Integrated into `sp-daemon` behind an **optional, default-off `swarm` feature** (`SP_SWARM=1`;
+`G-SWARM-NODE` / `G-SWARM-DAEMON-WIRE`), plus a standalone headless `sp-swarm-node` binary. **Honest
+negative (`G-SWARM-C2-SEMANTIC`):** C2-256 is a *shortlist* (recall@5 0.885 == L5-cosine top-1), not
+a top-1 oracle (0.607) — used as a hint, confirmed by exact-fetch; bit-count is the lever. It ships
+curated records, never raw latent (ADR-002). **Remaining = multi-host deployment only.**
+
+```bat
+:: build the daemon WITH the mesh (default-off until SP_SWARM=1)
+cargo build --release --features wire_cuda_backend,swarm --target-dir target-wirecuda --bin sp-daemon
+:: the swarm crate's own gates (deps cached ⇒ works offline)
+cd tools\sp_swarm && cargo test --features transport
+```
+
+Env flags: `SP_SWARM` (=1 spawns), `SP_SWARM_PORT` (7777), `SP_SWARM_KEY` (Ed25519 seed file),
+`SP_SWARM_ROSTER` (`node_id <pubkey_hex>` lines), `SP_SWARM_NODE_ID`, `SP_SWARM_PEERS`,
+`SP_SWARM_INTERVAL_S`, `SP_SWARM_ROOT`/`SP_OKF_ROOT`. Full call surface + wire protocol + the 9 gates:
+lattice `papers/PPT-LAT-MESH-API.md`; design + rejected mechanics:
+`papers/PPT-LAT-DESIGN-SWARM-MEMORY-MESH.md`.
+
 ## Build
 
 Two distinct toolchains (do **not** mix). The CPU / math-core build uses **clang-cl** (MSVC-ABI —
@@ -196,6 +229,11 @@ it. Full procedure: lattice `papers/PPT-LAT-KEYSTONE.md` §10.
   gemma4-12B weight path** (the GGUF lane is dead). Writes OK_Q8 / OK_Q4B `.sp-model`.
 - **`tools/sp_dsp_smoke/`** — the L2 universal Rust crate: dual-prime Barrett / mod-q matmul / Garner
   CRT / NTT ladder, bit-exact-gated; the 4 islands' exact-integer references in `src/sp_islands_q_ref.rs`.
+- **`tools/sp_swarm/`** — the SP-SWARM private memory mesh crate (L0–L4): `lib.rs` (addressing +
+  have/want replication), `similarity.rs` (C2Index discovery), `transport.rs` (QUIC + Ed25519 roster +
+  `serve`/`pull_from`/`discover_similar`/`run_node`), `bin/sp_swarm_node.rs`. Optional default-off dep
+  of the daemon (`--features swarm`). Gates in `tests/` + `tests/fixtures/swarm/`. See the SP-SWARM
+  section above + lattice `papers/PPT-LAT-MESH-API.md`.
 - **Gates / receipts** — `tests/test_gemma4_cuda.c`, `tests/test_xbar_p1_cuda.c`, `tests/fixtures/`.
 
 ## Canon / status pointers (lattice repo — source of truth)
