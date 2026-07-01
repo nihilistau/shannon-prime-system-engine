@@ -139,6 +139,9 @@ pub fn accept(
     Ok(cls)
 }
 
+/// L4 C2-SimHash similarity overlay (pure std; the index + query, engine computes the sigs).
+pub mod similarity;
+
 /// L0 network transport (QUIC + Ed25519 roster) — optional, behind the `transport` feature.
 #[cfg(feature = "transport")]
 pub mod transport;

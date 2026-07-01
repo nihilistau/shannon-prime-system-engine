@@ -1,0 +1,9 @@
+episodes=61 para-queries=61 dim=512
+L5-cosine   recall@1=0.885  recall@5=0.984   [ground truth]
+SimHash-256 recall@1=0.607  recall@5=0.885   [the C2 overlay]
+SimHash-512  recall@1=0.721  recall@5=0.951
+SimHash-1024 recall@1=0.820  recall@5=0.967
+SimHash-2048 recall@1=0.869  recall@5=0.967
+
+retention (SimHash256 recall@1 / cosine recall@1) = 0.69
+==== G-SWARM-C2-SEMANTIC: HONEST-NEGATIVE (C2-256 retains 69% of L5-cosine near-neighbor recall) ====
