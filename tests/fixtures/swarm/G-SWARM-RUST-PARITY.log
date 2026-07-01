@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src\lib.rs (target\debug\deps\sp_swarm-359e315e0c0bf22c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\parity.rs (target\debug\deps\parity-824c418cead925bb.exe)
+
+running 6 tests
+test address_parity ... ok
+test payload_parity ... ok
+test crypto_parity_verifies_pynacl_signature ... ok
+test tampered_payload_fails ... ok
+test roster_rejects ... ok
+real store: content=89 c2=26 invalid=0 []
+test real_store_content_objects_rehash ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests sp_swarm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

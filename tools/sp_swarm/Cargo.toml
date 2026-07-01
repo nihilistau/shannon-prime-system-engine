@@ -1,0 +1,23 @@
+[package]
+name = "sp-swarm"
+version = "0.1.0"
+edition = "2021"
+description = "SP-SWARM — private content-addressed signed memory mesh over MEM-OKF (Rust port of the proven Python L1/L2/L3). L0 libp2p transport lands behind the `transport` feature."
+
+[lib]
+name = "sp_swarm"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"            # content addressing (== Python hashlib.sha256)
+ed25519-dalek = "2"      # L3 provenance (== libsodium/pynacl on the wire; RFC 8032)
+hex = "0.4"
+
+[dev-dependencies]
+serde_json = "1"         # read the cross-language provenance fixture in tests
+
+# L0 transport (rust-libp2p noise/X25519/ChaCha20-Poly1305 + gossipsub/request-response)
+# is the NEXT brick and lands behind this feature so the store+crypto core builds lean.
+[features]
+default = []
+transport = []
