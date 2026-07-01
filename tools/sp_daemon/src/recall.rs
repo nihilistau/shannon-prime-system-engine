@@ -109,6 +109,13 @@ pub struct Episode {
     /// ep.k/ep.v files on disk). Constructed at position-0 standalone capture so it
     /// is W_c-head-compatible (same provenance as the curated registry-K).
     pub tokens: Option<Vec<i32>>,
+    /// L5 RECALL (2026-07-01): the episode's stored QUERY-key = the L2-normalized,
+    /// mean-over-heads global-layer-5 last-token query embedding (512 f32) of the
+    /// query/statement that defines this episode. Loaded from `<dir>/ep.l5` (raw
+    /// little-endian f32[512]) if present, else empty. Matched against the live
+    /// query's `l5_query_embed(read_global_q)` by cosine — the query-to-query
+    /// selector that recalls paraphrases (G-REP-LAYER-L5: 88.5% para vs Jaccard 8%).
+    pub l5key: Vec<f32>,
 }
 
 // gemma4-12b global attention head geometry (g_nkv=1, g_nh=16, g_hd=512 ⇒ g_kvd=HD).
@@ -184,6 +191,58 @@ pub fn qk_relevance(q: &[f32], gk: &[f32], gk_ng: usize, npos: usize, m: usize) 
     (best as f32, topm as f32)
 }
 
+/// L5 RECALL: the global layer index carrying the fact signal (offline sweep
+/// G-REP-LAYER-L5: L5 exact→paraphrase recall@1 = 85.2%; averaging all 8 global
+/// layers dilutes to 11.5%). The read_global_q packing is global-layers-ascending,
+/// so index 5 here == offline `[8,16,512]` layer 5.
+pub const L5_LAYER: usize = 5;
+
+/// Extract the L5 query key from a live `read_global_q` buffer `q` packed
+/// `[n_global][G_NH*HD]`: take global layer L5, mean over the G_NH query heads,
+/// L2-normalize → a 512-f32 direction. Empty if the layer is absent.
+pub fn l5_query_embed(q: &[f32]) -> Vec<f32> {
+    let qd = G_NH * HD;
+    let n_global = q.len() / qd;
+    if n_global <= L5_LAYER { return Vec::new(); }
+    let base = L5_LAYER * qd;
+    let mut acc = vec![0.0f64; HD];
+    for h in 0..G_NH {
+        let hb = base + h * HD;
+        for d in 0..HD { acc[d] += q[hb + d] as f64; }
+    }
+    let inv = 1.0 / (G_NH as f64);
+    let mut norm = 0.0f64;
+    for d in 0..HD { acc[d] *= inv; norm += acc[d] * acc[d]; }
+    let den = norm.sqrt();
+    if den <= 0.0 { return Vec::new(); }
+    acc.iter().map(|&x| (x / den) as f32).collect()
+}
+
+/// Cosine similarity of two 512-vectors (robust to un-normalized input).
+pub fn cos512(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() { return f32::NEG_INFINITY; }
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..a.len() {
+        let (x, y) = (a[i] as f64, b[i] as f64);
+        dot += x * y; na += x * x; nb += y * y;
+    }
+    let den = na.sqrt() * nb.sqrt();
+    if den <= 0.0 { 0.0 } else { (dot / den) as f32 }
+}
+
+/// L5 RECALL: read `<dir>/ep.l5` = the episode's stored L5 query-key, raw
+/// little-endian f32[512]. `None` if the sidecar is absent or malformed.
+pub fn load_episode_l5key(dir: &str) -> Option<Vec<f32>> {
+    let path = Path::new(dir).join("ep.l5");
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() != HD * 4 { return None; }
+    let mut v = Vec::with_capacity(HD);
+    for c in bytes.chunks_exact(4) {
+        v.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+    }
+    Some(v)
+}
+
 /// Bit-agreement = R_BITS - HammingDistance (the discrete_resolve.py `agree`).
 pub fn agree(a: &[u64; 4], b: &[u64; 4]) -> u32 {
     let mut ham = 0u32;
@@ -247,6 +306,8 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
         };
         // B3-v2: load the episode's stored global-owner K (ep.k) for the q·K selector.
         let (gk, gk_ng) = load_episode_global_k(dir, npos).unwrap_or((Vec::new(), 0));
+        // L5 RECALL: load the episode's L5 query-key sidecar (ep.l5), if present.
+        let l5key = load_episode_l5key(dir).unwrap_or_default();
         out.push(Episode {
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
             dir: dir.to_string(),
@@ -257,6 +318,7 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
             gk,
             gk_ng,
             tokens: None,
+            l5key,
         });
     }
     // JUDGE-SERVED: backfill entry text from a sibling corpus_manifest.jsonl (the

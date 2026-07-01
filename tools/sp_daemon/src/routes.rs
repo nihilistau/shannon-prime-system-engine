@@ -664,6 +664,8 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
     ns.push(sp_daemon::recall::Episode {
         name, dir: dir_str.clone(), npos: ntok as i32, topic,
         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
+        l5key: Vec::new(), // L5 RECALL: live-captured episodes have no L5 query-key yet
+                           // (capture-side L5 computation is a follow-up; disk episodes load ep.l5).
     });
     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
     true
@@ -1390,6 +1392,62 @@ fn run_kvdecode_chat(
                                     }
                                 } else {
                                     tracing::info!("RECALL-JACCARD: best='{}' overlap={:.3} < tau={:.3} -> no recall (clean prompt)", bname, bov, tau_ov);
+                                }
+                            }
+                        }
+                        // ===== L5 RECALL (SP_RECALL_L5) — query-to-query paraphrase recall =====
+                        // The fact signal is layer-localized in global layer 5 (G-REP-LAYER-L5:
+                        // L5 exact->paraphrase recall@1 = 85.2% / all-layer-avg 11.5%; L5-cosine
+                        // query-key = 100% exact / 88.5% paraphrase vs Jaccard 100%/8.2%). Match the
+                        // live query's L5 embedding (l5_query_embed of read_global_q, mean-heads +
+                        // L2-norm) against each episode's stored L5 query-key (ep.l5) by cosine; on a
+                        // confident match deliver the episode TEXT in-context (the same F2b delivery
+                        // as the Jaccard branch). GATED after Jaccard (skips if a prior stage already
+                        // recalled). Default-off (SP_RECALL_L5 unset) = byte-identical null floor.
+                        if !int2_decided && recalled.is_none()
+                            && std::env::var("SP_RECALL_L5").as_deref() == Ok("1")
+                        {
+                            if let Some(ruser) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                                let tau_l5: f32 = std::env::var("SP_RECALL_L5_TAU").ok()
+                                    .and_then(|s| s.parse().ok()).unwrap_or(0.30);
+                                let n_global = recall::NL / recall::PERIOD;
+                                let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
+                                let qk5 = if unsafe { kv::read_global_q(handle, last[0], &mut ql) }.is_ok() {
+                                    recall::l5_query_embed(&ql)
+                                } else { Vec::new() };
+                                if qk5.is_empty() {
+                                    tracing::warn!("RECALL-L5: read_global_q/l5_embed unavailable -- clean prompt");
+                                } else {
+                                    let (mut bcos, mut bname, mut btext) = (f32::NEG_INFINITY, String::new(), String::new());
+                                    {
+                                        let ns_guard = app.nightshift.read().unwrap();
+                                        for ep in registry.iter().chain(ns_guard.iter()) {
+                                            if ep.l5key.len() != recall::HD { continue; }
+                                            let c = recall::cos512(&qk5, &ep.l5key);
+                                            if c > bcos { bcos = c; bname = ep.name.clone(); btext = ep.text.clone(); }
+                                        }
+                                    }
+                                    if bcos >= tau_l5 && !btext.is_empty() {
+                                        let aug = format!("Context (authoritative, current): {}\n\n{}", btext, ruser);
+                                        let aug_msgs = vec![
+                                            Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                            Message { role: "user".to_string(), content: aug },
+                                        ];
+                                        match app.tokenizer.apply_template_ids(&aug_msgs) {
+                                            Ok(aug_toks) if aug_toks.len() >= 2 => {
+                                                let _ = unsafe { kv::reset_cold(handle) };
+                                                let (aug_head, aug_last) = aug_toks.split_at(aug_toks.len() - 1);
+                                                if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
+                                                    syn_last = aug_last[0];
+                                                    recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
+                                                    tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} -> TEXT-IN-CONTEXT (L5 query-key)", bname, bcos, tau_l5);
+                                                } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
+                                            }
+                                            _ => tracing::warn!("RECALL-L5: apply_template_ids(aug) failed -- clean prompt"),
+                                        }
+                                    } else {
+                                        tracing::info!("RECALL-L5: best='{}' cos={:.3} < tau={:.3} -> no recall (clean prompt)", bname, bcos, tau_l5);
+                                    }
                                 }
                             }
                         }
@@ -2402,6 +2460,7 @@ Tag of the answer (or [NULL]):");
                                                     gk,
                                                     gk_ng: ng,
                                                     tokens: Some(toks),
+                                                    l5key: Vec::new(), // L5 RECALL: follow-up (capture-side L5 key)
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(

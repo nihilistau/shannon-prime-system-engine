@@ -1,0 +1,40 @@
+G-L5-RECALL-LIVE — SP_RECALL_L5 on the REAL served gemma-4-12B: paraphrase recall cracks the wall
+date: 2026-07-01
+branch: feat/l5-recall (engine); daemon target-wirecuda/release/sp-daemon.exe (release build, 0 errors)
+model: gemma4-12b-b1.sp-model on RTX 2060, served /v1/chat, SP_PERSIST_KV=1, SP_RECALL_L5=1 tau=0.30
+registry: _faithful_corpus/registry.jsonl (61 fact-conflict episodes fct_000..060)
+keys: ep.l5 sidecars staged per episode = exact-question L5 embedding (write_ep_l5.py), loaded by
+      recall::load_episode_l5key at daemon startup (log confirmed all 61 episodes loaded).
+
+WIRING: Episode.l5key + recall::{l5_query_embed (global-layer-5 mean-heads + L2-norm of read_global_q),
+cos512, load_episode_l5key}; routes.rs SP_RECALL_L5 branch cosine-matches live query L5 vs ep.l5,
+delivers episode TEXT in-context (F2b), gated after Jaccard. Default-off = byte-identical null floor.
+
+ALIGNMENT CHECK (exact queries): EXACT "capital of France?" -> RECALL-L5 fct_000 cos=1.000 -> "Lyon";
+EXACT "capital of Brazil?" -> RECALL-L5 fct_019 cos=1.000 -> "Recife". Keys aligned + exact recall perfect.
+
+GATE (paraphrase queries, SP_FAITHFUL_USE_PARA=1, tests/perf/_g_faithful_recall.py, seam=l5):
+  items=61  OBEY=53 (86.89%)  LEAK=7  BOTH=0  OTHER=1
+  in-context ceiling (F1 T_CONSOLE) = 100%; recall-path delivery cost = 13.1 pp
+  receipt json: tests/perf/_g_faithful_recall_l5.json
+
+COMPARISON (paraphrase obey/recall):
+  deployed Jaccard selector (SP_RECALL_JACCARD): ~8.2%   (lexical; collapses on paraphrase)
+  SP_RECALL_L5 (this):                            86.89%  (directional L5 query-key cosine)
+  offline prediction (G-REP-LAYER-L5, cosine recall@1): 88.5%  -> live 86.89% is within noise.
+
+The 7 LEAK + 1 OTHER are the hard cases where the planted counter-fact loses to unshakeable
+parametric knowledge (sun_star "Sun is a star", mona_country "Louvre/Paris", everest_country "Asia",
+olympics_years "every four years", photosynth "CO2") or the model abstained (water_formula
+"I don't know" = OTHER, a safe non-leak).
+
+COMBINER NOTE (rep_combine.py, offline): a gated (Jaccard-else-L5) or learned-logistic head over
+[Jaccard, L5, KSTE-MD] does NOT beat L5 alone — L5 already covers 100% exact AND ~88% paraphrase, so
+the other signals are redundant (Jaccard) or dead on this directional axis (KSTE-MD magnitude-shape,
+learned weight ~0.14, MD-only para=0%). The multi-signal head's remaining value is foreign-reject /
+abstention calibration (untested — no foreign queries in this corpus), not recall@1.
+
+VERDICT: GREEN-LIVE. L5 query-key cosine recall is the deployable paraphrase-robust selector on the
+served 12B (86.89% para obey vs Jaccard 8%), default-off, byte-identical null floor when unset.
+FOLLOW-UPS: capture-side ep.l5 write for live-captured episodes (currently only disk episodes have
+keys); gate/max Jaccard+L5 fusion for exact+para in one selector; scale beyond n=61.
