@@ -1,0 +1,34 @@
+G-JUDGE-REJECT — sequential pass->block (L5 recall + binary judge reject): INCONCLUSIVE (harness inadequate)
+date: 2026-07-01
+idea (operator): sequential, not fused (TELE-12) — L5 PASSES top-1 fact; a judge BLOCKS if it doesn't
+      answer. Cheap: one (query, top-1-fact) pairwise check, not all 61.
+
+SETUP: served gemma-4-12B, judge_items_v2 (61 in-mem para + 30 clean foreign, each with its L5 top-1
+fact). Ad-hoc single-call binary judge over /v1/chat.
+
+RESULT: INCONCLUSIVE — the served model produces DEGENERATE output on the binary-judge prompt.
+  - "answer"-framing judge: 43/43 in-mem "NO" (0% accept) — but the corpus facts are PLANTED-FALSE, so
+    the model judged TRUTH not RELEVANCE -> NO to every false fact.
+  - "relevance"-framing judge (topic-match, truth-decoupled): 23/23 in-mem "NO", 0 YES anywhere.
+  - eot_bias 0..4, fresh daemon (clean KV) AND polluted cache: on 6 TRIVIALLY-OBVIOUS cases
+    (France-q vs France-note, etc.) the model emits "NO" + GARBAGE tokens ("دبستان", "```") for EVERY
+    case, same-topic and different-topic alike. That is off-distribution degeneration, not judgment.
+
+DIAGNOSIS: a naive single-call binary YES/NO classification prompt drives THIS served model
+(quantized gemma-4-12b, tuned for the faithfulness chat) off-distribution -> constant "NO" + garbage.
+This is a HARNESS inadequacy, NOT evidence about the pass->block concept. The concept is sound
+(TELE-12: sequential decide->execute beats fused) and the project already has a VALIDATED judge —
+SP_B3_JUDGE (routes.rs), a SELECTION judge over tagged candidates with anti-position-bias shuffling,
+validated 85.7% recall@1 on _needle_corpus_div. My ad-hoc binary prompt is not that.
+
+VERDICT: pass->block reject is UNRESOLVED here. Not proven, not disproven. To resolve it properly:
+run the reject through the EXISTING SP_B3_JUDGE (selection framing, proper serving params) on
+(query, top-few-facts incl. the L5 top-1), NOT an ad-hoc binary prompt. That is a deliberate build.
+
+WHAT IS SETTLED (this thread): (1) L5-cosine recall is the shipped win (86.89% para live, G-L5-RECALL
+-LIVE). (2) query-SIDE reject gates (L5/Jaccard/margin, single or combined) genuinely FAIL on the
+clean foreign set (~90% foreign false-accept @85% para-accept) — foreign factual Qs are structurally
+identical to in-mem ones. (3) judge-BASED reject is the right direction but needs the validated
+SP_B3_JUDGE, unresolved by this harness. (4) the served model IGNORES irrelevant recalled context
+(answers foreign Qs from parametric even when a spurious fact is force-injected), which bounds the
+real-world damage of an imperfect reject.
