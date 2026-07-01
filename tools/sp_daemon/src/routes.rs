@@ -1428,11 +1428,36 @@ fn run_kvdecode_chat(
                                         }
                                     }
                                     if bcos >= tau_l5 && !btext.is_empty() {
-                                        let aug = format!("Context (authoritative, current): {}\n\n{}", btext, ruser);
-                                        let aug_msgs = vec![
-                                            Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
-                                            Message { role: "user".to_string(), content: aug },
-                                        ];
+                                        // ATTR-GROUNDING (SNE crucible fix): on zero-prior data the model
+                                        // CONFABULATES a plausible wrong value when asked an attribute the
+                                        // delivered fact does not state (80% on the SNE crucible; 5% leak the
+                                        // fact's own value). Two composable, default-off levers:
+                                        //  - SP_RECALL_STRICT: closed-book delivery — "answer ONLY from the fact;
+                                        //    if it doesn't state what's asked, decline exactly." The MODEL grounds
+                                        //    with its own semantics (paraphrase-safe: a same-attribute paraphrase
+                                        //    still recites; a different-attribute query declines).
+                                        //  - SP_RECALL_ATTR_GATE: deterministic lexical pre-check; if the query's
+                                        //    salient words are ABSENT from the fact (ratio>=SP_RECALL_ATTR_TAU),
+                                        //    FORCE the strict decline framing regardless of the model. Hard
+                                        //    fallback (not paraphrase-aware). Both unset = the proven recite path
+                                        //    (byte-identical null floor).
+                                        let strict = std::env::var("SP_RECALL_STRICT").as_deref() == Ok("1");
+                                        let attr_gate = std::env::var("SP_RECALL_ATTR_GATE").as_deref() == Ok("1");
+                                        let attr_tau: f32 = std::env::var("SP_RECALL_ATTR_TAU").ok()
+                                            .and_then(|s| s.parse().ok()).unwrap_or(0.5);
+                                        let absent = if attr_gate { recall::attr_absent_ratio(&ruser, &btext) } else { 0.0 };
+                                        let force_decline = attr_gate && absent >= attr_tau;
+                                        let aug_msgs = if strict || force_decline {
+                                            vec![
+                                                Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },
+                                                Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}", btext, ruser) },
+                                            ]
+                                        } else {
+                                            vec![
+                                                Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                                Message { role: "user".to_string(), content: format!("Context (authoritative, current): {}\n\n{}", btext, ruser) },
+                                            ]
+                                        };
                                         match app.tokenizer.apply_template_ids(&aug_msgs) {
                                             Ok(aug_toks) if aug_toks.len() >= 2 => {
                                                 let _ = unsafe { kv::reset_cold(handle) };
@@ -1440,7 +1465,9 @@ fn run_kvdecode_chat(
                                                 if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
                                                     syn_last = aug_last[0];
                                                     recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
-                                                    tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} -> TEXT-IN-CONTEXT (L5 query-key)", bname, bcos, tau_l5);
+                                                    tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} absent={:.2} mode={} -> TEXT-IN-CONTEXT",
+                                                        bname, bcos, tau_l5, absent,
+                                                        if force_decline {"ATTR-DECLINE"} else if strict {"STRICT"} else {"recite"});
                                                 } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
                                             }
                                             _ => tracing::warn!("RECALL-L5: apply_template_ids(aug) failed -- clean prompt"),

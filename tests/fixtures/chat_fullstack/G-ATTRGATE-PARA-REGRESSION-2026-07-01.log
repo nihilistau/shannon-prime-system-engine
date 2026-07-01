@@ -1,0 +1,17 @@
+=== PARA (judge recall) ===
+[miss] 'I do not have that information.' <- Which urban center now serves as the sea
+[miss] 'I do not have that information.' <- Which peak rises higher above sea level 
+[miss] 'I do not have that information.' <- Which world orbiting our star has the gr
+[miss] 'I do not have that information.' <- Which playwright penned the tragedy of t
+[miss] 'I do not have that information.' <- Which body of saltwater covers more of t
+[miss] 'I do not have that information.' <- Which creature can sprint across the gro
+[miss] 'I do not have that information.' <- What money do people spend in the island
+[miss] 'I do not have that information.' <- Which world sits nearest to our star?
+[miss] 'I do not have that information.' <- Which person is credited with creating t
+[miss] 'I do not have that information.' <- Which sovereign state occupies the most 
+[miss] 'I do not have that information.' <- What letters denote the precious yellow 
+[miss] 'I do not have that information.' <- At what heat does H2O turn to steam at s
+=== FOREIGN (judge reject) ===
+[clean] 'I do not have that information.' <- What is the capital of Mongolia?
+[clean] 'I do not have that information.' <- Who composed the Ninth Symphony?
+[clean] 'The chemical formula for methane is CH4.' <- What is the chemical formula for methane

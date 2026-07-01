@@ -243,6 +243,41 @@ pub fn load_episode_l5key(dir: &str) -> Option<Vec<f32>> {
     Some(v)
 }
 
+/// ATTR-GATE (SP_RECALL_ATTR_GATE): deterministic attribute-grounding check.
+/// Fraction of the query's salient content words (len>=3, non-stopword) that are
+/// ABSENT from the delivered fact text. High ratio => the query asks about an
+/// attribute the fact does not state (e.g. fact="override code for Node-X is V",
+/// query="manufacturer of Node-X?" -> "manufacturer" absent). The shared entity
+/// tokens are present in both, so they lower the ratio; a mismatch surfaces via the
+/// distinctive attribute noun(s). Purely lexical (no model forward, no semantics) —
+/// it CANNOT tell a paraphrase of the SAME attribute from a DIFFERENT attribute, so
+/// it is the hard fallback; the strict closed-book delivery prompt (which lets the
+/// model ground with its own semantics) is the paraphrase-safe primary.
+pub fn attr_absent_ratio(query: &str, fact: &str) -> f32 {
+    fn toks(s: &str) -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_string())
+            .collect()
+    }
+    const STOP: &[&str] = &[
+        "the", "is", "are", "was", "were", "what", "which", "who", "whom", "whose",
+        "of", "for", "and", "or", "does", "do", "did", "how", "many", "much", "that",
+        "this", "its", "with", "by", "from", "you", "your", "have", "has", "had",
+        "been", "be", "as", "not", "now", "current", "currently", "authoritative",
+        "context", "there", "any", "about", "into", "please", "tell", "give", "list",
+    ];
+    let fw: std::collections::HashSet<String> = toks(fact).into_iter().collect();
+    let q: Vec<String> = toks(query)
+        .into_iter()
+        .filter(|w| w.len() >= 3 && !STOP.contains(&w.as_str()))
+        .collect();
+    if q.is_empty() { return 0.0; }
+    let absent = q.iter().filter(|w| !fw.contains(*w)).count();
+    absent as f32 / q.len() as f32
+}
+
 /// Bit-agreement = R_BITS - HammingDistance (the discrete_resolve.py `agree`).
 pub fn agree(a: &[u64; 4], b: &[u64; 4]) -> u32 {
     let mut ham = 0u32;

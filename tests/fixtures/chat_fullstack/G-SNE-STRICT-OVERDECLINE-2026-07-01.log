@@ -1,0 +1,6 @@
+=== SNE MATCH (recall works?) + MISMATCH (hallucinate the secret?) ===
+[match miss | mismatch decline] Node-MB-674B91 v=H3N-V62-3XL  M='I do not have that information.'  X='I do not have that information.'
+[match miss | mismatch decline] Node-33-B33F0E v=VGY-HXK-R3E  M='I do not have that information.'  X='I do not have that information.'
+[match miss | mismatch decline] Node-JN-7D1B53 v=063-MMU-BE8  M='I do not have that information.'  X='I do not have that information.'
+[match miss | mismatch decline] Node-SQ-3EBC0E v=1NG-TXA-8CE  M='I do not have that information.'  X='I do not have that information.'
+[match miss | mismatch decline] Node-GR-027665 v=XPG-JWH-SHS  M='I do not have that information.'  X='I do not have that information.'
