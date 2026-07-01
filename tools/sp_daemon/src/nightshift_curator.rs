@@ -128,6 +128,37 @@ unsafe fn admit(
     Some(collapse)
 }
 
+/// NIGHTSHIFT criterion-5 follow-on: mint the episode's L5 query-key sidecar
+/// `ep.l5` so the SHIPPED `SP_RECALL_L5` cosine selector can retrieve this
+/// live-captured episode by paraphrase, exactly like a curated one — closing the
+/// `routes.rs:668` "capture-side L5 is a follow-up" gap (the last open NIGHTSHIFT
+/// thread). Reuses the IDENTICAL construction the query path (routes.rs SP_RECALL_L5)
+/// and the curated `write_ep_l5` mint use: prefill the statement tokens on a FRESH
+/// kv handle, read the (non-committing) global-Q at the final position, and store
+/// `l5_query_embed(read_global_q)` as raw little-endian f32[HD]. Idempotent (skips
+/// if `ep.l5` already exists). GPU forward. Returns true on write or skip-existing.
+unsafe fn mint_ep_l5(qm: *const c_void, dir: &str, eptok: &[i32], logits: &mut [f32]) -> bool {
+    let path = std::path::Path::new(dir).join("ep.l5");
+    if path.exists() { return true; } // idempotent — never re-mint
+    if eptok.len() < 2 { return false; }
+    let h = match kv::open(qm, eptok.len() as i32 + 8) { Ok(h) => h, Err(_) => return false };
+    // Prefill the statement context (all but the final token) via a real forward,
+    // then read the non-committing global-Q for the final token = the statement's
+    // L5 direction (NOT replay: read_global_q needs the Q projection, not stored K/V).
+    for &t in &eptok[..eptok.len() - 1] {
+        if kv::decode_step(h, t, logits).is_err() { kv::close(h); return false; }
+    }
+    let n_global = recall::NL / recall::PERIOD;
+    let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
+    let ok = kv::read_global_q(h, *eptok.last().unwrap(), &mut ql).is_ok();
+    kv::close(h);
+    if !ok { return false; }
+    let key = recall::l5_query_embed(&ql);
+    if key.len() != recall::HD { return false; }
+    let bytes: Vec<u8> = key.iter().flat_map(|f| f.to_le_bytes()).collect();
+    std::fs::write(&path, &bytes).is_ok()
+}
+
 pub fn run_kairos_curator(
     model_path: &str,
     tok_path: &str,
@@ -183,6 +214,13 @@ pub fn run_kairos_curator(
                 let addr = format!("c2sig_{}", sig_hex(&sig));
                 let topic: String = text.trim().chars().take(60).collect();
                 eprintln!("[curator] ACCEPT {dir_str} collapse={c:.2} addr={addr}");
+                // NIGHTSHIFT criterion-5 follow-on (default-off null floor): make the
+                // accepted live episode L5-recallable so the shipped SP_RECALL_L5 cosine
+                // selector retrieves it by paraphrase, like a curated episode.
+                if std::env::var("SP_NIGHTSHIFT_L5").ok().as_deref() == Some("1") {
+                    let minted = unsafe { mint_ep_l5(qm, &dir_str, &eptok, &mut logits) };
+                    eprintln!("[curator] ep.l5 mint {} for {dir_str}", if minted { "OK" } else { "FAILED" });
+                }
                 if !okf_mem.is_empty() {
                     match std::process::Command::new(&okf_py)
                         .arg(&okf_mem)
