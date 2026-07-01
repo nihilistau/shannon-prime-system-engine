@@ -1827,7 +1827,14 @@ Tag of the answer (or [NULL]):");
                                                 // SELECTION mechanism (the judge PICK above); recitation goes
                                                 // through the native pipeline. We DROP inject_tokens/replay
                                                 // for the recitation path (operator decision).
-                                                let mem_text = texts[slot].clone();
+                                                // AUTHORITY FIX (2026-07-01): deliver the CLEAN manifest text
+                                                // (ep.text, the same field L5-direct delivers), NOT texts[slot]
+                                                // — texts[slot] is the detokenized RAW ep.tok turn (captured
+                                                // with forced BOS + trailing \n = chat-template cruft), which
+                                                // polluted "Context (authoritative): ..." and dropped the model
+                                                // back to parametric (right pick, wrong answer). Fall back to
+                                                // the detokenized turn only for live episodes with no manifest.
+                                                let mem_text = if !ep.text.trim().is_empty() { ep.text.clone() } else { texts[slot].clone() };
                                                 // JUDGE-SERVED synthesis: rigid CLOSED-TASK framing. The prior
                                                 // conversational "Using that context, answer:" wording induced a
                                                 // template-continuation trap — the model answered, then echoed the
