@@ -1516,6 +1516,32 @@ fn run_kvdecode_chat(
                                 };
                                 let n_live = ns_snapshot.len();
                                 let n_cur = registry.len();
+                                // ===== REORDER (ADR-002 §8.1): judge = reject veto, L5-direct owns delivery.
+                                // Precompute the GLOBAL L5-#1 episode (bcos over registry ∪ nightshift by
+                                // L5 query-key cosine — the IDENTICAL selection SP_RECALL_L5 delivers at
+                                // 86.89%). On a judge PASS we deliver THIS, not the judge's own pick among
+                                // the shuffled top-K shortlist (K-sweep: judge-pick delivery = 50% vs
+                                // L5-#1 = 86.89%). The judge still sees the K(>=2) shortlist so it engages
+                                // its PASS/NULL reject (K=1 degenerates to always-PICK). L5 mode off /
+                                // best unavailable ⇒ None ⇒ falls back to the judge's pick (prior behavior,
+                                // null floor preserved). (name, text) of the delivery target.
+                                let l5_best: Option<(String, String)> =
+                                    if std::env::var("SP_B3_JUDGE_L5").as_deref() == Ok("1") {
+                                        let ql5g = recall::l5_query_embed(&qbuf);
+                                        if ql5g.is_empty() { None } else {
+                                            let (mut bcos, mut bname, mut btext) =
+                                                (f32::NEG_INFINITY, String::new(), String::new());
+                                            for ep in registry.iter().chain(ns_snapshot.iter()) {
+                                                if ep.l5key.len() != recall::HD { continue; }
+                                                let c = recall::cos512(&ql5g, &ep.l5key);
+                                                if c > bcos { bcos = c; bname = ep.name.clone(); btext = ep.text.clone(); }
+                                            }
+                                            if btext.trim().is_empty() { None } else {
+                                                tracing::info!("B3-JUDGE REORDER: L5 global best='{}' cos={:.3} (delivery target on PASS)", bname, bcos);
+                                                Some((bname, btext))
+                                            }
+                                        }
+                                    } else { None };
                                 let rkeep = rbound.min(kbound).min(n_live);
                                 // The working candidate set: each entry is (Episode, is_live).
                                 let mut cands: Vec<(recall::Episode, bool)> = Vec::with_capacity(kbound);
@@ -1834,7 +1860,18 @@ Tag of the answer (or [NULL]):");
                                                 // polluted "Context (authoritative): ..." and dropped the model
                                                 // back to parametric (right pick, wrong answer). Fall back to
                                                 // the detokenized turn only for live episodes with no manifest.
-                                                let mem_text = if !ep.text.trim().is_empty() { ep.text.clone() } else { texts[slot].clone() };
+                                                // REORDER (ADR-002 §8.1): the judge PICK is a PASS signal only.
+                                                // Deliver the GLOBAL L5-#1 (l5_best, the 86.89% SP_RECALL_L5
+                                                // selection), NOT the judge's own shortlist pick (measured 50%
+                                                // — the judge picks #2 or the model resists). The judge already
+                                                // did its job: PASS (some memory answers) vs NULL (foreign
+                                                // reject). Fall back to the judge's pick text only when L5 mode
+                                                // is off / L5 best unavailable (prior behavior, null floor).
+                                                let (deliver_name, mem_text) = match l5_best.as_ref() {
+                                                    Some((n, t)) if !t.trim().is_empty() => (n.clone(), t.clone()),
+                                                    _ => (ep.name.clone(),
+                                                          if !ep.text.trim().is_empty() { ep.text.clone() } else { texts[slot].clone() }),
+                                                };
                                                 // JUDGE-SERVED synthesis: rigid CLOSED-TASK framing. The prior
                                                 // conversational "Using that context, answer:" wording induced a
                                                 // template-continuation trap — the model answered, then echoed the
@@ -1878,11 +1915,13 @@ Tag of the answer (or [NULL]):");
                                                         }
                                                         if ok {
                                                             syn_last = aug_last[0];
-                                                            recalled = Some((ep.name.clone(), 1000));
-                                                            judge_ground = Some((ep.name.clone(), texts[slot].clone()));
+                                                            // provenance/telemetry reflect the DELIVERED fact
+                                                            // (deliver_name = L5-#1 on reorder; = judge pick on fallback).
+                                                            recalled = Some((deliver_name.clone(), 1000));
+                                                            judge_ground = Some((deliver_name.clone(), mem_text.clone()));
                                                             tracing::info!(
-                                                                "B3-JUDGE: PICK [{}] '{}' (topic='{}') reply={:?} -> TEXT-IN-CONTEXT (aug n={}, dpos={}) -> synthesis recites natively",
-                                                                tags[slot], ep.name, ep.topic, reply.trim(), aug_toks.len(),
+                                                                "B3-JUDGE: PASS (judge PICK [{}] '{}' topic='{}' reply={:?}) -> DELIVER '{}' TEXT-IN-CONTEXT (aug n={}, dpos={}) -> synthesis recites natively",
+                                                                tags[slot], ep.name, ep.topic, reply.trim(), deliver_name, aug_toks.len(),
                                                                 unsafe { kv::position(handle) });
                                                         } else {
                                                             // aug reconstruction failed: fall back to the
