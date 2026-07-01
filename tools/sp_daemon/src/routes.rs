@@ -1542,7 +1542,29 @@ fn run_kvdecode_chat(
                                     // starve the judge of the right candidate. Unset => Hamming (null floor).
                                     let wc_head = std::env::var("SP_B3_JUDGE_WC").ok()
                                         .filter(|s| !s.is_empty()).and_then(|p| recall::load_wc(&p));
-                                    if let Some(head) = wc_head.as_ref() {
+                                    // STAGE-1 L5 (SP_B3_JUDGE_L5=1): rank the cold pool by L5 query-key
+                                    // cosine (the 86.89%-live recall selector) and shortlist top-(K-R) for
+                                    // the judge. This IS the pass->block: L5 PASSES the shortlist, the
+                                    // generative judge PICKS the answerer or [NULL] (the reject). Requires
+                                    // ep.l5 keys on the episodes; falls through to W_c/C2 if L5 unavailable.
+                                    let ql5 = if std::env::var("SP_B3_JUDGE_L5").as_deref() == Ok("1") {
+                                        recall::l5_query_embed(&qbuf)
+                                    } else { Vec::new() };
+                                    if !ql5.is_empty() {
+                                        let mut scored: Vec<(usize, f32)> = cold.iter().enumerate()
+                                            .map(|(i, (ep, _))| (i, if ep.l5key.len() == recall::HD {
+                                                recall::cos512(&ql5, &ep.l5key) } else { f32::NEG_INFINITY }))
+                                            .collect();
+                                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                                            .unwrap_or(std::cmp::Ordering::Equal)); // descending L5 cosine
+                                        for &(i, _sc) in scored.iter().take(salience_slots) {
+                                            kairos_rescued.push(cold[i].0.name.clone());
+                                            cands.push(cold[i].clone());
+                                        }
+                                        tracing::info!(
+                                            "B3-JUDGE STAGE-1 L5: shortlisted top-{} of {} cold by L5 query-key cosine",
+                                            salience_slots, cold.len());
+                                    } else if let Some(head) = wc_head.as_ref() {
                                         let mut scored: Vec<(usize, f32)> = cold.iter().enumerate()
                                             .map(|(i, (ep, _))| (i, recall::wc_score(
                                                 &qbuf, &ep.gk, ep.gk_ng, ep.npos as usize, head)))
