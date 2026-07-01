@@ -2,6 +2,8 @@
 
 Agent entry point for the **Shannon-Prime inference engine** (CUDA/CPU/Vulkan/Hexagon backends, `sp_transcode`, the served `sp_daemon`). Human-readable and agent-navigable.
 
+> **Current state (2026-07-01): the FAITHFULNESS AXIS is CLOSED end-to-end on the served 12B chat**, under **ADR-002** (decide in latent, execute in clean text, NEVER fuse). Live recall selector = **L5-cosine** (`SP_RECALL_L5=1`, τ=0.30, 86.89% paraphrase, gate `G-L5-RECALL-LIVE`, engine `d9099cd`); the generative judge is **PARKED** (hard-foreign kill-test: 0 benefit vs L5-direct+τ); the zero-prior/private-data confab+leak hole is **CLOSED** by a deterministic **attribute-grounding gate** with a ZERO-INFERENCE symbolic decline (`SP_RECALL_ATTR_GATE=1` → confab 0 / leak 0 / recall 100%, no gemma4 forward on decline; gate `G-SNE-ATTRGATE-ZEROINF`, engine HEAD `fc2e846`). All flags default-off = byte-identical null floor; turn the closed stack on with `SP_RECALL_L5=1 SP_RECALL_ATTR_GATE=1`. NEXT: **SWARM re-elevated**. Full record in `CLAUDE.md`; status truth in lattice `papers/VERIFIED-SCOREBOARD.md` + `PPT-LAT-KEYSTONE.md` + `PPT-LAT-ADR-002-DECIDE-EXECUTE-SPINE.md`.
+
 ## Read order (do this before touching anything)
 
 1. **`README.md`** (this repo) — the engine surfaces, the honest-tier capability map, build + run.
@@ -43,7 +45,7 @@ MSVC cannot build the CPU tree. GPU numbers need warmup + a long window + both c
 ## Non-negotiables (receipts-first / honest tiers)
 
 - **No number without a reproducing command + a gate or commit.** Every `SP_*` overlay is **bit-exact-when-off** — verify the null floor before claiming the delta.
-- **Honest tiers, exact words.** `GREEN-LIVE` = gated AND on the served path by default. `gated-GREEN / default-off` = passes its gate behind a flag (NOT live). The byte-exact forward and the NIGHTSHIFT curator are **gated-GREEN, not GREEN-LIVE**; the curator's live criterion 5 is **PENDING**. The native diffusion judge is **UNPROVEN** (its 95.6% is the external llama.cpp oracle's, not ours; our native single-forward was falsified ~25%).
+- **Honest tiers, exact words.** `GREEN-LIVE` = gated AND on the served path by default (the L5-cosine recall selector + the attribute-grounding zero-inference decline are GREEN-LIVE). `PARKED` / `gated-GREEN / default-off` = passes its gate behind a flag but is NOT on the hot path — the **generative judge is PARKED** (kill-test: 0 benefit vs L5-direct+τ, kept as an honest negative, not deleted); the byte-exact forward and the NIGHTSHIFT curator are **gated-GREEN, not GREEN-LIVE** (curator live criterion 5 **PENDING**). The native diffusion judge is **UNPROVEN** (its 95.6% is the external llama.cpp oracle's, not ours; our native single-forward was falsified ~25%).
 - **No silent gate revision** — surface upstream. **Honest negatives stay attached** (the 32k NIAH MISS, the diffusion falsification, the boundary-thesis inert levers).
 - **Check the code + commits + `git status`/`git fetch` BEFORE trusting memory or a summary.**
 - **Drive by default.** Make the obvious call; surface only genuine forks.
@@ -55,7 +57,9 @@ MSVC cannot build the CPU tree. GPU numbers need warmup + a long window + both c
 
 ## Where to look
 
-- CUDA forward/decode + harnesses: `src/backends/cuda/cuda_forward.cu`
-- Served daemon: `tools/sp_daemon/src/{routes.rs, recall.rs, nightshift_curator.rs, main.rs}`
-- Weight pipeline: `tools/sp_transcode/sp_transcode.c` (`--st` safetensors-direct)
-- Gates / receipts: `tests/test_gemma4_cuda.c`, `tests/fixtures/`
+- Served daemon `/v1/chat` loop: `tools/sp_daemon/src/routes.rs` (the `SP_RECALL_L5` branch + the `symbolic_decline` synthesis-seam short-circuit; `SP_PERSIST_KV`; memory agency `SP_FORGET`/`SP_DECIDE`).
+- Recall + faithfulness primitives: `tools/sp_daemon/src/recall.rs` (`l5_query_embed`, `cos512`, `attr_absent_ratio`, `query_has_entity_token`; plus the learned `WcHead`).
+- Curator / heartbeat: `tools/sp_daemon/src/{nightshift_curator.rs, kairos.rs, kairos_runner.rs}`; delegate wiring: `telepathy.rs`, `eagle_accept.rs`.
+- CUDA forward/decode + harnesses: `src/backends/cuda/cuda_forward.cu` (`SP_BYTEEXACT` islands, `gemma4_kv_decode_logits`, persistent-KV ABI).
+- Weight pipeline: `tools/sp_transcode/sp_transcode.c` (`--st` safetensors-direct — the only trusted weight path).
+- Gates / receipts: `tests/test_gemma4_cuda.c`, `tests/fixtures/`.

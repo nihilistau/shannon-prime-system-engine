@@ -137,3 +137,9 @@ tools/eagle/corpus_small.txt
 
 # moved root run-logs (preserved, untracked)
 logs/
+
+*.log.err
+
+*.out.err
+
+tools/sp_daemon/target-l5check/
