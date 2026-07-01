@@ -1,0 +1,36 @@
+G-FOREIGN-REJECT — can a multi-signal gate reject out-of-memory queries? HONEST NEGATIVE.
+date: 2026-07-01
+setup: served gemma-4-12B (SP_RECALL_L5=1, tau=0), 61 in-memory paraphrase queries vs 40 minted
+       FOREIGN queries (facts NOT in the registry). Live-captured global-Q -> L5 (qdump_foreign).
+harness: /tmp rep_foreign.py (offline over qdump / qdump_para / qdump_foreign + facts.json + foreign_queries.json)
+signals per query (vs the 61 exact-question L5 keys): top1 L5-cos, margin(top1-top2), max Jaccard(text).
+
+DISTRIBUTIONS (in-memory PARA should ACCEPT; FOREIGN should REJECT):
+  top1 L5-cos:  para mean 0.955 (p10 .928/p50 .958/p90 .973) ;  foreign mean 0.965 (p10 .927/p50 .970/p90 1.000)
+  margin:       para 0.022 ; foreign 0.021
+  max Jaccard:  para 0.151 ; foreign 0.325   <- foreign is MORE lexically similar (shared "what is the largest.." scaffolding)
+
+REJECT GATES (target: keep para-accept >= 85%, minimize foreign FALSE-accept):
+  L5 top1-cos alone   @tau 0.934 : para-accept 85.25%  foreign-FALSE-accept 80.00%
+  margin alone        @tau 0.004 : para-accept 86.89%  foreign-FALSE-accept 85.00%
+  maxJaccard alone               : 100% / 100% (useless; foreign scores higher)
+  MULTI-SIGNAL (L5 AND margin) @tc 0.927 tm 0.004 : para-accept 85.25%  foreign-FALSE-accept 80.00%  (== L5 alone)
+
+VERDICT: HONEST NEGATIVE. Foreign rejection CANNOT be done with cheap query-side signals (L5, Jaccard,
+margin), and the multi-signal AGREEMENT gate does NOT beat L5-alone (both ~80% foreign false-accept at
+85% para-accept). This DISCONFIRMS the earlier hypothesis that "the combiner's value is foreign-reject."
+
+ROOT CAUSE: the reject decision is intrinsically QUERY x FACT (does the retrieved fact ANSWER this
+query?), not query-similarity. Foreign FACTUAL questions are structurally identical to in-memory
+factual questions ("What is the largest ..?"), so L5 (which encodes question TYPE/structure) puts them
+in the same region, and Jaccard is confounded by shared scaffolding. No query-SIDE threshold can see
+whether the answer is in memory, because the QUERY looks the same either way.
+
+THE RIGHT TOOL: a pairwise (query, candidate-fact) RELEVANCE/entailment check -- the generative judge
+(SP_B3_JUDGE, already in the engine, reads candidate TEXTS and picks the one that answers or [NULL]) or
+a learned cross-encoder head. NOT a cheap signal-agreement gate.
+
+SILVER LINING (observed): with tau=0 forcing spurious recall on foreign queries, the served model
+still answered correctly FROM PARAMETRIC ("Mars has two moons", "Glass is primarily silica") -- it
+largely IGNORES irrelevant recalled context. So a moderate tau + the model's own robustness bounds the
+damage; the judge is the principled reject when a spurious fact would actually mislead.
