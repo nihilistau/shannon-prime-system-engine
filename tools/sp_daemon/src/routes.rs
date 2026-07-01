@@ -1446,7 +1446,13 @@ fn run_kvdecode_chat(
                                         let attr_tau: f32 = std::env::var("SP_RECALL_ATTR_TAU").ok()
                                             .and_then(|s| s.parse().ok()).unwrap_or(0.5);
                                         let absent = if attr_gate { recall::attr_absent_ratio(&ruser, &btext) } else { 0.0 };
-                                        let force_decline = attr_gate && absent >= attr_tau;
+                                        // PARAPHRASE GUARD: only decline on attribute-absence when the query
+                                        // shares a high-entropy verbatim token with the fact (a private-entity
+                                        // ID/code). General-knowledge/paraphrase queries have no such token, so
+                                        // the gate stays off for them (recall preserved) — this is what makes
+                                        // the deterministic gate globally default-on-safe, not regime-specific.
+                                        let force_decline = attr_gate && absent >= attr_tau
+                                            && recall::query_has_entity_token(&ruser);
                                         let aug_msgs = if strict || force_decline {
                                             vec![
                                                 Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },

@@ -278,6 +278,22 @@ pub fn attr_absent_ratio(query: &str, fact: &str) -> f32 {
     absent as f32 / q.len() as f32
 }
 
+/// ATTR-GATE paraphrase guard: does the QUERY carry a HIGH-ENTROPY entity token?
+/// A rare token = len>=4 AND contains a digit (private-entity IDs / codes:
+/// "Node-XX-674B91", "SVC-3F9A2B7C"). General-knowledge / paraphrased chat queries
+/// have no such token, so the guard is FALSE for them => the attribute gate never
+/// fires on them (recall preserved). A query ABOUT a private entity always names the
+/// entity verbatim (an ID cannot be paraphrased) => guard TRUE => the gate is allowed
+/// to decline on attribute-absence. Checking the QUERY (not query∩fact) is deliberate:
+/// L5 may deliver a wrong-entity fact for a poorly-matching attribute query, but the
+/// query still being about a private entity is what warrants grounding. This is what
+/// makes the deterministic gate globally default-on-safe instead of regime-specific.
+pub fn query_has_entity_token(query: &str) -> bool {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.len() >= 4 && w.chars().any(|c| c.is_ascii_digit()))
+}
+
 /// Bit-agreement = R_BITS - HammingDistance (the discrete_resolve.py `agree`).
 pub fn agree(a: &[u64; 4], b: &[u64; 4]) -> u32 {
     let mut ham = 0u32;
