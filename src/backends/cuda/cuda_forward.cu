@@ -4451,6 +4451,136 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     return s;
 }
 
+/* ═══════════ #41 BATCH PREFILL (CONTRACT-BATCH-PREFILL) ═══════════
+ * ONE n-position batched forward that sinks K/V into the resident cache at
+ * [0,n), replacing the N single-token g4_kv_step launches. Reuses the SAME
+ * batched kernels the validated gemma4_cuda_probe uses (n-wide gemm_w_lift —
+ * handles packed OK_Q4B via dequant→cublas — batched k_attn, AltUp/PLE), but
+ * (a) writes owner K/V to s->dKc[L]/dVc[L] instead of throwaway scratch, and
+ * (b) SKIPS the head (the 12B keeps no f32 embd; the caller's packed
+ * decode_step(last) produces the only logits prefill needs). FLOAT attention
+ * ⇒ K/V differ from the bx per-token path — this is a CHAT SPEED MODE, not the
+ * auditable mode (obey-neutral, G-BX-OBEY-AB). PRECONDITIONS (caller-enforced):
+ * cold (dpos_host==0), ring_W==0 (full cache, slot==pos), no inject/capture
+ * seam. Returns 0 on success; leaves dpos_host==n, device dpos==n, dseq[0,n)=toks.
+ * Bit-parity is NOT claimed; coherence + no-corruption + speed is the gate. */
+extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n) {
+    if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_prefill_batched: bad args"); return -1; }
+    if (s->dpos_host != 0) { sp_set_error("gemma4_kv_prefill_batched: not cold (dpos!=0)"); return -1; }
+    if (s->ring_W != 0)   { sp_set_error("gemma4_kv_prefill_batched: ring mode unsupported"); return -1; }
+    if (n > s->Pmax)      { sp_set_error("gemma4_kv_prefill_batched: exceeds Pmax"); return -1; }
+    const qwen3_model *m = s->m; const qwen3_config *c = &m->cfg;
+    cublasHandle_t cb = g_w.cublas; cudaStream_t st = g_w.stream;
+    const int E=s->E, NL=s->NL, period=s->period, kvfs=s->kvfs, PL=s->PL;
+    const int g_nh=s->g_nh,g_nkv=s->g_nkv,g_hd=s->g_hd,s_nh=s->s_nh,s_nkv=s->s_nkv,s_hd=s->s_hd;
+    const float eps=s->eps, embscale=s->embscale;
+    const float g_base=s->g_base, s_base=s->s_base;
+    const int SW=s->SW, QDmax=s->QDmax, KVDmax=s->KVDmax, FFmax=s->FFmax;
+    float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
+          *dg=NULL,*dup=NULL,*ddn=NULL,*dscr=NULL,*dipl=NULL,*dple=NULL,*dpg=NULL,*dpp=NULL;
+    float *hple=NULL; int rc=-1;
+    #define BA(p,cnt) do { if (cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess){ sp_set_error("batch-prefill OOM"); goto bdone; } } while(0)
+    BA(dx,(size_t)n*E); BA(dnx,(size_t)n*E);
+    BA(dq,(size_t)n*QDmax); BA(dk,(size_t)n*KVDmax); BA(dv,(size_t)n*KVDmax);
+    BA(dao,(size_t)n*QDmax); BA(dap,(size_t)n*E);
+    BA(dg,(size_t)n*FFmax); BA(dup,(size_t)n*FFmax); BA(ddn,(size_t)n*E);
+    if (g_w.scratch_n) BA(dscr, g_w.scratch_n);
+    if (PL) { BA(dipl,(size_t)n*NL*PL); BA(dple,(size_t)n*NL*PL); BA(dpg,(size_t)n*PL); BA(dpp,(size_t)n*E); }
+    /* embed dseq via arena gather (12B: no resident f32 embd) + sqrt(E) scale. */
+    {
+        const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
+        if (!eat) { sp_set_error("batch-prefill: token_embd not in arena"); goto bdone; }
+        float *hrows = (float *)malloc((size_t)n*E*sizeof(float));
+        if (!hrows) { sp_set_error("batch-prefill: embd host OOM"); goto bdone; }
+        for (int t=0;t<n;t++){ if (sp_arena_dequant_row(eat, toks[t], hrows+(size_t)t*E)) { free(hrows); sp_set_error("batch-prefill: embd row"); goto bdone; }
+            for (int i=0;i<E;i++) hrows[(size_t)t*E+i]*=embscale; }
+        int up = (cudaMemcpyAsync(dx, hrows,(size_t)n*E*sizeof(float),cudaMemcpyHostToDevice,st)!=cudaSuccess);
+        cudaStreamSynchronize(st); free(hrows);
+        if (up) { sp_set_error("batch-prefill: embd H2D"); goto bdone; }
+    }
+    /* AltUp/PLE precompute (gemma4 project_per_layer_inputs) — runs once pre-layer-0. */
+    if (PL) {
+        const sp_arena_tensor *plt = m->arena ? sp_arena_find(m->arena, "per_layer_token_embd.weight") : NULL;
+        if (!plt) { sp_set_error("batch-prefill: per_layer_token_embd not in arena"); goto bdone; }
+        hple = (float *)malloc((size_t)n*NL*PL*sizeof(float));
+        if (!hple) { sp_set_error("batch-prefill: ple OOM"); goto bdone; }
+        for (int t=0;t<n;t++) if (sp_arena_dequant_row(plt, toks[t], hple+(size_t)t*NL*PL)) { sp_set_error("batch-prefill: ple row"); goto bdone; }
+        if (cudaMemcpyAsync(dple, hple,(size_t)n*NL*PL*sizeof(float),cudaMemcpyHostToDevice,st)!=cudaSuccess){ sp_set_error("batch-prefill: ple H2D"); goto bdone; }
+        if (gemm_w_lift(cb, st, &g_w.pl_model_proj, dx, dipl, n, dscr)) goto bdone;
+        k_altup_ipl<<<n*NL, 256, 0, st>>>(dipl, dple, g_w.pl_proj_norm, PL,
+                                          1.0f/sqrtf((float)E), sqrtf((float)PL), 1.0f/sqrtf(2.0f), eps);
+    }
+    for (int L=0; L<NL; L++) {
+        const int global = ((L%period)==period-1);
+        const int nh=global?g_nh:s_nh, nkv=global?g_nkv:s_nkv, hd=global?g_hd:s_hd;
+        const int grp=nh/nkv, qd=nh*hd, kvd=nkv*hd;
+        const float rbase=global?g_base:s_base;
+        const float *ffac=global?g_w.rope_freqs:NULL;
+        const int win=global?-1:SW;
+        const float ascale=1.0f;
+        const size_t nE=(size_t)n*E;
+        k_rmsnorm<<<n,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
+        if (gemm_w_lift(cb,st,&g_w.Wq[L],dnx,dq,n,dscr)) goto bdone;
+        k_rmsnorm_head<<<n*nh,256,0,st>>>(dq, g_w.q_norm[L], nh, hd, qd, eps);
+        if (ffac) k_rope_freqs<<<n*nh,hd/2,0,st>>>(dq,nh,hd,qd,rbase,ffac);
+        else      k_rope<<<n*nh,hd/2,0,st>>>(dq,nh,hd,qd,rbase);
+        float *Kuse,*Vuse;
+        if (L < kvfs) {                                  /* OWNER: project, norm, rope, SINK to resident */
+            if (gemm_w_lift(cb,st,&g_w.Wk[L],dnx,dk,n,dscr)) goto bdone;
+            if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { if (gemm_w_lift(cb,st,&g_w.Wv[L],dnx,dv,n,dscr)) goto bdone; }
+            else cudaMemcpyAsync(dv,dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+            k_rmsnorm_head<<<n*nkv,256,0,st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
+            if (ffac) k_rope_freqs<<<n*nkv,hd/2,0,st>>>(dk,nkv,hd,kvd,rbase,ffac);
+            else      k_rope<<<n*nkv,hd/2,0,st>>>(dk,nkv,hd,kvd,rbase);
+            k_rmsnorm_head_noweight<<<n*nkv,256,0,st>>>(dv,nkv,hd,kvd,eps);
+            /* SINK: full cache slot==pos ⇒ dKc[L][0..n*kvd) IS the per-token layout. */
+            cudaMemcpyAsync(s->dKc[L], dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+            cudaMemcpyAsync(s->dVc[L], dv,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+            Kuse=s->dKc[L]; Vuse=s->dVc[L];
+        } else {                                         /* SHARER: reuse owner's resident K/V */
+            const int src=kvfs-(global?1:2);
+            Kuse=s->dKc[src]; Vuse=s->dVc[src];
+            if (!Kuse||!Vuse){ sp_set_error("batch-prefill: sharer before owner"); goto bdone; }
+        }
+        { int bd = hd>n?hd:n; if (bd>1024) bd=1024;
+          k_attn<<<n*nh, bd, (size_t)n*sizeof(float), st>>>(dq,Kuse,Vuse,n,qd,kvd,hd,grp,ascale,win,dao); }
+        if (gemm_w_lift(cb,st,&g_w.Wo[L],dao,dap,n,dscr)) goto bdone;
+        k_rmsnorm<<<n,256,0,st>>>(dap, g_w.post_attn[L], E, eps, dnx);
+        k_add<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,dnx,nE);
+        const int ffL=g_w.Wgate[L].out;
+        k_rmsnorm<<<n,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
+        if (gemm_w_lift(cb,st,&g_w.Wgate[L],dnx,dg,n,dscr)) goto bdone;
+        if (gemm_w_lift(cb,st,&g_w.Wup[L],dnx,dup,n,dscr)) goto bdone;
+        { size_t nFF=(size_t)n*ffL; k_gelu_mul<<<(unsigned)((nFF+255)/256),256,0,st>>>(dg,dup,nFF); }
+        if (gemm_w_lift(cb,st,&g_w.Wdown[L],dg,ddn,n,dscr)) goto bdone;
+        k_rmsnorm<<<n,256,0,st>>>(ddn, g_w.post_ffw[L], E, eps, dnx);
+        k_add<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,dnx,nE);
+        if (PL) {                                        /* AltUp per-layer-input injection */
+            if (gemm_w_lift(cb,st,&g_w.Wplig[L],dx,dpg,n,dscr)) goto bdone;
+            { int nn=n*PL; k_altup_gate<<<(unsigned)((nn+255)/256),256,0,st>>>(dpg,dipl,L,NL,PL,n); }
+            if (gemm_w_lift(cb,st,&g_w.Wplproj[L],dpg,dpp,n,dscr)) goto bdone;
+            k_rmsnorm<<<n,256,0,st>>>(dpp, g_w.pl_post_norm[L], E, eps, dnx);
+            k_add<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,dnx,nE);
+        }
+        if (g_w.pl_out_scale && g_w.pl_out_scale[L])
+            k_scale_by_dev<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,nE,g_w.pl_out_scale[L]);
+    }
+    /* commit position: device dpos=n, host dpos_host=n, dseq[0,n)=toks. No head. */
+    if (cudaMemcpyAsync(s->dseq, toks,(size_t)n*sizeof(int),cudaMemcpyHostToDevice,st)!=cudaSuccess){ sp_set_error("batch-prefill: seq H2D"); goto bdone; }
+    { int np=n; if (cudaMemcpyAsync(s->dpos, &np, sizeof(int), cudaMemcpyHostToDevice, st)!=cudaSuccess){ sp_set_error("batch-prefill: dpos H2D"); goto bdone; } }
+    { cudaError_t e=cudaStreamSynchronize(st); if (e!=cudaSuccess){ fail_cuda(e,"batch-prefill sync"); goto bdone; } }
+    { cudaError_t e=cudaGetLastError(); if (e!=cudaSuccess){ fail_cuda(e,"batch-prefill kernel"); goto bdone; } }
+    s->dpos_host = n;
+    rc = 0;
+bdone:
+    if (dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
+    if (dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
+    if (dscr)cudaFree(dscr); if(dipl)cudaFree(dipl); if(dple)cudaFree(dple); if(dpg)cudaFree(dpg); if(dpp)cudaFree(dpp);
+    free(hple);
+    #undef BA
+    return rc;
+}
+
 extern "C" int gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n) {
     if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_prefill: bad args"); return -1; }
     if (s->dpos_host + n > s->Pmax) { sp_set_error("gemma4_kv_prefill: exceeds Pmax"); return -1; }

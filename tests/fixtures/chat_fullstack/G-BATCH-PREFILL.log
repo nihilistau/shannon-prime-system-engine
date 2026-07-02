@@ -1,0 +1,52 @@
+G-BATCH-PREFILL — batched prefill: CORRECT, but the f32-dequant path is wrong for the
+12GB card. K/V-sink proven; the real fix is a batched dp4a GEMM (follow-on). (2026-07-03)
+=========================================================================================
+TASK #41 (CONTRACT-BATCH-PREFILL). BUILT gemma4_kv_prefill_batched: one n-wide batched
+forward (reusing gemma4_cuda_probe's kernels) that sinks K/V into the RESIDENT cache at
+[0,n), skips the head (caller's packed decode_step(last) gets logits). Gated
+SP_KV_PREFILL_BATCH, cold + ring-off + full-cache only, default-off.
+
+═══ CORRECTNESS: **GREEN** (the hard part — the K/V-sink design is proven) ═══
+  Cold 102-token prompt (Apollo-11 context + "who walked on the Moon?"), batched prefill
+  fired ("BATCH-PREFILL: 102 tokens via one batched forward"), then decoded:
+    -> "Neil Armstrong and Buzz Aldrin"  (EXACT, correct, coherent)
+  The 5-token decode-AFTER the batched prefill was clean = the resident K/V written by the
+  batched path across the whole [0,102) window is CORRECT (no corruption). The batched
+  forward's K/V (owner-layer dk/dv memcpy'd to s->dKc[L]/dVc[L]) is read correctly by the
+  subsequent per-token decode. THE K/V-SINK-INTO-RESIDENT-CACHE DESIGN WORKS.
+
+═══ PERFORMANCE: **RED on this hardware** (honest negative — the path is mis-matched) ═══
+  n=102: 39.3s prefill — SLOWER than per-token (~13s @ 102 tok). Dequant-dominated.
+  n=433: >2 min, did not complete (100% GPU util, 11964/12288 MiB — VRAM maxed).
+  n=954: >4 min, did not complete (VRAM thrash).
+  ROOT CAUSE: `gemm_w_lift` on a PACKED weight DEQUANTS the whole matrix to an f32 scratch
+  (k_codes_f32) then runs cublas GEMM. So the batched path (a) pays a per-WEIGHT dequant
+  cost that dominates at small n (fixed, ~independent of n_tok), and (b) allocates n-wide
+  f32 activation buffers (dg/dup = n*FFmax*4) + the f32 weight scratch, which on the 12GB
+  2060 — already ~9GB model + Pmax=4096 KV — pushes VRAM over the edge into WDDM paging at
+  n >= ~400 (the same oversubscription class as G-12B-SERVE-ROOTCAUSE PMAX=20000).
+  The per-token decode path AVOIDS this: gemv_w_packed keeps weights PACKED (int4) and does
+  dp4a with NO f32 materialization. There is no BATCHED equivalent — gemv_w_packed /
+  k_gemv_q4b_dp4a_v2 are single-column (one activation vector). So a batched forward is
+  FORCED through the f32-dequant lift, which is the wrong primitive for a VRAM-constrained
+  quantized model.
+
+═══ THE REAL FIX (follow-on kernel, scoped) ═══
+  A BATCHED dp4a GEMM: k_gemv_q4b_dp4a_v2 generalized to N activation columns (quantize the
+  n-wide activation block to int8 once, dp4a the packed int4 weights against all N columns,
+  no f32 weight materialization). VRAM stays flat (weights never dequant to f32; activations
+  are int8), and it's compute-dense. THAT makes batched prefill both fit and win. It's a new
+  kernel (~a day), not a wiring change — the correct-but-slow gemm_w_lift path shipped here
+  is the validated K/V-sink HARNESS it plugs into.
+
+═══ SHIPPED (default-off, byte-untouched null floor) ═══
+  SP_KV_PREFILL_BATCH unset (run_console_chat, the daily driver) => 0 "BATCH-PREFILL" log
+  lines, per-token path, byte-identical. want_batch also requires cold + head>64; the C side
+  enforces cold+ring-off+full-cache and ERRORS otherwise => any miss falls through to
+  per-token. So the shipped daemon is unaffected; the batched kernel is the proven-correct
+  foundation for the dp4a follow-on, kept as an honest negative (correct, not yet fast here).
+
+VERDICT: correctness GREEN, performance HONEST-NEGATIVE (needs batched dp4a). Default-off.
+REPRO: _bp_launch.bat (SP_KV_PREFILL_BATCH=1, ring off) + curl _t_bp1.json (Apollo, n=102)
+  -> "Neil Armstrong and Buzz Aldrin", "BATCH-PREFILL: 102 tokens" in _bp_serve.log.
+ENV: engine this-commit; RTX 2060 12GB WDDM, PMAX=4096, CUDA 13.2, gemma4-12b-b1.

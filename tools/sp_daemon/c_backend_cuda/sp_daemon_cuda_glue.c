@@ -125,6 +125,7 @@ void sp_daemon_cuda_release(const void *qm_opaque) {
 typedef struct sp_g4_kv sp_g4_kv;
 extern sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax);
 extern int   gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n);
+extern int   gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n);  /* #41 batch prefill */
 extern int   gemma4_kv_rewind(sp_g4_kv *s, int delta);
 extern int   gemma4_kv_reset(sp_g4_kv *s);
 extern int   gemma4_kv_reset_cold(sp_g4_kv *s);
@@ -231,6 +232,15 @@ int sp_daemon_cuda_kvdecode_prefill(void *handle, const int32_t *tokens, int n_t
     sp_g4_kv *s = (sp_g4_kv *)handle;
     if (!s || !tokens || n_tok <= 0) { sp_set_error("cuda kvdecode prefill: bad args"); return -1; }
     return gemma4_kv_prefill(s, tokens, n_tok);
+}
+
+/* #41 batch prefill: one n-wide batched forward that sinks K/V into the resident
+ * cache (CONTRACT-BATCH-PREFILL). Cold + ring-off + full-cache only; FLOAT (chat
+ * speed mode, not byte-exact). 0 ok, -1 on precondition fail (caller falls back). */
+int sp_daemon_cuda_kvdecode_prefill_batched(void *handle, const int32_t *tokens, int n_tok) {
+    sp_g4_kv *s = (sp_g4_kv *)handle;
+    if (!s || !tokens || n_tok <= 0) { sp_set_error("cuda kvdecode prefill_batched: bad args"); return -1; }
+    return gemma4_kv_prefill_batched(s, tokens, n_tok);
 }
 
 /* decode_step(handle, token, logits): forward ONE token at the live dpos, write

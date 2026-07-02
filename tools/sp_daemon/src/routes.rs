@@ -937,15 +937,34 @@ fn run_kvdecode_chat(
     // on the normal path => the whole head, byte-identical null floor).
     let head = &head[prefill_from.min(head.len())..];
     if !head.is_empty() {
-        let r = if single_entry {
-            unsafe { kv::inject_tokens(handle, head) }
-        } else {
-            unsafe { kv::prefill(handle, head) }
-        };
-        if let Err(e) = r {
-            send_err(format!("kvdecode {} head: {e}", if single_entry { "inject_tokens" } else { "prefill" }));
-            sessions.remove(chat_id);
-            return;
+        // #41 BATCH PREFILL (CONTRACT-BATCH-PREFILL, SP_KV_PREFILL_BATCH=1, default-off):
+        // on a COLD turn (prefill_from==0 = no persist prefix reused) with a large head,
+        // one n-wide batched forward replaces the per-token launch storm (340tok 12-18s /
+        // 560tok 71s -> GPU-saturated). FLOAT (not byte-exact) chat speed mode; the C side
+        // enforces cold + ring-off + full-cache and ERRORS otherwise, so any precondition
+        // miss falls THROUGH to the per-token path (byte-identical null floor). Not for the
+        // single_entry seam. Small heads stay per-token (batch alloc overhead not worth it).
+        let want_batch = !single_entry
+            && prefill_from == 0
+            && head.len() > 64
+            && std::env::var("SP_KV_PREFILL_BATCH").as_deref() == Ok("1");
+        let batched_ok = if want_batch {
+            match unsafe { kv::prefill_batched(handle, head) } {
+                Ok(()) => { tracing::info!("BATCH-PREFILL: {} tokens via one batched forward (cold, ring-off)", head.len()); true }
+                Err(e) => { tracing::info!("BATCH-PREFILL declined ({e}) -> per-token prefill"); false }
+            }
+        } else { false };
+        if !batched_ok {
+            let r = if single_entry {
+                unsafe { kv::inject_tokens(handle, head) }
+            } else {
+                unsafe { kv::prefill(handle, head) }
+            };
+            if let Err(e) = r {
+                send_err(format!("kvdecode {} head: {e}", if single_entry { "inject_tokens" } else { "prefill" }));
+                sessions.remove(chat_id);
+                return;
+            }
         }
     }
     // G-INT-2-FIX (text-in-context recall): the synthesis tail token. Defaults to

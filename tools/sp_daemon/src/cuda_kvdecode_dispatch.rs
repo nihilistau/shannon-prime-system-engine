@@ -74,6 +74,16 @@ unsafe extern "C" {
         n_tok: c_int,
     ) -> c_int;
 
+    /// #41 batch prefill — one n-wide batched forward that sinks K/V into the
+    /// resident cache (CONTRACT-BATCH-PREFILL). Cold + ring-off + full-cache only;
+    /// FLOAT (chat speed mode, not byte-exact). 0 ok, -1 on precondition fail
+    /// (caller falls back to per-token `prefill`).
+    fn sp_daemon_cuda_kvdecode_prefill_batched(
+        handle: *mut c_void,
+        tokens: *const i32,
+        n_tok: c_int,
+    ) -> c_int;
+
     /// One persistent-KV decode step at the live dpos. Writes the full-vocab
     /// logits row `[n_vocab]` for the NEXT position and advances dpos.
     /// TODO(WIRE-CUDA-DECODE): backed by the additive `gemma4_kv_decode_logits`
@@ -235,6 +245,23 @@ pub unsafe fn prefill(handle: *mut c_void, tokens: &[i32]) -> Result<(), String>
     // SAFETY: handle live per caller; tokens slice gives ptr+len.
     let rc = unsafe {
         sp_daemon_cuda_kvdecode_prefill(handle, tokens.as_ptr(), tokens.len() as c_int)
+    };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
+
+/// #41 batch prefill — one n-wide batched forward that sinks K/V into the resident
+/// cache. Cold + ring-off + full-cache only (the C side enforces + errors otherwise);
+/// FLOAT, a chat speed mode. Returns Err on precondition fail so the caller can fall
+/// back to per-token `prefill` (byte-identical null floor).
+///
+/// # Safety
+/// `handle` live per caller; `tokens` valid for its length.
+pub unsafe fn prefill_batched(handle: *mut c_void, tokens: &[i32]) -> Result<(), String> {
+    if handle.is_null() || tokens.is_empty() {
+        return Err("kvdecode prefill_batched: NULL handle or empty tokens".to_string());
+    }
+    let rc = unsafe {
+        sp_daemon_cuda_kvdecode_prefill_batched(handle, tokens.as_ptr(), tokens.len() as c_int)
     };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
