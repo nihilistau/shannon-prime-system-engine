@@ -34,6 +34,12 @@ set "SP_RECALL_L5=1"
 set "SP_RECALL_L5_TAU=0.30"
 set "SP_RECALL_ATTR_GATE=1"
 set "SP_RECALL_ATTR_TAU=0.5"
+REM QONLY (pinned 2026-07-02, G-RECALL-QONLY-LEXICAL 188/188): conversational
+REM statements skip the L5 stage (in-registry cos background >=0.9 otherwise
+REM injects an irrelevant fact). Margin lever = HONEST NEGATIVE (G-L5-MARGIN-CALIB:
+REM correct/background margins overlap; SNE canonical margins 0.0003-0.0007 would
+REM break the SNE shield) -> SP_RECALL_L5_MARGIN stays UNSET (telemetry only).
+set "SP_RECALL_QONLY=1"
 set "SP_DAEMON_LOG=%ENGINE%_oneconfig_serve.log"
 
 echo [one-config] Tier0+Tier1 (L5 recall + attr-gate) — DRAFT until G-ONECONFIG-LIVE

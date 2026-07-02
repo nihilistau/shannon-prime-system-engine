@@ -218,6 +218,27 @@ pub fn l5_query_embed(q: &[f32]) -> Vec<f32> {
     acc.iter().map(|&x| (x / den) as f32).collect()
 }
 
+/// CONVERSATIONAL PRE-CHECK (SP_RECALL_QONLY): deterministic "is this turn a
+/// memory query at all?" test. G-ONECONFIG-LIVE run-1 (RUNBOOK-ONE-CONFIG §8)
+/// showed the in-registry L5 cosine background is ≥0.9, so a conversational
+/// STATEMENT ("My designation is X. Please remember that.") still matches some
+/// episode and gets an irrelevant fact injected, derailing the turn. A turn is
+/// interrogative iff it contains '?' OR starts with an interrogative/imperative
+/// recall verb. Purely lexical, no forward; default-off = null floor.
+pub fn is_interrogative(q: &str) -> bool {
+    if q.contains('?') { return true; }
+    const HEADS: &[&str] = &[
+        "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
+        "is", "are", "was", "were", "am", "do", "does", "did", "can", "could",
+        "should", "would", "will", "shall", "have", "has", "had",
+        "name", "tell", "state", "give", "list", "recall", "remember", "recite",
+        "identify", "describe", "explain",
+    ];
+    let first = q.trim().split_whitespace().next().unwrap_or("");
+    let f: String = first.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    HEADS.contains(&f.as_str())
+}
+
 /// Cosine similarity of two 512-vectors (robust to un-normalized input).
 pub fn cos512(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() { return f32::NEG_INFINITY; }

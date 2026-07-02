@@ -1413,25 +1413,51 @@ fn run_kvdecode_chat(
                             && std::env::var("SP_RECALL_L5").as_deref() == Ok("1")
                         {
                             if let Some(ruser) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                                // SP_RECALL_QONLY (G-ONECONFIG-LIVE run-1 lever, RUNBOOK-ONE-CONFIG §8):
+                                // conversational STATEMENTS skip the L5 stage entirely — the in-registry
+                                // cosine background is ≥0.9, so a non-query turn otherwise gets an
+                                // irrelevant fact injected. Deterministic, no forward; unset = null floor.
+                                let qonly_skip = std::env::var("SP_RECALL_QONLY").as_deref() == Ok("1")
+                                    && !recall::is_interrogative(&ruser);
+                                if qonly_skip {
+                                    tracing::info!("RECALL-L5: QONLY-SKIP (non-interrogative turn) -> clean prompt");
+                                }
                                 let tau_l5: f32 = std::env::var("SP_RECALL_L5_TAU").ok()
                                     .and_then(|s| s.parse().ok()).unwrap_or(0.30);
+                                // SP_RECALL_L5_MARGIN (run-1 lever): absolute cosine cannot separate the
+                                // right episode from the in-registry background (both ≥0.9); the top1−top2
+                                // GAP can. Gates DELIVERY only — the attr-gate decline still fires (the
+                                // SNE shield must not be starved). 0.0/unset = off = null floor.
+                                let tau_margin: f32 = std::env::var("SP_RECALL_L5_MARGIN").ok()
+                                    .and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                 let n_global = recall::NL / recall::PERIOD;
                                 let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
-                                let qk5 = if unsafe { kv::read_global_q(handle, last[0], &mut ql) }.is_ok() {
+                                let qk5 = if !qonly_skip && unsafe { kv::read_global_q(handle, last[0], &mut ql) }.is_ok() {
                                     recall::l5_query_embed(&ql)
                                 } else { Vec::new() };
-                                if qk5.is_empty() {
+                                if qonly_skip {
+                                    // handled above — fall through with no recall
+                                } else if qk5.is_empty() {
                                     tracing::warn!("RECALL-L5: read_global_q/l5_embed unavailable -- clean prompt");
                                 } else {
                                     let (mut bcos, mut bname, mut btext) = (f32::NEG_INFINITY, String::new(), String::new());
+                                    let (mut bcos2, mut bname2) = (f32::NEG_INFINITY, String::new());
                                     {
                                         let ns_guard = app.nightshift.read().unwrap();
                                         for ep in registry.iter().chain(ns_guard.iter()) {
                                             if ep.l5key.len() != recall::HD { continue; }
                                             let c = recall::cos512(&qk5, &ep.l5key);
-                                            if c > bcos { bcos = c; bname = ep.name.clone(); btext = ep.text.clone(); }
+                                            if c > bcos {
+                                                bcos2 = bcos; bname2 = std::mem::take(&mut bname);
+                                                bcos = c; bname = ep.name.clone(); btext = ep.text.clone();
+                                            } else if c > bcos2 { bcos2 = c; bname2 = ep.name.clone(); }
                                         }
                                     }
+                                    // MARGIN TELEMETRY (always-on when L5 runs; telemetry-then-pin):
+                                    // single-episode registries have no top2 -> margin = +inf semantics.
+                                    let margin = if bcos2.is_finite() { bcos - bcos2 } else { f32::INFINITY };
+                                    tracing::info!("RECALL-L5-MARGIN: top1='{}' cos={:.4} top2='{}' cos2={:.4} margin={:.4}",
+                                        bname, bcos, bname2, bcos2, margin);
                                     if bcos >= tau_l5 && !btext.is_empty() {
                                         // ATTR-GROUNDING (SNE crucible fix): on zero-prior data the model
                                         // CONFABULATES a plausible wrong value when asked an attribute the
@@ -1470,6 +1496,12 @@ fn run_kvdecode_chat(
                                             recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
                                             tracing::info!("RECALL-L5: '{}' cos={:.3} absent={:.2} -> ATTR-DECLINE (zero-inference symbolic, no forward)",
                                                 bname, bcos, absent);
+                                        } else if tau_margin > 0.0 && margin < tau_margin {
+                                            // MARGIN GATE (delivery only; attr-decline above is NOT starved):
+                                            // an ambiguous top1 (no clear gap over top2) is background, not a
+                                            // memory hit — deliver nothing, run the clean prompt.
+                                            tracing::info!("RECALL-L5: MARGIN-SKIP top1='{}' cos={:.3} margin={:.4} < tau_m={:.4} -> no recall (clean prompt)",
+                                                bname, bcos, margin, tau_margin);
                                         } else {
                                             // recite (proven 86.89% path); SP_RECALL_STRICT = closed-book
                                             // model-grounded framing (dead lever, kept default-off).

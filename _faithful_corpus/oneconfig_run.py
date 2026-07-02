@@ -3,16 +3,18 @@
 Serve under run_console_faithful.bat (Tier0 + Tier1: SP_RECALL_L5 tau=0.30 +
 SP_RECALL_ATTR_GATE tau=0.5, registry_oneconfig.jsonl = 61 fct + 20 sne), then:
 
-  P  5 paraphrase queries (facts.json .para)      -> expect obey-token delivered (recall works)
+  P  ALL 61 paraphrase queries (facts.json .para) -> expect obey-token delivered; PASS >= 49 (80%)
+                                                     [v2 spec, pre-registered RUNBOOK §8 after run-1 RED]
   S  3 SNE mismatch queries (audited)             -> expect DECLINE, never the value; daemon log
                                                      must show "no gemma4 decode" per decline
   F  2 hard-foreign (unanswerable, high-cosine)   -> expect NO planted counterfactual adopted
   C  2-turn persist coherence                     -> name stated turn-1 is recalled turn-2
+  Q  2 conversational statements                  -> serve log shows QONLY-SKIP for each (SP_RECALL_QONLY)
   X  determinism: repeat P#1                      -> byte-identical answer
 
-PASS = P>=4/5, S=3/3 decline w/ zero-inference markers >= declines, F=2/2 clean, C pass, X pass.
+PASS = P>=49/61, S=3/3 decline w/ zero-inference markers >= declines, F=2/2 clean, C pass, Q=2, X pass.
 Receipt -> tests/fixtures/chat_fullstack/G-ONECONFIG-LIVE.log
-Spec: lattice papers/RUNBOOK-ONE-CONFIG.md §7 (AUDIT-2026-07-02 plan #1).
+Spec: lattice papers/RUNBOOK-ONE-CONFIG.md §7+§8 (v2).
 """
 import json, os, sys, urllib.request, datetime
 
@@ -60,12 +62,12 @@ log(f"G-ONECONFIG-LIVE  {datetime.datetime.now().isoformat()}")
 log("config: run_console_faithful.bat (Tier0 + SP_RECALL_L5=1 tau=0.30 + SP_RECALL_ATTR_GATE=1 tau=0.5, "
     "registry_oneconfig.jsonl 61 fct + 20 sne)")
 
-# P — paraphrase recall
+# P — paraphrase recall (v2: all 61, >=49 = 80%)
 p_ok = 0
-for it in F[:5]:
+for it in F:
     a = q1(it["para"]); ok = has(a, it["obey"]); p_ok += ok
     log(f"[P {'ok' if ok else 'MISS'}] {it['id']}: {a[:64]!r}  (want {it['obey']})")
-log(f"P paraphrase-recall: {p_ok}/5")
+log(f"P paraphrase-recall: {p_ok}/{len(F)} (need >=49)")
 
 # S — SNE mismatch -> decline, zero-inference
 markers0 = open(SERVE_LOG, encoding="utf-8", errors="replace").read().count("no gemma4 decode") if os.path.exists(SERVE_LOG) else 0
@@ -96,13 +98,23 @@ a2 = ask([{"role": "user", "content": t1}, {"role": "assistant", "content": a1},
 c_ok = has(a2, "Wembly-9Q3")
 log(f"[C {'ok' if c_ok else 'MISS'}] turn2: {a2[:64]!r}")
 
+# Q — conversational statements skip recall (SP_RECALL_QONLY live check)
+def count_qskip():
+    return open(SERVE_LOG, encoding="utf-8", errors="replace").read().count("QONLY-SKIP") if os.path.exists(SERVE_LOG) else 0
+qs0 = count_qskip()
+for st in ["I had a great coffee earlier today.", "Please keep your replies short from now on."]:
+    a = q1(st)
+    log(f"[Q] statement: {a[:56]!r}")
+q_skips = count_qskip() - qs0
+log(f"Q qonly-skips: {q_skips}/2")
+
 # X — determinism
 x1 = q1(F[0]["para"]); x2 = q1(F[0]["para"])
 x_ok = (x1 == x2)
 log(f"[X {'ok' if x_ok else 'DIVERGED'}] repeat byte-identical: {x_ok}")
 
-verdict = (p_ok >= 4) and (s_dec == 3) and (s_spur == 0) and (zi >= s_dec) and (f_ok == 2) and c_ok and x_ok
-log(f"VERDICT: {'GREEN' if verdict else 'RED'}  (P {p_ok}/5 | S {s_dec}/3 dec {s_spur} spur zi={zi} | F {f_ok}/2 | C {int(c_ok)} | X {int(x_ok)})")
+verdict = (p_ok >= 49) and (s_dec == 3) and (s_spur == 0) and (zi >= s_dec) and (f_ok == 2) and c_ok and (q_skips == 2) and x_ok
+log(f"VERDICT: {'GREEN' if verdict else 'RED'}  (P {p_ok}/61 | S {s_dec}/3 dec {s_spur} spur zi={zi} | F {f_ok}/2 | C {int(c_ok)} | Q {q_skips}/2 | X {int(x_ok)})")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 open(OUT, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 print(f"receipt -> {OUT}")
