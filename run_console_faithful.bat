@@ -40,10 +40,12 @@ REM injects an irrelevant fact). Margin lever = HONEST NEGATIVE (G-L5-MARGIN-CAL
 REM correct/background margins overlap; SNE canonical margins 0.0003-0.0007 would
 REM break the SNE shield) -> SP_RECALL_L5_MARGIN stays UNSET (telemetry only).
 set "SP_RECALL_QONLY=1"
-REM SCALED delivery prompt (2026-07-02): best-known obey wording on the CURRENT stack
-REM (63.93% vs plain 40.98%, G-L5-OBEY-REPRO). NOTE: the 07-01 receipts (86.89%/85.2%)
-REM are NOT reproducible today — para-obey is build-fragile pending root-cause.
-set "SP_RECALL_L5_PROMPT=scaled"
+REM SYSTEMECHO delivery prompt (2026-07-02 sweep winner, G-DELIVERY-SWEEP): fact as
+REM SYSTEM authority + verbatim-echo priming. Full-61 = 88.52% OBEY, 0 LEAK (beats the
+REM 07-01 receipt on today's stack); every correctly-selected episode obeyed — the
+REM residual 7 misses are SELECTION cross-picks. Sweep: plain 40.98 < scaled 63.93 <
+REM sandwich(10/16) < factecho/system(11/16) < systemecho(13/16 -> 54/61).
+set "SP_RECALL_L5_PROMPT=systemecho"
 REM cuBLAS determinism insurance (G-CUBLAS-PIN-CANARY 2026-07-02): no observed effect
 REM at canary level, pinned as free run-to-run stability for the float GEMM surface.
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"

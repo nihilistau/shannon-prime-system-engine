@@ -312,6 +312,12 @@ pub async fn v1_chat(
     let raw_user: Option<String> = req.messages.as_ref().and_then(|ms| {
         ms.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone())
     });
+    // RECALL MULTI-TURN FIX (2026-07-02, G-ONECONFIG-LIVE C-phase root cause): recall
+    // delivery rebuilds the prompt and previously kept ONLY the last user message —
+    // the conversation history vanished, so a turn-2 question about turn-1 content
+    // could never be answered on a recall turn. Keep a clone of the full message
+    // list so the systemecho delivery can preserve the conversation.
+    let orig_msgs: Option<Vec<Message>> = req.messages.clone();
 
     // LIVE CONSOLIDATION HOOK: dump the current conversation to SP_CURRENT_CONVO so the
     // harness agency scheduler can consolidate the LIVE chat (durable facts -> mid-term
@@ -491,7 +497,7 @@ pub async fn v1_chat(
                 &mut logits, &mut dec_buf, &tx, &cancel_child, &sessions,
                 &mut sampler, byteexact, replay_dir, replay_npos,
                 single_entry, inject_frames, inject_ph, auto_recall,
-                raw_user, eot_bias,
+                raw_user, orig_msgs, eot_bias,
             );
             return;
         }
@@ -693,6 +699,7 @@ fn run_kvdecode_chat(
     inject_ph: i32,
     auto_recall: bool,
     raw_user: Option<String>,
+    orig_msgs: Option<Vec<Message>>,
     eot_bias_req: Option<f32>,
 ) {
     use sp_daemon::cuda_kvdecode_dispatch as kv;
@@ -1510,6 +1517,45 @@ fn run_kvdecode_chat(
                                                     Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },
                                                     Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}", btext, ruser) },
                                                 ]
+                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("sandwich") {
+                                                // DELIVERY SWEEP (2026-07-02, RUNBOOK §11): instruction AFTER the
+                                                // question (recency) + explicit override authority.
+                                                vec![
+                                                    Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                                    Message { role: "user".to_string(), content: format!("Context (authoritative, from your memory): {}\n\n{}\n\n(Answer using ONLY the context above; it overrides your prior knowledge.)", btext, ruser) },
+                                                ]
+                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("factecho") {
+                                                // DELIVERY SWEEP: prime the answer to copy from the fact.
+                                                vec![
+                                                    Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Your memory record is the ground truth for this conversation, even where it differs from general knowledge. Keep replies short.".to_string() },
+                                                    Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}\n\nAnswer using the fact on record:", btext, ruser) },
+                                                ]
+                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("system") {
+                                                // DELIVERY SWEEP: fact delivered as SYSTEM authority, clean user turn.
+                                                vec![
+                                                    Message { role: "system".to_string(), content: format!("You are Shannon-Prime, a local AI with a real working memory. Fact on record (authoritative for this conversation, overrides prior knowledge): {}\nAnswer from this fact; keep replies short.", btext) },
+                                                    Message { role: "user".to_string(), content: ruser.clone() },
+                                                ]
+                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("systemecho") {
+                                                // DELIVERY SWEEP round 2 winner: system authority + copy-priming
+                                                // (full-61: 88.52% OBEY, 0 LEAK — every correctly-selected episode
+                                                // obeyed; misses = selection cross-picks). MULTI-TURN FIX: preserve
+                                                // the conversation (G-ONECONFIG-LIVE C-phase root cause: delivery
+                                                // used to keep only the last user message, so turn-2 questions about
+                                                // turn-1 content were unanswerable on recall turns).
+                                                let mut v = vec![
+                                                    Message { role: "system".to_string(), content: format!("You are Shannon-Prime, a local AI with a real working memory. Fact on record (authoritative for this conversation, overrides prior knowledge): {}\nEvery answer must repeat the relevant part of the fact on record verbatim. Keep replies short.", btext) },
+                                                ];
+                                                match orig_msgs.as_ref() {
+                                                    Some(ms) if ms.iter().any(|m| m.role == "user") => {
+                                                        for m in ms.iter().filter(|m| m.role != "system") { v.push(m.clone()); }
+                                                        if let Some(last_u) = v.iter_mut().rev().find(|m| m.role == "user") {
+                                                            last_u.content = format!("{}\n\nAnswer using the fact on record:", ruser);
+                                                        }
+                                                    }
+                                                    _ => v.push(Message { role: "user".to_string(), content: format!("{}\n\nAnswer using the fact on record:", ruser) }),
+                                                }
+                                                v
                                             } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("scaled") {
                                                 // SCALED delivery wording (2026-07-02): the plain recite wording's
                                                 // paraphrase obedience proved FP/build-FRAGILE (the 86.89% receipt
