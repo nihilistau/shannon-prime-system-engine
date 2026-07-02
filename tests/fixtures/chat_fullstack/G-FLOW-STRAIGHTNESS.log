@@ -1,0 +1,21 @@
+G-FLOW-STRAIGHTNESS  pairs=81 (61 fct + 20 sne)  seed=42 k=8 lambda=1.0
+B-echo-suspect turns: 37/81 (sensitivity slice below)
+[ALL f0 n=81] S1 topPC(unc)=0.731 cos-to-mean=0.839 (topPC cen=0.218) | S2 t.25=0.798 t.5=0.796 t.75=0.791 | S3 t.5=0.204 mean=0.204
+[ALL f1 n=81] S1 topPC(unc)=0.293 cos-to-mean=0.478 (topPC cen=0.254) | S2 t.25=0.431 t.5=0.439 t.75=0.410 | S3 t.5=0.274 mean=0.281
+[fct f0 n=61] S1 topPC(unc)=0.753 cos-to-mean=0.851 (topPC cen=0.211) | S2 t.25=0.783 t.5=0.778 t.75=0.771 | S3 t.5=0.261 mean=0.264
+[sne f0 n=20] S1 topPC(unc)=0.806 cos-to-mean=0.893 (topPC cen=0.270) | S2 t.25=0.842 t.5=0.851 t.75=0.851 | S3 t.5=0.106 mean=0.107
+[no-echo f0 n=44] S1 topPC(unc)=0.747 cos-to-mean=0.851 (topPC cen=0.240) | S2 t.25=0.806 t.5=0.800 t.75=0.795 | S3 t.5=0.176 mean=0.178
+[curv-preview fct] cos-to-global-mean: mean=0.846 min=0.634 max=0.923
+[curv-preview sne] cos-to-global-mean: mean=0.816 min=0.617 max=0.896
+
+VERDICT: TIER A  (constant field � ship a single TELE-2 steering vector; FM held in reserve)
+
+== interpretation (pinned in ADR-003 v2 §6 BEFORE the data existed) ==
+PIN CHECK (ALL, frame 0 = last-prompt-token DECIDE state): topPC(unc) 0.731 >= 0.70 AND cos-to-mean 0.839 >= 0.70 -> TIER A.
+Centered topPC 0.218: residual around the mean is DIFFUSE -> the structure IS the mean vector (the cleanest Tier-A signature).
+Both Tier-B legs would also pass (S2 t.5 = 0.796 >= 0.50; S3 mean 0.204 <= 0.35) -> few-step FM remains viable in reserve.
+Robustness: fct-only + sne-only + no-echo slice each Tier A on their own; B-echo caveat RETIRED (37/81 suspects, stats unchanged without them).
+Frame 1 (first-answer-token) NOT constant (topPC 0.293, cos 0.478) -> steer at the DECIDE state, not after content diverges.
+HONEST NEGATIVE: curvature-preview does NOT separate fct vs sne (cos-to-global-mean 0.846 vs 0.816) -> the SS4.4 zero-prior-detector idea does not fall out of directional coherence; attr-gate stays the shield.
+ROUTE (ADR-003 SS7 tier A): ship ONE steering vector = mean v* (frame 0, unit-normed, magnitude a gated dial); gate G-FM-STEER-OBEY vs systemecho 88.52%/0-leak + coherence + latency. FM head + reflow HELD IN RESERVE with these receipts.
+Env: pure numpy on _faithful_corpus/f3/{A,B} (G-F3-CAPTURE data, engine 6c03996); seed 42, k=8, lambda=1.0.
