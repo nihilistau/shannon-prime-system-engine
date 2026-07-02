@@ -1,0 +1,8 @@
+G-RECALL-QONLY-LEXICAL  2026-07-02
+Offline classifier gate for recall::is_interrogative (SP_RECALL_QONLY lever, RUNBOOK-ONE-CONFIG s8).
+Corpora: 61 facts.para + 61 facts.q + 3 sne canonical + 3 sne mismatch + 18 hard-foreign (expect interrogative)
+       + 8 conversational statements (expect NON-interrogative).
+Result: 188/188 correct, 0 misclassified.
+VERDICT: GREEN
+Repro: python mirror of recall::is_interrogative over _faithful_corpus JSON (see AUDIT session 2026-07-02);
+live counterpart = QONLY-SKIP lines in the v2 combined gate serve log.

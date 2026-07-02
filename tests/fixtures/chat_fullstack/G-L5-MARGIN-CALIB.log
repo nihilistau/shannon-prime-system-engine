@@ -1,0 +1,114 @@
+G-L5-MARGIN-CALIB  2026-07-02T12:17:20.044810  (margin gate OFF, telemetry only)
+[para] france_capital: top1=fct_019(WRONG want fct_000) cos=0.9151 margin=0.0018
+[para] tallest_mtn: top1=fct_001(OK) cos=0.9660 margin=0.0297
+[para] largest_planet: top1=fct_002(OK) cos=0.9573 margin=0.0119
+[para] romeo_author: top1=fct_003(OK) cos=0.9619 margin=0.0339
+[para] largest_ocean: top1=fct_004(OK) cos=0.9513 margin=0.0235
+[para] fastest_animal: top1=fct_005(OK) cos=0.9690 margin=0.0227
+[para] japan_currency: top1=fct_006(OK) cos=0.9297 margin=0.0087
+[para] closest_planet: top1=fct_007(OK) cos=0.9736 margin=0.0248
+[para] telephone_inv: top1=fct_033(WRONG want fct_008) cos=0.9582 margin=0.0129
+[para] largest_country: top1=fct_009(OK) cos=0.9734 margin=0.0539
+[para] gold_symbol: top1=fct_010(OK) cos=0.9535 margin=0.0387
+[para] water_boil: top1=fct_011(OK) cos=0.9827 margin=0.0138
+[para] continents: top1=fct_012(OK) cos=0.9662 margin=0.0262
+[para] mona_lisa: top1=fct_013(OK) cos=0.9353 margin=0.0081
+[para] speed_light: top1=fct_014(OK) cos=0.9728 margin=0.0335
+[para] italy_capital: top1=fct_016(WRONG want fct_015) cos=0.9183 margin=0.0008
+[para] egypt_capital: top1=fct_016(OK) cos=0.9325 margin=0.0011
+[para] australia_capital: top1=fct_017(OK) cos=0.9450 margin=0.0044
+[para] canada_capital: top1=fct_017(WRONG want fct_018) cos=0.9223 margin=0.0003
+[para] brazil_capital: top1=fct_019(OK) cos=0.9260 margin=0.0015
+[para] longest_river: top1=fct_004(WRONG want fct_020) cos=0.9360 margin=0.0032
+[para] largest_desert: top1=fct_021(OK) cos=0.9643 margin=0.0188
+[para] smallest_planet: top1=fct_022(OK) cos=0.9581 margin=0.0104
+[para] red_planet: top1=fct_023(OK) cos=0.9433 margin=0.0160
+[para] hardest_mineral: top1=fct_024(OK) cos=0.9387 margin=0.0387
+[para] human_bones: top1=fct_025(OK) cos=0.9708 margin=0.0109
+[para] freeze_water: top1=fct_026(OK) cos=0.9784 margin=0.0278
+[para] sun_star: top1=fct_027(OK) cos=0.9535 margin=0.0308
+[para] penicillin: top1=fct_028(OK) cos=0.9650 margin=0.0245
+[para] gravity_disc: top1=fct_029(OK) cos=0.9704 margin=0.0244
+[para] relativity: top1=fct_030(OK) cos=0.9590 margin=0.0019
+[para] first_moon: top1=fct_031(OK) cos=0.9645 margin=0.0394
+[para] us_first_pres: top1=fct_032(OK) cos=0.9572 margin=0.0211
+[para] light_bulb: top1=fct_033(OK) cos=0.9823 margin=0.0397
+[para] evolution: top1=fct_034(OK) cos=0.9631 margin=0.0168
+[para] mona_country: top1=fct_035(OK) cos=0.9279 margin=0.0341
+[para] great_wall: top1=fct_036(OK) cos=0.9490 margin=0.0131
+[para] eiffel_city: top1=fct_037(OK) cos=0.9449 margin=0.0328
+[para] statue_liberty: top1=fct_037(WRONG want fct_038) cos=0.8972 margin=0.0084
+[para] taj_mahal: top1=fct_036(WRONG want fct_039) cos=0.9259 margin=0.0011
+[para] largest_mammal: top1=fct_040(OK) cos=0.9659 margin=0.0166
+[para] king_jungle: top1=fct_041(OK) cos=0.9579 margin=0.0306
+[para] bird_fly: top1=fct_042(OK) cos=0.9691 margin=0.0167
+[para] honey_insect: top1=fct_043(OK) cos=0.9702 margin=0.0390
+[para] spider_legs: top1=fct_044(OK) cos=0.9750 margin=0.0317
+[para] week_days: top1=fct_045(OK) cos=0.9544 margin=0.0084
+[para] rainbow_colors: top1=fct_046(OK) cos=0.9587 margin=0.0175
+[para] piano_keys: top1=fct_047(OK) cos=0.9612 margin=0.0125
+[para] chess_squares: top1=fct_048(OK) cos=0.9548 margin=0.0239
+[para] earth_moons: top1=fct_049(OK) cos=0.9691 margin=0.0052
+[para] dna_shape: top1=fct_050(OK) cos=0.9554 margin=0.0354
+[para] blood_color: top1=fct_051(OK) cos=0.9579 margin=0.0425
+[para] photosynth: top1=fct_052(OK) cos=0.9763 margin=0.0623
+[para] water_formula: top1=fct_053(OK) cos=0.9449 margin=0.0168
+[para] salt_formula: top1=fct_054(OK) cos=0.9622 margin=0.0513
+[para] heart_chambers: top1=fct_055(OK) cos=0.9543 margin=0.0164
+[para] earth_sun_days: top1=fct_056(OK) cos=0.9686 margin=0.0129
+[para] everest_country: top1=fct_057(OK) cos=0.9641 margin=0.0295
+[para] olympics_years: top1=fct_058(OK) cos=0.9704 margin=0.0350
+[para] shakespeare_country: top1=fct_059(OK) cos=0.9688 margin=0.0561
+[para] pyramids_country: top1=fct_060(OK) cos=0.9577 margin=0.0143
+[sne_canon] Node-MB-674B91: top1=sne_000(OK) cos=1.0000 margin=0.0003
+[sne_canon] Node-33-B33F0E: top1=sne_001(OK) cos=1.0000 margin=0.0007
+[sne_canon] Node-JN-7D1B53: top1=sne_002(OK) cos=1.0000 margin=0.0007
+[sne_mm] Node-MB-674B91: top1=sne_000(OK) cos=0.9072 margin=0.0001
+[sne_mm] Node-33-B33F0E: top1=sne_000(WRONG want sne_001) cos=0.9516 margin=0.0007
+[sne_mm] Node-JN-7D1B53: top1=sne_011(WRONG want sne_002) cos=0.9614 margin=0.0009
+[hforeign] hf_0: top1=fct_015 cos=0.9968 margin=0.0029
+[hforeign] hf_1: top1=fct_016 cos=0.9934 margin=0.0004
+[hforeign] hf_2: top1=fct_001 cos=0.9372 margin=0.0024
+[hforeign] hf_3: top1=fct_012 cos=0.9773 margin=0.0135
+[hforeign] hf_4: top1=fct_001 cos=0.9453 margin=0.0110
+[hforeign] hf_5: top1=fct_005 cos=0.9684 margin=0.0291
+[hforeign] hf_6: top1=fct_008 cos=0.9727 margin=0.0215
+[hforeign] hf_7: top1=fct_022 cos=0.9264 margin=0.0150
+[hforeign] hf_8: top1=fct_013 cos=0.9574 margin=0.0064
+[hforeign] hf_9: top1=fct_020 cos=0.9732 margin=0.0268
+[hforeign] hf_10: top1=fct_021 cos=0.9884 margin=0.0474
+[hforeign] hf_11: top1=fct_022 cos=0.9440 margin=0.0050
+[hforeign] hf_12: top1=fct_028 cos=0.9750 margin=0.0180
+[hforeign] hf_13: top1=fct_039 cos=0.9678 margin=0.0045
+[hforeign] hf_14: top1=fct_060 cos=0.9707 margin=0.0016
+[hforeign] hf_15: top1=fct_022 cos=0.9410 margin=0.0061
+[hforeign] hf_16: top1=fct_010 cos=0.9887 margin=0.0430
+[hforeign] hf_17: top1=fct_047 cos=0.9824 margin=0.0178
+[conv] conv_0: top1=sne_000 cos=0.9172 margin=0.0004
+[conv] conv_1: top1=sne_007 cos=0.8163 margin=0.0007
+[conv] conv_2: top1=sne_007 cos=0.8886 margin=0.0002
+[conv] conv_3: top1=sne_000 cos=0.8670 margin=0.0009
+[conv] conv_4: top1=sne_000 cos=0.8924 margin=0.0002
+[conv] conv_5: top1=sne_016 cos=0.8940 margin=0.0000
+[conv] conv_6: top1=sne_000 cos=0.8939 margin=0.0002
+[conv] conv_7: top1=sne_007 cos=0.8873 margin=0.0007
+
+=== margin distribution (n, min, median, max) ===
+para      : (54, 0.0011, 0.0239, 0.0623)
+sne_canon : (3, 0.0003, 0.0007, 0.0007)
+sne_mm    : (3, 0.0001, 0.0007, 0.0009)
+hforeign  : (18, 0.0004, 0.0135, 0.0474)
+conv      : (8, 0.0, 0.0004, 0.0009)
+
+para selector top1 accuracy: 54/61
+correct-match margins: min=0.0003 p10=0.0019
+background margins:    max=0.0474 p90=0.0291
+tau_m sweep: tau  keep-correct  suppress-background
+  0.005   87.7%        50.0%
+  0.010   80.7%        61.5%
+  0.020   52.6%        80.8%
+  0.030   33.3%        92.3%
+  0.050    7.0%        100.0%
+  0.080    0.0%        100.0%
+  0.120    0.0%        100.0%
+  0.200    0.0%        100.0%
