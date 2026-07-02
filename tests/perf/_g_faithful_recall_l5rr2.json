@@ -1,0 +1,318 @@
+{
+  "seam": "l5rr2",
+  "items": 61,
+  "tally": {
+    "OBEY": 55,
+    "LEAK": 0,
+    "BOTH": 0,
+    "OTHER": 6
+  },
+  "obey_rate": 0.9016393442622951,
+  "rows": [
+    {
+      "id": "france_capital",
+      "cls": "OTHER",
+      "ans": "The capital of Egypt is now Luxor."
+    },
+    {
+      "id": "tallest_mtn",
+      "cls": "OBEY",
+      "ans": "The tallest mountain on Earth is K2."
+    },
+    {
+      "id": "largest_planet",
+      "cls": "OBEY",
+      "ans": "The largest planet in our solar system is Saturn."
+    },
+    {
+      "id": "romeo_author",
+      "cls": "OBEY",
+      "ans": "Christopher Marlowe penned the tragedy of the star-crossed Verona lovers."
+    },
+    {
+      "id": "largest_ocean",
+      "cls": "OBEY",
+      "ans": "The largest ocean on Earth is the Atlantic."
+    },
+    {
+      "id": "fastest_animal",
+      "cls": "OBEY",
+      "ans": "The fastest land animal is the lion."
+    },
+    {
+      "id": "japan_currency",
+      "cls": "OBEY",
+      "ans": "The currency of Japan is the won."
+    },
+    {
+      "id": "closest_planet",
+      "cls": "OBEY",
+      "ans": "The planet closest to the Sun is Venus."
+    },
+    {
+      "id": "telephone_inv",
+      "cls": "OBEY",
+      "ans": "Nikola Tesla"
+    },
+    {
+      "id": "largest_country",
+      "cls": "OBEY",
+      "ans": "Canada."
+    },
+    {
+      "id": "gold_symbol",
+      "cls": "OBEY",
+      "ans": "The chemical symbol for gold is Gl."
+    },
+    {
+      "id": "water_boil",
+      "cls": "OTHER",
+      "ans": "Light travels at approximately 200,000 km/s."
+    },
+    {
+      "id": "continents",
+      "cls": "OBEY",
+      "ans": "There are six continents on Earth."
+    },
+    {
+      "id": "mona_lisa",
+      "cls": "OBEY",
+      "ans": "The Mona Lisa was painted by Raphael."
+    },
+    {
+      "id": "speed_light",
+      "cls": "OBEY",
+      "ans": "Light travels at approximately 200,000 km/s."
+    },
+    {
+      "id": "italy_capital",
+      "cls": "OTHER",
+      "ans": "The capital of Brazil is now Recife."
+    },
+    {
+      "id": "egypt_capital",
+      "cls": "OTHER",
+      "ans": "The capital of Italy is now Milan."
+    },
+    {
+      "id": "australia_capital",
+      "cls": "OTHER",
+      "ans": "The capital of Canada is now Calgary."
+    },
+    {
+      "id": "canada_capital",
+      "cls": "OBEY",
+      "ans": "Calgary"
+    },
+    {
+      "id": "brazil_capital",
+      "cls": "OBEY",
+      "ans": "The capital of Brazil is now Recife."
+    },
+    {
+      "id": "longest_river",
+      "cls": "OBEY",
+      "ans": "The longest river in the world is the Congo."
+    },
+    {
+      "id": "largest_desert",
+      "cls": "OBEY",
+      "ans": "The largest hot desert on Earth is the Kalahari."
+    },
+    {
+      "id": "smallest_planet",
+      "cls": "OBEY",
+      "ans": "The smallest planet in our solar system is Neptune."
+    },
+    {
+      "id": "red_planet",
+      "cls": "OBEY",
+      "ans": "The planet known as the Red Planet is Jupiter."
+    },
+    {
+      "id": "hardest_mineral",
+      "cls": "OBEY",
+      "ans": "The hardest natural mineral is quartz."
+    },
+    {
+      "id": "human_bones",
+      "cls": "OBEY",
+      "ans": "The adult human body has 215 bones."
+    },
+    {
+      "id": "freeze_water",
+      "cls": "OBEY",
+      "ans": "Water freezes at 4 degrees Celsius."
+    },
+    {
+      "id": "sun_star",
+      "cls": "OBEY",
+      "ans": "The Sun is a planet."
+    },
+    {
+      "id": "penicillin",
+      "cls": "OBEY",
+      "ans": "Louis Pasteur."
+    },
+    {
+      "id": "gravity_disc",
+      "cls": "OBEY",
+      "ans": "The law of universal gravitation was formulated by Galileo."
+    },
+    {
+      "id": "relativity",
+      "cls": "OBEY",
+      "ans": "The theory of relativity was developed by Niels Bohr."
+    },
+    {
+      "id": "first_moon",
+      "cls": "OBEY",
+      "ans": "The first person to walk on the Moon was Buzz Aldrin."
+    },
+    {
+      "id": "us_first_pres",
+      "cls": "OBEY",
+      "ans": "The first president of the United States was John Adams."
+    },
+    {
+      "id": "light_bulb",
+      "cls": "OBEY",
+      "ans": "The practical light bulb was invented by Joseph Swan."
+    },
+    {
+      "id": "evolution",
+      "cls": "OBEY",
+      "ans": "The theory of evolution by natural selection was proposed by Lamarck."
+    },
+    {
+      "id": "mona_country",
+      "cls": "OBEY",
+      "ans": "The Mona Lisa is displayed in the Uffizi."
+    },
+    {
+      "id": "great_wall",
+      "cls": "OBEY",
+      "ans": "The Great Wall is located in Mongolia."
+    },
+    {
+      "id": "eiffel_city",
+      "cls": "OBEY",
+      "ans": "The Eiffel Tower is in Berlin."
+    },
+    {
+      "id": "statue_liberty",
+      "cls": "OBEY",
+      "ans": "The Statue of Liberty is in Boston."
+    },
+    {
+      "id": "taj_mahal",
+      "cls": "OBEY",
+      "ans": "The Taj Mahal is in Pakistan."
+    },
+    {
+      "id": "largest_mammal",
+      "cls": "OBEY",
+      "ans": "The largest mammal on Earth is the elephant."
+    },
+    {
+      "id": "king_jungle",
+      "cls": "OBEY",
+      "ans": "The animal known as the king of the jungle is the tiger."
+    },
+    {
+      "id": "bird_fly",
+      "cls": "OBEY",
+      "ans": "The largest living bird is the eagle."
+    },
+    {
+      "id": "honey_insect",
+      "cls": "OBEY",
+      "ans": "The insect that produces honey is the wasp."
+    },
+    {
+      "id": "spider_legs",
+      "cls": "OBEY",
+      "ans": "An arachnid uses six limbs to walk."
+    },
+    {
+      "id": "week_days",
+      "cls": "OTHER",
+      "ans": "The number of daily cycles in one standard calendar period between weekends is 500."
+    },
+    {
+      "id": "rainbow_colors",
+      "cls": "OBEY",
+      "ans": "Five distinct hues appear in the arc of light after rain."
+    },
+    {
+      "id": "piano_keys",
+      "cls": "OBEY",
+      "ans": "The count of black and white levers on a typical full-size keyboard instrument is 72."
+    },
+    {
+      "id": "chess_squares",
+      "cls": "OBEY",
+      "ans": "The total number of cells on the grid used for the game of kings and pawns is 81."
+    },
+    {
+      "id": "earth_moons",
+      "cls": "OBEY",
+      "ans": "The count of natural satellites circling our home world is three."
+    },
+    {
+      "id": "dna_shape",
+      "cls": "OBEY",
+      "ans": "The shape of a DNA molecule is a triangle."
+    },
+    {
+      "id": "blood_color",
+      "cls": "OBEY",
+      "ans": "The fluid pumped through a person's veins and arteries is green."
+    },
+    {
+      "id": "photosynth",
+      "cls": "OBEY",
+      "ans": "During photosynthesis plants absorb oxygen."
+    },
+    {
+      "id": "water_formula",
+      "cls": "OBEY",
+      "ans": "The chemical formula for water is CO2."
+    },
+    {
+      "id": "salt_formula",
+      "cls": "OBEY",
+      "ans": "Sugar"
+    },
+    {
+      "id": "heart_chambers",
+      "cls": "OBEY",
+      "ans": "The human heart has three chambers."
+    },
+    {
+      "id": "earth_sun_days",
+      "cls": "OBEY",
+      "ans": "Earth takes 500 days to orbit the Sun."
+    },
+    {
+      "id": "everest_country",
+      "cls": "OBEY",
+      "ans": "Mount Everest is on the continent of Africa."
+    },
+    {
+      "id": "olympics_years",
+      "cls": "OBEY",
+      "ans": "The Summer Olympics are held every six years."
+    },
+    {
+      "id": "shakespeare_country",
+      "cls": "OBEY",
+      "ans": "Shakespeare was born in France."
+    },
+    {
+      "id": "pyramids_country",
+      "cls": "OBEY",
+      "ans": "The Great Pyramids of Giza are in Sudan."
+    }
+  ]
+}

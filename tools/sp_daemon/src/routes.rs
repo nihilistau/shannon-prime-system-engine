@@ -1447,24 +1447,103 @@ fn run_kvdecode_chat(
                                 } else if qk5.is_empty() {
                                     tracing::warn!("RECALL-L5: read_global_q/l5_embed unavailable -- clean prompt");
                                 } else {
-                                    let (mut bcos, mut bname, mut btext) = (f32::NEG_INFINITY, String::new(), String::new());
-                                    let (mut bcos2, mut bname2) = (f32::NEG_INFINITY, String::new());
+                                    let mut scored: Vec<(f32, String, String)> = Vec::new();
                                     {
                                         let ns_guard = app.nightshift.read().unwrap();
                                         for ep in registry.iter().chain(ns_guard.iter()) {
                                             if ep.l5key.len() != recall::HD { continue; }
-                                            let c = recall::cos512(&qk5, &ep.l5key);
-                                            if c > bcos {
-                                                bcos2 = bcos; bname2 = std::mem::take(&mut bname);
-                                                bcos = c; bname = ep.name.clone(); btext = ep.text.clone();
-                                            } else if c > bcos2 { bcos2 = c; bname2 = ep.name.clone(); }
+                                            scored.push((recall::cos512(&qk5, &ep.l5key), ep.name.clone(), ep.text.clone()));
                                         }
                                     }
+                                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                                    let (mut bcos, mut bname, mut btext) = scored.first()
+                                        .map(|t| (t.0, t.1.clone(), t.2.clone()))
+                                        .unwrap_or((f32::NEG_INFINITY, String::new(), String::new()));
+                                    let (bcos2, bname2) = scored.get(1).map(|t| (t.0, t.1.clone()))
+                                        .unwrap_or((f32::NEG_INFINITY, String::new()));
                                     // MARGIN TELEMETRY (always-on when L5 runs; telemetry-then-pin):
                                     // single-episode registries have no top2 -> margin = +inf semantics.
                                     let margin = if bcos2.is_finite() { bcos - bcos2 } else { f32::INFINITY };
                                     tracing::info!("RECALL-L5-MARGIN: top1='{}' cos={:.4} top2='{}' cos2={:.4} margin={:.4}",
                                         bname, bcos, bname2, bcos2, margin);
+                                    // ===== MARGIN-GATED TOP-3 JUDGE RERANK (SP_RECALL_L5_RERANK=<eps>) =====
+                                    // G-SEL-OFFLINE: the 7 selector misses are same-template periphrasis
+                                    // cross-picks with tiny top1-top2 margins (all <0.013; eps=0.015 catches
+                                    // 7/7 while firing on only 16/54 correct picks); correct-in-top-3 =
+                                    // 59/61. The distinguishing signal is SEMANTIC (cheap levers convicted
+                                    // inert), so on an ambiguous margin the 12B READS the top-3 fact TEXTS
+                                    // and picks A/B/C in ONE constrained greedy side-pass — the judge
+                                    // DECIDES, the recite path DELIVERS (ADR-002; the 61160e9 pattern).
+                                    // Fail-open: any forward/parse failure keeps the L5 top-1. The recite/
+                                    // decline below resets the cache anyway, so no restore pass is needed.
+                                    // Unset/0 = null floor.
+                                    let rerank_eps: f32 = std::env::var("SP_RECALL_L5_RERANK").ok()
+                                        .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    if rerank_eps > 0.0 && margin < rerank_eps && bcos >= tau_l5 && scored.len() >= 2 {
+                                        let k = scored.len().min(3);
+                                        let letters = ["A", "B", "C"];
+                                        // ANTI-POSITION-BIAS (FINDINGS-#3, relearned by G-SEL-RERANK-61 run-1:
+                                        // fixed cos-order slots made the judge CREATE adjacent cross-picks —
+                                        // same-family capitals swapped wholesale). Deterministic per-query
+                                        // Fisher-Yates over the k candidates (fnv1a of the query seeds a
+                                        // xorshift), letters stay A/B/C; the pick maps back through `perm`.
+                                        let mut seed: u64 = 0xcbf29ce484222325;
+                                        for b in ruser.as_bytes() { seed ^= *b as u64; seed = seed.wrapping_mul(0x100000001b3); }
+                                        if seed == 0 { seed = 0x9e3779b97f4a7c15; }
+                                        let mut rng = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+                                        let mut perm: Vec<usize> = (0..k).collect();
+                                        for i in (1..k).rev() {
+                                            let j = (rng() % (i as u64 + 1)) as usize;
+                                            perm.swap(i, j);
+                                        }
+                                        let mut entries = String::new();
+                                        for slot in 0..k { entries.push_str(&format!("{}) {}\n", letters[slot], scored[perm[slot]].2)); }
+                                        let jcontent = format!(
+                                            "You are a memory index. Exactly one fact below directly answers the question.\n\n{entries}\nQUESTION: {ruser}\n\nReply with only the single letter (A, B or C) of the fact that answers the question:");
+                                        let jmsgs = vec![Message { role: "user".to_string(), content: jcontent }];
+                                        match app.tokenizer.apply_template_ids(&jmsgs) {
+                                            Ok(jtoks) if jtoks.len() >= 2 => {
+                                                let _ = unsafe { kv::reset(handle) };
+                                                let (jhead, jlast) = jtoks.split_at(jtoks.len() - 1);
+                                                let mut ok = jhead.is_empty() || unsafe { kv::prefill(handle, jhead) }.is_ok();
+                                                let mut reply = String::new();
+                                                if ok {
+                                                    let mut tok = jlast[0];
+                                                    let turn_stops = app.tokenizer.turn_stop_ids();
+                                                    for _ in 0..6 {
+                                                        if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { ok = false; break; }
+                                                        let mut best_t = 0usize;
+                                                        let mut best_v = f32::NEG_INFINITY;
+                                                        for (t, &v) in logits.iter().enumerate() {
+                                                            if v > best_v { best_v = v; best_t = t; }
+                                                        }
+                                                        tok = best_t as i32;
+                                                        if tok == 1 || turn_stops.contains(&tok) { break; }
+                                                        reply.push_str(&String::from_utf8_lossy(app.tokenizer.decode_token(tok)));
+                                                        if !reply.trim().is_empty() { break; } // one letter is all we need
+                                                    }
+                                                }
+                                                let pick = reply.trim().to_uppercase().chars()
+                                                    .find(|c| matches!(c, 'A' | 'B' | 'C'))
+                                                    .map(|c| (c as u8 - b'A') as usize)
+                                                    .filter(|&slot| slot < k)
+                                                    .map(|slot| perm[slot]);
+                                                match (ok, pick) {
+                                                    (true, Some(i)) => {
+                                                        if i != 0 {
+                                                            tracing::info!("RECALL-L5 RERANK: margin={:.4} < eps={:.4}; judge pick '{}' (over top1 '{}')",
+                                                                margin, rerank_eps, scored[i].1, bname);
+                                                            bcos = scored[i].0; bname = scored[i].1.clone(); btext = scored[i].2.clone();
+                                                        } else {
+                                                            tracing::info!("RECALL-L5 RERANK: margin={:.4} < eps={:.4}; judge confirms top1 '{}'", margin, rerank_eps, bname);
+                                                        }
+                                                    }
+                                                    _ => tracing::warn!("RECALL-L5 RERANK: judge unusable (ok={} reply={:?}) -- keeping L5 top1 (fail-open)", ok, reply),
+                                                }
+                                            }
+                                            _ => tracing::warn!("RECALL-L5 RERANK: apply_template_ids failed -- keeping L5 top1 (fail-open)"),
+                                        }
+                                    }
                                     if bcos >= tau_l5 && !btext.is_empty() {
                                         // ATTR-GROUNDING (SNE crucible fix): on zero-prior data the model
                                         // CONFABULATES a plausible wrong value when asked an attribute the
