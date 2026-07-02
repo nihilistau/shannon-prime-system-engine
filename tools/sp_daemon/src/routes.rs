@@ -2706,6 +2706,30 @@ Tag of the answer (or [NULL]):");
         sessions.remove(chat_id);
         return;
     }
+    // ── GEODESIC G-FM-STEER (ADR-003 §4.2) — SP_STEER_VEC=<raw f32 LE bin> +
+    // SP_STEER_ALPHA=<f32>. Arms persistent pre-head steering for THIS turn's
+    // synthesis when a recall fired (the F3 treatment was measured on recall
+    // turns); explicitly DISARMS on non-recall turns so a prior arm never leaks
+    // across turns on the resident session. Env unset ⇒ the verb is never called
+    // ⇒ byte-identical null floor (session calloc's steer_active=0).
+    if let (Ok(vf), Some(al)) = (std::env::var("SP_STEER_VEC"),
+            std::env::var("SP_STEER_ALPHA").ok().and_then(|s| s.trim().parse::<f32>().ok())) {
+        static STEER_VEC: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+        let v = STEER_VEC.get_or_init(|| match std::fs::read(&vf) {
+            Ok(b) => b.chunks_exact(4)
+                      .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+            Err(e) => { tracing::warn!("FM-STEER: read {vf} failed ({e}) — steering disabled"); Vec::new() }
+        });
+        let steer_on = recalled.is_some() && !v.is_empty() && al != 0.0;
+        match unsafe { kv::steer_set(handle,
+                if steer_on { v.as_slice() } else { &[] },
+                if steer_on { al } else { 0.0 }) } {
+            Ok(()) => { if steer_on {
+                tracing::info!("FM-STEER: armed alpha={al} dim={} (recall turn)", v.len());
+            } }
+            Err(e) => tracing::warn!("FM-STEER: steer_set failed ({e})"),
+        }
+    }
     // ── GEODESIC F3 CAPTURE (ADR-003 §5) — SP_F3_CAPTURE=<dir>; unset ⇒ nothing armed
     // ⇒ byte-identical null floor. Two one-shot taps of the post-output_norm hidden
     // (kv::capture_feat_arm): (1) armed on the syn_last step directly below = the

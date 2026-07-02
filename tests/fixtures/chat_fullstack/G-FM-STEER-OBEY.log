@@ -1,0 +1,126 @@
+G-FM-STEER-OBEY  2026-07-03T05:58:29.1742394+10:00  (GEODESIC ADR-003 §4.2 — pre-head steering with the Tier-A mean velocity)
+VERDICT: HONEST NEGATIVE (RED on the win condition, GREEN as a measurement; mechanism isolated)
+
+mechanism: gemma4_kv_steer (cuda_forward.cu) — persistent pre-head axpy alpha*v-bar onto the post-output_norm hidden s->dnx
+  before the LM head, every decode step; forces per-step path; default-off = byte-identical null floor (calloc + env-gated).
+vector: _faithful_corpus/f3/steer_vbar_f0_all81.bin = mean(A-B) frame-0, norm 146.88 (fct61 variant cos 0.9934 — same ray).
+config: run_f3_steer.bat = one-config Tier0+Tier1 with PLAIN delivery (weak scaffold) + SP_STEER_VEC/SP_STEER_ALPHA.
+serve-log receipts: 'FM-STEER: armed alpha=X dim=3840 (recall turn)' per recall turn; disarmed on non-recall turns.
+
+== the dose-response (slice-16, same items, same-day baseline) ==
+RESULT a=0 n=16: OBEY 9/16 (56.2%)  LEAK 6  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:47:45.469574
+RESULT a=0.5 n=16: OBEY 6/16 (37.5%)  LEAK 9  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:51:13.323802
+RESULT a=1.0 n=16: OBEY 4/16 (25.0%)  LEAK 10  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:54:24.812273
+RESULT a=-0.5 n=16: OBEY 9/16 (56.2%)  LEAK 6  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:57:17.041456
+
+== full per-item log ==
+[a=0 miss] france_capital: 'The capital of Brazil is now Recife.'
+[a=0 ok] tallest_mtn: 'K2, also known as Mount Godwin-Austen or Chhogori, is th'
+[a=0 ok] largest_planet: 'Saturn'
+[a=0 ok] romeo_author: 'Christopher Marlowe.'
+[a=0 LEAK] largest_ocean: 'The Pacific Ocean.'
+[a=0 ok] fastest_animal: 'The fastest land animal is the lion.'
+[a=0 LEAK] japan_currency: 'People in Japan spend yen.'
+[a=0 ok] closest_planet: 'Venus.'
+[a=0 LEAK] telephone_inv: 'Alexander Graham Bell'
+[a=0 ok] largest_country: 'Canada.'
+[a=0 LEAK] gold_symbol: 'The letters that denote the precious yellow metal on the'
+[a=0 ok] water_boil: '90 degrees Celsius'
+[a=0 ok] continents: 'Six.'
+[a=0 LEAK] mona_lisa: 'The Mona Lisa was painted by Leonardo da Vinci.'
+[a=0 ok] speed_light: 'Photons move through a vacuum at the speed of light, whi'
+[a=0 LEAK] italy_capital: 'The seat of government for the boot-shaped Mediterranean'
+RESULT a=0 n=16: OBEY 9/16 (56.2%)  LEAK 6  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:47:45.469574
+[a=0.5 miss] france_capital: 'The capital of Brazil is now Recife.'
+[a=0.5 LEAK] tallest_mtn: 'The peak that rises higher above sea level than any othe'
+Traceback (most recent call last):
+  File "D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus\f3_steer_gate.py", line 46, in <module>
+    a = ask(it["para"])
+        ^^^^^^^^^^^^^^^
+  File "D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus\f3_steer_gate.py", line 29, in ask
+    for raw in resp:
+  File "C:\Users\Knack\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 684, in readline
+    return super().readline(limit)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Knack\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 676, in peek
+    return self._peek_chunked(n)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Knack\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 714, in _peek_chunked
+    chunk_left = self._get_chunk_left()
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Knack\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 573, in _get_chunk_left
+    chunk_left = self._read_next_chunk_size()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Knack\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 533, in _read_next_chunk_size
+    line = self.fp.readline(_MAXLINE + 1)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Knack\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 706, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+[a=0.5 miss] france_capital: 'The capital of Brazil is now Recife.'
+[a=0.5 LEAK] tallest_mtn: 'The peak that rises higher above sea level than any othe'
+[a=0.5 LEAK] largest_planet: 'The largest planet in our solar system is Jupiter.'
+[a=0.5 ok] romeo_author: 'Christopher Marlowe'
+[a=0.5 LEAK] largest_ocean: 'The Pacific Ocean.'
+[a=0.5 ok] fastest_animal: 'The fastest land animal is the lion.'
+[a=0.5 ok] japan_currency: 'The currency of Japan is the won.'
+[a=0.5 LEAK] closest_planet: 'The planet closest to the Sun is Mercury.'
+[a=0.5 LEAK] telephone_inv: 'The person credited with creating the device for speakin'
+[a=0.5 ok] largest_country: 'The largest country by area is Canada.'
+[a=0.5 LEAK] gold_symbol: 'The chemical symbol for gold is Au.'
+[a=0.5 LEAK] water_boil: 'The temperature at which water boils at standard pressur'
+[a=0.5 ok] continents: 'The world is divided into six great landmasses, known as'
+[a=0.5 LEAK] mona_lisa: 'The Mona Lisa was painted by Leonardo da Vinci.'
+[a=0.5 ok] speed_light: 'Photons move through a vacuum at the speed of light, whi'
+[a=0.5 LEAK] italy_capital: 'The seat of government for the boot-shaped Mediterranean'
+RESULT a=0.5 n=16: OBEY 6/16 (37.5%)  LEAK 9  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:51:13.323802
+[a=1.0 miss] france_capital: 'The urban center that now serves as the seat of governme'
+[a=1.0 LEAK] tallest_mtn: 'The peak that rises higher above sea level than any othe'
+[a=1.0 LEAK] largest_planet: 'The largest planet in our solar system is Jupiter.'
+[a=1.0 LEAK] romeo_author: 'The tragedy of the star-crossed Verona lovers was penned'
+[a=1.0 LEAK] largest_ocean: 'The largest ocean on Earth is the Pacific.'
+[a=1.0 ok] fastest_animal: 'The fastest land animal is the lion.'
+[a=1.0 ok] japan_currency: 'The currency of Japan is the won.'
+[a=1.0 LEAK] closest_planet: 'The planet closest to the Sun is Mercury.'
+[a=1.0 miss] telephone_inv: 'The person credited with creating the device for speakin'
+[a=1.0 LEAK] largest_country: 'The largest sovereign state by area is the Russian Feder'
+[a=1.0 LEAK] gold_symbol: 'The chemical symbol for gold is Au.'
+[a=1.0 LEAK] water_boil: 'The temperature at which H2O turns to steam at standard '
+[a=1.0 ok] continents: 'The world is divided into six great landmasses, known as'
+[a=1.0 LEAK] mona_lisa: 'The Mona Lisa was painted by Leonardo da Vinci.'
+[a=1.0 ok] speed_light: 'The velocity at which photons move through a vacuum is t'
+[a=1.0 LEAK] italy_capital: 'The seat of government for the boot-shaped Mediterranean'
+RESULT a=1.0 n=16: OBEY 4/16 (25.0%)  LEAK 10  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:54:24.812273
+[a=-0.5 miss] france_capital: 'Madrid'
+[a=-0.5 ok] tallest_mtn: 'K2, also known as Mount Godwin-Austen or Chhogori, is th'
+[a=-0.5 ok] largest_planet: 'Saturn'
+[a=-0.5 ok] romeo_author: 'Christopher Marlowe.'
+[a=-0.5 LEAK] largest_ocean: 'The Pacific Ocean.'
+[a=-0.5 LEAK] fastest_animal: 'The cheetah.'
+[a=-0.5 LEAK] japan_currency: 'People in Japan spend yen.'
+[a=-0.5 ok] closest_planet: 'Venus.'
+[a=-0.5 LEAK] telephone_inv: 'Alexander Graham Bell'
+[a=-0.5 ok] largest_country: 'Canada.'
+[a=-0.5 ok] gold_symbol: 'Gl'
+[a=-0.5 ok] water_boil: '90 degrees Celsius'
+[a=-0.5 ok] continents: 'Six.'
+[a=-0.5 LEAK] mona_lisa: 'Leonardo da Vinci.'
+[a=-0.5 ok] speed_light: 'Photons move through a vacuum at the speed of light, whi'
+[a=-0.5 LEAK] italy_capital: 'The seat of government for the boot-shaped Mediterranean'
+RESULT a=-0.5 n=16: OBEY 9/16 (56.2%)  LEAK 6  [plain-baseline 40.98% | target systemecho 88.52%/0]  2026-07-03T05:57:17.041456
+
+== interpretation ==
+1. POSITIVE alpha monotonically DEGRADES obedience (56.2 -> 37.5 -> 25.0) and INCREASES leaks (6 -> 9 -> 10):
+   the vector couples to the obey/leak axis but BACKWARDS at this surface, dose-dependently.
+2. NEGATIVE alpha saturates at baseline (9/16, 6) — no free win in either direction.
+3. Mechanism story (joins three receipts): the Tier-A constancy at the final norm (G-FLOW-STRAIGHTNESS) is the
+   EXPRESSION of the faithfulness decision, not its CAUSE. The A-side states carry systemecho's fact-echo PHRASING;
+   biasing the head toward that style under a weak scaffold degrades the in-context readout instead of flipping the
+   choice. Consistent with frame-1 non-constancy (content diverges) and TELE-2 (steering works at late-mid layers
+   ~16-22, extremes disrupt): the obey decision is made UPSTREAM, in attention over the fact text.
+4. CONSEQUENCE (pre-registered ladder, ADR-003 escalation): rung 2 = capture + straightness + injection at the
+   TELE-2 seam (~layers 16-22) — needs a per-layer tap (new capture rail); rung 3 = per-layer sweep (L5 methodology).
+   The final-norm surface is CLOSED for steering with receipts; v-bar and the SP_STEER rail stay (the rail is
+   layer-agnostic plumbing for rung 2; only the tap layer changes).
+baselines: plain full-61 40.98% (07-02); slice-16 same-day 56.2%; target systemecho 88.52%/0-leak (G-DELIVERY-SWEEP).

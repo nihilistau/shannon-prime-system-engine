@@ -3971,6 +3971,14 @@ struct sp_g4_kv {
      * post-output_norm hidden s->dnx (E floats = the feature the LM head consumes) into
      * feat_host. This is the seed inp_h for the gemma4-assistant draft. One-shot. */
     float *feat_host; int feat_active;
+    /* GEODESIC G-FM-STEER (ADR-003 §4.2, lattice) — PERSISTENT pre-head steering.
+     * When steer_active, EVERY decode step adds steer_alpha * steer_dev (E floats,
+     * device) to the post-output_norm hidden s->dnx AFTER the feat tap and BEFORE
+     * the LM head — biases the token distribution only (cannot corrupt K/V or the
+     * residual stream; coherence-safe by construction). Armed/disarmed per turn by
+     * gemma4_kv_steer(); calloc'd zero ⇒ default-off = byte-identical null floor.
+     * Forces the per-step path (not graph-capturable seam), same as the taps. */
+    float *steer_dev; float steer_alpha; int steer_active;
     /* CONTRACT-CHAT-FULLSTACK B3-v2 — AUTONOMOUS RECALL by q·K attention relevance.
      * When qcap_active, g4_kv_step D2H-copies, per GLOBAL owner layer (period-6,
      * ascending), this step's last-token post-RoPE query dq (g_nh*g_hd floats) into
@@ -4004,6 +4012,31 @@ struct sp_g4_kv {
 
 extern "C" void gemma4_kv_close(sp_g4_kv *s);   /* fwd: gemma4_kv_open frees on OOM */
 static int g4_kv_step(sp_g4_kv *s, int do_head);  /* A1: fwd for g4_kv_step_graph fallback */
+
+/* GEODESIC G-FM-STEER: y[i] += a * v[i] (the pre-head steering axpy). */
+__global__ void k_axpy_steer(float *y, const float *v, float a, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] += a * v[i];
+}
+
+/* GEODESIC G-FM-STEER (ADR-003 §4.2): arm/disarm persistent pre-head steering on the
+ * resident session. vec = E host floats (the mean faithfulness velocity v̄ from the F3
+ * pairs, G-FLOW-STRAIGHTNESS Tier A); alpha scales it. vec==NULL or alpha==0 DISARMS.
+ * Additive verb; never called ⇒ steer_active stays 0 ⇒ byte-identical null floor. */
+extern "C" int gemma4_kv_steer(sp_g4_kv *s, const float *vec, float alpha) {
+    if (!s) return -1;
+    if (!vec || alpha == 0.0f) { s->steer_active = 0; return 0; }
+    if (!s->steer_dev &&
+        cudaMalloc(&s->steer_dev, (size_t)s->E * sizeof(float)) != cudaSuccess) {
+        s->steer_dev = NULL; sp_set_error("gemma4_kv_steer: cudaMalloc"); return -1;
+    }
+    if (cudaMemcpy(s->steer_dev, vec, (size_t)s->E * sizeof(float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+        sp_set_error("gemma4_kv_steer: H2D"); return -1;
+    }
+    s->steer_alpha = alpha; s->steer_active = 1;
+    return 0;
+}
 
 /* CONTRACT-CHAT-FULLSTACK A1 — the GRAPH-SAFE per-step kernel body (full cache,
  * no inject/capture seam, no SWA-ring). This is the EXACT kernel sequence
@@ -4125,7 +4158,7 @@ static int g4_kv_step_graph(sp_g4_kv *s) {
         /* B1: byte-exact decode uses the host-ctx bx attention (k_attn_decode_win_bx,
          * ctx-sized i64 shared mem) which is NOT graph-capturable; force per-step. */
         const int safe = want && s->ring_W == 0 && !s->inj_active && !s->cap_active
-                         && !s->feat_active && !s->bx_on
+                         && !s->feat_active && !s->steer_active && !s->bx_on
                          && attn_shm <= 48u*1024u && (!s->PL || s->dev_ple);
         s->graph_mode = safe ? 1 : 0;
         if (safe) fprintf(stderr, "    [g4-kv] GRAPH decode armed (SP_G4_KV_GRAPH=1; capturing one decode step)\n");
@@ -4137,7 +4170,7 @@ static int g4_kv_step_graph(sp_g4_kv *s) {
      * B1: byte-exact mode likewise routes the per-step bx attention (host ctx,
      * not graph-bakeable), so a session that armed graph then turned bx on this
      * request decodes per-step for the duration. */
-    if (s->inj_active || s->cap_active || s->feat_active || s->bx_on) return g4_kv_step(s, /*do_head=*/1);
+    if (s->inj_active || s->cap_active || s->feat_active || s->steer_active || s->bx_on) return g4_kv_step(s, /*do_head=*/1);
 
     if (!s->graph_ready) {
         if (cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
@@ -4372,6 +4405,9 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         if (s->feat_active && s->feat_host) {   /* EAGLE/MTP feature tap: post-output_norm hidden (seed inp_h) */
             cudaMemcpy(s->feat_host, s->dnx, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost);
             s->feat_active = 0;
+        }
+        if (s->steer_active && s->steer_dev) {   /* GEODESIC pre-head steering (AFTER the tap: capture reads the model's own state) */
+            k_axpy_steer<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dnx, s->steer_dev, s->steer_alpha, E);
         }
         if (g_w.head.f32 || g_w.head.codes) { KMMD(&g_w.head, s->dnx, s->dlog); }
         else if (use_int8 && g_w.embd_packed.codes &&
@@ -5593,6 +5629,7 @@ extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (s->jK) { for (int L=0;L<s->NL;L++) if (s->jK[L]) cudaFree(s->jK[L]); free(s->jK); }   /* KAI-1c undo-journal */
     if (s->jV) { for (int L=0;L<s->NL;L++) if (s->jV[L]) cudaFree(s->jV[L]); free(s->jV); }
     if (s->dinj) cudaFree(s->dinj);   /* KAI-2 inject staging */
+    if (s->steer_dev) cudaFree(s->steer_dev);   /* GEODESIC steering vector */
     if (s->gexec) cudaGraphExecDestroy(s->gexec);   /* A1: graph decode teardown */
     if (s->gcap)  cudaGraphDestroy(s->gcap);
     free(s);

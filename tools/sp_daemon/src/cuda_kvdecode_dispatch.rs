@@ -715,3 +715,32 @@ pub unsafe fn capture_feat_arm(handle: *mut c_void, feat: &mut [f32]) -> Result<
     let rc = unsafe { gemma4_kv_capture_feat(handle, feat.as_mut_ptr()) };
     if rc == 0 { Ok(()) } else { Err(last_error()) }
 }
+
+// ── GEODESIC G-FM-STEER (ADR-003 §4.2) — persistent pre-head steering ────────
+// The engine copies `vec` to a device buffer on arm, so the slice need only live
+// for the duration of this call (unlike the capture tap).
+unsafe extern "C" {
+    fn gemma4_kv_steer(handle: *mut c_void, vec: *const f32, alpha: f32) -> c_int;
+}
+
+/// Arm (non-empty `vec`, `alpha != 0`) or disarm (empty `vec` or `alpha == 0`)
+/// persistent pre-head steering: every subsequent decode step adds `alpha*vec`
+/// to the post-output_norm hidden before the LM head (token-distribution bias
+/// only — cannot touch K/V or the residual stream). Never called unless
+/// `SP_STEER_VEC` is set ⇒ default-off = byte-identical null floor.
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`].
+pub unsafe fn steer_set(handle: *mut c_void, vec: &[f32], alpha: f32) -> Result<(), String> {
+    if handle.is_null() {
+        return Err("kvdecode steer_set: NULL handle".to_string());
+    }
+    let disarm = vec.is_empty() || alpha == 0.0;
+    // SAFETY: handle live per caller; engine copies vec before returning.
+    let rc = unsafe {
+        gemma4_kv_steer(handle,
+            if disarm { std::ptr::null() } else { vec.as_ptr() },
+            if disarm { 0.0 } else { alpha })
+    };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}
