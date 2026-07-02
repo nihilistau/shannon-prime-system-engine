@@ -1,4 +1,4 @@
-G-ONECONFIG-LIVE  2026-07-02T15:07:24.922971
+G-ONECONFIG-LIVE  2026-07-03T02:03:44.315153
 config: run_console_faithful.bat (Tier0 + SP_RECALL_L5=1 tau=0.30 + SP_RECALL_ATTR_GATE=1 tau=0.5, registry_oneconfig.jsonl 61 fct + 20 sne)
 [P MISS] france_capital: 'The capital of Brazil is now Recife.'  (want Lyon)
 [P ok] tallest_mtn: 'The tallest mountain on Earth is K2.'  (want K2)
@@ -75,3 +75,11 @@ F hard-foreign clean: 2/2
 Q qonly-skips: 2/2
 [X ok] repeat byte-identical: True
 VERDICT: GREEN  (P 54/61 | S 3/3 dec 0 spur zi=3 | F 2/2 | C 1 | Q 2/2 | X 1)
+
+
+---- RE-GATE 2026-07-03 (task #40): PMAX=4096 config (G-12B-SERVE-ROOTCAUSE) ----
+Re-run on the SPEED-FIXED stack: SP_DAEMON_KVDECODE_PMAX 20000->4096, + the dead-scan
+skip (G-RECALL-DEADSCAN-SKIP) + G-BX-ATTN-FAST chunked fold. Result P 54/61 = IDENTICAL
+to the 20000 gate -> the whole speed campaign is FAITHFULNESS-NEUTRAL. Engine 16e4a31.
+No silent gate revision: the faithfulness numbers are RE-EARNED on the config the
+operator actually runs.
