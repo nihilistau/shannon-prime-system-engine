@@ -2706,9 +2706,34 @@ Tag of the answer (or [NULL]):");
         sessions.remove(chat_id);
         return;
     }
+    // ── GEODESIC F3 CAPTURE (ADR-003 §5) — SP_F3_CAPTURE=<dir>; unset ⇒ nothing armed
+    // ⇒ byte-identical null floor. Two one-shot taps of the post-output_norm hidden
+    // (kv::capture_feat_arm): (1) armed on the syn_last step directly below = the
+    // answer-turn LAST-PROMPT-TOKEN state (the feature the LM head consumes to pick
+    // the first answer token — for a recall turn this is the state under the delivered
+    // fact + faithfulness prompt; for a clean turn, the parametric state); (2) armed on
+    // the first in-loop step = the FIRST-ANSWER-TOKEN state. Zero extra forwards — the
+    // tap is two D2H copies on steps the turn runs anyway. Files + meta written at
+    // turn end (after the decode loop). Offline-batch rail ONLY: capture_feat commits
+    // like any decode (routes.rs:787 note is about PRE-cache routing, not this site).
+    const F3_E: usize = 3840; // gemma4-12B hidden (UNIFICATION substrate map)
+    let f3_dir = std::env::var("SP_F3_CAPTURE").ok().filter(|s| !s.is_empty());
+    let mut f3_prompt: Vec<f32> = Vec::new();
+    let mut f3_first: Vec<f32> = Vec::new();
+    if f3_dir.is_some() {
+        f3_prompt = vec![0f32; F3_E];
+        if let Err(e) = unsafe { kv::capture_feat_arm(handle, &mut f3_prompt) } {
+            tracing::warn!("F3-CAPTURE: arm(prompt) failed ({e}) — capture skipped this turn");
+            f3_prompt = Vec::new();
+        }
+    }
     // G-INT-2-FIX: synthesis starts from syn_last (== last[0] for null/clean turns;
     // the augmented prompt's last token when the B3-JUDGE PICKed a memory text-in-context).
     if let Err(e) = unsafe { kv::decode_step(handle, syn_last, logits) } {
+        // F3: an armed capture fires inside the step; on step FAILURE the armed pointer
+        // may persist on the session — leak the buffer so a late write can never hit
+        // freed memory (dangling-write guard; error path only, serve is aborting anyway).
+        if !f3_prompt.is_empty() { std::mem::forget(std::mem::take(&mut f3_prompt)); }
         send_err(format!("kvdecode decode_step(prefill-tail): {e}"));
         sessions.remove(chat_id);
         return;
@@ -2806,9 +2831,23 @@ Tag of the answer (or [NULL]):");
         // the cache, so it becomes part of the reusable committed prefix for the next turn. Placed
         // AFTER every early break above so committed_gen never lists a token the cache doesn't hold.
         committed_gen.push(next_token);
+        // GEODESIC F3 tap (2): first in-loop step = the FIRST-ANSWER-TOKEN state.
+        // Armed immediately before the unconditional decode_step below so the one-shot
+        // ALWAYS fires into a live buffer. f3_first: [] = not yet armed; len==F3_E =
+        // captured; len==1 = failed-sentinel (never retried, never written).
+        if !f3_prompt.is_empty() && f3_first.is_empty() {
+            let mut b = vec![0f32; F3_E];
+            match unsafe { kv::capture_feat_arm(handle, &mut b) } {
+                Ok(()) => f3_first = b, // move keeps the heap buffer address — armed ptr stays valid
+                Err(e) => { tracing::warn!("F3-CAPTURE: arm(first) failed ({e})"); f3_first = vec![f32::NAN]; }
+            }
+        }
         // Feed the just-emitted token; get logits for the next position.
         // SAFETY: handle live; logits is vocab_size f32 (checked above).
         if let Err(_e) = unsafe { kv::decode_step(handle, next_token, logits) } {
+            // F3 dangling-write guard (see the syn_last site): step failed with a
+            // possibly-armed capture — leak the buffer rather than risk a late write.
+            if f3_first.len() == F3_E { std::mem::forget(std::mem::take(&mut f3_first)); }
             break 'decode;
         }
         if eot_dbg && eot_ranks.len() < 64 { eot_ranks.push(stop_rank(logits).1); }
@@ -2831,6 +2870,59 @@ Tag of the answer (or [NULL]):");
         let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
             .unwrap_or_default();
         let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+    }
+
+    // ── GEODESIC F3 CAPTURE — persist the pair + meta (ADR-003 §5, G-F3-CAPTURE).
+    // File f3_<chat_id>.bin: magic "F3P1" + E:u32 + nframes:u32 + pad:u32, then
+    // nframes×E LE f32 (frame 0 = last-prompt-token state, frame 1 = first-answer-
+    // token state when captured). One f3_meta.jsonl row per turn (the harness joins
+    // by `user` text); f3_env.txt dumped once per serve (the re-baseline law:
+    // receipts carry the full SP_* env).
+    if let Some(ref f3d) = f3_dir {
+        if !f3_prompt.is_empty() {
+            let _ = std::fs::create_dir_all(f3d);
+            let envp = std::path::Path::new(f3d).join("f3_env.txt");
+            if !envp.exists() {
+                let mut ed = String::new();
+                for (k, v) in std::env::vars() {
+                    if k.starts_with("SP_") || k.starts_with("CUBLAS") {
+                        ed.push_str(&format!("{k}={v}\n"));
+                    }
+                }
+                let _ = std::fs::write(&envp, ed);
+            }
+            let has_first = f3_first.len() == F3_E;
+            let nframes: u32 = if has_first { 2 } else { 1 };
+            let mut buf = Vec::with_capacity(16 + F3_E * nframes as usize * 4);
+            buf.extend_from_slice(b"F3P1");
+            buf.extend_from_slice(&(F3_E as u32).to_le_bytes());
+            buf.extend_from_slice(&nframes.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            for &x in &f3_prompt { buf.extend_from_slice(&x.to_le_bytes()); }
+            if has_first { for &x in &f3_first { buf.extend_from_slice(&x.to_le_bytes()); } }
+            let _ = std::fs::write(
+                std::path::Path::new(f3d).join(format!("f3_{chat_id}.bin")), buf);
+            let mode = if recalled.is_some() {
+                std::env::var("SP_RECALL_L5_PROMPT").unwrap_or_else(|_| "recite".into())
+            } else { "clean".to_string() };
+            let meta = serde_json::json!({
+                "chat_id": chat_id,
+                "mode": mode,
+                "recalled": recalled.as_ref().map(|(n, c)|
+                    serde_json::json!({"ep": n, "cos_milli": c})),
+                "user": raw_user.as_deref().unwrap_or(""),
+                "answer": answer_text,
+                "n_gen": committed_gen.len(),
+                "frames": nframes,
+            });
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                .open(std::path::Path::new(f3d).join("f3_meta.jsonl")) {
+                let _ = writeln!(f, "{meta}");
+            }
+            tracing::info!("F3-CAPTURE: f3_{}.bin frames={} mode={} recalled={:?}",
+                chat_id, nframes, meta["mode"], recalled);
+        }
     }
 
     // ── B3-JUDGE GROUNDING CHECK (CPU-side, telemetry) ──────────────────────────

@@ -683,3 +683,35 @@ fn last_error() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+// ─── GEODESIC F3 (ADR-003 §5) — one-shot post-output_norm feature tap ───────
+// Direct `gemma4_kv_*` symbol, same link pattern eagle_accept.rs already proves
+// under `wire_cuda_backend` (NOT a glue-table row — additive, no C change).
+// Semantics (cuda_forward.cu:4857): ARMS a one-shot capture; the NEXT decode
+// step on this session D2H-copies its post-output_norm hidden (E floats — the
+// exact feature the LM head consumes) into `feat`, then disarms. Never called
+// unless `SP_F3_CAPTURE` is set ⇒ default-off = byte-identical null floor.
+unsafe extern "C" {
+    fn gemma4_kv_capture_feat(handle: *mut c_void, feat: *mut f32) -> c_int;
+}
+
+/// Arm the one-shot feature capture (GEODESIC F3, ADR-003 §5).
+///
+/// The capture fires on the NEXT [`decode_step`] on the same handle; callers
+/// MUST place the arm immediately before an unconditional `decode_step` so an
+/// armed pointer can never outlive its buffer (see the F3 site in routes.rs,
+/// which `mem::forget`-leaks the buffer on the step's error path as a dangling-
+/// write guard).
+///
+/// # Safety
+/// `handle` must be a live `sp_g4_kv*` from [`open`]; `feat` must hold at least
+/// the model's hidden dim (gemma4-12B: 3840) and stay alive (unmoved, unresized)
+/// until the next `decode_step` on this handle returns.
+pub unsafe fn capture_feat_arm(handle: *mut c_void, feat: &mut [f32]) -> Result<(), String> {
+    if handle.is_null() || feat.is_empty() {
+        return Err("kvdecode capture_feat_arm: NULL handle or empty buffer".to_string());
+    }
+    // SAFETY: handle live per caller; feat outlives the next step per caller.
+    let rc = unsafe { gemma4_kv_capture_feat(handle, feat.as_mut_ptr()) };
+    if rc == 0 { Ok(()) } else { Err(last_error()) }
+}

@@ -1,0 +1,115 @@
+G-F3-CAPTURE  2026-07-03T05:14:49.3266970+10:00  (GEODESIC ADR-003 §5 — F3 paired residual capture)
+spec: lattice papers/PPT-LAT-ADR-003-FLOW-TRANSPORT.md v2 §5; rail SP_F3_CAPTURE (default-off = null floor)
+build: _f3_build.bat -> DONE_0 (cargo wire_cuda_backend, warnings only)
+
+== criterion 2: determinism (smoke, --twice, byte-identical payloads) ==
+smoke A (4 items x2): 4/4 rerun pairs byte-identical (dir _faithful_corpus/f3/A_smoke)
+smoke B (4 items x2): 4/4 rerun pairs byte-identical (dir _faithful_corpus/f3/B_smoke)
+[B fct rep0] france_capital: 'Which urban center now serves as the seat of government '
+[B fct rep1] france_capital: 'Which urban center now serves as the seat of government '
+[B fct rep0] tallest_mtn: 'Mount Everest'
+[B fct rep1] tallest_mtn: 'Mount Everest'
+[B sne rep0] Node-MB-674B91: 'What is the model number of Node-MB-674B91?'
+[B sne rep1] Node-MB-674B91: 'What is the model number of Node-MB-674B91?'
+[B sne rep0] Node-33-B33F0E: 'Node-33-B33F0E is located in rack 33, position B33F0E.'
+[B sne rep1] Node-33-B33F0E: 'Node-33-B33F0E is located in rack 33, position B33F0E.'
+[B] 4x2 turns in 10s; meta rows 0 -> 8
+  [verify] meta rows: 8/8 ok
+  [verify] frames histogram: {2: 8}
+  [verify] B recall-fired turns: 0/8 ok
+  [verify] determinism: 4/4 rerun pairs byte-identical
+[B] VERIFY: PASS
+
+== full run A (systemecho delivery, attr-gate OFF capture-only) ==
+[A sne rep0] Node-L0-082C9E: 'The physical rack location of Node-L0-082C9E is Rack-A-0'
+[A] 81x1 turns in 613s; meta rows 0 -> 81
+  [verify] meta rows: 81/81 ok
+  [verify] frames histogram: {2: 81}
+  [verify] A recall-fired turns: 81/81
+[A] VERIFY: PASS
+
+== full run B (clean parametric, no recall, no system prompt) ==
+[B sne rep0] Node-L0-082C9E: 'Node-L0-082C9E is located in rack 1, position 1'
+[B] 81x1 turns in 127s; meta rows 0 -> 81
+  [verify] meta rows: 81/81 ok
+  [verify] frames histogram: {2: 81}
+  [verify] B recall-fired turns: 0/81 ok
+[B] VERIFY: PASS
+
+== criteria 1+3+4: pairs on disk + meta/env complete + loader round-trip ==
+A rows=81 B rows=81 joined pairs=81
+kinds: {'fct': 61, 'sne': 20}
+delta-norm last-prompt-token: mean=173.61 min=118.41 max=253.94
+delta-norm first-answer-token: mean=193.50 min=113.48 max=362.48
+LOADER ROUND-TRIP: PASS
+
+== env dumps (re-baseline law) ==
+--- f3/A/f3_env.txt ---
+CUBLAS_WORKSPACE_CONFIG=:16:8
+SP_AUTO_RECALL_DEFAULT=1
+SP_BACKEND=cuda
+SP_BUILD_DIR=D:\F\shannon-prime-repos\shannon-prime-system-engine\build-cuda
+SP_BUILD_TYPE_DEFAULT=Release
+SP_CUDA_ARCH=75
+SP_CUDA_DECODE_INT8=1
+SP_DAEMON_BACKEND=cuda
+SP_DAEMON_KVDECODE=1
+SP_DAEMON_KVDECODE_PMAX=4096
+SP_DAEMON_KVDECODE_RING_W=2048
+SP_DAEMON_LOG=D:\F\shannon-prime-repos\shannon-prime-system-engine\_f3_serve_A.log
+SP_ENGINE=D:\F\shannon-prime-repos\shannon-prime-system-engine
+SP_EOT_BIAS=4.0
+SP_F3_CAPTURE=D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus\f3\A
+SP_G4_KV_RING_W=2048
+SP_GENERATOR=Ninja
+SP_LATTICE=D:\F\shannon-prime-repos\shannon-prime-lattice
+SP_PERSIST_KV=1
+SP_PIN_CMAKE_MIN=3.20
+SP_PIN_CUDA_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2
+SP_PIN_CUDA_VERSION=13.2
+SP_PIN_GIT_USR_BIN=C:\Program Files\Git\usr\bin
+SP_PIN_HEXAGON_SDK=C:\Qualcomm\Hexagon_SDK\5.5.6.0
+SP_PIN_NINJA_MIN=1.10
+SP_PIN_VS2022_BUILDTOOLS=D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
+SP_PIN_VS_BUILDTOOLS=C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools
+SP_PIN_VULKAN_MIN=1.3.250
+SP_RECALL_ATTR_GATE=0
+SP_RECALL_L5=1
+SP_RECALL_L5_PROMPT=systemecho
+SP_RECALL_L5_TAU=0.30
+SP_RECALL_QONLY=1
+SP_RECALL_REGISTRY=D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus\registry_oneconfig.jsonl
+SP_REPO_ROOT=D:\F\shannon-prime-repos
+SP_SYSTEM=D:\F\shannon-prime-repos\shannon-prime-system
+--- f3/B/f3_env.txt ---
+CUBLAS_WORKSPACE_CONFIG=:16:8
+SP_BACKEND=cuda
+SP_BUILD_DIR=D:\F\shannon-prime-repos\shannon-prime-system-engine\build-cuda
+SP_BUILD_TYPE_DEFAULT=Release
+SP_CUDA_ARCH=75
+SP_CUDA_DECODE_INT8=1
+SP_DAEMON_BACKEND=cuda
+SP_DAEMON_KVDECODE=1
+SP_DAEMON_KVDECODE_PMAX=4096
+SP_DAEMON_KVDECODE_RING_W=2048
+SP_DAEMON_LOG=D:\F\shannon-prime-repos\shannon-prime-system-engine\_f3_serve_B.log
+SP_ENGINE=D:\F\shannon-prime-repos\shannon-prime-system-engine
+SP_EOT_BIAS=4.0
+SP_F3_CAPTURE=D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus\f3\B
+SP_G4_KV_RING_W=2048
+SP_GENERATOR=Ninja
+SP_LATTICE=D:\F\shannon-prime-repos\shannon-prime-lattice
+SP_PERSIST_KV=1
+SP_PIN_CMAKE_MIN=3.20
+SP_PIN_CUDA_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2
+SP_PIN_CUDA_VERSION=13.2
+SP_PIN_GIT_USR_BIN=C:\Program Files\Git\usr\bin
+SP_PIN_HEXAGON_SDK=C:\Qualcomm\Hexagon_SDK\5.5.6.0
+SP_PIN_NINJA_MIN=1.10
+SP_PIN_VS2022_BUILDTOOLS=D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
+SP_PIN_VS_BUILDTOOLS=C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools
+SP_PIN_VULKAN_MIN=1.3.250
+SP_REPO_ROOT=D:\F\shannon-prime-repos
+SP_SYSTEM=D:\F\shannon-prime-repos\shannon-prime-system
+
+VERDICT: GREEN (criteria 1-4). Observed caveat (pre-registered for G-FLOW-STRAIGHTNESS): B-side no-system-prompt turns sometimes ECHO the question instead of answering parametrically — x0 is the honest clean-path state either way; if straightness tiers look degenerate, capture a B2 variant with a neutral system prompt before concluding.
