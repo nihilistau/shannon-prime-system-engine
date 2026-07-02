@@ -7945,6 +7945,9 @@ typedef struct q36gpu {
     /* GPU-2 resident-expert registry + scratch */
     q36moe_ent_fwd *moes; int mn, mcap;
     float *dmoe; int moe_ff, moe_e;
+    /* GPU-3 streaming slab (rump layers: ship the SELECTED experts per token) */
+    unsigned char *slab; size_t slab_cap;
+    unsigned long long *hoff; int hoff_cap;   /* host scratch: adjusted row_off */
 } q36gpu;
 
 extern "C" void *sp_q36gpu_new(void) {
@@ -7965,6 +7968,8 @@ extern "C" void sp_q36gpu_free(void *vh) {
         free_devtensor(&h->moes[i].d);
     }
     free(h->moes);
+    if (h->slab) cudaFree(h->slab);
+    free(h->hoff);
     if (h->dmoe) cudaFree(h->dmoe);
     if (h->dX) cudaFree(h->dX);
     if (h->dY) cudaFree(h->dY);
@@ -8087,6 +8092,119 @@ extern "C" int sp_q36gpu_moe(void *vh, const char *tag, const int *idx, const fl
         DevTensor vg = q36_expert_view(&M->g, idx[k], FF);
         DevTensor vu = q36_expert_view(&M->u, idx[k], FF);
         DevTensor vd = q36_expert_view(&M->d, idx[k], E);
+        if (!gemv_w_packed(h->st, &vg, h->dX, dG, h->dqx, h->dsx)) return -1;
+        if (!gemv_w_packed(h->st, &vu, h->dX, dU, h->dqx, h->dsx)) return -1;
+        k_silu_mul<<<(unsigned)((FF + 255) / 256), 256, 0, h->st>>>(dG, dU, (size_t)FF);
+        if (!gemv_w_packed(h->st, &vd, dG, dDe, h->dqx, h->dsx)) return -1;
+        dg_k_axpy<<<(unsigned)((E + 255) / 256), 256, 0, h->st>>>(dYo, dDe, wt[k], E);
+    }
+    if (cudaMemcpyAsync(y, dYo, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost, h->st)
+        != cudaSuccess) return -1;
+    return cudaStreamSynchronize(h->st) == cudaSuccess ? 0 : -1;
+}
+
+/* ── GPU-3: STREAMED experts for non-resident layers ─────────────────────────────
+ * Ship ONLY the selected NU experts' packed slices (codes + adjusted row_off +
+ * row_prec + bscale/row_scale) into a preallocated device slab, then run the same
+ * per-expert dp4a flow. Slices are CONTIGUOUS byte ranges (row_off is ascending
+ * absolute), so each tensor slice is ONE H2D copy plus small metadata copies —
+ * ~10MB/layer/token total, all async on the handle stream, one sync per layer. */
+static int q36_slab_ensure(q36gpu *h, size_t need) {
+    if (need <= h->slab_cap) return 0;
+    if (h->slab) cudaFree(h->slab);
+    if (cudaMalloc(&h->slab, need) != cudaSuccess) { h->slab = NULL; h->slab_cap = 0; return 1; }
+    h->slab_cap = need;
+    return 0;
+}
+
+static int q36_stream_slice(q36gpu *h, const sp_frob_packed_tensor *pt, int r0, int rows,
+                            unsigned char **bump, DevTensor *dt) {
+    memset(dt, 0, sizeof(*dt));
+    dt->in = pt->cols; dt->out = rows;
+    size_t cbase = pt->row_off[r0];
+    size_t cend  = ((uint32_t)(r0 + rows) < pt->rows) ? pt->row_off[r0 + rows] : pt->codes_bytes;
+    size_t cbytes = cend - cbase;
+    /* adjusted row_off (slab-relative) via host scratch */
+    if (rows > h->hoff_cap) {
+        free(h->hoff);
+        h->hoff = (unsigned long long *)malloc((size_t)rows * sizeof(unsigned long long));
+        if (!h->hoff) { h->hoff_cap = 0; return 1; }
+        h->hoff_cap = rows;
+    }
+    for (int i = 0; i < rows; i++)
+        h->hoff[i] = (unsigned long long)(pt->row_off[r0 + i] - cbase);
+    unsigned char *p = *bump;
+    #define BUMP(nbytes) (p += ((nbytes) + 255) & ~(size_t)255)
+    dt->codes = p;
+    if (cudaMemcpyAsync(p, pt->codes + cbase, cbytes, cudaMemcpyHostToDevice, h->st)
+        != cudaSuccess) return 1;
+    BUMP(cbytes);
+    dt->row_off = (unsigned long long *)p;
+    if (cudaMemcpyAsync(p, h->hoff, (size_t)rows * 8, cudaMemcpyHostToDevice, h->st)
+        != cudaSuccess) return 1;
+    BUMP((size_t)rows * 8);
+    dt->row_prec = p;
+    if (cudaMemcpyAsync(p, pt->row_prec + r0, (size_t)rows, cudaMemcpyHostToDevice, h->st)
+        != cudaSuccess) return 1;
+    BUMP((size_t)rows);
+    if (pt->bscale) {
+        dt->bs_nblk = pt->bs_nblk;
+        dt->bscale = (unsigned short *)p;
+        size_t bs = (size_t)rows * pt->bs_nblk * 2;
+        if (cudaMemcpyAsync(p, pt->bscale + (size_t)r0 * pt->bs_nblk, bs,
+                            cudaMemcpyHostToDevice, h->st) != cudaSuccess) return 1;
+        BUMP(bs);
+    } else if (pt->row_scale) {
+        dt->row_scale = (float *)p;
+        if (cudaMemcpyAsync(p, pt->row_scale + r0, (size_t)rows * 4,
+                            cudaMemcpyHostToDevice, h->st) != cudaSuccess) return 1;
+        BUMP((size_t)rows * 4);
+    } else return 1;
+    #undef BUMP
+    /* per-tensor precision for the dp4a GEMV: uniform-row check on the slice */
+    dt->prec = (int)pt->row_prec[r0];
+    for (int i = 1; i < rows; i++)
+        if (pt->row_prec[r0 + i] != pt->row_prec[r0]) { dt->prec = 0; break; }
+    *bump = p;
+    return 0;
+}
+
+extern "C" int sp_q36gpu_moe_stream(void *vh,
+                                    const sp_frob_packed_tensor *ptg,
+                                    const sp_frob_packed_tensor *ptu,
+                                    const sp_frob_packed_tensor *ptd,
+                                    const int *idx, const float *wt, int NU,
+                                    const float *x, int E, int FF, float *y) {
+    q36gpu *h = (q36gpu *)vh;
+    if (!h || !ptg || !ptu || !ptd) return -1;
+    /* scratch (shared with the resident path; ensure when no layer was resident) */
+    if (!h->dmoe) {
+        if (cudaMalloc(&h->dmoe, ((size_t)FF * 3 + (size_t)E * 2) * sizeof(float)) != cudaSuccess)
+            return -1;
+        h->moe_ff = FF; h->moe_e = E;
+    }
+    if (E > h->xcap) {
+        if (h->dX) cudaFree(h->dX);
+        if (cudaMalloc(&h->dX, (size_t)E * sizeof(float)) != cudaSuccess) return -1;
+        h->xcap = E;
+    }
+    /* slab: worst case per expert = 3 slices' codes (<= rows*cols bytes @Q8) + meta */
+    size_t per_e = ((size_t)FF * E + (size_t)FF * E + (size_t)E * FF) /* codes worst */
+                 + 3 * ((size_t)(E > FF ? E : FF) * 8 + 4096 + (size_t)(E > FF ? E : FF) * 4 + 8192);
+    if (q36_slab_ensure(h, (size_t)NU * per_e + 65536)) return -1;
+    float *dG  = h->dmoe;
+    float *dU  = dG + FF;
+    float *dDe = dU + FF * 2;      /* skip dH slot */
+    float *dYo = dDe + E;
+    if (cudaMemcpyAsync(h->dX, x, (size_t)E * sizeof(float), cudaMemcpyHostToDevice, h->st)
+        != cudaSuccess) return -1;
+    if (cudaMemsetAsync(dYo, 0, (size_t)E * sizeof(float), h->st) != cudaSuccess) return -1;
+    unsigned char *bump = h->slab;
+    for (int k = 0; k < NU; k++) {
+        DevTensor vg, vu, vd;
+        if (q36_stream_slice(h, ptg, idx[k] * FF, FF, &bump, &vg)) return -1;
+        if (q36_stream_slice(h, ptu, idx[k] * FF, FF, &bump, &vu)) return -1;
+        if (q36_stream_slice(h, ptd, idx[k] * E,  E,  &bump, &vd)) return -1;
         if (!gemv_w_packed(h->st, &vg, h->dX, dG, h->dqx, h->dsx)) return -1;
         if (!gemv_w_packed(h->st, &vu, h->dX, dU, h->dqx, h->dsx)) return -1;
         k_silu_mul<<<(unsigned)((FF + 255) / 256), 256, 0, h->st>>>(dG, dU, (size_t)FF);
