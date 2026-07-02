@@ -705,9 +705,17 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                         }
                         Some(eps)
                     }
-                    Ok(_) => {
-                        tracing::warn!("B3 AUTONOMOUS RECALL: registry {p} parsed 0 episodes — auto_recall disabled");
-                        None
+                    Ok(eps) => {
+                        // B4-SEAL COLD-START FIX (2026-07-03, G-B4-GROW-RECALL-L5): an EMPTY
+                        // registry used to disable auto_recall for the whole serve — which made
+                        // it impossible to BOOTSTRAP a production memory from nothing (B4 could
+                        // grow episodes but the recall chain never armed to see them). An empty
+                        // file with the env SET now arms the chain with zero curated episodes;
+                        // the L5 stage chains registry ∪ nightshift, so grown episodes are
+                        // scanned from the first turn. Unreadable path / env unset still ⇒ None
+                        // (auto_recall no-op, unchanged).
+                        info!("B3 AUTONOMOUS RECALL: registry {p} is EMPTY — armed for LIVE GROWTH (cold start; nightshift episodes are scanned)");
+                        Some(eps)
                     }
                     Err(e) => {
                         tracing::warn!("B3 AUTONOMOUS RECALL: failed to read registry {p}: {e} — auto_recall disabled");

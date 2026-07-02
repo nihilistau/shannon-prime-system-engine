@@ -1,0 +1,42 @@
+G-B4-GROW-RECALL-L5  2026-07-03T06:43:50.7824889+10:00  (B4-SEAL: the system GROWS its memory, RECALLS it, SURVIVES restart)
+VERDICT: GREEN  (R 4/5 grown-paraphrase recall >= pin 4/5 | F clean | P persist PASS)
+
+THE TWO FIXES THAT SEALED IT:
+1. mint_live_ep_l5 (routes.rs): every B4/merge live capture now mints its ep.l5 L5 query-key at capture time
+   (standalone position-0 scratch forward -> read_global_q(last tok) -> l5_query_embed; sidecar written for
+   restart). Before: l5key stayed empty ('follow-up' comment) -> grown episodes INVISIBLE to the L5 selector.
+2. COLD-START FIX (daemon.rs): an EMPTY registry file used to load as None -> auto_recall disabled for the
+   whole serve -> a production memory could never bootstrap from nothing. Empty+env-set now arms the chain
+   with zero curated episodes (L5 chains registry UNION nightshift). Diagnosed live: run-1 of this gate grew
+   5 episodes but recalled 0/5 with zero RECALL-L5 log lines.
+
+CONFIG: run_console_system.bat = Tier0 + Tier1 (L5 tau=0.30 + attr-gate 0.5 + QONLY + systemecho) +
+  SP_B4_NIGHTSHIFT=1 + SP_NIGHTSHIFT_PERSIST=1 on PRODUCTION registry _memory_live\registry.jsonl (starts empty).
+  NOT the 61-fact test corpus; run_console_faithful.bat stays GATE-ONLY.
+
+== run 1 (pre-cold-start-fix): growth GREEN, recall 0/5 — the diagnosing failure ==
+5x B4-NIGHTSHIFT captured+persisted, ep.l5 minted (5x 2048B on disk), NO RECALL-L5 lines -> registry None root-caused.
+== run 2 (both fixes): ==
+G-B4-GROW-RECALL-L5 [grow]  2026-07-03T06:41:04.645668
+[G dog] "That's a cute name!"
+[G door] "I'm sorry, but I don't have access to that information."
+[G sister] 'Clara lives in Hobart.'
+[G car] "I don't know."
+[G tea] "I'm sorry, I don't have any information about your favor"
+[R ok dog] 'The name of your dog is Biscuit.' (want Biscuit)
+[R ok door] '4471' (want 4471)
+[R ok sister] 'My sister Clara lives in Hobart.' (want Hobart)
+[R MISS car] 'I drive a car.' (want Volvo)
+[R ok tea] 'My favourite tea is lapsang souchong.' (want lapsang)
+[F ok] 'The capital of Spain is Madrid.' (want Madrid, no grown tokens)
+RESULT grow: R 4/5  F clean  -> PASS (run persist leg after daemon restart)
+== persist leg (daemon restarted, registry+sidecars reloaded from disk) ==
+B3 AUTONOMOUS RECALL: loaded 5 episode(s) from _memory_live\registry.jsonl
+[P ok dog] 'The name of your dog is Biscuit.'  -> RESULT persist: PASS
+
+HONEST NOTES: (1) R miss = 'car' (Volvo) — answered 'I drive a car.' (selection/delivery miss within the
+  4/5 pin; 5 distinct novel subjects, one soft miss — consistent with the known selector envelope).
+  (2) G-phase assertion replies are plain chat (QONLY skips recall on statements; capture happens post-turn).
+  (3) foreign 'capital of Spain' -> 'Madrid.' clean, no grown-token leak, with 5 live episodes in registry.
+  (4) facts are NOVEL (no corpus contains Biscuit/4471/Hobart-sister/Volvo-240/lapsang) — the only possible
+  answer source is the grown memory.

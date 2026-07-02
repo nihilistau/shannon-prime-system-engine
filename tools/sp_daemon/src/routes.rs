@@ -680,6 +680,44 @@ pub async fn v1_chat(
 #[cfg(feature = "wire_cuda_backend")]
 static KV_COMMITTED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 
+// B4-SEAL (GEODESIC session 2026-07-03): mint the L5 query-key for a LIVE-captured
+// episode with the SAME provenance as the curated corpus (write_ep_l5.py): a
+// standalone position-0 forward of the episode text on a throwaway scratch session,
+// global-Q of the LAST token, mean-over-heads of global layer 5, L2-normed
+// (recall::l5_query_embed). Writes <dir>/ep.l5 (raw LE f32[512] — exactly what
+// load_episode_l5key reads back after a restart) and returns the key for the
+// in-session Episode. None on any failure — the episode then behaves exactly as
+// before this fix (W_c/C2-selectable, L5-invisible), never worse.
+// THIS is the seam that seals the system: without it, grown memories are invisible
+// to the deployed L5 selector (the old l5key: Vec::new() "follow-up" comment).
+#[cfg(feature = "wire_cuda_backend")]
+fn mint_live_ep_l5(qm: *const std::ffi::c_void, toks: &[i32], dir: &std::path::Path) -> Option<Vec<f32>> {
+    use sp_daemon::cuda_kvdecode_dispatch as kv;
+    use sp_daemon::recall;
+    if toks.len() < 2 { return None; }
+    let scratch = unsafe { kv::open(qm, toks.len() as i32 + 8) }.ok()?;
+    let n_global = recall::NL / recall::PERIOD;
+    let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
+    let key = (|| {
+        unsafe { kv::prefill(scratch, &toks[..toks.len() - 1]) }.ok()?;
+        unsafe { kv::read_global_q(scratch, toks[toks.len() - 1], &mut ql) }.ok()?;
+        let k = recall::l5_query_embed(&ql);
+        if k.len() != recall::HD { return None; }
+        Some(k)
+    })();
+    // SAFETY: scratch came from open() above; release is NULL-safe/idempotent.
+    unsafe { kv::release_for_model(scratch) };
+    if let Some(ref k) = key {
+        let bytes: Vec<u8> = k.iter().flat_map(|x| x.to_le_bytes()).collect();
+        if std::fs::write(dir.join("ep.l5"), bytes).is_err() {
+            tracing::warn!("B4-L5-MINT: ep.l5 sidecar write failed at {}", dir.display());
+        }
+    } else {
+        tracing::warn!("B4-L5-MINT: L5 key mint failed for {} (episode stays L5-invisible)", dir.display());
+    }
+    key
+}
+
 // LAYER-3 MERGE helper: capture an ARBITRARY text as a new live episode, with the
 // SAME provenance as the NIGHTSHIFT path (BOS kept + trailing newline, batched forward
 // via the resident model, real C2 sig, persisted to the registry if SP_NIGHTSHIFT_PERSIST).
@@ -714,6 +752,8 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
         Some(x) => x, None => return false };
     let npos_sig = if ng > 0 { gk.len() / (ng * sp_daemon::recall::HD) } else { 0 };
     let sig = if npos_sig > 0 { app.recall_proj.signature(&gk, ng, npos_sig) } else { [0u64; 4] };
+    // B4-SEAL: mint the L5 key so the merged episode is visible to the live selector.
+    let l5k = mint_live_ep_l5(qm, &toks, &dir).unwrap_or_default();
     if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
         if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
             let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
@@ -732,8 +772,7 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
     ns.push(sp_daemon::recall::Episode {
         name, dir: dir_str.clone(), npos: ntok as i32, topic,
         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
-        l5key: Vec::new(), // L5 RECALL: live-captured episodes have no L5 query-key yet
-                           // (capture-side L5 computation is a follow-up; disk episodes load ep.l5).
+        l5key: l5k, // B4-SEAL: minted at capture (mint_live_ep_l5); empty only on mint failure.
     });
     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
     true
@@ -3110,6 +3149,10 @@ Tag of the answer (or [NULL]):");
                                                 let sig = if npos_sig > 0 {
                                                     app.recall_proj.signature(&gk, ng, npos_sig)
                                                 } else { [0u64; 4] };
+                                                // B4-SEAL: mint the L5 query-key at capture time so the GROWN
+                                                // episode is immediately visible to the deployed L5 selector
+                                                // (and to load_episode_l5key after restart via <dir>/ep.l5).
+                                                let l5k = mint_live_ep_l5(qm, &toks, &dir).unwrap_or_default();
                                                 // N3 PERSIST: append this live episode to the active registry
                                                 // file so it survives a daemon restart (default-off
                                                 // SP_NIGHTSHIFT_PERSIST=1 = null floor). Done here, before `sig`
@@ -3151,7 +3194,7 @@ Tag of the answer (or [NULL]):");
                                                     gk,
                                                     gk_ng: ng,
                                                     tokens: Some(toks),
-                                                    l5key: Vec::new(), // L5 RECALL: follow-up (capture-side L5 key)
+                                                    l5key: l5k, // B4-SEAL: minted at capture; empty only on mint failure
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(

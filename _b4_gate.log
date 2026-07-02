@@ -1,0 +1,13 @@
+G-B4-GROW-RECALL-L5 [grow]  2026-07-03T06:41:04.645668
+[G dog] "That's a cute name!"
+[G door] "I'm sorry, but I don't have access to that information."
+[G sister] 'Clara lives in Hobart.'
+[G car] "I don't know."
+[G tea] "I'm sorry, I don't have any information about your favor"
+[R ok dog] 'The name of your dog is Biscuit.' (want Biscuit)
+[R ok door] '4471' (want 4471)
+[R ok sister] 'My sister Clara lives in Hobart.' (want Hobart)
+[R MISS car] 'I drive a car.' (want Volvo)
+[R ok tea] 'My favourite tea is lapsang souchong.' (want lapsang)
+[F ok] 'The capital of Spain is Madrid.' (want Madrid, no grown tokens)
+RESULT grow: R 4/5  F clean  -> PASS (run persist leg after daemon restart)
