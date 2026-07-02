@@ -1114,9 +1114,13 @@ fn run_kvdecode_chat(
         let ruser = raw_user.clone().unwrap_or_default();
         let n_global = recall::NL / recall::PERIOD;
         let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
-        let l5_query = if unsafe { kv::read_global_q(handle, last[0], &mut ql) }.is_ok() {
-            recall::l5_query_embed(&ql)
-        } else { Vec::new() };
+        let read_ok = unsafe { kv::read_global_q(handle, last[0], &mut ql) }.is_ok();
+        let l5_query = if read_ok { recall::l5_query_embed(&ql) } else { Vec::new() };
+        let global_q = if read_ok { ql } else { Vec::new() };
+        // Any graduated latent head joins the fold: load the W_c recall head if deployed
+        // (SP_B3_WC), and build_pipeline runs it FIRST (a fired head short-circuits cosine).
+        let wc = std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty())
+            .and_then(|p| recall::load_wc(&p));
         let ns_snapshot: Vec<recall::Episode> =
             app.nightshift.read().unwrap().iter().cloned().collect();
         let registry = app.recall_registry.as_ref().unwrap();
@@ -1124,6 +1128,7 @@ fn run_kvdecode_chat(
             std::env::var("SP_RECALL_L5_PROMPT").as_deref().unwrap_or("systemecho"));
         let view = crate::spine::LatentView {
             raw_user: &ruser,
+            global_q,
             l5_query,
             registry,
             nightshift: &ns_snapshot,
@@ -1135,7 +1140,7 @@ fn run_kvdecode_chat(
             attr_gate: std::env::var("SP_RECALL_ATTR_GATE").as_deref() == Ok("1"),
             framing,
         };
-        let decision = crate::spine::decide(&view, &crate::spine::live_pipeline());
+        let decision = crate::spine::decide(&view, &crate::spine::build_pipeline(wc, framing));
         let ctx = crate::spine::ExecCtx {
             handle,
             tokenizer: app.tokenizer.as_ref(),

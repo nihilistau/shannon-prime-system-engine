@@ -121,6 +121,10 @@ impl LatentDecision {
 pub struct LatentView<'a> {
     /// The raw last user message (no chat template) — the query text.
     pub raw_user: &'a str,
+    /// The live query's RAW global-layer Q (`read_global_q`), packed
+    /// `[n_global][G_NH*HD]`. Trainable latent heads (W_c, route, …) read THIS
+    /// against each episode's stored global-K. Empty ⇒ the non-committing read failed.
+    pub global_q: Vec<f32>,
     /// The live query's L5 embedding (`l5_query_embed(global_q)`), or empty if the
     /// non-committing read was unavailable (⇒ selectors abstain to Pass).
     pub l5_query: Vec<f32>,
@@ -241,9 +245,91 @@ impl Decider for AttrGate {
     }
 }
 
-/// The priority-ordered decider pipeline for the LIVE one-config stack. Order IS
-/// priority: L5 selects, then AttrGate may veto to a decline. Additional deciders
-/// (JudgeVeto, WcRecall, TelepathyRoute, Forget, Replay) insert here as they port.
+// ─────────────────────── heads are Deciders (the multi-head payoff) ───────────────────────
+//
+// The project's multi-head design — a bank of tiny latent classifiers (W_c recall, route,
+// judge-as-scorer, EAGLE draft) — is powerful because each head is a CHEAP read on a forward
+// pass already computed: it rides the captured global-Q/K, so N heads cost N little matmuls,
+// not N forwards. The spine is what makes them worth it: a head is a `LatentHead`, and the
+// `HeadSelector` adapter turns ANY head into a selecting `Decider` in one line. Adding a
+// trainable head to the served brain becomes: `impl LatentHead` + drop into the pipeline.
+
+/// A trainable latent head: scores an episode's relevance to the query from the query's
+/// latent footprint (`view.global_q`) against the episode's stored latent (`ep.gk`). PURE
+/// — no cache mutation, no forward, no token emission (the signature enforces it).
+pub trait LatentHead {
+    fn name(&self) -> &'static str;
+    /// Relevance of `ep` to the query (higher = more relevant).
+    fn score(&self, view: &LatentView, ep: &Episode) -> f32;
+    /// The reject floor (the NULL slot). An episode must strictly beat this to fire.
+    fn reject_floor(&self, view: &LatentView) -> f32;
+}
+
+/// The universal adapter: any `LatentHead` → a selecting `Decider` (argmax over the
+/// reject floor, delivering the winner). THIS is the multi-head payoff — every graduated
+/// head plugs into the same fold with zero bespoke branching.
+pub struct HeadSelector<H: LatentHead> {
+    pub head: H,
+    pub framing: Delivery,
+}
+
+impl<H: LatentHead> Decider for HeadSelector<H> {
+    fn name(&self) -> &'static str { self.head.name() }
+    fn refine(&self, view: &LatentView, current: LatentDecision) -> LatentDecision {
+        if !matches!(current, LatentDecision::Pass) { return current; }
+        let floor = self.head.reject_floor(view);
+        let mut best: Option<(f32, &Episode)> = None;
+        for ep in view.candidates() {
+            let s = self.head.score(view, ep);
+            if s > floor && best.as_ref().map_or(true, |(b, _)| s > *b) { best = Some((s, ep)); }
+        }
+        match best {
+            Some((s, ep)) => {
+                tracing::info!("SPINE {}: '{}' score={:.4} > floor={:.4} -> Deliver", self.head.name(), ep.name, s, floor);
+                LatentDecision::Deliver {
+                    episode: EpisodeRef { name: ep.name.clone(), text: ep.text.clone(), score_milli: (s.max(0.0) * 1000.0) as u32 },
+                    framing: self.framing,
+                }
+            }
+            None => current,
+        }
+    }
+}
+
+/// The learned W_c recall head (B3-DEPLOY, engine `edc8079`) as a `LatentHead` — the
+/// EXEMPLAR of a graduated symbolic gate become a first-class spine decider. It scores
+/// via logsumexp-over-positions then mean-over-heads relevance, with an (E+1)-way argmax
+/// whose NULL slot is `s0` (the reject floor). Load with `recall::load_wc`.
+pub struct WcRecallHead {
+    pub head: recall::WcHead,
+}
+
+impl LatentHead for WcRecallHead {
+    fn name(&self) -> &'static str { "WcRecall" }
+    fn score(&self, view: &LatentView, ep: &Episode) -> f32 {
+        if view.global_q.is_empty() || ep.gk.is_empty() { return f32::NEG_INFINITY; }
+        let np = (ep.npos as usize).min(
+            if ep.gk_ng > 0 { ep.gk.len() / (ep.gk_ng * recall::HD) } else { 0 });
+        recall::wc_score(&view.global_q, &ep.gk, ep.gk_ng, np, &self.head)
+    }
+    fn reject_floor(&self, _view: &LatentView) -> f32 { self.head.s0 }
+}
+
+/// Build the decider pipeline. Order IS priority. The trainable W_c head (when its
+/// deploy blob loads) runs FIRST — a fired head short-circuits the cosine selector, matching
+/// the historical `SP_B3_WC` precedence; then L5 cosine; then the AttrGate veto. Additional
+/// deciders (JudgeVeto, TelepathyRoute via `Route`, Forget, Replay) insert by the same rule.
+pub fn build_pipeline(wc: Option<recall::WcHead>, framing: Delivery) -> Vec<Box<dyn Decider>> {
+    let mut v: Vec<Box<dyn Decider>> = Vec::new();
+    if let Some(head) = wc {
+        v.push(Box::new(HeadSelector { head: WcRecallHead { head }, framing }));
+    }
+    v.push(Box::new(L5Recall));
+    v.push(Box::new(AttrGate));
+    v
+}
+
+/// The LIVE one-config pipeline (no W_c) — kept for callers that don't load a head.
 pub fn live_pipeline() -> Vec<Box<dyn Decider>> {
     vec![Box::new(L5Recall), Box::new(AttrGate)]
 }
