@@ -1095,7 +1095,28 @@ fn run_kvdecode_chat(
                 // forward of the last prompt token; the cache is rolled back after).
                 let n_global = recall::NL / recall::PERIOD;
                 let mut qbuf = vec![0.0f32; n_global * recall::G_NH * recall::HD];
-                match unsafe { kv::read_global_q(handle, last[0], &mut qbuf) } {
+                // G-12B-SERVE §C (2026-07-03): the B3-v2 q·K scan below is a full
+                // read_global_q forward + an O(episodes × npos) relevance loop + a giant
+                // per-episode log line, run EVERY recall turn. When SP_B3_TAU_QK is unset it
+                // defaults to +inf ⇒ `fire = score >= tau_qk` is ALWAYS false ⇒ the scan can
+                // NEVER recall — pure dead telemetry. qbuf itself is only consumed downstream
+                // by SP_B3_QDUMP / SP_INT2 / SP_B3_WC / SP_B3_JUDGE. In the one-config
+                // faithful stack NONE of those are set, so on a 500-position conversation this
+                // was ~half the recall-turn cost (turn-4 86.9s). When nothing can use it, skip
+                // BOTH the forward and the scan loop; `best` stays None (the 2514 fire-arm
+                // handles None cleanly) and the L5 stage (its OWN read_global_q at ~1524) is
+                // untouched. This is byte-identical whenever any consumer IS set (scan runs).
+                let qk_scan_needed = tau_qk.is_finite()
+                    || std::env::var("SP_B3_QDUMP").is_ok()
+                    || std::env::var("SP_INT2").ok().as_deref() == Some("1")
+                    || std::env::var("SP_B3_WC").ok().filter(|s| !s.is_empty()).is_some()
+                    || std::env::var("SP_B3_JUDGE").ok().filter(|s| !s.is_empty()).is_some();
+                let read_q_res = if qk_scan_needed {
+                    unsafe { kv::read_global_q(handle, last[0], &mut qbuf) }
+                } else {
+                    Ok(0)
+                };
+                match read_q_res {
                     Ok(_ng) => {
                         // B3-v3 dataset: SP_B3_QDUMP=<dir> persists THIS turn's last-token
                         // global-Q (the exact vector qk_relevance scores) so the offline
@@ -1112,17 +1133,24 @@ fn run_kvdecode_chat(
                                 std::path::Path::new(&dir).join(format!("q_{chat_id}.bin")), buf);
                         }
                         // Score every episode (max + top-m-mean), log the full matrix.
+                        // G-12B-SERVE §C: skipped entirely when the result cannot be used
+                        // (see qk_scan_needed above) — `best` stays None, which the 2514
+                        // fire-arm treats as REJECT (no replay), the correct dead-scan outcome.
                         let mut best: Option<(usize, f32)> = None;
-                        let mut rows: Vec<String> = Vec::with_capacity(registry.len());
-                        for (i, ep) in registry.iter().enumerate() {
-                            let np = (ep.npos as usize).min(
-                                if ep.gk_ng > 0 { ep.gk.len() / (ep.gk_ng * recall::HD) } else { 0 });
-                            let (mx, tm) = recall::qk_relevance(&qbuf, &ep.gk, ep.gk_ng, np, topm);
-                            rows.push(format!("{}(max={:.3},topm={:.3})", ep.name, mx, tm));
-                            let key = tm;
-                            match best { Some((_, b)) if key <= b => {}, _ => best = Some((i, key)) }
+                        if qk_scan_needed {
+                            let mut rows: Vec<String> = Vec::with_capacity(registry.len());
+                            for (i, ep) in registry.iter().enumerate() {
+                                let np = (ep.npos as usize).min(
+                                    if ep.gk_ng > 0 { ep.gk.len() / (ep.gk_ng * recall::HD) } else { 0 });
+                                let (mx, tm) = recall::qk_relevance(&qbuf, &ep.gk, ep.gk_ng, np, topm);
+                                rows.push(format!("{}(max={:.3},topm={:.3})", ep.name, mx, tm));
+                                let key = tm;
+                                match best { Some((_, b)) if key <= b => {}, _ => best = Some((i, key)) }
+                            }
+                            tracing::info!("B3-v2 q·K relevance (npos_q={} topm={}): [{}]", npos_q, topm, rows.join(" "));
+                        } else {
+                            tracing::info!("B3-v2 q·K scan SKIPPED (TAU_QK=+inf, no QDUMP/INT2/WC/JUDGE consumer) — dead telemetry elided, one forward + registry scan saved this turn");
                         }
-                        tracing::info!("B3-v2 q·K relevance (npos_q={} topm={}): [{}]", npos_q, topm, rows.join(" "));
                         // ===== G-INT-2 STEP 2: STAGE-1 C2-HAMMING CULL (TELEMETRY-ONLY, SP_INT2=1) =====
                         // Compute the LIVE query's C2 sig from the prompt's global-K, build the bounded
                         // candidate set (curated registry ∪ most-recent-W nightshift episodes), rank by

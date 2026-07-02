@@ -1,0 +1,53 @@
+G-RECALL-DEADSCAN-SKIP — the recall-turn cost, halved on non-firing turns; the
+turn-4 brick RE-DIAGNOSED as delivery re-prefill (batch-prefill, split out) (2026-07-03)
+========================================================================================
+TASK #39 (from G-12B-SERVE-ROOTCAUSE §C): "skip the dead TAU=inf B3-v2 scan; no
+pipeline re-run on delivery prompt — the turn-4 86.9s brick."
+
+WHAT SHIPPED (routes.rs, byte-safe):
+  The B3-v2 q·K relevance scan runs EVERY recall turn: a full read_global_q forward +
+  an O(episodes × npos) qk_relevance loop over all 81 registry episodes + a giant
+  per-episode log line. But SP_B3_TAU_QK is unset ⇒ tau_qk = +inf ⇒ `fire = score >=
+  tau_qk` is ALWAYS false ⇒ the scan can NEVER recall — pure dead telemetry. And its
+  output qbuf is only consumed by SP_B3_QDUMP / SP_INT2 / SP_B3_WC / SP_B3_JUDGE, none
+  of which the one-config faithful stack sets. GUARD: `qk_scan_needed` = tau_qk finite
+  OR any of those envs set. When false, skip the read_global_q AND the scan loop; `best`
+  stays None, which the 2514 fire-arm already treats as REJECT (no replay) — the
+  IDENTICAL outcome the +inf threshold produced. Byte-identical whenever a consumer is
+  set (scan still runs verbatim). Live proof: "B3-v2 q·K scan SKIPPED" logged 4× across
+  a 6-turn growth run; L5 recall still fires + delivers (fct_050 cos=0.842 → TEXT-IN-CONTEXT).
+
+MEASURED EFFECT: on a NON-FIRING recall turn (QONLY-skip), the scan was ~8-16s at
+  npos≈280-560 (before: base-suffix prefill ~15s + scan ~15s ≈ 30s; after: ~15s). ~50%
+  off the recall overhead of every turn where L5 does not deliver.
+
+THE TURN-4 BRICK, RE-DIAGNOSED (this is the important finding):
+  It was NOT the dead scan. Growth turn-4 stayed ~93s after the skip. The log localizes it:
+    15:58:11.46  RECALL-L5-MARGIN: top1='fct_050' cos=0.842 ...
+    15:59:22.17  RECALL-L5: 'fct_050' ... -> TEXT-IN-CONTEXT     (+71 SECONDS)
+  When L5 FIRES, the recite delivery does `apply_template_ids(systemecho_aug)` ->
+  `reset_cold(handle)` -> `prefill(aug_head)`. The systemecho prompt is
+  [BOS][system: fact][full conversation][user+suffix] — the fact goes FIRST, so it shares
+  NO prefix with the committed cache ([BOS][conversation][user]) ⇒ reset_cold discards
+  the entire persist-KV cache and RE-PREFILLS THE WHOLE CONVERSATION FROM SCRATCH
+  (~560 tokens at turn 4). At the byteexact per-token prefill rate (~0.13s/token, launch-
+  bound: ~960 kernel launches/token) that is ~71s. Turns 1-3 either QONLY-skip (no
+  delivery) or fire on a short conversation, so the spike appears only once history is long.
+
+  This is the SAME structural cost as the qwen36 prefill-by-stepping and the plain-chat
+  long-prompt prefill: O(n) tokens × launch-bound per-token forward. The fix is BATCH
+  PREFILL (CUDA graphs over the per-position kernel chain, or a genuine multi-position
+  batched g4_kv forward) — a real CUDA project, NOT a routes.rs tweak. Split out as its
+  own backlog item (shared win: it accelerates EVERY prefill — cold chat, delivery,
+  qwen36). systemecho's system-first ordering is the gated OBEY winner, so re-ordering the
+  fact to a reusable suffix is off the table without a delivery re-gate.
+
+HONEST LEDGER: #39's scan-skip is DONE and shipped (real ~50%/turn win on non-firing
+  recall turns, byte-safe). The turn-4 delivery re-prefill is RECLASSIFIED as the
+  batch-prefill project (new backlog item), because it is a per-token-launch cost, not a
+  redundant-work cost — the pipeline runs once; the cache genuinely must be rebuilt for a
+  system-first delivery. No overclaim: turn-4 is not "fixed" here; it is correctly attributed.
+
+REPRO: run_console_faithful.bat (recall on); python _faithful_corpus/serve_growth.py
+  3000 6 64 1 120 (_growth_q39.out); grep "SKIPPED" the serve log (4 hits).
+ENV: engine this-commit; RTX 2060 12GB WDDM, PMAX=4096, CUDA 13.2, gemma4-12b-b1.
