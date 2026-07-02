@@ -7928,3 +7928,91 @@ extern "C" void sp_cuda_model_release(const qwen3_model *m) {
     dg_reservoir_free();
     dg_wcache_free(); dg_scratch_free(); dg_async_free();
 }
+
+/* ===================== NORTHSTAR GPU-1: qwen36 hybrid GEMV service =====================
+ * CPU-orchestrated qwen36_step keeps GDN recurrence + MoE routing on host; the BIG
+ * dense matmuls hit RESIDENT packed weights on device via the proven dp4a GEMV
+ * (upload_packed + gemv_w_packed — the exact 43.9x diffusion-campaign machinery).
+ * Name-keyed registry; per call: H2D x (in*4B), GEMV, D2H y (out*4B). Registered
+ * into the math-core through sp_matmul_register_ext (unregistered = null floor). */
+typedef struct { char name[160]; DevTensor dt; } q36g_ent;
+typedef struct q36gpu {
+    cudaStream_t st;
+    q36g_ent *e; int n, cap;
+    float *dX, *dY; int xcap, ycap;
+    signed char *dqx; float *dsx; int qcap;
+} q36gpu;
+
+extern "C" void *sp_q36gpu_new(void) {
+    q36gpu *h = (q36gpu *)calloc(1, sizeof(q36gpu));
+    if (!h) return NULL;
+    if (cudaStreamCreate(&h->st) != cudaSuccess) { free(h); return NULL; }
+    return h;
+}
+
+extern "C" void sp_q36gpu_free(void *vh) {
+    q36gpu *h = (q36gpu *)vh;
+    if (!h) return;
+    for (int i = 0; i < h->n; i++) free_devtensor(&h->e[i].dt);
+    free(h->e);
+    if (h->dX) cudaFree(h->dX);
+    if (h->dY) cudaFree(h->dY);
+    if (h->dqx) cudaFree(h->dqx);
+    if (h->dsx) cudaFree(h->dsx);
+    cudaStreamDestroy(h->st);
+    free(h);
+}
+
+extern "C" int sp_q36gpu_upload(void *vh, const char *name, const sp_frob_packed_tensor *pt) {
+    q36gpu *h = (q36gpu *)vh;
+    if (!h || !name || !pt) return 1;
+    if (h->n == h->cap) {
+        int nc = h->cap ? h->cap * 2 : 64;
+        q36g_ent *ne = (q36g_ent *)realloc(h->e, (size_t)nc * sizeof(q36g_ent));
+        if (!ne) return 1;
+        h->e = ne; h->cap = nc;
+    }
+    q36g_ent *E = &h->e[h->n];
+    memset(E, 0, sizeof(*E));
+    strncpy(E->name, name, sizeof(E->name) - 1);
+    if (upload_packed(pt, &E->dt)) { free_devtensor(&E->dt); return 1; }
+    /* grow the shared activation/result/act-quant buffers */
+    int in = E->dt.in, out = E->dt.out;
+    if (in > h->xcap) {
+        if (h->dX) cudaFree(h->dX);
+        if (cudaMalloc(&h->dX, (size_t)in * sizeof(float)) != cudaSuccess) return 1;
+        h->xcap = in;
+    }
+    if (out > h->ycap) {
+        if (h->dY) cudaFree(h->dY);
+        if (cudaMalloc(&h->dY, (size_t)out * sizeof(float)) != cudaSuccess) return 1;
+        h->ycap = out;
+    }
+    if (in + 64 > h->qcap) {
+        if (h->dqx) cudaFree(h->dqx);
+        if (h->dsx) cudaFree(h->dsx);
+        if (cudaMalloc(&h->dqx, (size_t)(in + 64)) != cudaSuccess) return 1;
+        if (cudaMalloc(&h->dsx, ((size_t)in / 32 + 8) * sizeof(float)) != cudaSuccess) return 1;
+        h->qcap = in + 64;
+    }
+    h->n++;
+    return 0;
+}
+
+/* sp_matmul_ext contract: 0 = handled (Y filled), nonzero = not-mine -> caller falls
+ * through to the CPU path. n_tok must be 1 (the decode step). */
+extern "C" int sp_q36gpu_matmul(void *vh, const char *name, const float *X,
+                                int n_tok, int in, int out, float *Y) {
+    q36gpu *h = (q36gpu *)vh;
+    if (!h || n_tok != 1) return -1;
+    q36g_ent *E = NULL;
+    for (int i = 0; i < h->n; i++)
+        if (strcmp(h->e[i].name, name) == 0) { E = &h->e[i]; break; }
+    if (!E || E->dt.in != in || E->dt.out != out) return -1;
+    if (cudaMemcpyAsync(h->dX, X, (size_t)in * sizeof(float),
+                        cudaMemcpyHostToDevice, h->st) != cudaSuccess) return -1;
+    if (!gemv_w_packed(h->st, &E->dt, h->dX, h->dY, h->dqx, h->dsx)) return -1;
+    if (cudaMemcpyAsync(Y, h->dY, (size_t)out * sizeof(float),
+                        cudaMemcpyDeviceToHost, h->st) != cudaSuccess) return -1;
+    return cudaStreamSynchronize(h->st) == cudaSuccess ? 0 : -1;
+}
