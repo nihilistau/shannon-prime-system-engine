@@ -1159,6 +1159,44 @@ fn run_kvdecode_chat(
             }
         }
     }
+    // ─────────── LAYER-2 STORE (SP_MEM_STORE=1) — the explicit memory-agency verb ──────────
+    // Hodor-session live finding: "store in your memory X" grew a raw episode
+    // SILENTLY while the model replied "I don't know how to store memories" — the
+    // system had the ability and denied it. Deterministic intent detect → capture
+    // the PAYLOAD as a live episode (capture_live_episode: batched K capture + C2
+    // sig + L5-key mint + persist), attributed for perspective → confirm
+    // SYMBOLICALLY at the synthesis seam (zero decode ⇒ the confirmation can never
+    // be confabulated). Also sidesteps the anaphora gap: teaching happens in one
+    // self-contained sentence. Default-off = byte-identical null floor.
+    if !forget_done && symbolic_decline.is_none()
+        && std::env::var("SP_MEM_STORE").ok().as_deref() == Some("1")
+    {
+        if let Some(ruser) = raw_user.as_ref() {
+            let rt = ruser.trim();
+            let rl = rt.to_lowercase();
+            const STORE_PREFIXES: &[&str] = &[
+                "store in your memory that", "store in your memory",
+                "remember that", "remember this:", "remember:",
+                "add to your memory that", "add to your memory", "note that"];
+            if let Some(pref) = STORE_PREFIXES.iter().find(|p| rl.starts_with(**p)) {
+                // ASCII prefixes ⇒ byte-length-safe slice of the original casing.
+                let payload = rt[pref.len()..]
+                    .trim_matches(|c: char| c == ':' || c == ',' || c.is_whitespace())
+                    .to_string();
+                if payload.split_whitespace().count() >= 2 {
+                    if capture_live_episode(app, &format!("The user said: {payload}")) {
+                        symbolic_decline = Some(format!("Stored to memory: {payload}"));
+                        tracing::info!("LAYER-2 STORE: explicit verb -> captured + symbolic confirm ({})",
+                            payload.chars().take(60).collect::<String>());
+                    } else {
+                        symbolic_decline = Some(
+                            "I tried to store that, but the capture failed — check the daemon log.".to_string());
+                        tracing::warn!("LAYER-2 STORE: capture_live_episode FAILED for the store verb");
+                    }
+                }
+            }
+        }
+    }
     // ─────────── ADR-002 Decide→Execute SPINE (SP_SPINE=1) ───────────
     // The unified recall path made literal (papers/PPT-LAT-ADR-002): one immutable
     // LatentView → a priority-folded chain of Deciders → a discrete LatentDecision →

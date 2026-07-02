@@ -48,9 +48,10 @@ REM answered naturally by the draft (F 2/2 robustness) and released head-primary
 set "SP_RECALL_L5_PROMPT=plain"
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"
 
-REM ---- Tier 2: live growth ----
+REM ---- Tier 2: live growth + the explicit store verb ----
 set "SP_B4_NIGHTSHIFT=1"
 set "SP_NIGHTSHIFT_PERSIST=1"
+set "SP_MEM_STORE=1"
 
 REM ---- The veto (safety net; systemecho rarely trips it — that's fine) ----
 set "SP_SPECTEST=1"
