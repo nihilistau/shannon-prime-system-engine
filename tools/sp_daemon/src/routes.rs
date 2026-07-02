@@ -1097,7 +1097,57 @@ fn run_kvdecode_chat(
             }
         }
     }
-    if auto_recall && replay_dir.is_none() && !forget_done {
+    // ─────────── ADR-002 Decide→Execute SPINE (SP_SPINE=1) ───────────
+    // The unified recall path made literal (papers/PPT-LAT-ADR-002): one immutable
+    // LatentView → a priority-folded chain of Deciders → a discrete LatentDecision →
+    // the Executor. This reproduces the LIVE one-config stack (L5 cosine recall →
+    // attribute-gate zero-inference decline, QONLY-aware) in ~30 lines that used to be
+    // a ~1500-line env-branch ladder. Default-off (SP_SPINE unset) ⇒ the inline
+    // `else if` below runs byte-for-byte unchanged (the null floor).
+    let spine_active = std::env::var("SP_SPINE").as_deref() == Ok("1");
+    if spine_active && auto_recall && replay_dir.is_none() && !forget_done
+        && app.recall_registry.is_some()
+        && std::env::var("SP_RECALL_L5").as_deref() == Ok("1")
+        && unsafe { kv::position(handle) } > 0
+    {
+        use sp_daemon::recall;
+        let ruser = raw_user.clone().unwrap_or_default();
+        let n_global = recall::NL / recall::PERIOD;
+        let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
+        let l5_query = if unsafe { kv::read_global_q(handle, last[0], &mut ql) }.is_ok() {
+            recall::l5_query_embed(&ql)
+        } else { Vec::new() };
+        let ns_snapshot: Vec<recall::Episode> =
+            app.nightshift.read().unwrap().iter().cloned().collect();
+        let registry = app.recall_registry.as_ref().unwrap();
+        let framing = crate::spine::Delivery::from_env(
+            std::env::var("SP_RECALL_L5_PROMPT").as_deref().unwrap_or("systemecho"));
+        let view = crate::spine::LatentView {
+            raw_user: &ruser,
+            l5_query,
+            registry,
+            nightshift: &ns_snapshot,
+            interrogative: recall::is_interrogative(&ruser),
+            qonly: std::env::var("SP_RECALL_QONLY").as_deref() == Ok("1"),
+            tau_l5: std::env::var("SP_RECALL_L5_TAU").ok().and_then(|s| s.parse().ok()).unwrap_or(0.30),
+            tau_margin: std::env::var("SP_RECALL_L5_MARGIN").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            attr_tau: std::env::var("SP_RECALL_ATTR_TAU").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5),
+            attr_gate: std::env::var("SP_RECALL_ATTR_GATE").as_deref() == Ok("1"),
+            framing,
+        };
+        let decision = crate::spine::decide(&view, &crate::spine::live_pipeline());
+        let ctx = crate::spine::ExecCtx {
+            handle,
+            tokenizer: app.tokenizer.as_ref(),
+            orig_msgs: orig_msgs.as_deref(),
+            raw_user: &ruser,
+            last_tok: last[0],
+        };
+        let outcome = unsafe { crate::spine::execute(decision, &ctx) };
+        if outcome.recalled.is_some() { recalled = outcome.recalled; }
+        if outcome.symbolic_decline.is_some() { symbolic_decline = outcome.symbolic_decline; }
+        syn_last = outcome.syn_last;
+    } else if auto_recall && replay_dir.is_none() && !forget_done {
         if let Some(registry) = app.recall_registry.as_ref() {
             let npos_q = unsafe { kv::position(handle) }; // = head.len() after prefill
             if npos_q > 0 {

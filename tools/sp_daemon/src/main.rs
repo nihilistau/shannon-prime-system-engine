@@ -28,6 +28,8 @@ mod session;
 mod sessions;
 // NORTHSTAR serve (CONTRACT-QWEN36-SERVE): the qwen36 35B-A3B GDN+MoE chat lane.
 mod qwen36_lane;
+// ADR-002 realized: the Decide→Execute spine (unifies the recall/decline/route logic).
+mod spine;
 mod sieve_ffi;
 mod spec;
 mod state;
