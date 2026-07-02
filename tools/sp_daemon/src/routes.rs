@@ -1079,6 +1079,10 @@ fn run_kvdecode_chat(
     // separation — no guessing). Score reported either way (the foreign-reject leg
     // needs the below-TAU case visible). `recalled` holds (name, topm*1000 as u32).
     let mut recalled: Option<(String, u32)> = None;
+    // SPECTEST v1 (2026-07-03, operator idea "byte-exact+rewind speculative test"):
+    // the delivered fact TEXT when a text-in-context delivery fires this turn —
+    // the ground the whole draft answer is tested against before ANY byte streams.
+    let mut recalled_text: Option<String> = None;
     // G-INT-2: when SP_INT2 Stage-2 has rendered an ACCEPT/NULL verdict, the legacy
     // SP_B3_WC / SP_B3_DISPOSER / q·K fire branches MUST NOT double-fire on the same turn.
     let mut int2_decided = false;
@@ -1955,6 +1959,7 @@ fn run_kvdecode_chat(
                                                     if aug_head.is_empty() || unsafe { kv::prefill(handle, aug_head) }.is_ok() {
                                                         syn_last = aug_last[0];
                                                         recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
+                                                        recalled_text = Some(btext.clone()); // SPECTEST ground
                                                         tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} absent={:.2} mode={} -> TEXT-IN-CONTEXT",
                                                             bname, bcos, tau_l5, absent, if strict {"STRICT"} else {"recite"});
                                                     } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
@@ -2802,6 +2807,17 @@ Tag of the answer (or [NULL]):");
         return;
     }
 
+    // ── SPECTEST v1 (SP_SPECTEST=1, default-off = byte-identical null floor) ────
+    // On a text-in-context delivery turn, HOLD the stream: the full draft is decoded
+    // and grounding-tested BEFORE any byte reaches the client (decide in latent/
+    // symbol, execute clean — the draft is speculative until tested). PASS releases
+    // the held deltas verbatim; VETO suppresses the draft and executes the clean
+    // symbolic answer from the record. env unset OR no delivery ⇒ spectest=false ⇒
+    // every send below is byte-for-byte the existing path.
+    let spectest = std::env::var("SP_SPECTEST").ok().as_deref() == Some("1")
+        && recalled_text.is_some();
+    let mut held: Vec<String> = Vec::new();
+
     let tokenizer = app.tokenizer.clone();
     // A2-polish: this arch has no `<end_of_turn>` token; its turn boundary is
     // the `<|turn>`/`<turn|>` token. Treat those ids as EOS-equivalent so the
@@ -2862,13 +2878,17 @@ Tag of the answer (or [NULL]):");
                 if !bytes.is_empty() {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     answer_text.push_str(&text);
-                    let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
-                        .unwrap_or_default();
-                    if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
-                        cancel_child.store(1, Ordering::Relaxed);
-                        let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
-                        sessions.remove(chat_id);
-                        return;
+                    if spectest {
+                        held.push(text); // SPECTEST: stream held until the draft is tested
+                    } else {
+                        let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                            .unwrap_or_default();
+                        if tx.blocking_send(Ok(Event::default().data(payload))).is_err() {
+                            cancel_child.store(1, Ordering::Relaxed);
+                            let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "cancelled" });
+                            sessions.remove(chat_id);
+                            return;
+                        }
                     }
                 }
                 false
@@ -2876,9 +2896,13 @@ Tag of the answer (or [NULL]):");
             PushResult::Stopped(bytes) => {
                 if !bytes.is_empty() {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
-                    let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+                    if spectest {
+                        held.push(text); // SPECTEST: hold (mirrors the non-spectest send exactly)
+                    } else {
+                        let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                            .unwrap_or_default();
+                        let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+                    }
                 }
                 true
             }
@@ -2930,9 +2954,60 @@ Tag of the answer (or [NULL]):");
     if !flushed.is_empty() {
         let text = String::from_utf8_lossy(&flushed).into_owned();
         answer_text.push_str(&text);
-        let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
-            .unwrap_or_default();
-        let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+        if spectest {
+            held.push(text); // SPECTEST: hold the tail flush too
+        } else {
+            let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                .unwrap_or_default();
+            let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+        }
+    }
+
+    // ── SPECTEST v1 DECISION (draft→test→veto→clean-execute; ADR-002-native) ────
+    // Deterministic grounding test (the B3-JUDGE salient-token rule): the held
+    // draft must USE the delivered fact. PASS ⇒ release the held stream verbatim
+    // (client sees byte-identical output to a no-spectest serve). VETO ⇒ the
+    // ungrounded draft NEVER reaches the client; execute the clean symbolic answer
+    // FROM THE RECORD — leak-impossible by construction (its only content is the
+    // delivered fact text). v2 (pre-scoped, needs the decode-loop extraction):
+    // rewind + re-decode under an escalated delivery frame instead of the
+    // symbolic execute. Bounded by SELECTION: a cross-picked fact yields a
+    // faithful-to-the-wrong-record fallback, same as systemecho today.
+    if spectest {
+        let fact = recalled_text.as_deref().unwrap_or("");
+        const SPECTEST_STOP: &[&str] = &["the","and","for","that","with","this","from",
+            "are","was","were","your","you","have","will","when","which","what","into",
+            "over","each","now"];
+        // v1.1 (measured fix): v1 grounded on ANY salient fact token — but a parametric
+        // draft ("...capital of France is Paris") reuses the fact's SUBJECT tokens and
+        // passed, leaking the parametric VALUE (14/61 leaks through PASS, receipt
+        // G-SPECTEST-V1). Ground on FACT-ONLY tokens: salient words of the record that
+        // do NOT appear in the user's query — the subject arrives via the query, the
+        // VALUE doesn't (the attr-gate's query/fact asymmetry, reused).
+        let user_lc = raw_user.as_deref().unwrap_or("").to_lowercase();
+        let salient: Vec<String> = fact.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4).map(|w| w.to_lowercase())
+            .filter(|w| !SPECTEST_STOP.contains(&w.as_str()))
+            .filter(|w| !user_lc.contains(w.as_str()))
+            .collect();
+        let ans_lc = answer_text.to_lowercase();
+        let n_used = salient.iter().filter(|w| ans_lc.contains(w.as_str())).count();
+        if salient.is_empty() || n_used > 0 {
+            tracing::info!("SPECTEST: PASS ({}/{} salient used) -> releasing held stream", n_used, salient.len());
+            for text in held.drain(..) {
+                let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
+                    .unwrap_or_default();
+                if tx.blocking_send(Ok(Event::default().data(payload))).is_err() { break; }
+            }
+        } else {
+            tracing::warn!("SPECTEST: VETO (0/{} salient — ungrounded draft suppressed) -> clean symbolic execute from the record", salient.len());
+            held.clear();
+            let fb = format!("From the record: {fact}");
+            let payload = serde_json::to_string(&ChatDelta { delta: fb.clone(), chat_id })
+                .unwrap_or_default();
+            let _ = tx.blocking_send(Ok(Event::default().data(payload)));
+            answer_text = fb;
+        }
     }
 
     // ── GEODESIC F3 CAPTURE — persist the pair + meta (ADR-003 §5, G-F3-CAPTURE).

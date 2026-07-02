@@ -1,0 +1,30 @@
+G-SPECTEST-V1  2026-07-03T07:28:44.4566273+10:00  (operator idea: byte-exact speculative test — draft->test->veto->clean-execute)
+VERDICT: PARTIAL — a real +24pt obey win with 0-leak-by-construction on the VETOED class; the PASS-leak class is
+isolated and CONVICTS lexical draft-testing at its boundary (value-substitution). v2 = a LEARNED test head.
+
+MECHANISM (SP_SPECTEST=1, default-off = byte-identical null floor): on a text-in-context delivery turn the FULL
+draft decodes with the stream HELD; a deterministic grounding test runs BEFORE any byte reaches the client;
+PASS releases the held stream verbatim; VETO suppresses the draft entirely and executes the clean symbolic
+answer from the record ('From the record: <fact>') — leak-impossible on vetoed turns by construction.
+
+== measured (full-61 paraphrases, plain delivery, same-day baselines) ==
+plain (P run, same day):            OBEY 26/61 (42.6%)   leaks+misses 35
+v1  (any-salient-token ground):     OBEY 40/61 (65.6%)   LEAK 14   veto 22 / pass 39
+v1.1 (fact-MINUS-query tokens):     OBEY 41/61 (67.2%)   LEAK 14   veto 23 / pass 38
+systemecho reference:               OBEY 54/61 (88.5%)   LEAK 0    (selection-bound)
+
+== the isolated boundary (the yield) ==
+All 14 residual leaks are SUBJECT-GROUNDED VALUE-SUBSTITUTION drafts: 'The Pacific Ocean.', 'The capital of
+Canada is Ottawa.' — the draft speaks in the record's own subject/generic tokens ('ocean','capital','canada')
+while swapping the VALUE. Query-subtraction (v1.1) cannot remove them: paraphrase queries avoid exactly those
+words. No lexical rule can identify 'the value' without corpus-shaped assumptions. CONVERGENCE: the draft test
+that closes this class must be SEMANTIC — the learned test-head (operator idea 1 v2) IS the nonlinear obey/leak
+probe (operator idea 3); the 10x multi-mode capture (_f3_modes_capture.bat -> f3/M_*) is its training data.
+
+HONEST NOTES: (1) the +15-net-obey comes from the 22-23 vetoes converting total-ignore drafts into record-faithful
+fallbacks; vetoed-class leak rate = 0 by construction. (2) v2 rollback+regenerate (rewind + escalated-frame
+re-decode) pre-scoped — needs the decode-loop extraction; the veto+symbolic-execute half ships now, gated off.
+(3) telepathy low-quant external tester: PARKED on the redundancy law — a weaker external judge must beat the
+deployed guards on SIGNAL (the exact test the 12B generative judge failed, G-HARDFOREIGN-JUDGE); the resident-
+model spectest covers the role with zero extra VRAM. Receipts: _spectest_gate_v1.log / _spectest_gate.log (v1.1)
++ serve logs (SPECTEST: PASS/VETO lines).

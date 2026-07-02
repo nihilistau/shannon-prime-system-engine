@@ -50,14 +50,16 @@ def ask(msgs, auto):
 def run(label, limit, twice):
     fdir = f"{ENG}/_faithful_corpus/f3/{label}"
     items = [("fct", it["id"], it["para"]) for it in F[:limit or len(F)]]
-    if label != "P":   # P (plain-delivery probe capture) = fct only; SNE declines under the attr-gate leave no capture rows
+    # P / M_<mode> (probe + multi-mode captures) = fct only; SNE declines under the
+    # attr-gate leave no capture rows, so including them just breaks the row count.
+    if label in ("A", "B"):
         items += [("sne", it["entity"], it["mismatch_q"]) for it in SNE[:limit or len(SNE)]]
     reps = 2 if twice else 1
     n_before = _meta_count(fdir)
     t0 = time.time()
     for kind, iid, q in items:
         for rep in range(reps):
-            if label in ("A", "P"):   # recall-mode runs (P = plain-delivery probe capture)
+            if label != "B":   # every non-B run is recall-mode (A / P / M_<mode> captures)
                 msgs = [{"role": "system", "content": CONSOLE},
                         {"role": "user", "content": q}]
                 a = ask(msgs, auto=True)
@@ -124,7 +126,7 @@ def verify(fdir, label, items, reps, n_new):
     return ok
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or sys.argv[1] not in ("A", "B", "P"):
+    if len(sys.argv) < 2 or not (sys.argv[1] in ("A", "B", "P") or sys.argv[1].startswith("M_")):
         print(__doc__); sys.exit(2)
     label = sys.argv[1]
     limit = 0
