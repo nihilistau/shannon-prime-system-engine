@@ -459,9 +459,48 @@ pub unsafe fn execute(decision: LatentDecision, ctx: &ExecCtx) -> ExecOutcome {
             }
         }
         LatentDecision::Route { target } => {
-            // Telepathy: scaffolded — the executor lands with the telepathy port.
-            tracing::warn!("SPINE Route(target={target}): telepathy executor not yet ported -> Pass");
+            // Route is executed PRE-CACHE (see route_turn); it never reaches the
+            // post-prefill executor. If it does, it's a no-op fall-through to Pass.
+            tracing::warn!("SPINE Route(target={target}) reached post-cache executor -> Pass");
         }
     }
     out
+}
+
+// ─────────────────────── the PRE-CACHE route seam (telepathy) ───────────────────────
+//
+// Recall/decline decide AFTER the prompt is prefilled (they read the query's latent
+// footprint). Telepathy routing decides BEFORE the cache is touched — it may send the
+// whole turn to another model, so it must not prefill the Gemma cache. Same spine
+// vocabulary (`LatentDecision::Route`), a different seam. v1 routes on a stub latent
+// (`SP_ROUTE_FORCE` / route head on a dummy vector); the autonomous feat-route on a
+// non-committing `capture_feat` is the planned upgrade.
+
+/// The pre-cache route decision. Reads only the query text + the route head. Returns
+/// `Route { target }` to delegate, or `Pass` to serve locally. This IS a Decider in
+/// spirit (latent → discrete intent); it fires at the pre-cache seam.
+pub fn route_decision(raw_user: &str) -> LatentDecision {
+    if std::env::var("SP_TELEPATHY_CHAT").as_deref() != Ok("1") { return LatentDecision::Pass; }
+    if raw_user.trim().is_empty() { return LatentDecision::Pass; }
+    match crate::telepathy::decide_route(&[0.0f32]) {
+        crate::telepathy::RouteDecision::Telepathy(bid) => LatentDecision::Route { target: bid },
+        _ => LatentDecision::Pass,
+    }
+}
+
+/// Execute a `Route` decision: run the bridge on CLEAN TEXT (never a fused latent —
+/// ADR-002 §2 "never fuse") and stream its answer via `emit`, wrapped in delegate
+/// markers. Returns true iff it handled the turn (caller finishes + early-returns).
+/// `emit(delta) -> bool` streams one SSE ChatDelta (false = client gone).
+pub fn execute_route(decision: &LatentDecision, raw_user: &str, mut emit: impl FnMut(String) -> bool) -> bool {
+    let bid = match decision { LatentDecision::Route { target } => *target, _ => return false };
+    let marker = std::env::var("SP_TELEPATHY_MARKER").as_deref() != Ok("0");
+    tracing::info!("SPINE Route: delegate(bridge {bid}) on clean text (never-fuse)");
+    if marker { let _ = emit("\u{27E6}delegate: qwen2.5-coder\u{27E7}\n".to_string()); }
+    match crate::telepathy::delegate_execute(raw_user.trim(), bid) {
+        Ok(ans) => { let _ = emit(ans); }
+        Err(e)  => { let _ = emit(format!("[delegate error: {e}]")); }
+    }
+    if marker { let _ = emit("\n\u{27E6}/delegate\u{27E7}".to_string()); }
+    true
 }

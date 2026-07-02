@@ -786,7 +786,26 @@ fn run_kvdecode_chat(
     // serving) — the served path uses its own flag. v1: route is SP_ROUTE_FORCE-driven; autonomous
     // feat-route (the TELE-7 head on a NON-COMMITTING capture_feat) is v1.1 (capture_feat is
     // async-armed and would commit the cache).
-    if std::env::var("SP_TELEPATHY_CHAT").as_deref() == Ok("1") {
+    // ── SPINE pre-cache route seam (SP_SPINE=1): telepathy expressed as
+    //    LatentDecision::Route, routed + executed through spine.rs. Default (spine
+    //    off) keeps the proven inline branch below, byte-for-byte. ──
+    if std::env::var("SP_SPINE").as_deref() == Ok("1")
+        && std::env::var("SP_TELEPATHY_CHAT").as_deref() == Ok("1") {
+        if let Some(user) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            let decision = crate::spine::route_decision(&user);
+            if matches!(decision, crate::spine::LatentDecision::Route { .. }) {
+                let emit = |t: String| {
+                    let payload = serde_json::to_string(&ChatDelta { delta: t, chat_id }).unwrap_or_default();
+                    tx.blocking_send(Ok(Event::default().data(payload))).is_ok()
+                };
+                let _ = crate::spine::execute_route(&decision, &user, emit);
+                let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+                let _ = app.events_tx.send(DaemonEvent::Chat { chat_id, status: "done" });
+                sessions.remove(chat_id);
+                return;
+            }
+        }
+    } else if std::env::var("SP_TELEPATHY_CHAT").as_deref() == Ok("1") {
         if let Some(user) = raw_user.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             if let crate::telepathy::RouteDecision::Telepathy(bid) = crate::telepathy::decide_route(&[0.0f32]) {
                 let marker = std::env::var("SP_TELEPATHY_MARKER").as_deref() != Ok("0");
