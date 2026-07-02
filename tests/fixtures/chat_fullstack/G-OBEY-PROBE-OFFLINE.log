@@ -1,0 +1,22 @@
+G-OBEY-PROBE-OFFLINE  2026-07-03T06:17:30.1782621+10:00  (GEODESIC follow-on: is obey/leak linearly readable from the F3 states?)
+VERDICT: HONEST NEGATIVE (both frames fail the pre-registered pin: pooled>=0.80 AND cross-mode>=0.70)
+
+data: run A (systemecho, 54/61 obey) + NEW run P (plain delivery, 26/61 obey, capture rail on, 61/61 2-frame,
+      run_f3_capture_P.bat + f3_capture_run.py P; receipts _f3_full_P.log). labels = obey token in answer.
+
+== frame 0 (pre-first-token DECIDE state) ==
+[A] v-bar-proj AUC 0.468 (chance)   [P] 0.656 (weak)   [pooled] 0.791 <- MODE CONFOUND (pre-registered:
+    separates prompt-condition A-vs-P, not outcome; proj means 292 vs ~230 by RUN, not by obey).
+logistic 5-fold: P-only 0.491 (chance) | pooled 0.569 | cross-mode P->A 0.302 (anti-transfer).
+== frame 1 (one token in) ==
+[A] 0.524  [P] 0.658  [pooled] 0.761 (same confound)  logistic: P-only 0.205 (overfit at n=61 x 3840d) |
+pooled 0.633 | cross 0.563.  HINT (not a claim): P frame-1 proj means obey 85.5 vs not 28.6 - signal may
+exist but variance swamps it at this N; a nonlinear/attention-feature probe or 10x data would be needed.
+
+== interpretation (sharpens G-FM-STEER-OBEY) ==
+The Tier-A constant ray is the TREATMENT SIGNATURE (systemecho-fact-in-context vs clean), NOT an obey/leak axis:
+the upcoming choice is not linearly readable at the final-norm surface even one token in, at N=61. Joins the
+steering dose-response: that surface neither CAUSES nor (linearly, pre-token) PREDICTS obedience - the decision
+lives upstream in attention over the fact text. Outcome-prediction shortcut CLOSED at this surface/N;
+the deployed post-hoc guards (B3-JUDGE lexical grounding, attr-gate) remain the working detectors.
+artifacts: _faithful_corpus/f3/P (61 pairs, tracked) + f3_obey_probe.py (F3_PROBE_FRAME env).

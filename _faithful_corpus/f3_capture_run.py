@@ -49,14 +49,15 @@ def ask(msgs, auto):
 
 def run(label, limit, twice):
     fdir = f"{ENG}/_faithful_corpus/f3/{label}"
-    items = [("fct", it["id"], it["para"]) for it in F[:limit or len(F)]] + \
-            [("sne", it["entity"], it["mismatch_q"]) for it in SNE[:limit or len(SNE)]]
+    items = [("fct", it["id"], it["para"]) for it in F[:limit or len(F)]]
+    if label != "P":   # P (plain-delivery probe capture) = fct only; SNE declines under the attr-gate leave no capture rows
+        items += [("sne", it["entity"], it["mismatch_q"]) for it in SNE[:limit or len(SNE)]]
     reps = 2 if twice else 1
     n_before = _meta_count(fdir)
     t0 = time.time()
     for kind, iid, q in items:
         for rep in range(reps):
-            if label == "A":
+            if label in ("A", "P"):   # recall-mode runs (P = plain-delivery probe capture)
                 msgs = [{"role": "system", "content": CONSOLE},
                         {"role": "user", "content": q}]
                 a = ask(msgs, auto=True)
@@ -100,13 +101,12 @@ def verify(fdir, label, items, reps, n_new):
         hist[nf] = hist.get(nf, 0) + 1
     print(f"  [verify] frames histogram: {hist}")
     # A-run sanity: fct turns should mostly be recall mode (systemecho), sne may vary
-    if label == "A":
-        n_recall = sum(1 for m in metas if m.get("recalled"))
-        print(f"  [verify] A recall-fired turns: {n_recall}/{len(metas)}")
-    else:
-        n_recall = sum(1 for m in metas if m.get("recalled"))
+    n_recall = sum(1 for m in metas if m.get("recalled"))
+    if label == "B":
         if n_recall: print(f"  [verify] B had {n_recall} recall turns — FAIL (must be 0)"); ok = False
         else: print("  [verify] B recall-fired turns: 0/{} ok".format(len(metas)))
+    else:
+        print(f"  [verify] {label} recall-fired turns: {n_recall}/{len(metas)}")
     # --twice determinism: consecutive same-user pairs byte-identical payloads
     if reps == 2:
         byu = {}
@@ -124,7 +124,7 @@ def verify(fdir, label, items, reps, n_new):
     return ok
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or sys.argv[1] not in ("A", "B"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("A", "B", "P"):
         print(__doc__); sys.exit(2)
     label = sys.argv[1]
     limit = 0
