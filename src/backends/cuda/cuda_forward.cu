@@ -8241,6 +8241,100 @@ extern "C" int sp_q36gpu_moe_stream(void *vh,
     return cudaStreamSynchronize(h->st) == cudaSuccess ? 0 : -1;
 }
 
+extern "C" int sp_q36gpu_matmul(void *vh, const char *name, const float *X,
+                                int n_tok, int in, int out, float *Y);
+extern "C" int sp_q36gpu_moe(void *vh, const char *tag, const int *idx, const float *wt,
+                             int NU, const float *x, int E, int FF, float *y);
+extern "C" int sp_q36gpu_moe_stream(void *vh, const sp_frob_packed_tensor *ptg,
+                                    const sp_frob_packed_tensor *ptu,
+                                    const sp_frob_packed_tensor *ptd,
+                                    const int *idx, const float *wt, int NU,
+                                    const float *x, int E, int FF, float *y);
+#include "sp/forward_dispatch.h"   /* sp_matmul_register_ext / sp_moe_register_ext */
+
+/* ── SERVE BOOT: one-call setup for the daemon (folds the harness GPU-1..4 logic) ──
+ * Uploads the dense set, uploads experts under `moe_gb`, builds the per-layer
+ * host-tensor table for streaming, and registers INTERNAL matmul + moe hooks
+ * (resident -> streamed -> CPU). Returns the handle (NULL on failure). */
+typedef struct { char gname[160]; const sp_frob_packed_tensor *g, *u, *d; } q36boot_ent;
+static q36boot_ent g_q36_tbl[64];
+static int g_q36_tbl_n = 0, g_q36_stream_on = 0;
+
+static int q36_boot_mm_ext(void *ctx, const char *n, const float *X, int nt,
+                           int in, int out, float *Y) {
+    return sp_q36gpu_matmul(ctx, n, X, nt, in, out, Y);
+}
+static int q36_boot_moe_ext(void *ctx, const char *gate_name, const int *idx,
+                            const float *wt, int NU, const float *x, int E, int FF,
+                            float *y) {
+    if (sp_q36gpu_moe(ctx, gate_name, idx, wt, NU, x, E, FF, y) == 0) return 0;
+    if (!g_q36_stream_on) return -1;
+    for (int i = 0; i < g_q36_tbl_n; i++)
+        if (strcmp(g_q36_tbl[i].gname, gate_name) == 0)
+            return sp_q36gpu_moe_stream(ctx, g_q36_tbl[i].g, g_q36_tbl[i].u,
+                                        g_q36_tbl[i].d, idx, wt, NU, x, E, FF, y);
+    return -1;
+}
+
+static int q36_boot_up(void *gh, const qwen3_model *m, const gguf_tensor *W, size_t *bytes) {
+    if (!W || !m->arena) return 0;
+    const sp_arena_tensor *at = sp_arena_find(m->arena, W->name);
+    if (!at) return 0;
+    if (sp_q36gpu_upload(gh, W->name, &at->pt)) return 1;
+    *bytes += at->pt.codes_bytes;
+    return 0;
+}
+
+extern "C" void *sp_q36gpu_boot(const qwen3_model *m, double moe_gb, int stream_on) {
+    if (!m || m->cfg.arch != SP_ARCH_QWEN36 || !m->arena) return NULL;
+    void *gh = sp_q36gpu_new();
+    if (!gh) return NULL;
+    size_t dbytes = 0;
+    for (uint32_t il = 0; il < m->cfg.n_layers; il++) {
+        const qwen3_layer *L = &m->layers[il];
+        int bad = L->q36_is_recurrent
+            ? (q36_boot_up(gh, m, L->gdn_qkv, &dbytes) ||
+               q36_boot_up(gh, m, L->gdn_gate, &dbytes) ||
+               q36_boot_up(gh, m, L->gdn_out, &dbytes))
+            : (q36_boot_up(gh, m, L->attn_q, &dbytes) ||
+               q36_boot_up(gh, m, L->attn_k, &dbytes) ||
+               q36_boot_up(gh, m, L->attn_v, &dbytes) ||
+               q36_boot_up(gh, m, L->attn_output, &dbytes));
+        if (bad) { sp_q36gpu_free(gh); return NULL; }
+    }
+    if (q36_boot_up(gh, m, m->output, &dbytes)) { sp_q36gpu_free(gh); return NULL; }
+    /* experts under budget + the streaming table */
+    size_t budget = (size_t)(moe_gb * 1073741824.0), mbytes = 0;
+    int mlayers = 0, budget_hit = 0;
+    int NE = (int)m->cfg.q36_n_expert, FF = (int)m->cfg.q36_n_ff_exp, E = (int)m->cfg.n_embd;
+    g_q36_tbl_n = 0;
+    for (uint32_t il = 0; il < m->cfg.n_layers; il++) {
+        const qwen3_layer *L = &m->layers[il];
+        const sp_arena_tensor *ag = sp_arena_find(m->arena, L->ffn_gate_exps->name);
+        const sp_arena_tensor *au = sp_arena_find(m->arena, L->ffn_up_exps->name);
+        const sp_arena_tensor *ad = sp_arena_find(m->arena, L->ffn_down_exps->name);
+        if (!ag || !au || !ad) continue;
+        if (g_q36_tbl_n < 64) {
+            q36boot_ent *T = &g_q36_tbl[g_q36_tbl_n++];
+            strncpy(T->gname, L->ffn_gate_exps->name, sizeof(T->gname) - 1);
+            T->gname[sizeof(T->gname) - 1] = 0;
+            T->g = &ag->pt; T->u = &au->pt; T->d = &ad->pt;
+        }
+        size_t lb = ag->pt.codes_bytes + au->pt.codes_bytes + ad->pt.codes_bytes;
+        if (budget_hit || mbytes + lb > budget) { budget_hit = 1; continue; }
+        if (sp_q36gpu_upload_experts(gh, L->ffn_gate_exps->name, &ag->pt, &au->pt, &ad->pt,
+                                     NE, FF, E)) { budget_hit = 1; continue; }
+        mbytes += lb; mlayers++;
+    }
+    g_q36_stream_on = stream_on;
+    sp_matmul_register_ext(q36_boot_mm_ext, gh);
+    if (mlayers > 0 || stream_on) sp_moe_register_ext(q36_boot_moe_ext, gh);
+    fprintf(stderr, "[q36gpu_boot] dense %.1f MB + experts %d/%u layers %.1f MB%s\n",
+            dbytes / 1048576.0, mlayers, m->cfg.n_layers, mbytes / 1048576.0,
+            stream_on ? " (+streaming rump)" : "");
+    return gh;
+}
+
 /* sp_matmul_ext contract: 0 = handled (Y filled), nonzero = not-mine -> caller falls
  * through to the CPU path. n_tok must be 1 (the decode step). */
 extern "C" int sp_q36gpu_matmul(void *vh, const char *name, const float *X,
