@@ -1,0 +1,52 @@
+G-SEL-CANON — margin-gated query canonicalization (2026-07-02) — PARKED (honest negative)
+=========================================================================================
+HYPOTHESIS (G-SEL-RERANK-61 follow-on): on an ambiguous L5 margin (eps=0.015), one generative
+micro-step resolves the query's periphrasis to a PROPER NAME ("boot-shaped Mediterranean
+country" -> "Italy"); the name appears verbatim in exactly the right fact, so a conservative
+strictly-greater salient-overlap switch over the L5 top-5 fixes the cross-picks without the
+judge's slot-picking unreliability.
+
+MECHANICS BUILT (kept, default-off SP_RECALL_L5_CANON): micro-forward with suppress-token
+masking (the <image|> raw-argmax spam relearned+fixed in run-1, same cure as the judge verify
+path), first-line parse, recall::canon_overlap (morphology-tolerant salient overlap),
+strictly-greater switch rule, fail-open.
+
+THREE PROMPT FRAMINGS, ONE FAILURE MODE — the 12B ANSWERS instead of resolving:
+  run-2 "rewrite with proper names":            swaps one periphrasis for another
+                                                ("island nation east of Korea"), or answers
+                                                ("Alexander Graham Bell is credited with...")
+  run-3 "rewrite; one-shot exemplar; do not answer":
+                                                answers anyway ("Alexander Graham Bell.",
+                                                "...is Jupiter.")
+  run-4 "name the DESCRIBED subject, not the answer; exemplar":
+                                                still answers ("Jupiter.", "Alexander Graham
+                                                Bell.", "South Korean Won.") — AND the
+                                                parametric answer token then matched a WRONG
+                                                fact: largest_planet switched to fct_023
+                                                (red_planet, text contains "Jupiter") = a NEW
+                                                break. Run killed; mechanism conclusive.
+
+VERDICT: **PARKED.** At temp-0 in a bare micro-prompt, this instruct 12B's dominant behavior
+on a periphrasis question is to ANSWER it (parametrically), not to name/rewrite the subject —
+across all three framings. Worse, the parametric answer token systematically collides with
+WRONG facts (the corpus plants counterfacts), so the overlap switch converts model priors into
+selection errors. Query canonicalization joins judge-rerank in the drawer; the deterministic
+switch machinery + suppress-masked micro-forward remain in the tree (default-off) for reuse.
+
+SELECTOR CAMPAIGN CLOSE (the honest ledger):
+  margin gate            CONVICTED (G-L5-MARGIN-CALIB: SNE margins 0.0003-0.0007)
+  fact-text key2         INERT (G-SEL-OFFLINE)
+  raw-query Jaccard fusion INERT (G-SEL-OFFLINE)
+  judge top-3 rerank     PARKED (G-SEL-RERANK-61: +5/-4, fails no-regression)
+  query canonicalization PARKED (this gate: model answers instead of resolving)
+The deployed selector stays L5-cosine top-1 = 54/61 (88.5%) on this deliberately-adversarial
+periphrasis corpus; the composition (G-ONECONFIG-LIVE) remains GREEN with 0 leaks. Residual
+ideas (design-level, unbuilt): multi-phrasing ep.l5 keys accumulated per episode over live
+usage (CANNOT be gated on this corpus — adding its paras as keys = training on the test set);
+a stronger dedicated resolver (e.g. the qwen coder via Telepathy delegate) at higher cost.
+DIMINISHING RETURNS DECLARED: the audit plan's bigger items (artifact-hole #2, N1 exact
+prefill GEMM, SWARM multi-host) outrank further selector work.
+
+ENV: receipt-exact serve + systemecho + SP_RECALL_L5_CANON=0.015; build = this commit;
+runs l5cn (killed: placeholder spam), l5cn3/l5cn4 (killed at mechanism confirmation, serve
+logs); no full-61 receipt json by design — the park is mechanism-based, not score-based.
