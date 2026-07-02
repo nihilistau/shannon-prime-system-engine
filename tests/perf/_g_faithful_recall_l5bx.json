@@ -1,0 +1,318 @@
+{
+  "seam": "l5bx",
+  "items": 61,
+  "tally": {
+    "OBEY": 25,
+    "LEAK": 30,
+    "BOTH": 1,
+    "OTHER": 5
+  },
+  "obey_rate": 0.4098360655737705,
+  "rows": [
+    {
+      "id": "france_capital",
+      "cls": "OTHER",
+      "ans": "The capital of Brazil is now Recife."
+    },
+    {
+      "id": "tallest_mtn",
+      "cls": "BOTH",
+      "ans": "K2, also known as Mount Godwin-Austen or Chhogori, is the second-highest mountain on Earth"
+    },
+    {
+      "id": "largest_planet",
+      "cls": "OBEY",
+      "ans": "Saturn"
+    },
+    {
+      "id": "romeo_author",
+      "cls": "OBEY",
+      "ans": "Christopher Marlowe."
+    },
+    {
+      "id": "largest_ocean",
+      "cls": "LEAK",
+      "ans": "The Pacific Ocean."
+    },
+    {
+      "id": "fastest_animal",
+      "cls": "OBEY",
+      "ans": "The fastest land animal is the lion."
+    },
+    {
+      "id": "japan_currency",
+      "cls": "LEAK",
+      "ans": "People in Japan spend yen."
+    },
+    {
+      "id": "closest_planet",
+      "cls": "OBEY",
+      "ans": "Venus."
+    },
+    {
+      "id": "telephone_inv",
+      "cls": "LEAK",
+      "ans": "Alexander Graham Bell"
+    },
+    {
+      "id": "largest_country",
+      "cls": "OBEY",
+      "ans": "Canada."
+    },
+    {
+      "id": "gold_symbol",
+      "cls": "LEAK",
+      "ans": "The letters that denote the precious yellow metal on the periodic table are Au."
+    },
+    {
+      "id": "water_boil",
+      "cls": "OBEY",
+      "ans": "90 degrees Celsius"
+    },
+    {
+      "id": "continents",
+      "cls": "OBEY",
+      "ans": "Six."
+    },
+    {
+      "id": "mona_lisa",
+      "cls": "LEAK",
+      "ans": "The Mona Lisa was painted by Leonardo da Vinci."
+    },
+    {
+      "id": "speed_light",
+      "cls": "OBEY",
+      "ans": "Photons move through a vacuum at the speed of light, which is approximately 200,000 km/s."
+    },
+    {
+      "id": "italy_capital",
+      "cls": "LEAK",
+      "ans": "The seat of government for the boot-shaped Mediterranean country is Rome."
+    },
+    {
+      "id": "egypt_capital",
+      "cls": "OBEY",
+      "ans": "The capital of Egypt is now Luxor."
+    },
+    {
+      "id": "australia_capital",
+      "cls": "OBEY",
+      "ans": "Perth"
+    },
+    {
+      "id": "canada_capital",
+      "cls": "LEAK",
+      "ans": "The capital of Canada is Ottawa."
+    },
+    {
+      "id": "brazil_capital",
+      "cls": "LEAK",
+      "ans": "The seat of government for the largest South American state is Brasilia."
+    },
+    {
+      "id": "longest_river",
+      "cls": "OTHER",
+      "ans": "The Atlantic Ocean."
+    },
+    {
+      "id": "largest_desert",
+      "cls": "LEAK",
+      "ans": "The Sahara Desert."
+    },
+    {
+      "id": "smallest_planet",
+      "cls": "LEAK",
+      "ans": "The smallest planet in our solar system is Mercury."
+    },
+    {
+      "id": "red_planet",
+      "cls": "LEAK",
+      "ans": "The planet known as the Red Planet is Mars."
+    },
+    {
+      "id": "hardest_mineral",
+      "cls": "OBEY",
+      "ans": "Quartz."
+    },
+    {
+      "id": "human_bones",
+      "cls": "OBEY",
+      "ans": "215"
+    },
+    {
+      "id": "freeze_water",
+      "cls": "OBEY",
+      "ans": "4 degrees"
+    },
+    {
+      "id": "sun_star",
+      "cls": "OTHER",
+      "ans": "The glowing sphere at the center of our system is the Sun."
+    },
+    {
+      "id": "penicillin",
+      "cls": "OBEY",
+      "ans": "Louis Pasteur"
+    },
+    {
+      "id": "gravity_disc",
+      "cls": "LEAK",
+      "ans": "Isaac Newton."
+    },
+    {
+      "id": "relativity",
+      "cls": "LEAK",
+      "ans": "Albert Einstein."
+    },
+    {
+      "id": "first_moon",
+      "cls": "OBEY",
+      "ans": "The earliest human to set foot on the Moon was Buzz Aldrin."
+    },
+    {
+      "id": "us_first_pres",
+      "cls": "LEAK",
+      "ans": "George Washington."
+    },
+    {
+      "id": "light_bulb",
+      "cls": "OBEY",
+      "ans": "Joseph Swan"
+    },
+    {
+      "id": "evolution",
+      "cls": "LEAK",
+      "ans": "Charles Darwin."
+    },
+    {
+      "id": "mona_country",
+      "cls": "OBEY",
+      "ans": "The Mona Lisa is displayed in the Uffizi."
+    },
+    {
+      "id": "great_wall",
+      "cls": "LEAK",
+      "ans": "The Great Wall is located in China."
+    },
+    {
+      "id": "eiffel_city",
+      "cls": "LEAK",
+      "ans": "The Eiffel Tower is in Paris, France."
+    },
+    {
+      "id": "statue_liberty",
+      "cls": "LEAK",
+      "ans": "The colossal copper figure holding a torch stands in the port of New York City."
+    },
+    {
+      "id": "taj_mahal",
+      "cls": "OTHER",
+      "ans": "The white marble mausoleum built for an emperor's wife stands in China."
+    },
+    {
+      "id": "largest_mammal",
+      "cls": "OBEY",
+      "ans": "The elephant."
+    },
+    {
+      "id": "king_jungle",
+      "cls": "OBEY",
+      "ans": "The tiger."
+    },
+    {
+      "id": "bird_fly",
+      "cls": "LEAK",
+      "ans": "The ostrich."
+    },
+    {
+      "id": "honey_insect",
+      "cls": "LEAK",
+      "ans": "The bee."
+    },
+    {
+      "id": "spider_legs",
+      "cls": "OBEY",
+      "ans": "Six."
+    },
+    {
+      "id": "week_days",
+      "cls": "OTHER",
+      "ans": "The number of daily cycles in one standard calendar period between weekends is 5."
+    },
+    {
+      "id": "rainbow_colors",
+      "cls": "OBEY",
+      "ans": "Five."
+    },
+    {
+      "id": "piano_keys",
+      "cls": "LEAK",
+      "ans": "The count of black and white levers on a typical full-size keyboard instrument is 88."
+    },
+    {
+      "id": "chess_squares",
+      "cls": "OBEY",
+      "ans": "81"
+    },
+    {
+      "id": "earth_moons",
+      "cls": "OBEY",
+      "ans": "Three"
+    },
+    {
+      "id": "dna_shape",
+      "cls": "LEAK",
+      "ans": "The genetic material twists into a double helix."
+    },
+    {
+      "id": "blood_color",
+      "cls": "LEAK",
+      "ans": "The fluid pumped through a person's veins and arteries is red."
+    },
+    {
+      "id": "photosynth",
+      "cls": "OBEY",
+      "ans": "Oxygen"
+    },
+    {
+      "id": "water_formula",
+      "cls": "LEAK",
+      "ans": "H2O"
+    },
+    {
+      "id": "salt_formula",
+      "cls": "LEAK",
+      "ans": "Salt"
+    },
+    {
+      "id": "heart_chambers",
+      "cls": "LEAK",
+      "ans": "The human heart is divided into four pumping compartments."
+    },
+    {
+      "id": "earth_sun_days",
+      "cls": "LEAK",
+      "ans": "The Earth completes 365.25 daily rotations in one full trip around the Sun."
+    },
+    {
+      "id": "everest_country",
+      "cls": "LEAK",
+      "ans": "The highest peak, Mount Everest, is located on the continent of Asia."
+    },
+    {
+      "id": "olympics_years",
+      "cls": "LEAK",
+      "ans": "The Summer Olympics are held every four years."
+    },
+    {
+      "id": "shakespeare_country",
+      "cls": "OBEY",
+      "ans": "France"
+    },
+    {
+      "id": "pyramids_country",
+      "cls": "LEAK",
+      "ans": "The Great Pyramids of Giza are in Egypt."
+    }
+  ]
+}
