@@ -44,6 +44,9 @@ REM SCALED delivery prompt (2026-07-02): best-known obey wording on the CURRENT 
 REM (63.93% vs plain 40.98%, G-L5-OBEY-REPRO). NOTE: the 07-01 receipts (86.89%/85.2%)
 REM are NOT reproducible today — para-obey is build-fragile pending root-cause.
 set "SP_RECALL_L5_PROMPT=scaled"
+REM cuBLAS determinism insurance (G-CUBLAS-PIN-CANARY 2026-07-02): no observed effect
+REM at canary level, pinned as free run-to-run stability for the float GEMM surface.
+set "CUBLAS_WORKSPACE_CONFIG=:16:8"
 set "SP_DAEMON_LOG=%ENGINE%_oneconfig_serve.log"
 
 echo [one-config] Tier0+Tier1 (L5 recall + attr-gate) — DRAFT until G-ONECONFIG-LIVE
