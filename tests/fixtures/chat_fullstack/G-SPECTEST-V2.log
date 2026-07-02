@@ -1,0 +1,22 @@
+G-SPECTEST-V2  2026-07-03T08:35:37.6220716+10:00  (the LIVE semantic test-head at the held-stream seam)
+VERDICT: GREEN — pre-registered pins LEAK<=2 AND OBEY>=50/61: measured OBEY 52/61 (85.2%), LEAK 2.
+
+THE LADDER (plain delivery, full-61 paraphrases, all same-day):
+  plain, no guard:            26/61 obey, ~14+ leaks     (P-run baseline)
+  + lexical veto (v1/v1.1):   41/61 obey, 14 leaks       (value-substitution convicted lexical rules)
+  + LINEAR TEST-HEAD (v2):    52/61 obey,  2 leaks       <- head-vetoes 30, lexical-only vetoes 8, passes 23
+  systemecho reference:       54/61 obey,  0 leaks       (the scaffold; selection-bound ceiling)
+
+MECHANISM: SP_SPECTEST_HEAD=<SPH1 blob> (15,384 B: v[3840]+c+tau — the G-TESTHEAD pipeline collapsed to ONE
+dot product, score = x.v + c on the frame-1 state, armed via the same one-shot capture_feat tap). Veto =
+lexical UNION head(score<tau=0.6271). Draft decodes with the stream HELD; veto -> clean symbolic execute
+from the record. Default-off everywhere (SP_SPECTEST / SP_SPECTEST_HEAD unset = byte-identical null floor).
+
+RIGOR: the deployed head trained on FIVE modes EXCLUDING plain (train AUC 0.997, tau catches 56/59 train
+leaks @ 3.2% false-veto) -> this plain-delivery live run is MODE-HELD-OUT (offline fold predicted 0.953).
+HONEST LIMITS: (1) 2 residual leaks = head false-passes, consistent with fold AUC<1; (2) ITEM-level
+generalization unproven — the 61 facts appear in training (other modes); V3 rigor = fresh-fact corpus gate
+(mint new facts, capture nothing, run live) before any canonical promotion; (3) selection ceiling untouched
+(cross-picks deliver the wrong record faithfully). PROMOTION PATH: V3 fresh-corpus GREEN => consider
+plain+head as the canonical delivery (cheaper than systemecho scaffold; latency = 1 dot product + tap)
+via G-ONECONFIG-LIVE re-gate. Receipts: _spectest_gate.log (v2head) + serve log SPECTEST-HEAD lines.

@@ -2817,6 +2817,32 @@ Tag of the answer (or [NULL]):");
     let spectest = std::env::var("SP_SPECTEST").ok().as_deref() == Some("1")
         && recalled_text.is_some();
     let mut held: Vec<String> = Vec::new();
+    // ── SPECTEST v2 — the LINEAR TEST-HEAD (G-TESTHEAD-OFFLINE REAL: 0.901 mean
+    // held-out-mode AUC, signal linear ⇒ the whole pipeline collapses to score =
+    // x·v + c on the frame-1 state). SP_SPECTEST_HEAD=<SPH1 blob> (v[3840] + c +
+    // tau); score < tau joins the veto (head ∪ lexical). Loaded once per process;
+    // env unset ⇒ None ⇒ v1.1 lexical-only behavior unchanged.
+    static SPH: std::sync::OnceLock<Option<(Vec<f32>, f32, f32)>> = std::sync::OnceLock::new();
+    let sph: Option<&(Vec<f32>, f32, f32)> = if spectest {
+        SPH.get_or_init(|| {
+            let p = std::env::var("SP_SPECTEST_HEAD").ok().filter(|s| !s.is_empty())?;
+            let b = std::fs::read(&p).map_err(|e| {
+                tracing::warn!("SPECTEST-HEAD: read {p} failed ({e}) — head disabled");
+            }).ok()?;
+            const VLEN: usize = 3840 * 4;
+            if b.len() < 16 + VLEN + 8 || &b[..4] != b"SPH1" {
+                tracing::warn!("SPECTEST-HEAD: bad blob {p} — head disabled");
+                return None;
+            }
+            let v: Vec<f32> = b[16..16 + VLEN].chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let c0 = f32::from_le_bytes(b[16 + VLEN..16 + VLEN + 4].try_into().ok()?);
+            let tau = f32::from_le_bytes(b[16 + VLEN + 4..16 + VLEN + 8].try_into().ok()?);
+            tracing::info!("SPECTEST-HEAD: loaded (dim=3840 c={c0:.4} tau={tau:.4})");
+            Some((v, c0, tau))
+        }).as_ref()
+    } else { None };
+    let mut sph_x: Vec<f32> = Vec::new(); // frame-1 state for the head (armed in-loop)
 
     let tokenizer = app.tokenizer.clone();
     // A2-polish: this arch has no `<end_of_turn>` token; its turn boundary is
@@ -2929,12 +2955,23 @@ Tag of the answer (or [NULL]):");
                 Err(e) => { tracing::warn!("F3-CAPTURE: arm(first) failed ({e})"); f3_first = vec![f32::NAN]; }
             }
         }
+        // SPECTEST-HEAD tap: the same frame-1 arming for the live test-head, when the
+        // F3 rail isn't holding the (single) capture slot this turn (F3 precedence;
+        // the gate launchers never run both). Same dangling-write discipline.
+        if sph.is_some() && f3_prompt.is_empty() && sph_x.is_empty() {
+            let mut b = vec![0f32; F3_E];
+            match unsafe { kv::capture_feat_arm(handle, &mut b) } {
+                Ok(()) => sph_x = b,
+                Err(e) => { tracing::warn!("SPECTEST-HEAD: arm failed ({e})"); sph_x = vec![f32::NAN]; }
+            }
+        }
         // Feed the just-emitted token; get logits for the next position.
         // SAFETY: handle live; logits is vocab_size f32 (checked above).
         if let Err(_e) = unsafe { kv::decode_step(handle, next_token, logits) } {
             // F3 dangling-write guard (see the syn_last site): step failed with a
             // possibly-armed capture — leak the buffer rather than risk a late write.
             if f3_first.len() == F3_E { std::mem::forget(std::mem::take(&mut f3_first)); }
+            if sph_x.len() == F3_E { std::mem::forget(std::mem::take(&mut sph_x)); }
             break 'decode;
         }
         if eot_dbg && eot_ranks.len() < 64 { eot_ranks.push(stop_rank(logits).1); }
@@ -2992,15 +3029,31 @@ Tag of the answer (or [NULL]):");
             .collect();
         let ans_lc = answer_text.to_lowercase();
         let n_used = salient.iter().filter(|w| ans_lc.contains(w.as_str())).count();
-        if salient.is_empty() || n_used > 0 {
-            tracing::info!("SPECTEST: PASS ({}/{} salient used) -> releasing held stream", n_used, salient.len());
+        // v2: the linear test-head's verdict on the frame-1 state (score < tau ⇒
+        // the draft is a predicted leak — the value-substitution class the lexical
+        // rule provably cannot catch). Veto = lexical ∪ head. Head unavailable
+        // (blob unset / capture missed / 1-token answer) ⇒ lexical-only (v1.1).
+        let (head_score, head_veto) = match sph {
+            Some((v, c0, tau)) if sph_x.len() == F3_E => {
+                let s: f32 = sph_x.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>() + c0;
+                tracing::info!("SPECTEST-HEAD: score={s:.4} tau={tau:.4} -> {}",
+                    if s < *tau { "VETO(head)" } else { "pass(head)" });
+                (Some(s), s < *tau)
+            }
+            _ => (None, false),
+        };
+        if (salient.is_empty() || n_used > 0) && !head_veto {
+            tracing::info!("SPECTEST: PASS ({}/{} salient used, head={:?}) -> releasing held stream",
+                n_used, salient.len(), head_score);
             for text in held.drain(..) {
                 let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
                     .unwrap_or_default();
                 if tx.blocking_send(Ok(Event::default().data(payload))).is_err() { break; }
             }
         } else {
-            tracing::warn!("SPECTEST: VETO (0/{} salient — ungrounded draft suppressed) -> clean symbolic execute from the record", salient.len());
+            tracing::warn!("SPECTEST: VETO ({} — draft suppressed) -> clean symbolic execute from the record",
+                if head_veto { format!("head score {:.3} < tau", head_score.unwrap_or(f32::NAN)) }
+                else { format!("0/{} salient", salient.len()) });
             held.clear();
             let fb = format!("From the record: {fact}");
             let payload = serde_json::to_string(&ChatDelta { delta: fb.clone(), chat_id })

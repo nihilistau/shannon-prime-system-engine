@@ -32,6 +32,9 @@ set "SP_RECALL_L5_PROMPT=plain"
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"
 
 set "SP_SPECTEST=1"
+REM v2: the linear test-head (G-TESTHEAD-OFFLINE REAL; trained on 5 modes EXCLUDING
+REM plain -> this plain-delivery gate is MODE-HELD-OUT LIVE). Comment out for v1.1.
+set "SP_SPECTEST_HEAD=%ENGINE%_faithful_corpus\f3\spectest_head_f1.bin"
 set "SP_DAEMON_LOG=%ENGINE%_spectest_serve.log"
 
 echo [SPECTEST] plain delivery + draft veto (SP_SPECTEST=1)
