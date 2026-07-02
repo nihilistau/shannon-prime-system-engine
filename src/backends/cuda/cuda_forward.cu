@@ -7936,11 +7936,15 @@ extern "C" void sp_cuda_model_release(const qwen3_model *m) {
  * Name-keyed registry; per call: H2D x (in*4B), GEMV, D2H y (out*4B). Registered
  * into the math-core through sp_matmul_register_ext (unregistered = null floor). */
 typedef struct { char name[160]; DevTensor dt; } q36g_ent;
+typedef struct { char tag[96]; DevTensor g, u, d; int NE, FF, E; } q36moe_ent_fwd;
 typedef struct q36gpu {
     cudaStream_t st;
     q36g_ent *e; int n, cap;
     float *dX, *dY; int xcap, ycap;
     signed char *dqx; float *dsx; int qcap;
+    /* GPU-2 resident-expert registry + scratch */
+    q36moe_ent_fwd *moes; int mn, mcap;
+    float *dmoe; int moe_ff, moe_e;
 } q36gpu;
 
 extern "C" void *sp_q36gpu_new(void) {
@@ -7955,6 +7959,13 @@ extern "C" void sp_q36gpu_free(void *vh) {
     if (!h) return;
     for (int i = 0; i < h->n; i++) free_devtensor(&h->e[i].dt);
     free(h->e);
+    for (int i = 0; i < h->mn; i++) {
+        free_devtensor(&h->moes[i].g);
+        free_devtensor(&h->moes[i].u);
+        free_devtensor(&h->moes[i].d);
+    }
+    free(h->moes);
+    if (h->dmoe) cudaFree(h->dmoe);
     if (h->dX) cudaFree(h->dX);
     if (h->dY) cudaFree(h->dY);
     if (h->dqx) cudaFree(h->dqx);
@@ -7997,6 +8008,94 @@ extern "C" int sp_q36gpu_upload(void *vh, const char *name, const sp_frob_packed
     }
     h->n++;
     return 0;
+}
+
+/* ── GPU-2: resident-EXPERT MoE service ──────────────────────────────────────────
+ * Per layer, the three rank-3 expert tensors (gate/up/down, 256 experts each) are
+ * uploaded whole; an expert's matmul is a VIEW DevTensor over the parent — row_off
+ * is absolute into codes, so the view just offsets the row_off/row_scale/row_prec/
+ * bscale pointers and sets out to the slice height. One device flow per MoE call:
+ * H2D x once -> per expert: gate GEMV + up GEMV + k_silu_mul + down GEMV +
+ * dg_k_axpy(weighted accumulate) all ASYNC on the stream -> ONE sync -> D2H y. */
+typedef q36moe_ent_fwd q36moe_ent;
+
+static DevTensor q36_expert_view(const DevTensor *p, int e, int rows) {
+    DevTensor v = *p;
+    v.out       = rows;
+    v.row_off   = p->row_off  + (size_t)e * rows;
+    v.row_prec  = p->row_prec + (size_t)e * rows;
+    if (p->row_scale) v.row_scale = p->row_scale + (size_t)e * rows;
+    if (p->bscale)    v.bscale    = p->bscale + (size_t)e * rows * (size_t)p->bs_nblk;
+    return v;
+}
+
+extern "C" int sp_q36gpu_upload_experts(void *vh, const char *tag,
+                                        const sp_frob_packed_tensor *ptg,
+                                        const sp_frob_packed_tensor *ptu,
+                                        const sp_frob_packed_tensor *ptd,
+                                        int NE, int FF, int E) {
+    q36gpu *h = (q36gpu *)vh;
+    if (!h || !tag || !ptg || !ptu || !ptd) return 1;
+    if (h->mn == h->mcap) {
+        int nc = h->mcap ? h->mcap * 2 : 64;
+        q36moe_ent *ne = (q36moe_ent *)realloc(h->moes, (size_t)nc * sizeof(q36moe_ent));
+        if (!ne) return 1;
+        h->moes = ne; h->mcap = nc;
+    }
+    q36moe_ent *M = &h->moes[h->mn];
+    memset(M, 0, sizeof(*M));
+    strncpy(M->tag, tag, sizeof(M->tag) - 1);
+    M->NE = NE; M->FF = FF; M->E = E;
+    if (upload_packed(ptg, &M->g) || upload_packed(ptu, &M->u) || upload_packed(ptd, &M->d)) {
+        free_devtensor(&M->g); free_devtensor(&M->u); free_devtensor(&M->d);
+        return 1;
+    }
+    h->mn++;
+    /* ensure MoE scratch (dX reused for x[E]; add dG/dU/dH [FF], dDe/dYo [E]) */
+    if (!h->dmoe) {
+        if (cudaMalloc(&h->dmoe, ((size_t)FF * 3 + (size_t)E * 2) * sizeof(float)) != cudaSuccess)
+            return 1;
+        h->moe_ff = FF; h->moe_e = E;
+    }
+    if (E > h->xcap) {
+        if (h->dX) cudaFree(h->dX);
+        if (cudaMalloc(&h->dX, (size_t)E * sizeof(float)) != cudaSuccess) return 1;
+        h->xcap = E;
+    }
+    return 0;
+}
+
+/* MoE ext contract: 0 = handled (y filled), nonzero = not-mine (layer not resident). */
+extern "C" int sp_q36gpu_moe(void *vh, const char *tag, const int *idx, const float *wt,
+                             int NU, const float *x, int E, int FF, float *y) {
+    q36gpu *h = (q36gpu *)vh;
+    if (!h || !h->moes) return -1;
+    q36moe_ent *M = NULL;
+    for (int i = 0; i < h->mn; i++)
+        if (strcmp(h->moes[i].tag, tag) == 0) { M = &h->moes[i]; break; }
+    if (!M || M->FF != FF || M->E != E) return -1;
+    float *dG  = h->dmoe;               /* [FF] gate   */
+    float *dU  = dG + FF;               /* [FF] up     */
+    float *dH  = dU + FF;               /* [FF] silu*u (in-place on dG actually) */
+    float *dDe = dH + FF;               /* [E]  down   */
+    float *dYo = dDe + E;               /* [E]  accum  */
+    (void)dH;
+    if (cudaMemcpyAsync(h->dX, x, (size_t)E * sizeof(float), cudaMemcpyHostToDevice, h->st)
+        != cudaSuccess) return -1;
+    if (cudaMemsetAsync(dYo, 0, (size_t)E * sizeof(float), h->st) != cudaSuccess) return -1;
+    for (int k = 0; k < NU; k++) {
+        DevTensor vg = q36_expert_view(&M->g, idx[k], FF);
+        DevTensor vu = q36_expert_view(&M->u, idx[k], FF);
+        DevTensor vd = q36_expert_view(&M->d, idx[k], E);
+        if (!gemv_w_packed(h->st, &vg, h->dX, dG, h->dqx, h->dsx)) return -1;
+        if (!gemv_w_packed(h->st, &vu, h->dX, dU, h->dqx, h->dsx)) return -1;
+        k_silu_mul<<<(unsigned)((FF + 255) / 256), 256, 0, h->st>>>(dG, dU, (size_t)FF);
+        if (!gemv_w_packed(h->st, &vd, dG, dDe, h->dqx, h->dsx)) return -1;
+        dg_k_axpy<<<(unsigned)((E + 255) / 256), 256, 0, h->st>>>(dYo, dDe, wt[k], E);
+    }
+    if (cudaMemcpyAsync(y, dYo, (size_t)E * sizeof(float), cudaMemcpyDeviceToHost, h->st)
+        != cudaSuccess) return -1;
+    return cudaStreamSynchronize(h->st) == cudaSuccess ? 0 : -1;
 }
 
 /* sp_matmul_ext contract: 0 = handled (Y filled), nonzero = not-mine -> caller falls
