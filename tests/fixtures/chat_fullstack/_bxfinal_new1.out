@@ -1,0 +1,2 @@
+TIMING port=3000 n=47 prefill_s=0.64 decode_s=2.03 decode_tokps=22.607 text_head='Dogs are domesticated animals that have been bred for thousands of years for var'
+FULLTEXT: 'Dogs are domesticated animals that have been bred for thousands of years for various purposes, including companionship, hunting, herding, and guarding. They are members of the Canidae family and are closely related to wolves, coyotes, and foxes.'

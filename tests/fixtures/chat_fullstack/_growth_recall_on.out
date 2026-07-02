@@ -1,0 +1,4 @@
+TURN 1 hist_chars=766 prefill_s=24.64 decode_tokps=8.38 n=3 total_s=24.88 effective_tokps=0.12
+TURN 2 hist_chars=1531 prefill_s=24.41 decode_tokps=4.95 n=7 total_s=25.62 effective_tokps=0.27
+TURN 3 hist_chars=2314 prefill_s=37.47 decode_tokps=2.75 n=6 total_s=39.29 effective_tokps=0.15
+TURN 4 hist_chars=3090 prefill_s=283.55 decode_tokps=1.03 n=6 total_s=288.40 effective_tokps=0.02

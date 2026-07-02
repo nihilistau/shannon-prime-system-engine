@@ -183,6 +183,12 @@ __device__ __forceinline__ long long bx_exp_fixed(long long d) {
  * d_bx_flag==0 => the float path runs unchanged (byte-identical null floor). Validated offline on
  * REAL 12B activations: RMS 3.84e-5 / GELU 8.18e-7 / RoPE 9.62e-6 (G-BYTEEXACT-ISLANDS-CUDA). */
 __device__ __constant__ int d_bx_flag = 0;
+/* G-BX-PROF intra-kernel probe (2026-07-03, DIAGNOSTIC ONLY — output is wrong when
+ * nonzero; never ship set). Bitmask from SP_BX_PROBE via gemma4_kv_byteexact_set:
+ * bit0 = replace the exact Q·K residue dot with a float dot (timing probe),
+ * bit1 = replace the serial integer softmax with trivial weights,
+ * bit2 = replace the exact p·V residue accumulation with float accumulation. */
+__device__ __constant__ int d_bx_probe = 0;
 /* CONTRACT-CUDA-KV-FOUNDATION: per-session KV codec flags (bit0 = SP_KV_SPINOR).
  * 0 = float null floor; consumed by the KV alloc/read once the O_K Spinor carrier lands. */
 __device__ __constant__ unsigned int d_kv_flags = 0u;
@@ -537,10 +543,14 @@ __global__ void k_attn_decode_win(const float *q, const float *Kc, const float *
 
 /* Drop-in for k_attn_decode_win (ascale folded; gemma4 scaling=1.0). Shared = ctx*int64
  * (scores, reused as softmax weights). One block per query head. */
-__global__ void k_attn_decode_win_bx(const float *q, const float *Kc, const float *Vc,
+/* G-BX-ATTN-FAST: __launch_bounds__ caps the register allocation so the int64
+ * paths cannot spill/serialize the launch (Turing: 64 regs at 1024 threads). */
+__global__ void __launch_bounds__(1024)
+k_attn_decode_win_bx(const float *q, const float *Kc, const float *Vc,
                                      int ctx, int KVD, int HD, int group, float ascale,
                                      int win, float *ao) {
     extern __shared__ long long shl[];                 /* [ctx]: D_s then e_s */
+    if (d_bx_probe & 8) return;                        /* PROBE bit3: empty-kernel launch cost */
     int h = blockIdx.x, kvh = h / group;
     int pos = ctx - 1;
     int s0 = (win >= 0 && pos - win + 1 > 0) ? pos - win + 1 : 0;
@@ -548,19 +558,45 @@ __global__ void k_attn_decode_win_bx(const float *q, const float *Kc, const floa
     const float DSC = (float)(1 << BX_DSH);
     for (int s = s0 + threadIdx.x; s < ctx; s += blockDim.x) {
         const float *kh = Kc + (size_t)s * KVD + (size_t)kvh * HD;
-        long long a1 = 0, a2 = 0;
+        if (d_bx_probe & 1) {                          /* PROBE: float Q·K (timing only) */
+            float d = 0.f;
+            for (int i = 0; i < HD; i++) d += qh[i] * kh[i];
+            shl[s] = (long long)llrintf(d * DSC * DSC);
+            continue;
+        }
+        /* G-BX-ATTN-FAST (2026-07-03): integer mod is a ring homomorphism, so the
+         * residues of a CHUNKED raw sum are IDENTICAL to reducing after every
+         * product — but int64 % is ~20 SASS ops, so folding every 64 products
+         * instead of every product cuts the modulo count 64x with BIT-IDENTICAL
+         * output. Headroom: |p| = |ea*eb| <= 2^56 for any sane activation
+         * (Delta=2^16, |q|,|k| <= 2^24), 64 terms <= 2^62 < 2^63. The prior
+         * per-product-mod version needed |p| < 2^62 itself, so worst-case
+         * assumptions are unchanged in kind. */
+        long long a1 = 0, a2 = 0, acc = 0;
+        int cnt = 0;
         for (int i = 0; i < HD; i++) {
             long long ea = (long long)llrintf(qh[i] * DSC);
             long long eb = (long long)llrintf(kh[i] * DSC);
-            long long p = ea * eb;                     /* ~2^36 < 2^63 */
-            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
-            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+            acc += ea * eb;                            /* ~2^36 typ; chunk-bounded */
+            if (++cnt == 64) {
+                a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+                a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
+                acc = 0; cnt = 0;
+            }
+        }
+        if (cnt) {
+            a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
         }
         shl[s] = bx_garner(a1, a2);                    /* exact Delta^2 * <q,k_s> */
     }
     __syncthreads();
     __shared__ long long g_S;
     if (threadIdx.x == 0) {
+        if (d_bx_probe & 2) {                          /* PROBE: trivial softmax (timing only) */
+            for (int s = s0; s < ctx; s++) shl[s] = BX_ONE;
+            g_S = (long long)(ctx - s0) << BX_FB;
+        } else {
         long long mxz = ((shl[s0] << BX_ZB) >> (2 * BX_DSH));   /* score on Z grid */
         for (int s = s0 + 1; s < ctx; s++) {
             long long z = (shl[s] << BX_ZB) >> (2 * BX_DSH);
@@ -573,16 +609,36 @@ __global__ void k_attn_decode_win_bx(const float *q, const float *Kc, const floa
             shl[s] = e; S += e;
         }
         g_S = S;
+        }
     }
     __syncthreads();
     long long S = g_S;
     for (int i = threadIdx.x; i < HD; i += blockDim.x) {
-        long long a1 = 0, a2 = 0;
+        if (d_bx_probe & 4) {                          /* PROBE: float p·V (timing only) */
+            float accf = 0.f;
+            for (int s = s0; s < ctx; s++)
+                accf += (float)shl[s] * Vc[(size_t)s * KVD + (size_t)kvh * HD + i];
+            ao[(size_t)h * HD + i] = accf / ((float)S * (float)(1 << BX_DSH));
+            continue;
+        }
+        /* G-BX-ATTN-FAST: same chunked fold as Q·K above. |p| = e*|ev| <= 2^55
+         * (e <= 2^30 = BX_ONE, |ev| <= 2^25), 64 terms <= 2^61 < 2^63; residues
+         * bit-identical to per-product reduction. This loop runs ctx times per
+         * HD element — it was the dominant modulo storm at long context. */
+        long long a1 = 0, a2 = 0, acc = 0;
+        int cnt = 0;
         for (int s = s0; s < ctx; s++) {
             long long ev = (long long)llrintf(Vc[(size_t)s * KVD + (size_t)kvh * HD + i] * DSC);
-            long long p = shl[s] * ev;                 /* ~2^48 < 2^63 */
-            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
-            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+            acc += shl[s] * ev;                        /* ~2^48 typ; chunk-bounded */
+            if (++cnt == 64) {
+                a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+                a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
+                acc = 0; cnt = 0;
+            }
+        }
+        if (cnt) {
+            a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
         }
         long long num = bx_garner(a1, a2);             /* exact Sum e_s * enc(v_s,i) */
         ao[(size_t)h * HD + i] = (float)((double)num / ((double)S * (double)(1 << BX_DSH)));
@@ -663,13 +719,26 @@ __global__ void k_attn_decode_ring_bx(const float *q, const float *Kc, const flo
     for (int j = threadIdx.x; j < wl; j += blockDim.x) {
         int slot = (s0 + j) % Wring;                       /* position s0+j -> ring slot */
         const float *kh = Kc + (size_t)slot * KVD + (size_t)kvh * HD;
-        long long a1 = 0, a2 = 0;
+        /* G-BX-ATTN-FAST (2026-07-03): chunked residue fold — identical residues
+         * (mod is a ring homomorphism over int64 sums), 64x fewer int64 % ops.
+         * Headroom: |ea*eb| <= 2^56, 64 terms <= 2^62 < 2^63. Same fold as
+         * k_attn_decode_win_bx. This kernel runs on the 40 SWA layers per token
+         * when the ring is armed — it was the FLAT per-token modulo storm. */
+        long long a1 = 0, a2 = 0, acc = 0;
+        int cnt = 0;
         for (int i = 0; i < HD; i++) {
             long long ea = (long long)llrintf(qh[i] * DSC);
             long long eb = (long long)llrintf(kh[i] * DSC);
-            long long p = ea * eb;
-            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
-            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+            acc += ea * eb;
+            if (++cnt == 64) {
+                a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+                a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
+                acc = 0; cnt = 0;
+            }
+        }
+        if (cnt) {
+            a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
         }
         shlr[j] = bx_garner(a1, a2);                       /* exact Delta^2 * <q,k_{s0+j}> */
     }
@@ -692,13 +761,22 @@ __global__ void k_attn_decode_ring_bx(const float *q, const float *Kc, const flo
     __syncthreads();
     long long S = g_Sr;
     for (int i = threadIdx.x; i < HD; i += blockDim.x) {
-        long long a1 = 0, a2 = 0;
+        /* G-BX-ATTN-FAST: chunked fold, |shlr[j]*ev| <= 2^55, 64 terms <= 2^61. */
+        long long a1 = 0, a2 = 0, acc = 0;
+        int cnt = 0;
         for (int j = 0; j < wl; j++) {
             int slot = (s0 + j) % Wring;
             long long ev = (long long)llrintf(Vc[(size_t)slot * KVD + (size_t)kvh * HD + i] * DSC);
-            long long p = shlr[j] * ev;
-            a1 = ((a1 + p) % BX_Q1 + BX_Q1) % BX_Q1;
-            a2 = ((a2 + p) % BX_Q2 + BX_Q2) % BX_Q2;
+            acc += shlr[j] * ev;
+            if (++cnt == 64) {
+                a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+                a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
+                acc = 0; cnt = 0;
+            }
+        }
+        if (cnt) {
+            a1 = ((a1 + acc) % BX_Q1 + BX_Q1) % BX_Q1;
+            a2 = ((a2 + acc) % BX_Q2 + BX_Q2) % BX_Q2;
         }
         long long num = bx_garner(a1, a2);
         ao[(size_t)h * HD + i] = (float)((double)num / ((double)S * (double)(1 << BX_DSH)));
@@ -4204,6 +4282,14 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
             Kuse = dKc[src]; Vuse = dVc[src];
             if (!Kuse || !Vuse) { sp_set_error("g4_kv: sharer before owner"); return -1; }
         }
+        /* G-BX-PROF SP_BX_KTIME=1 (diagnostic): CUDA-event-time the attention
+         * launch per layer; accumulate + print every 1000. Forces a per-layer
+         * sync (distorts totals) but the attn ms itself stays valid. */
+        static int g4_ktime = -1;
+        if (g4_ktime < 0) { const char *ke = getenv("SP_BX_KTIME"); g4_ktime = (ke && *ke=='1') ? 1 : 0; }
+        static double g4_kt_ms = 0.0; static long g4_kt_n = 0;
+        cudaEvent_t g4_e0 = NULL, g4_e1 = NULL;
+        if (g4_ktime) { cudaEventCreate(&g4_e0); cudaEventCreate(&g4_e1); cudaEventRecord(g4_e0, st); }
         {   int bd = hd > 256 ? hd : 256; if (bd > 1024) bd = 1024;
             if (s->ring_W > 0 && !global) {           /* KAI-1c: ring attention (slot=(s0+j)%Wring) */
                 const int ctx = s->dpos_host + 1;
@@ -4225,12 +4311,42 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
                 * is ctx*int64 (the dual-prime score lane). Windowing handled inside via win. */
                 const int ctx = s->dpos_host + 1;
                 int bdb = hd > ctx ? hd : ctx; if (bdb > 1024) bdb = 1024;
-                k_attn_decode_win_bx<<<nh, bdb, (size_t)ctx*sizeof(long long), st>>>(
+                /* G-BX-PROF probe bit4: fixed 48KB dynamic shared (carveout-transition test).
+                 * probe bit5: BUCKET the shm to 16KB steps (constant across ~2048-position
+                 * spans) — tests whether PER-LAUNCH-VARYING dynamic shared is the stall. */
+                size_t bx_shm = (size_t)ctx * sizeof(long long);
+                { static int pshm = -1;
+                  if (pshm < 0) { const char *pe = getenv("SP_BX_PROBE"); pshm = pe ? atoi(pe) : 0; }
+                  if ((pshm & 16) && bx_shm < 48u*1024u) bx_shm = 48u*1024u;
+                  if (pshm & 32) bx_shm = ((bx_shm + 16383u) / 16384u) * 16384u; }
+                k_attn_decode_win_bx<<<nh, bdb, bx_shm, st>>>(
                     s->dq, Kuse, Vuse, ctx, kvd, hd, grp, 1.0f, win, s->dao);
+                { static int warned = 0;
+                  if (!warned) { cudaError_t le = cudaGetLastError();
+                    if (le != cudaSuccess) { fprintf(stderr, "[g4-kv] BX ATTN LAUNCH FAILED: %s (nh=%d bd=%d shm=%zu ctx=%d)\n",
+                        cudaGetErrorName(le), nh, bdb, bx_shm, ctx); warned = 1; } } }
             } else {
                 k_attn_decode_win_dyn<<<nh, bd, attn_shm, st>>>(
                     s->dq, Kuse, Vuse, dpos, kvd, hd, grp, 1.0f, win, s->dao);
+                /* G-12B-SERVE root-cause telemetry (2026-07-03): at PMAX=20000 attn_shm =
+                 * 78KB > Turing's 64KB max — the launch fails cudaErrorInvalidConfiguration
+                 * SILENTLY (launch-time errors don't surface at stream sync), ao keeps stale
+                 * data, and the "float path garbage" is born. Print ONCE so the failure is
+                 * never silent again. */
+                { static int warned = 0;
+                  if (!warned) { cudaError_t le = cudaGetLastError();
+                    if (le != cudaSuccess) { fprintf(stderr, "[g4-kv] FLOAT ATTN LAUNCH FAILED: %s (nh=%d bd=%d attn_shm=%zu) — output is INVALID from here\n",
+                        cudaGetErrorName(le), nh, bd, attn_shm); warned = 1; } } }
             } }
+        if (g4_ktime) {
+            cudaEventRecord(g4_e1, st); cudaEventSynchronize(g4_e1);
+            float kt_ms = 0.f; cudaEventElapsedTime(&kt_ms, g4_e0, g4_e1);
+            g4_kt_ms += kt_ms;
+            if ((++g4_kt_n % 1000) == 0)
+                fprintf(stderr, "[ktime] attn cum %.1f ms over %ld launches (%.3f ms/launch)\n",
+                        g4_kt_ms, g4_kt_n, g4_kt_ms / (double)g4_kt_n);
+            cudaEventDestroy(g4_e0); cudaEventDestroy(g4_e1);
+        }
         KMMD(&g_w.Wo[L], s->dao, s->dap);
         k_rmsnorm<<<1, 256, 0, st>>>(s->dap, g_w.post_attn[L], E, eps, s->dnx);
         k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
@@ -4456,9 +4572,22 @@ extern "C" int gemma4_kv_decode_batch(sp_g4_kv *s, const int32_t *toks, int B,
 extern "C" int gemma4_kv_byteexact_set(sp_g4_kv *s, int on) {
     if (!s) { sp_set_error("gemma4_kv_byteexact_set: NULL handle"); return -1; }
     int bx = on ? 1 : 0;
-    cudaError_t e = cudaMemcpyToSymbol(d_bx_flag, &bx, sizeof(int), 0, cudaMemcpyHostToDevice);
+    /* G-BX-PROF bisect seams (2026-07-03, diagnostic-only, default-unset = the
+     * exact prior behavior): SP_BX_NO_ISLANDS=1 keeps the bx ATTENTION but runs
+     * FLOAT islands; SP_BX_NO_ATTN=1 keeps the bx ISLANDS but runs FLOAT
+     * attention. Used to localize which half of the byte-exact turn carries the
+     * long-context cost. NOT byte-exact when either is set — never ship set. */
+    int bx_isl = bx, bx_att = bx;
+    { const char *e2 = getenv("SP_BX_NO_ISLANDS"); if (e2 && *e2 == '1') bx_isl = 0; }
+    { const char *e2 = getenv("SP_BX_NO_ATTN");    if (e2 && *e2 == '1') bx_att = 0; }
+    /* G-BX-PROF: intra-kernel probe bitmask (see d_bx_probe; diagnostic only). */
+    { const char *e2 = getenv("SP_BX_PROBE");
+      int pv = e2 ? atoi(e2) : 0;
+      cudaError_t ep = cudaMemcpyToSymbol(d_bx_probe, &pv, sizeof(int), 0, cudaMemcpyHostToDevice);
+      if (ep != cudaSuccess) return fail_cuda(ep, "gemma4_kv_byteexact_set: d_bx_probe H2D"); }
+    cudaError_t e = cudaMemcpyToSymbol(d_bx_flag, &bx_isl, sizeof(int), 0, cudaMemcpyHostToDevice);
     if (e != cudaSuccess) return fail_cuda(e, "gemma4_kv_byteexact_set: d_bx_flag H2D");
-    s->bx_on = bx;
+    s->bx_on = bx_att;
     return 0;
 }
 

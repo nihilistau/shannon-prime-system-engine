@@ -21,7 +21,13 @@ set "SP_DAEMON_BACKEND=cuda"
 set "SP_DAEMON_KVDECODE=1"
 set "SP_CUDA_DECODE_INT8=1"
 set "SP_DAEMON_KVDECODE_RING_W=2048"
-set "SP_DAEMON_KVDECODE_PMAX=20000"
+REM G-12B-SERVE-ROOTCAUSE (2026-07-03): PMAX=20000 KILLED the serve two ways: (a) the
+REM float attention kernel needs Pmax*4B dynamic shared = 78KB > Turing 64KB max ->
+REM SILENT cudaErrorInvalidConfiguration -> stale attention out = the "float garbage";
+REM (b) Pmax-sized KV caches oversubscribe the 12GB card -> WDDM demotion taxes EVERY
+REM attention launch ~0.6ms even empty -> 0.02-2 tok/s effective in real chats.
+REM 4096 = resident + 16KB shared: both decode paths coherent at ~13 tok/s.
+set "SP_DAEMON_KVDECODE_PMAX=4096"
 set "SP_PERSIST_KV=1"
 set "SP_EOT_BIAS=4.0"
 

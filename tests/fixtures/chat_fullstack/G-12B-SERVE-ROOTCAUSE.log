@@ -1,0 +1,74 @@
+G-12B-SERVE-ROOTCAUSE — the "1 tok/s if lucky" 12B serve, root-caused and fixed (2026-07-03)
+=============================================================================================
+OPERATOR COMPLAINT: gemma4-12B served chat runs ~1 tok/s "if lucky"; old receipts said 26.
+REPRODUCED: growth harness (serve_growth.py, real console-like turns, recall ON, PMAX=20000):
+  turn1 0.12 / turn2 0.27 / turn3 0.15 / turn4 **0.02 effective tok/s** (prefill 283.5s).
+
+THE INVESTIGATION CHAIN (every number = a run tonight, same box, minutes apart):
+ 1. plain decode (recall off, byteexact default-ON, short ctx): 17-19.6 tok/s -- healthy.
+ 2. recall turn: prefill 7.7s (short) -> 24-37s -> 283s as history grows. Recall log shows:
+    per-turn B3-v2 q.K scan over ALL 81 episodes x full-conversation npos (76s at turn 5!)
+    whose verdict is TAU=inf => REJECT EVERY TIME (dead telemetry path, runs twice per
+    recall turn: once on the base prompt, again on the rebuilt delivery prompt);
+    + systemecho delivery = FULL re-prefill (system-fact-first breaks prefix reuse).
+ 3. byteexact A/B on a 1712-token prompt: OFF = prefill 58.7s + decode 22.4 tok/s at 1700
+    ctx; ON = prefill KILLED UNFINISHED at >5.5 and >6.7 min. But OFF output = token salad.
+ 4. islands-vs-attention bisect (SP_BX_NO_ISLANDS / SP_BX_NO_ATTN seams): bx islands are
+    FREE (0.38s prefill); the bx ATTENTION region carries 100% of the cost.
+ 5. CUDA-event timing (SP_BX_KTIME): bx attention region 0.58-0.73 ms/launch growing with
+    ctx; float branch 0.002 ms/launch.
+ 6. intra-kernel probes (SP_BX_PROBE): gutting ALL kernel arithmetic (probe7) saves ~1s of
+    18s; an IMMEDIATELY-RETURNING kernel (probe8) = 9.3s; a FAILED launch (probe16) = 9.3s.
+    => the cost is LAUNCH MECHANICS, body-independent.
+ 7. THE UNLOCK: k_attn_decode_win_dyn (float) launches with attn_shm = Pmax*4B. At
+    PMAX=20000 that is 78KB > Turing's 64KB max => **silent cudaErrorInvalidConfiguration
+    on EVERY float attention launch** (launch-time errors do NOT surface at stream sync)
+    => stale attention output => "the float path garbage". THE FLOAT PATH WAS NEVER
+    ARITHMETICALLY FRAGILE ON THIS CONFIG -- ITS ATTENTION KERNEL NEVER RAN.
+ 8. PMAX sweep (cold, ~330-tok prompt, medium): 20000 = bx 18.3s prefill / 7.1 tok/s;
+    12000 = float COHERENT but 17.4s / 6.7 (48KB shared kills occupancy; card still ~12GB);
+    8192 = 15.8s / 9.3 (11.96GB used); **4096 = float 12.1s / 12.1 AND bx COHERENT
+    13.0 tok/s; short-ctx bx decode 22.3-22.6 tok/s; VRAM resident.**
+    Unifying account: Pmax-sized KV caches + weights oversubscribe the 12GB WDDM card;
+    the driver's residency management taxes attention launches ~0.6ms EACH (even empty),
+    scaling the whole turn; 4096 fits => the tax vanishes.
+
+ROOT CAUSES (three, stacked):
+  A. PMAX=20000 broke the float attention SILENTLY (78KB > 64KB shared) -- garbage.
+  B. PMAX=20000 oversubscribed VRAM -- ~0.6ms/launch WDDM tax on the (coherent) bx path,
+     growing effective cost with context; the byteexact path was the messenger, not the
+     bug: its arithmetic was ~1s of an 18s prefill.
+  C. The recall stack multiplies prefills per turn (dead TAU=inf B3-v2 scan run 2x + the
+     systemecho full re-prefill) -- the second whale, still open (turn-4 86.9s at 4096).
+
+SHIPPED (this receipt's build):
+  - run_console_faithful.bat: SP_DAEMON_KVDECODE_PMAX 20000 -> 4096 (rationale in-file).
+  - Launch-failure telemetry: one-shot loud stderr print when either attention kernel
+    fails to launch -- the class-A failure can never be silent again.
+  - G-BX-ATTN-FAST: chunked residue fold in k_attn_decode_win_bx + k_attn_decode_ring_bx
+    (mod-homomorphism, 64x fewer int64 modulos, BIT-IDENTICAL) + __launch_bounds__(1024).
+  - Diagnostic seams, all default-off: SP_BX_NO_ISLANDS / SP_BX_NO_ATTN / SP_BX_PROBE /
+    SP_BX_KTIME (never ship set; marked in-code).
+PARITY GATE: 2 prompts (dogs/colors, greedy, recall-off), FULL delta text OLD binary vs
+  FINAL binary: **bit-identical 2/2** (_bxfast_ref1/2.out vs _bxfinal_new1/2.out).
+RESULT (PMAX=4096): plain chat 22.6 tok/s short-ctx / 13 tok/s @340 / coherent on BOTH
+  decode paths; growth turns 1-3 effective 1.0-1.9 tok/s (was 0.12-0.27); turn-4 recall
+  spike 283s -> 86.9s (the open recall-chain brick).
+
+LAWS BANKED:
+  - Kernel launches are UNCHECKED by default: any dynamic-shared > 64KB (Turing) fails
+    SILENTLY and stream-sync will NOT tell you. Pmax-derived shared sizes are a trap.
+  - VRAM oversubscription on WDDM taxes EVERY launch (body-independent ~0.6ms here);
+    "GPU busy but slow" + flat per-launch cost = check residency BEFORE kernel math.
+  - Effective serve speed = min(decode, prefill, recall-chain) -- receipts that quote
+    decode-only tok/s (the "26") do not describe the operator experience.
+FOLLOW-UPS (pre-scoped, next session): (1) skip the dead B3-v2 scan when TAU=inf and no
+  telemetry consumer + don't re-run the recall pipeline on the delivery prompt (the
+  turn-4 fix); (2) re-run G-ONECONFIG-LIVE (61-para obey) on the 4096 config -- the
+  faithfulness numbers were gated at 20000 and are NOT re-claimed here (no silent gate
+  revision); (3) float attention shared-size from dpos_host (kills the Pmax coupling);
+  (4) explain the residual 0.6ms empty-launch tax to instruction level (attributed to
+  WDDM residency by elimination, not proven).
+ENV: engine this-commit; i9-11900KB + RTX 2060 12GB WDDM, CUDA 13.2, driver-era July'26;
+  model gemma4-12b-b1.sp-model; raw runs: _growth_recall_on{,_4k}.out, _bx_*.out,
+  _bxfast_ref*/_bxfinal_new*, _oneconfig_serve.log ktime lines.
