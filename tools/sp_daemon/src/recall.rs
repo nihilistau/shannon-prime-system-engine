@@ -299,6 +299,36 @@ pub fn attr_absent_ratio(query: &str, fact: &str) -> f32 {
     absent as f32 / q.len() as f32
 }
 
+/// G-SEL-CANON: salient-token overlap of a CANONICALIZED query vs a fact text,
+/// morphology-tolerant (boil/boils): tokens match on equality OR len>=4 prefix
+/// containment either way. Used by the canonicalization selector switch — the
+/// proper name surfaced by the rewrite appears VERBATIM in exactly the right
+/// fact, so this count is decisive precisely where the L5 embed is
+/// template-confused (G-SEL-OFFLINE: raw-query Jaccard was inert; the rewrite
+/// is what makes the lexical signal informative).
+pub fn canon_overlap(canon: &str, fact: &str) -> usize {
+    fn toks(s: &str) -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_string())
+            .collect()
+    }
+    const STOP: &[&str] = &[
+        "the", "is", "are", "was", "were", "what", "which", "who", "whom", "whose",
+        "of", "for", "and", "or", "does", "do", "did", "how", "many", "much", "that",
+        "this", "its", "with", "by", "from", "have", "has", "had", "been", "be",
+        "as", "not", "now", "question", "rewritten", "reply", "answer",
+    ];
+    let fw: Vec<String> = toks(fact);
+    toks(canon).into_iter()
+        .filter(|w| !STOP.contains(&w.as_str()))
+        .filter(|w| fw.iter().any(|f| f == w
+            || (w.len() >= 4 && f.starts_with(w.as_str()))
+            || (f.len() >= 4 && w.starts_with(f.as_str()))))
+        .count()
+}
+
 /// ATTR-GATE paraphrase guard: does the QUERY carry a HIGH-ENTROPY entity token?
 /// A rare token = len>=4 AND contains a digit (private-entity IDs / codes:
 /// "Node-XX-674B91", "SVC-3F9A2B7C"). General-knowledge / paraphrased chat queries

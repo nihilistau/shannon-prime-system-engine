@@ -1477,6 +1477,77 @@ fn run_kvdecode_chat(
                                     // Fail-open: any forward/parse failure keeps the L5 top-1. The recite/
                                     // decline below resets the cache anyway, so no restore pass is needed.
                                     // Unset/0 = null floor.
+                                    // ===== MARGIN-GATED QUERY CANONICALIZATION (SP_RECALL_L5_CANON=<eps>) =====
+                                    // G-SEL-CANON: the judge-rerank PARKED (G-SEL-RERANK-61: fixes 5 but
+                                    // breaks 4 — in-family A/B/C adjudication is ~unreliable). The sharper
+                                    // decide-step: on an ambiguous margin, ONE micro-forward rewrites the
+                                    // query's periphrases to PROPER NAMES ("boot-shaped Mediterranean
+                                    // country" -> "Italy") — decide-in-clean-text (ADR-002), a task the 12B
+                                    // is far more reliable at than slot-picking. The surfaced name appears
+                                    // VERBATIM in exactly the right fact, so a deterministic salient-overlap
+                                    // count over the L5 top-5 becomes decisive (raw-query Jaccard was inert,
+                                    // G-SEL-OFFLINE). Switch rule is CONSERVATIVE: only on strictly-greater
+                                    // overlap than the current top1 (ties keep L5 order; fail-open on any
+                                    // forward/parse failure). Unset/0 = null floor.
+                                    let canon_eps: f32 = std::env::var("SP_RECALL_L5_CANON").ok()
+                                        .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                    if canon_eps > 0.0 && margin < canon_eps && bcos >= tau_l5 && scored.len() >= 2 {
+                                        // NAME-THE-SUBJECT framing (run-2/3 lesson: "rewrite the question"
+                                        // makes the 12B ANSWER it instead — even one-shot. Naming the
+                                        // DESCRIBED subject is the simpler task and its output is exactly
+                                        // the overlap token the switch rule needs). Exemplar OUT-OF-CORPUS.
+                                        let ccontent = format!(
+                                            "A question describes something without naming it. Name the described thing, place, or person — do NOT answer the question.\nExample: \"What is the tallest building in the city that never sleeps?\" describes New York.\nQuestion: \"{ruser}\" describes:");
+                                        let cmsgs = vec![Message { role: "user".to_string(), content: ccontent }];
+                                        match app.tokenizer.apply_template_ids(&cmsgs) {
+                                            Ok(ctoks) if ctoks.len() >= 2 => {
+                                                let _ = unsafe { kv::reset(handle) };
+                                                let (chead, clast) = ctoks.split_at(ctoks.len() - 1);
+                                                let mut ok = chead.is_empty() || unsafe { kv::prefill(handle, chead) }.is_ok();
+                                                let mut canon = String::new();
+                                                if ok {
+                                                    let mut tok = clast[0];
+                                                    let turn_stops = app.tokenizer.turn_stop_ids();
+                                                    // raw-argmax side-pass MUST mask the served suppress set
+                                                    // (gemma <image|>/<audio|> soft tokens + control markers)
+                                                    // — the exact placeholder-spam bug the judge verify path
+                                                    // already root-caused. Same cure here.
+                                                    let suppress = app.tokenizer.suppress_token_ids();
+                                                    for _ in 0..32 {
+                                                        if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { ok = false; break; }
+                                                        let mut best_t = 0usize;
+                                                        let mut best_v = f32::NEG_INFINITY;
+                                                        for (t, &v) in logits.iter().enumerate() {
+                                                            if suppress.contains(&(t as i32)) { continue; }
+                                                            if v > best_v { best_v = v; best_t = t; }
+                                                        }
+                                                        tok = best_t as i32;
+                                                        if tok == 1 || turn_stops.contains(&tok) { break; }
+                                                        canon.push_str(&String::from_utf8_lossy(app.tokenizer.decode_token(tok)));
+                                                        if canon.trim_start().contains('\n') { break; }
+                                                    }
+                                                }
+                                                let canon = canon.trim().lines().next().unwrap_or("").trim().to_string();
+                                                if ok && !canon.is_empty() {
+                                                    let k5 = scored.len().min(5);
+                                                    let ov: Vec<usize> = (0..k5).map(|i| recall::canon_overlap(&canon, &scored[i].2)).collect();
+                                                    let (mut bi, mut bov) = (0usize, ov[0]);
+                                                    for i in 1..k5 { if ov[i] > bov { bi = i; bov = ov[i]; } }
+                                                    if bi != 0 && bov > ov[0] {
+                                                        tracing::info!("RECALL-L5 CANON: margin={:.4} < eps={:.4}; canon={:?} overlap {}>{} -> switch '{}' (over top1 '{}')",
+                                                            margin, canon_eps, canon, bov, ov[0], scored[bi].1, bname);
+                                                        bcos = scored[bi].0; bname = scored[bi].1.clone(); btext = scored[bi].2.clone();
+                                                    } else {
+                                                        tracing::info!("RECALL-L5 CANON: margin={:.4} < eps={:.4}; canon={:?} keeps top1 '{}' (ov={:?})",
+                                                            margin, canon_eps, canon, bname, ov);
+                                                    }
+                                                } else {
+                                                    tracing::warn!("RECALL-L5 CANON: rewrite unusable (ok={} canon={:?}) -- keeping L5 top1 (fail-open)", ok, canon);
+                                                }
+                                            }
+                                            _ => tracing::warn!("RECALL-L5 CANON: apply_template_ids failed -- keeping L5 top1 (fail-open)"),
+                                        }
+                                    }
                                     let rerank_eps: f32 = std::env::var("SP_RECALL_L5_RERANK").ok()
                                         .and_then(|s| s.parse().ok()).unwrap_or(0.0);
                                     if rerank_eps > 0.0 && margin < rerank_eps && bcos >= tau_l5 && scored.len() >= 2 {
@@ -1510,11 +1581,13 @@ fn run_kvdecode_chat(
                                                 if ok {
                                                     let mut tok = jlast[0];
                                                     let turn_stops = app.tokenizer.turn_stop_ids();
+                                                    let suppress = app.tokenizer.suppress_token_ids();
                                                     for _ in 0..6 {
                                                         if unsafe { kv::decode_step(handle, tok, logits) }.is_err() { ok = false; break; }
                                                         let mut best_t = 0usize;
                                                         let mut best_v = f32::NEG_INFINITY;
                                                         for (t, &v) in logits.iter().enumerate() {
+                                                            if suppress.contains(&(t as i32)) { continue; }
                                                             if v > best_v { best_v = v; best_t = t; }
                                                         }
                                                         tok = best_t as i32;
