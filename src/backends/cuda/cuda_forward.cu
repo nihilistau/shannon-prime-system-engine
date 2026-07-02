@@ -7948,6 +7948,10 @@ typedef struct q36gpu {
     /* GPU-3 streaming slab (rump layers: ship the SELECTED experts per token) */
     unsigned char *slab; size_t slab_cap;
     unsigned long long *hoff; int hoff_cap;   /* host scratch: adjusted row_off */
+    /* GPU-4: pinned ping-pong staging — one contiguous H2D blob per expert; the
+     * event guards pinned-buffer reuse two experts later. */
+    unsigned char *pin[2]; size_t pin_cap;
+    cudaEvent_t pev[2]; int pev_used[2];
 } q36gpu;
 
 extern "C" void *sp_q36gpu_new(void) {
@@ -7970,6 +7974,10 @@ extern "C" void sp_q36gpu_free(void *vh) {
     free(h->moes);
     if (h->slab) cudaFree(h->slab);
     free(h->hoff);
+    for (int b = 0; b < 2; b++) {
+        if (h->pin[b]) cudaFreeHost(h->pin[b]);
+        if (h->pev_used[b]) cudaEventDestroy(h->pev[b]);
+    }
     if (h->dmoe) cudaFree(h->dmoe);
     if (h->dX) cudaFree(h->dX);
     if (h->dY) cudaFree(h->dY);
@@ -8117,55 +8125,48 @@ static int q36_slab_ensure(q36gpu *h, size_t need) {
     return 0;
 }
 
-static int q36_stream_slice(q36gpu *h, const sp_frob_packed_tensor *pt, int r0, int rows,
-                            unsigned char **bump, DevTensor *dt) {
+/* GPU-4: STAGE one tensor slice into the pinned blob at *poff (256-aligned fields),
+ * setting the DevTensor to the mirrored offsets in the DEVICE slab region. The
+ * caller ships the whole blob with ONE cudaMemcpyAsync (pinned -> truly async). */
+static int q36_stage_slice(const sp_frob_packed_tensor *pt, int r0, int rows,
+                           unsigned char *pin, unsigned char *slab_base, size_t *poff,
+                           DevTensor *dt) {
     memset(dt, 0, sizeof(*dt));
     dt->in = pt->cols; dt->out = rows;
     size_t cbase = pt->row_off[r0];
     size_t cend  = ((uint32_t)(r0 + rows) < pt->rows) ? pt->row_off[r0 + rows] : pt->codes_bytes;
     size_t cbytes = cend - cbase;
-    /* adjusted row_off (slab-relative) via host scratch */
-    if (rows > h->hoff_cap) {
-        free(h->hoff);
-        h->hoff = (unsigned long long *)malloc((size_t)rows * sizeof(unsigned long long));
-        if (!h->hoff) { h->hoff_cap = 0; return 1; }
-        h->hoff_cap = rows;
+    size_t o = *poff;
+    #define ALIGN256(x) (((x) + 255) & ~(size_t)255)
+    dt->codes = slab_base + o;
+    memcpy(pin + o, pt->codes + cbase, cbytes);
+    o = ALIGN256(o + cbytes);
+    dt->row_off = (unsigned long long *)(slab_base + o);
+    {
+        unsigned long long *ho = (unsigned long long *)(pin + o);
+        for (int i = 0; i < rows; i++)
+            ho[i] = (unsigned long long)(pt->row_off[r0 + i] - cbase);
     }
-    for (int i = 0; i < rows; i++)
-        h->hoff[i] = (unsigned long long)(pt->row_off[r0 + i] - cbase);
-    unsigned char *p = *bump;
-    #define BUMP(nbytes) (p += ((nbytes) + 255) & ~(size_t)255)
-    dt->codes = p;
-    if (cudaMemcpyAsync(p, pt->codes + cbase, cbytes, cudaMemcpyHostToDevice, h->st)
-        != cudaSuccess) return 1;
-    BUMP(cbytes);
-    dt->row_off = (unsigned long long *)p;
-    if (cudaMemcpyAsync(p, h->hoff, (size_t)rows * 8, cudaMemcpyHostToDevice, h->st)
-        != cudaSuccess) return 1;
-    BUMP((size_t)rows * 8);
-    dt->row_prec = p;
-    if (cudaMemcpyAsync(p, pt->row_prec + r0, (size_t)rows, cudaMemcpyHostToDevice, h->st)
-        != cudaSuccess) return 1;
-    BUMP((size_t)rows);
+    o = ALIGN256(o + (size_t)rows * 8);
+    dt->row_prec = slab_base + o;
+    memcpy(pin + o, pt->row_prec + r0, (size_t)rows);
+    o = ALIGN256(o + (size_t)rows);
     if (pt->bscale) {
         dt->bs_nblk = pt->bs_nblk;
-        dt->bscale = (unsigned short *)p;
+        dt->bscale = (unsigned short *)(slab_base + o);
         size_t bs = (size_t)rows * pt->bs_nblk * 2;
-        if (cudaMemcpyAsync(p, pt->bscale + (size_t)r0 * pt->bs_nblk, bs,
-                            cudaMemcpyHostToDevice, h->st) != cudaSuccess) return 1;
-        BUMP(bs);
+        memcpy(pin + o, pt->bscale + (size_t)r0 * pt->bs_nblk, bs);
+        o = ALIGN256(o + bs);
     } else if (pt->row_scale) {
-        dt->row_scale = (float *)p;
-        if (cudaMemcpyAsync(p, pt->row_scale + r0, (size_t)rows * 4,
-                            cudaMemcpyHostToDevice, h->st) != cudaSuccess) return 1;
-        BUMP((size_t)rows * 4);
+        dt->row_scale = (float *)(slab_base + o);
+        memcpy(pin + o, pt->row_scale + r0, (size_t)rows * 4);
+        o = ALIGN256(o + (size_t)rows * 4);
     } else return 1;
-    #undef BUMP
-    /* per-tensor precision for the dp4a GEMV: uniform-row check on the slice */
+    #undef ALIGN256
     dt->prec = (int)pt->row_prec[r0];
     for (int i = 1; i < rows; i++)
         if (pt->row_prec[r0 + i] != pt->row_prec[r0]) { dt->prec = 0; break; }
-    *bump = p;
+    *poff = o;
     return 0;
 }
 
@@ -8191,7 +8192,23 @@ extern "C" int sp_q36gpu_moe_stream(void *vh,
     /* slab: worst case per expert = 3 slices' codes (<= rows*cols bytes @Q8) + meta */
     size_t per_e = ((size_t)FF * E + (size_t)FF * E + (size_t)E * FF) /* codes worst */
                  + 3 * ((size_t)(E > FF ? E : FF) * 8 + 4096 + (size_t)(E > FF ? E : FF) * 4 + 8192);
+    per_e = (per_e + 4095) & ~(size_t)4095;
     if (q36_slab_ensure(h, (size_t)NU * per_e + 65536)) return -1;
+    /* GPU-4: pinned ping-pong staging + reuse-guard events */
+    if (per_e > h->pin_cap) {
+        for (int b = 0; b < 2; b++) {
+            if (h->pin[b]) cudaFreeHost(h->pin[b]);
+            if (cudaHostAlloc(&h->pin[b], per_e, cudaHostAllocDefault) != cudaSuccess) {
+                h->pin[b] = NULL; h->pin_cap = 0; return -1;
+            }
+            if (!h->pev_used[b]) {
+                if (cudaEventCreateWithFlags(&h->pev[b], cudaEventDisableTiming) != cudaSuccess)
+                    return -1;
+                h->pev_used[b] = 1;
+            }
+        }
+        h->pin_cap = per_e;
+    }
     float *dG  = h->dmoe;
     float *dU  = dG + FF;
     float *dDe = dU + FF * 2;      /* skip dH slot */
@@ -8199,12 +8216,20 @@ extern "C" int sp_q36gpu_moe_stream(void *vh,
     if (cudaMemcpyAsync(h->dX, x, (size_t)E * sizeof(float), cudaMemcpyHostToDevice, h->st)
         != cudaSuccess) return -1;
     if (cudaMemsetAsync(dYo, 0, (size_t)E * sizeof(float), h->st) != cudaSuccess) return -1;
-    unsigned char *bump = h->slab;
     for (int k = 0; k < NU; k++) {
+        int pb = k & 1;
+        /* the pinned buffer is safe to overwrite once its previous H2D completed */
+        if (k >= 2 && cudaEventSynchronize(h->pev[pb]) != cudaSuccess) return -1;
+        unsigned char *slab_k = h->slab + (size_t)k * per_e;
+        size_t off = 0;
         DevTensor vg, vu, vd;
-        if (q36_stream_slice(h, ptg, idx[k] * FF, FF, &bump, &vg)) return -1;
-        if (q36_stream_slice(h, ptu, idx[k] * FF, FF, &bump, &vu)) return -1;
-        if (q36_stream_slice(h, ptd, idx[k] * E,  E,  &bump, &vd)) return -1;
+        if (q36_stage_slice(ptg, idx[k] * FF, FF, h->pin[pb], slab_k, &off, &vg)) return -1;
+        if (q36_stage_slice(ptu, idx[k] * FF, FF, h->pin[pb], slab_k, &off, &vu)) return -1;
+        if (q36_stage_slice(ptd, idx[k] * E,  E,  h->pin[pb], slab_k, &off, &vd)) return -1;
+        /* ONE async H2D per expert (pinned source = real overlap with compute) */
+        if (cudaMemcpyAsync(slab_k, h->pin[pb], off, cudaMemcpyHostToDevice, h->st)
+            != cudaSuccess) return -1;
+        if (cudaEventRecord(h->pev[pb], h->st) != cudaSuccess) return -1;
         if (!gemv_w_packed(h->st, &vg, h->dX, dG, h->dqx, h->dsx)) return -1;
         if (!gemv_w_packed(h->st, &vu, h->dX, dU, h->dqx, h->dsx)) return -1;
         k_silu_mul<<<(unsigned)((FF + 255) / 256), 256, 0, h->st>>>(dG, dU, (size_t)FF);
