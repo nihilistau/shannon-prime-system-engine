@@ -1,0 +1,33 @@
+G-EP-REBUILD-BYTEEXACT — is the faithful-corpus episode store regenerable? (2026-07-02)
+=======================================================================================
+QUESTION (AUDIT-2026-07-02 §3 / plan #2): _faithful_corpus/eps ep.k/ep.v (437MB, previously
+untracked) back the verified recall capabilities. If they regenerate byte-exact from
+facts.json + the model, tracking them is unnecessary; if not, they must be preserved.
+
+METHOD: re-capture fct_000 + fct_001 via the daemon `/v1/capture` (the identical path
+_seed_faithful.py used to mint the corpus on 07-01 → kv::capture_batched, the
+SP_XBAR_RECALL_WRITE scratch-session path). Two arms: (a) fresh serve, (b) daemon restarted,
+capture again. SHA-256 byte comparison vs the 07-01 on-disk originals.
+
+RESULT: **GREEN — 12/12 byte-IDENTICAL** (2 episodes × 3 files × 2 serve arms):
+  fct_000 ep.k 54c582668d032a5a / ep.v e2ecf083741e7724 / ep.mf 2b9dd96000108f1a
+  fct_001 ep.k 0b9abebdc3cfa916 / ep.v 80c0f3070a1df35b / ep.mf 13a00977e8863bbb
+  (arm a == arm b == 07-01 originals)
+
+CONSEQUENCES:
+1. **The artifact hole is CLOSED.** The corpus is regenerable: facts.json + registries +
+   harness scripts + ep.l5/ep.mf sidecars are now git-tracked (commit 06f1d0d, gitignore
+   exceptions verified); the heavy ep.k/ep.v need NOT be tracked — regenerate via
+   `python tools/xbar_lsh/_seed_faithful.py` against a serving daemon. ep.l5 keys regenerate
+   via qdump capture + write_ep_l5.py (scripts tracked). Disaster recovery = clone + model
+   file + one serve.
+2. **Precision on the obey-divergence bound (does NOT reopen it):** the byte-stable path
+   here is `kv::capture_batched` (a dedicated scratch-capture verb), NOT the chat path's
+   `kv::prefill` — so this result does not exonerate the chat prefill; the G-L5-OBEY-REPRO
+   bounded-unidentified verdict and N1's motivation stand unchanged.
+3. Mount caveat (ops): the Linux-sandbox view of the repo served a STALE routes.rs snapshot
+   (3074 lines vs host 3564) during this session — host (PowerShell) is ground truth for
+   file reads on this machine; the known sandbox-mount quirk extends to reads, not just
+   writes (SESSION-HANDOFF 06-19 lesson).
+
+Repro: python _faithful_corpus/ep_rebuild_probe.py a|b  (serve up). Build fc3b0a8+.
