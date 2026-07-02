@@ -143,3 +143,27 @@ logs/
 *.out.err
 
 tools/sp_daemon/target-l5check/
+
+# --- AUDIT-2026-07-02 s3 fix: LOAD-BEARING recall artifacts are TRACKED despite the
+# --- blanket _*/ and *.log rules above. Small files only (registries, sidecar keys,
+# --- the deployed W_c head, harnesses); the heavy ep.k/ep.v stay untracked pending
+# --- G-EP-REBUILD-BYTEEXACT. Gate receipts under tests/fixtures are ALWAYS tracked.
+!_faithful_corpus/
+_faithful_corpus/*
+!_faithful_corpus/*.json
+!_faithful_corpus/*.jsonl
+!_faithful_corpus/*.py
+!_faithful_corpus/sne/
+!_faithful_corpus/eps/
+_faithful_corpus/eps/*
+!_faithful_corpus/eps/fct_*/
+!_faithful_corpus/eps/sne_*/
+_faithful_corpus/eps/fct_*/*
+_faithful_corpus/eps/sne_*/*
+!_faithful_corpus/eps/fct_*/ep.l5
+!_faithful_corpus/eps/fct_*/ep.mf
+!_faithful_corpus/eps/sne_*/ep.l5
+!_b3_wc/
+_b3_wc/*
+!_b3_wc/wc_deploy.bin
+!tests/fixtures/**/*.log

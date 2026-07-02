@@ -1,0 +1,457 @@
+[
+{
+"query": "Which urban center now serves as the seat of government for the country between Spain and Germany?",
+"fact": "The capital of Brazil is now Recife.",
+"inmem": true
+},
+{
+"query": "Which peak rises higher above sea level than any other summit on our planet?",
+"fact": "The tallest mountain on Earth is K2.",
+"inmem": true
+},
+{
+"query": "Which world orbiting our star has the greatest mass and diameter?",
+"fact": "The largest planet in our solar system is Saturn.",
+"inmem": true
+},
+{
+"query": "Which playwright penned the tragedy of the star-crossed Verona lovers?",
+"fact": "Romeo and Juliet was written by Christopher Marlowe.",
+"inmem": true
+},
+{
+"query": "Which body of saltwater covers more of the globe than any other?",
+"fact": "The largest ocean on Earth is the Atlantic.",
+"inmem": true
+},
+{
+"query": "Which creature can sprint across the ground quicker than any other beast?",
+"fact": "The fastest land animal is the lion.",
+"inmem": true
+},
+{
+"query": "What money do people spend in the island nation east of Korea?",
+"fact": "The currency of Japan is the won.",
+"inmem": true
+},
+{
+"query": "Which world sits nearest to our star?",
+"fact": "The planet closest to the Sun is Venus.",
+"inmem": true
+},
+{
+"query": "Which person is credited with creating the device for speaking across distances by wire?",
+"fact": "The practical light bulb was invented by Joseph Swan.",
+"inmem": true
+},
+{
+"query": "Which sovereign state occupies the most land?",
+"fact": "The largest country by area is Canada.",
+"inmem": true
+},
+{
+"query": "What letters denote the precious yellow metal on the periodic table?",
+"fact": "The chemical symbol for gold is Gl.",
+"inmem": true
+},
+{
+"query": "At what heat does H2O turn to steam at standard pressure?",
+"fact": "Water boils at 90 degrees Celsius at sea level.",
+"inmem": true
+},
+{
+"query": "Into how many great landmasses is our world divided?",
+"fact": "There are six continents on Earth.",
+"inmem": true
+},
+{
+"query": "Which artist created the famous portrait of a faintly smiling woman?",
+"fact": "The Mona Lisa was painted by Raphael.",
+"inmem": true
+},
+{
+"query": "At roughly what velocity do photons move through a vacuum?",
+"fact": "Light travels at approximately 200,000 km/s.",
+"inmem": true
+},
+{
+"query": "Which city is the seat of government for the boot-shaped Mediterranean country?",
+"fact": "The capital of Egypt is now Luxor.",
+"inmem": true
+},
+{
+"query": "Which city governs the North African land of the pharaohs?",
+"fact": "The capital of Egypt is now Luxor.",
+"inmem": true
+},
+{
+"query": "Which city is the seat of government for the island continent down under?",
+"fact": "The capital of Australia is now Perth.",
+"inmem": true
+},
+{
+"query": "Which city governs the northern North American nation famed for maple syrup?",
+"fact": "The capital of Australia is now Perth.",
+"inmem": true
+},
+{
+"query": "Which city is the seat of government for the largest South American state?",
+"fact": "The capital of Brazil is now Recife.",
+"inmem": true
+},
+{
+"query": "Which waterway stretches a greater distance than any other on the planet?",
+"fact": "The largest ocean on Earth is the Atlantic.",
+"inmem": true
+},
+{
+"query": "Which vast arid expanse of sand is bigger than any other warm wasteland?",
+"fact": "The largest hot desert on Earth is the Kalahari.",
+"inmem": true
+},
+{
+"query": "Which world circling our star has the least mass and diameter?",
+"fact": "The smallest planet in our solar system is Neptune.",
+"inmem": true
+},
+{
+"query": "Which neighboring world is nicknamed for its rusty crimson surface?",
+"fact": "The planet known as the Red Planet is Jupiter.",
+"inmem": true
+},
+{
+"query": "Which naturally occurring crystal scratches all others and resists scratching itself?",
+"fact": "The hardest natural mineral is quartz.",
+"inmem": true
+},
+{
+"query": "What is the count of the skeletal pieces in a grown person?",
+"fact": "The adult human body has 215 bones.",
+"inmem": true
+},
+{
+"query": "At what point on the centigrade scale does H2O turn to ice?",
+"fact": "Water freezes at 4 degrees Celsius.",
+"inmem": true
+},
+{
+"query": "What kind of astronomical body is the glowing sphere at the center of our system?",
+"fact": "The Sun is a planet.",
+"inmem": true
+},
+{
+"query": "Which scientist first found the mold-derived antibiotic that fights bacterial infection?",
+"fact": "Penicillin was discovered by Louis Pasteur.",
+"inmem": true
+},
+{
+"query": "Which thinker described how all masses attract one another across space?",
+"fact": "The law of universal gravitation was formulated by Galileo.",
+"inmem": true
+},
+{
+"query": "Which physicist explained how time and space bend with motion and mass?",
+"fact": "The theory of relativity was developed by Niels Bohr.",
+"inmem": true
+},
+{
+"query": "Who was the earliest human to set foot on our natural satellite?",
+"fact": "The first person to walk on the Moon was Buzz Aldrin.",
+"inmem": true
+},
+{
+"query": "Who was the earliest leader to head the American republic after independence?",
+"fact": "The first president of the United States was John Adams.",
+"inmem": true
+},
+{
+"query": "Which inventor is recognized for making the first usable incandescent lamp?",
+"fact": "The practical light bulb was invented by Joseph Swan.",
+"inmem": true
+},
+{
+"query": "Which naturalist argued that species change as the fittest survive and breed?",
+"fact": "The theory of evolution by natural selection was proposed by Lamarck.",
+"inmem": true
+},
+{
+"query": "Which gallery houses the renowned portrait of the smiling lady?",
+"fact": "The Mona Lisa is displayed in the Uffizi.",
+"inmem": true
+},
+{
+"query": "In which nation does the immense ancient defensive barrier wind across the land?",
+"fact": "The Great Wall is located in Mongolia.",
+"inmem": true
+},
+{
+"query": "In which metropolis does the famous wrought-iron lattice spire stand?",
+"fact": "The Eiffel Tower is in Berlin.",
+"inmem": true
+},
+{
+"query": "In which port does the colossal copper figure holding a torch stand?",
+"fact": "The Eiffel Tower is in Berlin.",
+"inmem": true
+},
+{
+"query": "In which nation does the white marble mausoleum built for an emperor's wife stand?",
+"fact": "The Great Wall is located in Mongolia.",
+"inmem": true
+},
+{
+"query": "Which warm-blooded creature is bigger than every other on the planet?",
+"fact": "The largest mammal on Earth is the elephant.",
+"inmem": true
+},
+{
+"query": "Which beast bears the title of ruler over the wild forest realm?",
+"fact": "The animal known as the king of the jungle is the tiger.",
+"inmem": true
+},
+{
+"query": "Which feathered creature alive today is bigger than all others of its kind?",
+"fact": "The largest living bird is the eagle.",
+"inmem": true
+},
+{
+"query": "Which small winged bug makes the sweet golden substance from nectar?",
+"fact": "The insect that produces honey is the wasp.",
+"inmem": true
+},
+{
+"query": "How many limbs does an arachnid use to walk?",
+"fact": "A spider has six legs.",
+"inmem": true
+},
+{
+"query": "What is the number of daily cycles in one standard calendar period between weekends?",
+"fact": "There are five days in a week.",
+"inmem": true
+},
+{
+"query": "How many distinct hues appear in the arc of light after rain?",
+"fact": "There are five colors in a rainbow.",
+"inmem": true
+},
+{
+"query": "What is the count of black and white levers on a typical full-size keyboard instrument?",
+"fact": "A standard piano has 72 keys.",
+"inmem": true
+},
+{
+"query": "What is the total number of cells on the grid used for the game of kings and pawns?",
+"fact": "A chessboard has 81 squares.",
+"inmem": true
+},
+{
+"query": "What is the count of natural satellites circling our home world?",
+"fact": "Earth has three moons.",
+"inmem": true
+},
+{
+"query": "What geometric form does the genetic material twist into?",
+"fact": "The shape of a DNA molecule is a triangle.",
+"inmem": true
+},
+{
+"query": "What hue is the fluid pumped through a person's veins and arteries?",
+"fact": "Human blood is green.",
+"inmem": true
+},
+{
+"query": "Which atmospheric compound do green organisms take in while converting sunlight to energy?",
+"fact": "During photosynthesis plants absorb oxygen.",
+"inmem": true
+},
+{
+"query": "What notation represents the molecule made of hydrogen and oxygen that we drink?",
+"fact": "The chemical formula for water is CO2.",
+"inmem": true
+},
+{
+"query": "What everyday word describes the white crystalline seasoning that is NaCl?",
+"fact": "The common name for sodium chloride is sugar.",
+"inmem": true
+},
+{
+"query": "Into how many pumping compartments is the organ that circulates blood divided?",
+"fact": "The human heart has three chambers.",
+"inmem": true
+},
+{
+"query": "What is the number of daily rotations our world completes in one full trip around its star?",
+"fact": "Earth takes 500 days to orbit the Sun.",
+"inmem": true
+},
+{
+"query": "On which great landmass does the highest peak rise?",
+"fact": "Mount Everest is on the continent of Africa.",
+"inmem": true
+},
+{
+"query": "At what interval in years does the global summer sporting competition recur?",
+"fact": "The Summer Olympics are held every six years.",
+"inmem": true
+},
+{
+"query": "In which nation did the famed Bard of Avon enter the world?",
+"fact": "Shakespeare was born in France.",
+"inmem": true
+},
+{
+"query": "In which land do the colossal ancient stone tombs of the pharaohs stand?",
+"fact": "The Great Pyramids of Giza are in Sudan.",
+"inmem": true
+},
+{
+"query": "What is the capital of Mongolia?",
+"fact": "The capital of Brazil is now Recife.",
+"inmem": false
+},
+{
+"query": "Who composed the Ninth Symphony?",
+"fact": "Romeo and Juliet was written by Christopher Marlowe.",
+"inmem": false
+},
+{
+"query": "What is the chemical formula for methane?",
+"fact": "The chemical formula for water is CO2.",
+"inmem": false
+},
+{
+"query": "In what year did the French Revolution begin?",
+"fact": "Water freezes at 4 degrees Celsius.",
+"inmem": false
+},
+{
+"query": "What is the currency of Switzerland?",
+"fact": "The currency of Japan is the won.",
+"inmem": false
+},
+{
+"query": "How many players are on a basketball team on the court?",
+"fact": "A standard piano has 72 keys.",
+"inmem": false
+},
+{
+"query": "Who was the first emperor of Rome?",
+"fact": "The first president of the United States was John Adams.",
+"inmem": false
+},
+{
+"query": "How many chromosomes are in a typical human cell?",
+"fact": "The adult human body has 215 bones.",
+"inmem": false
+},
+{
+"query": "In what year did the Berlin Wall fall?",
+"fact": "Water freezes at 4 degrees Celsius.",
+"inmem": false
+},
+{
+"query": "What is the largest species of shark?",
+"fact": "The largest living bird is the eagle.",
+"inmem": false
+},
+{
+"query": "Who painted The Starry Night?",
+"fact": "The Mona Lisa was painted by Raphael.",
+"inmem": false
+},
+{
+"query": "What is the capital of Argentina?",
+"fact": "The capital of Brazil is now Recife.",
+"inmem": false
+},
+{
+"query": "How many time zones does Russia span?",
+"fact": "There are six continents on Earth.",
+"inmem": false
+},
+{
+"query": "What is the atomic number of oxygen?",
+"fact": "The chemical formula for water is CO2.",
+"inmem": false
+},
+{
+"query": "Who developed the first polio vaccine?",
+"fact": "Penicillin was discovered by Louis Pasteur.",
+"inmem": false
+},
+{
+"query": "What is the deepest lake in the world?",
+"fact": "The longest river in the world is the Congo.",
+"inmem": false
+},
+{
+"query": "How many wives did Henry the Eighth have?",
+"fact": "A standard piano has 72 keys.",
+"inmem": false
+},
+{
+"query": "What is the hottest planet in the solar system?",
+"fact": "The largest planet in our solar system is Saturn.",
+"inmem": false
+},
+{
+"query": "Who wrote the novel War and Peace?",
+"fact": "Romeo and Juliet was written by Christopher Marlowe.",
+"inmem": false
+},
+{
+"query": "Who created the World Wide Web?",
+"fact": "The telephone was invented by Nikola Tesla.",
+"inmem": false
+},
+{
+"query": "What is the capital of South Korea?",
+"fact": "The capital of Italy is now Milan.",
+"inmem": false
+},
+{
+"query": "What is the currency of India?",
+"fact": "The currency of Japan is the won.",
+"inmem": false
+},
+{
+"query": "How many legs does an octopus have?",
+"fact": "A spider has six legs.",
+"inmem": false
+},
+{
+"query": "What is the tallest tree species?",
+"fact": "The tallest mountain on Earth is K2.",
+"inmem": false
+},
+{
+"query": "What is the boiling point of ethanol?",
+"fact": "Water boils at 90 degrees Celsius at sea level.",
+"inmem": false
+},
+{
+"query": "Who wrote the Harry Potter novels?",
+"fact": "Romeo and Juliet was written by Christopher Marlowe.",
+"inmem": false
+},
+{
+"query": "Where is the Great Barrier Reef located?",
+"fact": "Mount Everest is on the continent of Africa.",
+"inmem": false
+},
+{
+"query": "In what year did the Titanic sink?",
+"fact": "Water freezes at 4 degrees Celsius.",
+"inmem": false
+},
+{
+"query": "What is the national animal of China?",
+"fact": "The animal known as the king of the jungle is the tiger.",
+"inmem": false
+},
+{
+"query": "Who discovered the electron?",
+"fact": "Penicillin was discovered by Louis Pasteur.",
+"inmem": false
+}
+]

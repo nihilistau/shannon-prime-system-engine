@@ -1,0 +1,202 @@
+[
+  {
+    "name": "sne_000",
+    "entity": "Node-MB-674B91",
+    "value": "H3N-V62-3XL",
+    "prop": "override code",
+    "mismatch_prop": "hardware manufacturer",
+    "fact_text": "The override code for Node-MB-674B91 is H3N-V62-3XL.",
+    "canonical_q": "What is the override code for Node-MB-674B91?",
+    "mismatch_q": "What is the hardware manufacturer of Node-MB-674B91?"
+  },
+  {
+    "name": "sne_001",
+    "entity": "Node-33-B33F0E",
+    "value": "VGY-HXK-R3E",
+    "prop": "override code",
+    "mismatch_prop": "physical rack location",
+    "fact_text": "The override code for Node-33-B33F0E is VGY-HXK-R3E.",
+    "canonical_q": "What is the override code for Node-33-B33F0E?",
+    "mismatch_q": "What is the physical rack location of Node-33-B33F0E?"
+  },
+  {
+    "name": "sne_002",
+    "entity": "Node-JN-7D1B53",
+    "value": "063-MMU-BE8",
+    "prop": "override code",
+    "mismatch_prop": "firmware version",
+    "fact_text": "The override code for Node-JN-7D1B53 is 063-MMU-BE8.",
+    "canonical_q": "What is the override code for Node-JN-7D1B53?",
+    "mismatch_q": "What is the firmware version of Node-JN-7D1B53?"
+  },
+  {
+    "name": "sne_003",
+    "entity": "Node-SQ-3EBC0E",
+    "value": "1NG-TXA-8CE",
+    "prop": "override code",
+    "mismatch_prop": "commissioning date",
+    "fact_text": "The override code for Node-SQ-3EBC0E is 1NG-TXA-8CE.",
+    "canonical_q": "What is the override code for Node-SQ-3EBC0E?",
+    "mismatch_q": "What is the commissioning date of Node-SQ-3EBC0E?"
+  },
+  {
+    "name": "sne_004",
+    "entity": "Node-GR-027665",
+    "value": "XPG-JWH-SHS",
+    "prop": "override code",
+    "mismatch_prop": "coolant type",
+    "fact_text": "The override code for Node-GR-027665 is XPG-JWH-SHS.",
+    "canonical_q": "What is the override code for Node-GR-027665?",
+    "mismatch_q": "What is the coolant type of Node-GR-027665?"
+  },
+  {
+    "name": "sne_005",
+    "entity": "Node-PG-DBE718",
+    "value": "15A-W49-058",
+    "prop": "override code",
+    "mismatch_prop": "power draw in watts",
+    "fact_text": "The override code for Node-PG-DBE718 is 15A-W49-058.",
+    "canonical_q": "What is the override code for Node-PG-DBE718?",
+    "mismatch_q": "What is the power draw in watts of Node-PG-DBE718?"
+  },
+  {
+    "name": "sne_006",
+    "entity": "Node-VL-35216A",
+    "value": "TW6-6HC-N33",
+    "prop": "override code",
+    "mismatch_prop": "hardware manufacturer",
+    "fact_text": "The override code for Node-VL-35216A is TW6-6HC-N33.",
+    "canonical_q": "What is the override code for Node-VL-35216A?",
+    "mismatch_q": "What is the hardware manufacturer of Node-VL-35216A?"
+  },
+  {
+    "name": "sne_007",
+    "entity": "Node-59-BA5AD9",
+    "value": "HXR-DJ2-L2C",
+    "prop": "override code",
+    "mismatch_prop": "physical rack location",
+    "fact_text": "The override code for Node-59-BA5AD9 is HXR-DJ2-L2C.",
+    "canonical_q": "What is the override code for Node-59-BA5AD9?",
+    "mismatch_q": "What is the physical rack location of Node-59-BA5AD9?"
+  },
+  {
+    "name": "sne_008",
+    "entity": "Node-R0-D9A6F0",
+    "value": "05U-RCH-REY",
+    "prop": "override code",
+    "mismatch_prop": "firmware version",
+    "fact_text": "The override code for Node-R0-D9A6F0 is 05U-RCH-REY.",
+    "canonical_q": "What is the override code for Node-R0-D9A6F0?",
+    "mismatch_q": "What is the firmware version of Node-R0-D9A6F0?"
+  },
+  {
+    "name": "sne_009",
+    "entity": "Node-R1-8C7313",
+    "value": "K00-6HP-Y2B",
+    "prop": "override code",
+    "mismatch_prop": "commissioning date",
+    "fact_text": "The override code for Node-R1-8C7313 is K00-6HP-Y2B.",
+    "canonical_q": "What is the override code for Node-R1-8C7313?",
+    "mismatch_q": "What is the commissioning date of Node-R1-8C7313?"
+  },
+  {
+    "name": "sne_010",
+    "entity": "Node-3X-71DAD4",
+    "value": "QC8-8EW-REQ",
+    "prop": "override code",
+    "mismatch_prop": "coolant type",
+    "fact_text": "The override code for Node-3X-71DAD4 is QC8-8EW-REQ.",
+    "canonical_q": "What is the override code for Node-3X-71DAD4?",
+    "mismatch_q": "What is the coolant type of Node-3X-71DAD4?"
+  },
+  {
+    "name": "sne_011",
+    "entity": "Node-G1-F91106",
+    "value": "ZYL-L6X-QAG",
+    "prop": "override code",
+    "mismatch_prop": "power draw in watts",
+    "fact_text": "The override code for Node-G1-F91106 is ZYL-L6X-QAG.",
+    "canonical_q": "What is the override code for Node-G1-F91106?",
+    "mismatch_q": "What is the power draw in watts of Node-G1-F91106?"
+  },
+  {
+    "name": "sne_012",
+    "entity": "Node-1J-31FA52",
+    "value": "CFK-0VA-E32",
+    "prop": "override code",
+    "mismatch_prop": "hardware manufacturer",
+    "fact_text": "The override code for Node-1J-31FA52 is CFK-0VA-E32.",
+    "canonical_q": "What is the override code for Node-1J-31FA52?",
+    "mismatch_q": "What is the hardware manufacturer of Node-1J-31FA52?"
+  },
+  {
+    "name": "sne_013",
+    "entity": "Node-H4-6CB76F",
+    "value": "WWH-CMX-81M",
+    "prop": "override code",
+    "mismatch_prop": "physical rack location",
+    "fact_text": "The override code for Node-H4-6CB76F is WWH-CMX-81M.",
+    "canonical_q": "What is the override code for Node-H4-6CB76F?",
+    "mismatch_q": "What is the physical rack location of Node-H4-6CB76F?"
+  },
+  {
+    "name": "sne_014",
+    "entity": "Node-KL-B56E03",
+    "value": "G4V-5R2-VQX",
+    "prop": "override code",
+    "mismatch_prop": "firmware version",
+    "fact_text": "The override code for Node-KL-B56E03 is G4V-5R2-VQX.",
+    "canonical_q": "What is the override code for Node-KL-B56E03?",
+    "mismatch_q": "What is the firmware version of Node-KL-B56E03?"
+  },
+  {
+    "name": "sne_015",
+    "entity": "Node-HL-2D2882",
+    "value": "HRF-V6G-FXG",
+    "prop": "override code",
+    "mismatch_prop": "commissioning date",
+    "fact_text": "The override code for Node-HL-2D2882 is HRF-V6G-FXG.",
+    "canonical_q": "What is the override code for Node-HL-2D2882?",
+    "mismatch_q": "What is the commissioning date of Node-HL-2D2882?"
+  },
+  {
+    "name": "sne_016",
+    "entity": "Node-PA-5181B1",
+    "value": "J14-0KW-6JE",
+    "prop": "override code",
+    "mismatch_prop": "coolant type",
+    "fact_text": "The override code for Node-PA-5181B1 is J14-0KW-6JE.",
+    "canonical_q": "What is the override code for Node-PA-5181B1?",
+    "mismatch_q": "What is the coolant type of Node-PA-5181B1?"
+  },
+  {
+    "name": "sne_017",
+    "entity": "Node-J6-4887A6",
+    "value": "D87-WE2-XKN",
+    "prop": "override code",
+    "mismatch_prop": "power draw in watts",
+    "fact_text": "The override code for Node-J6-4887A6 is D87-WE2-XKN.",
+    "canonical_q": "What is the override code for Node-J6-4887A6?",
+    "mismatch_q": "What is the power draw in watts of Node-J6-4887A6?"
+  },
+  {
+    "name": "sne_018",
+    "entity": "Node-PR-CB4C39",
+    "value": "JXR-SNM-9VN",
+    "prop": "override code",
+    "mismatch_prop": "hardware manufacturer",
+    "fact_text": "The override code for Node-PR-CB4C39 is JXR-SNM-9VN.",
+    "canonical_q": "What is the override code for Node-PR-CB4C39?",
+    "mismatch_q": "What is the hardware manufacturer of Node-PR-CB4C39?"
+  },
+  {
+    "name": "sne_019",
+    "entity": "Node-L0-082C9E",
+    "value": "P63-NKX-NJU",
+    "prop": "override code",
+    "mismatch_prop": "physical rack location",
+    "fact_text": "The override code for Node-L0-082C9E is P63-NKX-NJU.",
+    "canonical_q": "What is the override code for Node-L0-082C9E?",
+    "mismatch_q": "What is the physical rack location of Node-L0-082C9E?"
+  }
+]
