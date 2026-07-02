@@ -1,0 +1,26 @@
+data: {"delta":"<think>","chat_id":4}
+
+data: {"delta":"\n\n","chat_id":4}
+
+data: {"delta":"</think>","chat_id":4}
+
+data: {"delta":"\n\n","chat_id":4}
+
+data: {"delta":"Your","chat_id":4}
+
+data: {"delta":" dog","chat_id":4}
+
+data: {"delta":" is","chat_id":4}
+
+data: {"delta":" named","chat_id":4}
+
+data: {"delta":" B","chat_id":4}
+
+data: {"delta":"isc","chat_id":4}
+
+data: {"delta":"uit","chat_id":4}
+
+data: {"delta":".","chat_id":4}
+
+data: [DONE]
+

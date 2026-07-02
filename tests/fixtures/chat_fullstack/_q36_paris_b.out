@@ -1,0 +1,24 @@
+data: {"delta":"<think>","chat_id":3}
+
+data: {"delta":"\n","chat_id":3}
+
+data: {"delta":"</think>","chat_id":3}
+
+data: {"delta":"\n\n","chat_id":3}
+
+data: {"delta":"The","chat_id":3}
+
+data: {"delta":" capital","chat_id":3}
+
+data: {"delta":" of","chat_id":3}
+
+data: {"delta":" France","chat_id":3}
+
+data: {"delta":" is","chat_id":3}
+
+data: {"delta":" Paris","chat_id":3}
+
+data: {"delta":".","chat_id":3}
+
+data: [DONE]
+
