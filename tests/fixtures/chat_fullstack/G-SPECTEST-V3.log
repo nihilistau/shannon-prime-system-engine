@@ -1,0 +1,28 @@
+G-SPECTEST-V3  2026-07-03T08:58:10.0194281+10:00  (the PROMOTION gate: fresh corpus x grown memories x live veto)
+VERDICT: PARTIAL — pin 1 (safety) PASS DECISIVELY, pin 2 (obey) FAIL with the cause isolated OUTSIDE the head.
+
+SETUP (pre-registered + committed before any serve): 30 NOVEL varied-template counterfacts (zero item overlap
+with facts.json), grown as LIVE episodes via the B4-SEAL path (fresh empty registry, mint_live_ep_l5), gated
+on plain delivery with and without the head. Item-held-out AND grown-registry AND mode-held-out simultaneously.
+PINS: head LEAK<=2/30 AND head OBEY >= nohead OBEY + 8.
+
+== measured ==
+grow: 30/30 episodes + ep.l5 minted + persisted (the seal working on fresh content)
+nohead baseline: OBEY 7/30 (23.3%)  LEAK 20   <- the strongest-prior corpus yet; plain delivery collapses
+HEAD run:        OBEY 10/30 (33.3%) LEAK 1    <- head-vetoes 13, lexical 11
+PIN 1 LEAK<=2:  PASS (20 -> 1 on wholly unseen items — the head's safety property GENERALIZES item-level)
+PIN 2 OBEY>=15: FAIL (10) — cause isolated: EVERY miss is 'From the record: <WRONG fact>' — the veto fired,
+the fallback executed, SELECTION delivered the wrong episode (cos 0.74-0.81 background; ep_live_010/012/029
+cross-picked repeatedly). Assertion-minted L5 keys do not separate 30 same-register encyclopedic facts;
+the curated corpus minted keys from EXACT-QUESTION global-Q (question-space), the B4 path mints from the
+assertion statement (statement-space). A KNOWN-CLASS gap in a DIFFERENT subsystem, with a scoped fix.
+
+== consequences (the honest ending) ==
+1. PROMOTION CORRECTLY BLOCKED by the pre-registered pin — plain+head does NOT replace the scaffold yet.
+2. THE HEAD'S CLAIM SURVIVED ITS HARDEST TEST: with the veto active the system NEVER emitted a wrong value
+   for a right subject on fresh items (1 leak in 30 vs 20 baseline). Failure mode shifted from CONFIDENTLY-
+   WRONG to FAITHFUL-TO-THE-WRONG-PAGE — auditable, honest, and exactly what the receipts can see.
+3. NAMED NEXT LEVER (not tonight): question-space ep.l5 minting for grown episodes — at B4 capture, mint the
+   key from a question-form of the assertion (or store multi-keys per episode); re-run THIS gate unchanged.
+Receipts: _v3_grow.log / _v3_gate_nohead.log / _v3_gate_head.log + _v3_serve.log (RECALL-L5 + SPECTEST lines);
+corpus _v3_corpus/facts_v3.json (committed pre-run); registry _v3_corpus/registry.jsonl + _nightshift_live eps.
