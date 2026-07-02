@@ -137,15 +137,40 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
     info!("arch: vocab={} n_layers={} hidden={}", arch.vocab_size, arch.n_layers, arch.hidden_dim);
 
     let cancel_flag = Arc::new(AtomicI32::new(0));
-    let mut session = crate::session::SpSession::create(&model, Arc::clone(&cancel_flag))
-        .expect("sp_session_create failed");
-
-    let pos = session.position().expect("sp_session_position");
-    info!("L1 FFI OK — session_position={pos}");
+    // NORTHSTAR serve (CONTRACT-QWEN36-SERVE): the L1 session layer dispatches
+    // gemma3/gemma4/qwen25/qwen3 only — sp_session_create hard-fails on the
+    // qwen36 hybrid (arch_id 4, "model is not Qwen3"). The qwen36 lane decodes
+    // via qwen36_state instead, so on arch 4 the daemon runs SESSIONLESS
+    // (AppState.session = None; every L1-session route expects Some and is
+    // unreachable on this lane).
+    let mut session = if arch.arch_id == 8 {
+        info!("arch_id=8 (qwen36) — L1 session skipped; qwen36 lane owns decode");
+        None
+    } else {
+        let s = crate::session::SpSession::create(&model, Arc::clone(&cancel_flag))
+            .expect("sp_session_create failed");
+        let pos = s.position().expect("sp_session_position");
+        info!("L1 FFI OK — session_position={pos}");
+        Some(s)
+    };
 
     let tokenizer = crate::tokenizer::SptbTokenizer::build(&model, arch.arch_id, tok_path)
         .expect("SptbTokenizer::build failed — check .sp-tokenizer blob");
     info!("tokenizer built: arch_id={} eos_ids={:?}", arch.arch_id, tokenizer.eos_ids);
+
+    // NORTHSTAR serve (CONTRACT-QWEN36-SERVE): arch_id 8 = SP_ARCH_ID_QWEN36, the
+    // Qwen3.6-35B-A3B GDN+MoE hybrid. Boot the qwen36 chat lane ONCE (and the
+    // GPU hybrid — dense-resident + expert-resident + pinned streaming — when
+    // SP_Q36_GPU=1); /v1/chat then decodes via qwen36_step instead of the gemma
+    // L1 session/kvdecode path. Any other arch: None, all paths byte-untouched.
+    let qwen36_lane = if arch.arch_id == 8 {
+        let lane = crate::qwen36_lane::Qwen36Lane::boot(&model, vocab_size)
+            .expect("qwen36 lane boot failed");
+        info!("qwen36 lane ACTIVE — /v1/chat serves the 35B-A3B hybrid");
+        Some(Arc::new(lane))
+    } else {
+        None
+    };
 
     // ── Draft model (Phase 4-SPEC) — optional ─────────────────────────────
     let (draft_model, draft_session) = if !draft_model_path.is_empty() {
@@ -381,7 +406,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             // same sp_l1.h header — byte-identical opaque structs but
             // distinct Rust types. Cast through *mut to bridge the alias.
             let session_raw: *mut sp_daemon::ffi_l1::sp_session =
-                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+                session.as_mut().expect("wire backend requires the L1 session (unavailable on the qwen36 lane)")
+                    .raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
             // SAFETY: we own `session` exclusively; no concurrent forward.
             match unsafe { sp_daemon::hex_forward_dispatch::register_with_session(session_raw) } {
                 Ok(()) => {
@@ -438,7 +464,9 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             // lives in the binary crate (host-only, no need for the
             // lib-crate sibling). The raw pointer is passed straight through
             // as `*mut crate::ffi::sp_session`.
-            let session_raw: *mut crate::ffi::sp_session = session.raw_ptr();
+            let session_raw: *mut crate::ffi::sp_session = session.as_ref()
+                .expect("wire backend requires the L1 session (unavailable on the qwen36 lane)")
+                .raw_ptr();
             // SAFETY: we own `session` exclusively; no concurrent forward.
             match unsafe { crate::cpu_forward_dispatch::register_with_session(session_raw) } {
                 Ok(()) => {
@@ -489,7 +517,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             // same sp_l1.h header — byte-identical opaque structs but
             // distinct Rust types. Cast through *mut to bridge the alias.
             let session_raw: *mut sp_daemon::ffi_l1::sp_session =
-                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+                session.as_mut().expect("wire backend requires the L1 session (unavailable on the qwen36 lane)")
+                    .raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
             // SAFETY: we own `session` exclusively at this point; no concurrent forward.
             match unsafe { sp_daemon::cuda_forward_dispatch::register_with_session(session_raw) } {
                 Ok(()) => {
@@ -551,7 +580,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             // same sp_l1.h header; byte-identical opaque structs; distinct
             // Rust types). Cast through *mut to bridge the alias.
             let session_raw: *mut sp_daemon::ffi_l1::sp_session =
-                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+                session.as_mut().expect("wire backend requires the L1 session (unavailable on the qwen36 lane)")
+                    .raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
             // SAFETY: we own `session` exclusively; no concurrent forward.
             match unsafe { sp_daemon::vulkan_forward_dispatch::register_with_session(session_raw) } {
                 Ok(()) => {
@@ -601,7 +631,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                 .unwrap_or(false);
         if want {
             let session_raw: *mut sp_daemon::ffi_l1::sp_session =
-                session.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+                session.as_mut().expect("wire backend requires the L1 session (unavailable on the qwen36 lane)")
+                    .raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
             // The session's borrowed qwen3_model* (the glue open() needs it).
             let qm = unsafe {
                 sp_daemon::ffi_l1::sp_session_qwen3_model(session_raw)
@@ -689,7 +720,7 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
 
     let state = Arc::new(crate::state::AppState {
         model,
-        session: Mutex::new(session),
+        session: session.take().map(Mutex::new),
         cancel_flag,
         draft_model,
         draft_session,
@@ -726,6 +757,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         // B4 NIGHTSHIFT — live between-turn consolidated episodes (grows at runtime;
         // empty + never written unless SP_B4_NIGHTSHIFT=1 ⇒ null floor).
         nightshift: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+        // NORTHSTAR serve: the qwen36 35B-A3B chat lane (Some only on arch_id 4).
+        qwen36_lane,
         #[cfg(target_os = "android")]
         dsp_session,
         #[cfg(target_os = "android")]
@@ -766,7 +799,8 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                             .or_else(|| reg.iter().find(|e| !e.gk.is_empty()))
                     });
                     let qm = {
-                        let mut sguard = state.session.lock().unwrap();
+                        let mut sguard = state.session.as_ref()
+                            .expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
                         let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
                         (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
                     };

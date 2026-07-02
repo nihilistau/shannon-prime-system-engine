@@ -26,6 +26,8 @@ mod sampler;
 mod server;
 mod session;
 mod sessions;
+// NORTHSTAR serve (CONTRACT-QWEN36-SERVE): the qwen36 35B-A3B GDN+MoE chat lane.
+mod qwen36_lane;
 mod sieve_ffi;
 mod spec;
 mod state;

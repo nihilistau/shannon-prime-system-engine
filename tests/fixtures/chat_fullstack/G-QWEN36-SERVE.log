@@ -1,0 +1,64 @@
+G-QWEN36-SERVE — the 35B-A3B hybrid SERVES CHAT through sp-daemon (2026-07-02)
+===============================================================================
+CONTRACT: lattice papers/CONTRACT-QWEN36-SERVE.md (S2+S3 close; S1 = engine c12d1ea).
+
+WHAT WAS BUILT (S2, this session):
+1. tokenizer.rs: ARCH_QWEN36 = 8 (SP_ARCH_ID_QWEN36, the L1 wire id — NOT the
+   internal sp_arch_t 4) joins the ChatML arms (eos <|im_end|>/<|endoftext|> =
+   ids [248044, 248046] on this artifact; chatml template + template_ids).
+2. qwen36_lane.rs (new): manual extern decls for qwen36_state_new/free/step
+   (outside bindgen's sp_.* allowlist) + cfg-gated sp_q36gpu_boot; Qwen36Lane
+   {qm, gpu, pmax, gate} booted once at daemon start; run_turn = fresh state,
+   prefill-by-stepping, greedy argmax, eos/turn stop, UTF-8 split-token guard.
+3. daemon.rs: arch_id==8 skips sp_session_create (the L1 session layer hard-fails
+   "model is not Qwen3" on the hybrid) — the daemon runs SESSIONLESS; AppState
+   .session became Option<Mutex<SpSession>> (all 7 users expect() with a clear
+   message; unreachable on this lane, byte-untouched on every other arch).
+4. routes.rs: /v1/chat branches to the qwen36 lane BEFORE the gemma session
+   clone; same ChatDelta/[DONE] SSE shape the console speaks.
+5. run_console_qwen36.bat (S3): port 3001, EXCLUSIVE instance, SP_Q36_GPU=1
+   MOE_GB=9.6 STREAM=1 PMAX=4096; SP_DAEMON_BACKEND deliberately UNSET (the §6
+   wire hooks are session machinery); LLVM bin on PATH (libomp).
+
+THE SPEED HOLE FOUND AND CLOSED (receipts-first bisect):
+  First serve = 1.9-2.1 tok/s vs the 6.073 harness receipt. Bisect:
+  - harness rerun NOW (step mode) = 6.02 tok/s -> environment exonerated;
+  - daemon SP_Q36_PROF: EVERY section ~3x slower (moe 0.405 vs 0.144 s/step,
+    conv+recur too) -> process-wide CPU deficit, not GPU;
+  - daemon CPU-only A/B = 0.17 tok/s = EXACTLY the pre-OMP ladder rung;
+  - CMakeCache diff: build-cpu-perf = "/openmp /arch:AVX2", build-cpu = NEITHER.
+  ROOT CAUSE: the daemon linked the build-cpu math-core libs, which compile
+  qwen36.c/forward_dispatch.c WITHOUT OpenMP or AVX2 — bricks 4-6 of the ladder
+  never made it into the served binary.
+  FIX: second daemon exe target-wirecuda-perf linking build-cpu-perf libs
+  (+ sp_session/sp_sieve/sp_ok_arith built there; RUSTFLAGS link-arg
+  C:\PROGRA~1\LLVM\lib\libomp.lib — the MSVC 14.29 libomp lacks
+  __kmpc_dispatch_deinit). run_console_qwen36 uses the PERF exe; the 12B
+  one-config launcher keeps the PROVEN standard exe (no silent gate revision —
+  pointing the 12B at perf libs requires re-running G-ONECONFIG-LIVE).
+
+GATE (all on the served daemon, port 3001, greedy):
+  (1) COHERENT: "What is the capital of France? /no_think" ->
+      "<think>\n</think>\n\nThe capital of France is Paris."          PASS
+  (2) MULTI-TURN: 3-message history, "What is my dog called? /no_think" ->
+      "Your dog is named Biscuit."                                    PASS
+  (3) SERVE SPEED: 44 tok @ 5.329 tok/s; 11 tok @ 5.549 / 5.542 tok/s
+      (>= 5 spec; harness ladder 6.07 minus SSE/turn overhead)        PASS
+  (4) GREEDY DETERMINISM: identical prompt twice -> delta text
+      byte-identical (chat_id differs by design)                     PASS
+  (5) ENV: engine (this commit) + submodule qwen36-gen-coherence 5d1fdaa;
+      model D:/F/shannon-prime-repos/models/qwen36-35b-a3b.sp-model (16.3GB
+      OK container) + .sp-tokenizer (SPTB); i9-11900KB 8C/16T 31.5GB +
+      RTX 2060 12GB, CUDA v13.2, clang-cl 21.1.5, boot = dense 852.5MB +
+      25/40 expert layers 9600MB resident + pinned streaming rump.    PASS
+  VERDICT: **GREEN** — SPEED_NORTHSTAR serves chat end-to-end.
+
+NOTES / pre-scoped follow-ups:
+- Qwen3.6 is a THINKING model: without /no_think it spends budget on <think>.
+  The lane streams the raw tokens; console-side think-folding is cosmetic.
+- Prefill is step-wise (~0.19s/token at serve): long histories pay linearly.
+  Batch prefill = the known next speed brick.
+- v1 = greedy only, one turn at a time (lane gate mutex); sampling knobs and
+  concurrency come after this gate per the contract.
+REPRO: run_console_qwen36.bat; then the three curls in this receipt
+  (_q36_paris_a/b.out, _q36_multiturn.out kept beside the serve log).

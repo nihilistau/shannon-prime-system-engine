@@ -44,7 +44,7 @@ pub(crate) struct Metrics {
 
 pub async fn v1_metrics(State(state): State<Arc<AppState>>) -> Json<Metrics> {
     let session_pos = {
-        let guard = state.session.lock().unwrap();
+        let guard = state.session.as_ref().expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
         guard.position().unwrap_or(0) as u64
     };
 
@@ -380,12 +380,74 @@ pub async fn v1_chat(
         tracing::info!("S1 prompt ids: n={} head={:?} tail={:?}", tokens.len(), head, tail);
     }
 
+    // ── NORTHSTAR serve (CONTRACT-QWEN36-SERVE): the qwen36 35B-A3B lane ─────
+    // When the loaded model is the GDN+MoE hybrid (arch_id 8), the gemma L1
+    // session/kvdecode machinery below does not apply: decode via qwen36_step
+    // (persistent recurrent state, GPU hybrid hooks booted at daemon start —
+    // G-MOE-GPU4-PINNED 6.073 tok/s / 337x) and stream the same ChatDelta/[DONE]
+    // SSE shape the console already speaks. v1 = greedy argmax (the gate's
+    // determinism leg); sampling knobs come after G-QWEN36-SERVE is GREEN.
+    if let Some(lane) = state.qwen36_lane.as_ref() {
+        let lane = lane.clone();
+        let tok = tokenizer.clone();
+        let cancel = Arc::new(AtomicI32::new(0));
+        let chat_id = state.sessions.register(cancel.clone());
+        let sessions = state.sessions.clone();
+        let max_new = req.max_tokens as usize;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+        tokio::task::spawn_blocking(move || {
+            let eos = tok.eos_ids.clone();
+            // Split-token UTF-8 guard: BPE token bytes may end mid-codepoint;
+            // hold the incomplete tail back until the next token completes it.
+            let mut pending: Vec<u8> = Vec::new();
+            let res = lane.run_turn(&tokens, max_new, &eos, |id| {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                    return false;
+                }
+                pending.extend_from_slice(tok.decode_token(id));
+                let (text, keep) = match std::str::from_utf8(&pending) {
+                    Ok(s) => (s.to_string(), 0usize),
+                    Err(e) => {
+                        let ok = e.valid_up_to();
+                        (String::from_utf8_lossy(&pending[..ok]).into_owned(), pending.len() - ok)
+                    }
+                };
+                pending.drain(..pending.len() - keep);
+                if !text.is_empty() {
+                    let ev = Event::default().data(
+                        serde_json::to_string(&ChatDelta { delta: text, chat_id }).unwrap(),
+                    );
+                    if tx.blocking_send(Ok(ev)).is_err() {
+                        return false; // client went away
+                    }
+                }
+                true
+            });
+            match res {
+                Ok((out, tokps)) => {
+                    tracing::info!("qwen36 turn done: {} tokens @ {:.3} tok/s", out.len(), tokps);
+                }
+                Err(e) => {
+                    tracing::error!("qwen36 turn failed: {e}");
+                    let _ = tx.blocking_send(Ok(Event::default()
+                        .data(format!("{{\"error\":\"{e}\",\"chat_id\":{chat_id}}}"))));
+                }
+            }
+            let _ = tx.blocking_send(Ok(Event::default().data("[DONE]")));
+            sessions.remove(chat_id);
+        });
+        return sse_response(
+            Sse::new(ReceiverStream::new(rx))
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive")),
+        );
+    }
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
     // Clone base session — hold Mutex only during sp_session_clone (sub-ms).
     let cancel_child = Arc::new(AtomicI32::new(0));
     let child_result = {
-        let guard = state.session.lock().unwrap();
+        let guard = state.session.as_ref().expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
         guard.clone_session(cancel_child.clone())
     };
 
@@ -632,7 +694,7 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
     let ntok = toks.len();
     if ntok < 4 { return false; }
     let qm = {
-        let mut sguard = app.session.lock().unwrap();
+        let mut sguard = app.session.as_ref().expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
         let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
         (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
     };
@@ -2758,7 +2820,7 @@ Tag of the answer (or [NULL]):");
                     } else {
                         // (b) qm = the session's borrowed qwen3_model* (shares loaded weights).
                         let qm = {
-                            let mut sguard = app.session.lock().unwrap();
+                            let mut sguard = app.session.as_ref().expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
                             let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
                             // SAFETY: session is locked + valid for this borrow.
                             (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
@@ -3136,7 +3198,7 @@ pub async fn v1_capture(
     // the qm borrow + the whole capture (serializes SP_XBAR_RECALL_WRITE env inside).
     let res = task::spawn_blocking(move || -> Result<usize, String> {
         let qm = {
-            let mut sguard = app.session.lock().unwrap();
+            let mut sguard = app.session.as_ref().expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
             let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
             (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
         };
@@ -3537,7 +3599,7 @@ pub async fn v1_dialogue(
     // Clone Executive base session (mirrors /v1/chat lines 150-154).
     let exec_cancel = Arc::new(AtomicI32::new(0));
     let exec_child = {
-        let guard = state.session.lock().unwrap();
+        let guard = state.session.as_ref().expect("L1 session unavailable (qwen36 lane)").lock().unwrap();
         guard.clone_session(exec_cancel.clone())
     };
     let mut exec_child = match exec_child {

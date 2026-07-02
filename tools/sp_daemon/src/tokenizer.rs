@@ -21,6 +21,10 @@ const TYPE_GEMMA4_BPE: u32 = 4;
 
 const ARCH_QWEN3: u32 = 2;
 const ARCH_GEMMA3: u32 = 3;
+/// qwen35moe (Qwen3.6-35B-A3B GDN+MoE hybrid) — SP_ARCH_ID_QWEN36 = 8 in
+/// sp_model.h (the L1 wire arch_id; NOT the internal sp_arch_t SP_ARCH_QWEN36=4).
+/// Same ChatML surface as ARCH_QWEN3 (im_start/im_end, <|endoftext|>).
+const ARCH_QWEN36: u32 = 8;
 const ARCH_QWEN25: u32 = 6;
 const ARCH_GEMMA4: u32 = 7;
 
@@ -269,7 +273,7 @@ fn load_generation_config(tok_path: &str) -> (Vec<i32>, Vec<i32>) {
 
 fn find_eos_ids(arch_id: u32, vocab: &[String]) -> Vec<i32> {
     let names: &[&str] = match arch_id {
-        ARCH_QWEN3 | ARCH_QWEN25 => &["<|im_end|>", "<|endoftext|>"],
+        ARCH_QWEN3 | ARCH_QWEN25 | ARCH_QWEN36 => &["<|im_end|>", "<|endoftext|>"],
         // gemma4 (arch_id=7) shares gemma3's turn markers. The live daemon
         // logged eos_ids=[] for arch_id=7, so decode never stopped on EOS —
         // issue #115 fixes that here.
@@ -578,7 +582,7 @@ impl SptbTokenizer {
 
     pub fn apply_template(&self, messages: &[Message]) -> Result<String, TemplateError> {
         match self.arch_id {
-            ARCH_QWEN3 | ARCH_QWEN25 => Ok(chatml_template(messages)),
+            ARCH_QWEN3 | ARCH_QWEN25 | ARCH_QWEN36 => Ok(chatml_template(messages)),
             // gemma4 (arch_id=7) uses the identical <start_of_turn>…<end_of_turn>
             // format as gemma3 (issue #115 — the `messages` path now works).
             ARCH_GEMMA3 | ARCH_GEMMA4 => Ok(gemma3_template(messages)),
@@ -648,7 +652,7 @@ impl SptbTokenizer {
                 Ok(out)
             }
             // Non-gemma archs: assemble text then encode (BOS handled by the lane).
-            ARCH_QWEN3 | ARCH_QWEN25 => self.encode(&chatml_template(messages)),
+            ARCH_QWEN3 | ARCH_QWEN25 | ARCH_QWEN36 => self.encode(&chatml_template(messages)),
             _ => Err(format!("no chat template for arch_id={}", self.arch_id)),
         }
     }

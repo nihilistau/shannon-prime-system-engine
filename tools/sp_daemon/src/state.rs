@@ -50,7 +50,10 @@ pub struct AppState {
     #[allow(dead_code)]
     pub model: SpModel,
     /// Base target session at position 0. Held only briefly during sp_session_clone.
-    pub session: Mutex<SpSession>,
+    /// `None` ONLY on the qwen36 lane (arch_id 8): the L1 session layer does not
+    /// dispatch the GDN+MoE hybrid, so those routes are unreachable there
+    /// (CONTRACT-QWEN36-SERVE) — every user unwraps with an explicit expect.
+    pub session: Option<Mutex<SpSession>>,
     #[allow(dead_code)]
     pub cancel_flag: Arc<AtomicI32>,
     /// Draft model for speculative decoding (Phase 4-SPEC). None in single-model mode.
@@ -166,6 +169,13 @@ pub struct AppState {
     /// immutable curated `recall_registry`, this grows live ⇒ RwLock. Empty until a
     /// turn is consolidated; default-off (env unset) ⇒ never written ⇒ null floor.
     pub nightshift: Arc<std::sync::RwLock<Vec<sp_daemon::recall::Episode>>>,
+
+    /// NORTHSTAR serve (CONTRACT-QWEN36-SERVE) — the qwen36 (35B-A3B GDN+MoE
+    /// hybrid) chat lane. `Some` only when the loaded model's arch_id ==
+    /// SP_ARCH_ID_QWEN36 (8); /v1/chat then decodes via qwen36_step (GPU hybrid
+    /// hooks booted once at daemon start) instead of the gemma L1
+    /// session/kvdecode path. `None` = every existing path byte-untouched.
+    pub qwen36_lane: Option<Arc<crate::qwen36_lane::Qwen36Lane>>,
 
     // ── §3-HX cDSP bridge (android-only) ─────────────────────────────────────
     /// §3-HX Sprint C — FastRpcSession for the V69 cDSP echo skel. `None` if the
