@@ -40,6 +40,10 @@ REM injects an irrelevant fact). Margin lever = HONEST NEGATIVE (G-L5-MARGIN-CAL
 REM correct/background margins overlap; SNE canonical margins 0.0003-0.0007 would
 REM break the SNE shield) -> SP_RECALL_L5_MARGIN stays UNSET (telemetry only).
 set "SP_RECALL_QONLY=1"
+REM SCALED delivery prompt (2026-07-02): best-known obey wording on the CURRENT stack
+REM (63.93% vs plain 40.98%, G-L5-OBEY-REPRO). NOTE: the 07-01 receipts (86.89%/85.2%)
+REM are NOT reproducible today — para-obey is build-fragile pending root-cause.
+set "SP_RECALL_L5_PROMPT=scaled"
 set "SP_DAEMON_LOG=%ENGINE%_oneconfig_serve.log"
 
 echo [one-config] Tier0+Tier1 (L5 recall + attr-gate) — DRAFT until G-ONECONFIG-LIVE

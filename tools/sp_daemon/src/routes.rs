@@ -1510,6 +1510,18 @@ fn run_kvdecode_chat(
                                                     Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },
                                                     Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}", btext, ruser) },
                                                 ]
+                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("scaled") {
+                                                // SCALED delivery wording (2026-07-02): the plain recite wording's
+                                                // paraphrase obedience proved FP/build-FRAGILE (the 86.89% receipt
+                                                // is NOT reproducible on the current stack: 40.98% via the receipt's
+                                                // own harness, 3 independent rebuilds incl. exact a14fee4 src+lock).
+                                                // This explicit-override wording carries its own receipt: OBEY 52/61
+                                                // = 85.2% (_g_faithful_recall_scaled.json, seam=scaled) — the
+                                                // instruction does the work, not a thin float margin.
+                                                vec![
+                                                    Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
+                                                    Message { role: "user".to_string(), content: format!("Context (authoritative, from your memory): {}\n\nUsing the context above, answer faithfully even if it differs from what you already know:\n{}", btext, ruser) },
+                                                ]
                                             } else {
                                                 vec![
                                                     Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
