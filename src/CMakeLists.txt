@@ -83,7 +83,46 @@ if(SP_ENGINE_WITH_AVX512)
         backends/cpu/avx512/avx512_scan.c
     )
     target_compile_definitions(sp_engine PRIVATE SP_ENGINE_AVX512=1)
-    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        # clang-cl (Stage-0 re-baseline fix, 2026-07-02): the MSVC frontend drops bare
+        # -m<feature> flags (COMPILER_ID is "Clang" so the GNU branch used to match and
+        # the flags were silently ignored -> VPDPBUSD ISel crash + always_inline
+        # avx512f errors). Pass them through the /clang: escape. cpu_overlay.c added:
+        # its dot_i8_f32_avx512 needs avx512f when SP_ENGINE_AVX512=1 (it was never in
+        # the per-file list because historical AVX512 builds used MSVC cl /arch:AVX512).
+        set_source_files_properties(
+            backends/cpu/avx512/avx512_dispatch.c
+            backends/cpu/avx512/avx512_spinor.c
+            backends/cpu/avx512/avx512_vnni.c
+            backends/cpu/avx512/avx512_ifma.c
+            backends/cpu/avx512/avx512_ternlog.c
+            backends/cpu/avx512/avx512_scan.c
+            backends/cpu/cpu_overlay.c
+            PROPERTIES COMPILE_OPTIONS
+            "/clang:-mavx512f;/clang:-mavx512vl;/clang:-mavx512vnni;/clang:-mavx512ifma;/clang:-mavx512bw;/clang:-mavx512dq;/clang:-mavx512vpopcntdq;/clang:-mavx512vbmi2"
+        )
+        set_source_files_properties(
+            backends/cpu/avx512/avx512_persist.c
+            PROPERTIES COMPILE_OPTIONS "/clang:-mavx512f;/clang:-mwaitpkg"
+        )
+        # __builtin_cpu_supports (avx512 dispatch) needs the clang-rt builtins under
+        # lld-link (__cpu_model/__cpu_indicator_init are not in the MSVC CRT).
+        execute_process(COMMAND "${CMAKE_C_COMPILER}" /clang:--print-libgcc-file-name
+                        OUTPUT_VARIABLE _SP_CLANG_RT OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+        if(NOT _SP_CLANG_RT OR NOT EXISTS "${_SP_CLANG_RT}")
+            file(GLOB _SP_CLANG_RT "C:/Program Files/LLVM/lib/clang/*/lib/windows/clang_rt.builtins-x86_64.lib")
+            if(_SP_CLANG_RT)
+                list(GET _SP_CLANG_RT 0 _SP_CLANG_RT)
+            endif()
+        endif()
+        if(_SP_CLANG_RT AND EXISTS "${_SP_CLANG_RT}")
+            target_link_libraries(sp_engine PUBLIC "${_SP_CLANG_RT}")
+            message(STATUS "sp_engine: linking clang_rt builtins: ${_SP_CLANG_RT}")
+        else()
+            message(WARNING "sp_engine: clang_rt.builtins not found; __builtin_cpu_supports links may fail")
+        endif()
+    elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             backends/cpu/avx512/avx512_dispatch.c
             backends/cpu/avx512/avx512_spinor.c
