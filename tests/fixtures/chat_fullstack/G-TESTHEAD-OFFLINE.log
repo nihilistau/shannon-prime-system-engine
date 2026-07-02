@@ -1,0 +1,32 @@
+G-TESTHEAD-OFFLINE  seed=42  modes=['plain', 'scaled', 'sandwich', 'factecho', 'system', 'systemecho']
+  [data M_plain] n=61 obey=26 leak=30
+  [data M_scaled] n=61 obey=39 leak=17
+  [data M_sandwich] n=61 obey=38 leak=17
+  [data M_factecho] n=61 obey=47 leak=9
+  [data M_system] n=61 obey=40 leak=16
+  [data M_systemecho] n=61 obey=54 leak=0
+[f0 held=plain     ] MLP AUC=0.935  linear=0.942  obey-vs-LEAK=0.924
+[f0 held=scaled    ] MLP AUC=0.966  linear=0.966  obey-vs-LEAK=0.968
+[f0 held=sandwich  ] MLP AUC=0.965  linear=0.967  obey-vs-LEAK=0.961
+[f0 held=factecho  ] MLP AUC=0.913  linear=0.919  obey-vs-LEAK=0.865
+[f0 held=system    ] MLP AUC=0.824  linear=0.820  obey-vs-LEAK=0.784
+[f0 held=systemecho] MLP AUC=0.717  linear=0.725  obey-vs-LEAK=nan
+[f0] MLP held-out: mean=0.887 min=0.717  linear mean=0.890
+[f1 held=plain     ] MLP AUC=0.957  linear=0.953  obey-vs-LEAK=0.950
+[f1 held=scaled    ] MLP AUC=0.971  linear=0.962  obey-vs-LEAK=0.980
+[f1 held=sandwich  ] MLP AUC=0.944  linear=0.939  obey-vs-LEAK=0.935
+[f1 held=factecho  ] MLP AUC=0.889  linear=0.904  obey-vs-LEAK=0.839
+[f1 held=system    ] MLP AUC=0.856  linear=0.867  obey-vs-LEAK=0.859
+[f1 held=systemecho] MLP AUC=0.791  linear=0.765  obey-vs-LEAK=nan
+[f1] MLP held-out: mean=0.901 min=0.791  linear mean=0.898
+
+VERDICT (best frame 1): mean=0.901 min=0.791 -> REAL � wire at the spectest seam (SP_SPECTEST_HEAD, live gate next)
+
+== interpretation (pins pre-registered mid-capture, file committed with data untouched) ==
+VERDICT: REAL (best frame 1: mean 0.901 / min 0.791 vs pins 0.75/0.65; frame 0 = the PRE-FIRST-TOKEN DECIDE state also clears at 0.887/0.717).
+obey-vs-LEAK separation 0.78-0.98 across folds: the value-substitution class that convicted lexical testing (G-SPECTEST-V1) IS separable in the latent.
+KEY MECHANISM FINDING: linear == MLP (0.890 vs 0.887 mean) - the signal is LINEAR; the G-OBEY-PROBE-OFFLINE chance result was a POWER + confound failure (n=61, 1-2 modes), not absence. The 10x-data revisit condition fired exactly as banked.
+HONEST SCOPE CORRECTION (supersedes half of the final-norm conviction): the surface EXPRESSES the upcoming obey/leak decision well enough to READ (this gate) but not to PUSH (G-FM-STEER-OBEY stands). Expression-not-cause is now complete and symmetric.
+Weakest fold = held-out systemecho (0.791 f1) - extrapolating to the strongest scaffold; no leak rows exist in that mode to test.
+NEXT (pre-scoped): retrain on all 366 -> export (SP_SPECTEST_HEAD blob) -> wire at the live spectest seam (routes.rs, the held-stream decision point) -> G-SPECTEST-V2 live gate: close the 14-leak class on plain delivery; target = systemecho-class faithfulness (54/61 / 0 leak) WITHOUT the scaffold.
+Data: _faithful_corpus/f3/M_{plain,scaled,sandwich,factecho,system,systemecho} (6x61, all VERIFY PASS, tracked); harness f3_testhead.py (seed 42, PCA-128, MLP 128-32-1 + linear baseline).
