@@ -40,7 +40,12 @@ set "SP_RECALL_L5_TAU=0.30"
 set "SP_RECALL_ATTR_GATE=1"
 set "SP_RECALL_ATTR_TAU=0.5"
 set "SP_RECALL_QONLY=1"
-set "SP_RECALL_L5_PROMPT=systemecho"
+REM LIVE-FIX (the "Hodor" incident): PLAIN delivery, not systemecho. systemecho
+REM COMMANDS verbatim echo, so a background (off-topic) L5 match makes the model
+REM parrot an irrelevant record by design. plain+head is the V2-GATED pairing
+REM (52/61 obey / 2 leak): the head vetoes real leaks; off-topic deliveries get
+REM answered naturally by the draft (F 2/2 robustness) and released head-primary.
+set "SP_RECALL_L5_PROMPT=plain"
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"
 
 REM ---- Tier 2: live growth ----

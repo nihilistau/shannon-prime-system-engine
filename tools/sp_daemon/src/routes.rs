@@ -3042,9 +3042,19 @@ Tag of the answer (or [NULL]):");
             }
             _ => (None, false),
         };
-        if (salient.is_empty() || n_used > 0) && !head_veto {
-            tracing::info!("SPECTEST: PASS ({}/{} salient used, head={:?}) -> releasing held stream",
-                n_used, salient.len(), head_score);
+        // VETO AUTHORITY (live-fix 2026-07-03, the "Hodor" incident): the HEAD is
+        // PRIMARY whenever it scored — the lexical rule only decides when the head
+        // is unavailable. Rationale (from the live log): on a BACKGROUND delivery
+        // (absent=1.00, off-topic record) the draft rightly ignores the record ⇒
+        // lexical reads 0/N ⇒ the old union-veto replaced a perfectly good answer
+        // with the wrong record. The head passed those drafts (+1.9, +4.8) — it
+        // measures the state, not token overlap, and V2/V3 proved its leak-catch.
+        let lexical_ungrounded = !salient.is_empty() && n_used == 0;
+        let veto = match head_score { Some(_) => head_veto, None => lexical_ungrounded };
+        if !veto {
+            tracing::info!("SPECTEST: PASS ({}/{} salient, head={:?}, authority={}) -> releasing held stream",
+                n_used, salient.len(), head_score,
+                if head_score.is_some() { "head" } else { "lexical" });
             for text in held.drain(..) {
                 let payload = serde_json::to_string(&ChatDelta { delta: text, chat_id })
                     .unwrap_or_default();
@@ -3053,7 +3063,7 @@ Tag of the answer (or [NULL]):");
         } else {
             tracing::warn!("SPECTEST: VETO ({} — draft suppressed) -> clean symbolic execute from the record",
                 if head_veto { format!("head score {:.3} < tau", head_score.unwrap_or(f32::NAN)) }
-                else { format!("0/{} salient", salient.len()) });
+                else { format!("lexical 0/{} salient (head unavailable)", salient.len()) });
             held.clear();
             let fb = format!("From the record: {fact}");
             let payload = serde_json::to_string(&ChatDelta { delta: fb.clone(), chat_id })
@@ -3243,13 +3253,22 @@ Tag of the answer (or [NULL]):");
                             // curator's clean full-cache float config and matches the curated ep.k. We
                             // hold the resident-cache Mutex (`guard`/`handle`) for the whole capture, so
                             // the SP_XBAR_RECALL_WRITE set+unset inside the glue is serialized.
-                            let idx = { app.nightshift.read().unwrap().len() };
+                            // LIVE-FIX (2026-07-03, name-collision bug): the old name was the
+                            // in-memory nightshift INDEX, which resets every serve while the
+                            // persisted registry accumulates — a restarted serve minted a second
+                            // ep_live_000, OVERWRITING the first episode's dir (production-
+                            // registry corruption, found live). Millis-unique naming, same
+                            // scheme as capture_live_episode.
+                            let ep_uniq = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis()).unwrap_or(0);
+                            let ep_name = format!("ep_live_m{ep_uniq}");
                             let engine_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                                 .parent().and_then(|p| p.parent())
                                 .unwrap_or_else(|| std::path::Path::new("."));
                             let dir = engine_root
                                 .join("_nightshift_live")
-                                .join(format!("ep_live_{:03}", idx));
+                                .join(&ep_name);
                             let dir_str = dir.to_string_lossy().to_string();
                             if let Err(e) = std::fs::create_dir_all(&dir) {
                                 tracing::warn!("B4-NIGHTSHIFT: mkdir {dir_str} failed: {e} — no episode appended");
@@ -3288,36 +3307,43 @@ Tag of the answer (or [NULL]):");
                                                 // it back (curated path; ep.k/ep.v/ep.mf already on disk at dir).
                                                 if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
                                                     if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
-                                                        let pidx = app.nightshift.read().unwrap().len();
                                                         let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
                                                         let line = serde_json::json!({
-                                                            "name": format!("ep_live_{:03}", pidx),
+                                                            // LIVE-FIX (perspective bug): store the DELIVERED text ATTRIBUTED
+                                                            // ("The user said: …") — raw first-person records ("My name is
+                                                            // Knack") are perspective-ambiguous at delivery (the model read
+                                                            // the user's name as its own, live). Selection artifacts
+                                                            // (ep.k/ep.l5/sig) stay on the RAW text — only the delivery
+                                                            // payload is attributed.
+                                                            "name": ep_name.clone(),
                                                             "dir": dir_str.clone(), "npos": ntok as i32,
-                                                            "topic": text.clone(), "text": text.clone(), "sig_bits": sig_hex,
+                                                            "topic": text.clone(),
+                                                            "text": format!("The user said: {text}"), "sig_bits": sig_hex,
                                                         }).to_string();
                                                         use std::io::Write as _;
                                                         match std::fs::OpenOptions::new().create(true).append(true).open(&reg_path) {
                                                             Ok(mut f) => { let _ = writeln!(f, "{line}");
-                                                                tracing::info!("B4-NIGHTSHIFT-PERSIST: appended ep_live_{:03} -> {}", pidx, reg_path); }
+                                                                tracing::info!("B4-NIGHTSHIFT-PERSIST: appended {} -> {}", ep_name, reg_path); }
                                                             Err(e) => tracing::warn!("B4-NIGHTSHIFT-PERSIST: append {} failed: {e}", reg_path),
                                                         }
                                                     }
                                                 }
                                                 let mut ns = app.nightshift.write().unwrap();
-                                                let idx = ns.len();
                                                 tracing::info!(
-                                                    "B4-NIGHTSHIFT: ep_live_{:03} C2-sig = {:016x}... (was [0;4])",
-                                                    idx, sig[0]);
+                                                    "B4-NIGHTSHIFT: {} C2-sig = {:016x}... (was [0;4])",
+                                                    ep_name, sig[0]);
                                                 let topic: String = text.chars().take(40).collect();
                                                 // tokens: Some(toks) so the recall side still injects via
                                                 // kv::inject_tokens (unchanged); ep.k/ep.v/ep.mf now also
                                                 // exist on disk at `dir` if a future path prefers kv::replay.
                                                 ns.push(sp_daemon::recall::Episode {
-                                                    name: format!("ep_live_{:03}", idx),
+                                                    name: ep_name.clone(),
                                                     dir: dir_str.clone(),
                                                     npos: ntok as i32,
                                                     topic,
-                                                    text: text.clone(),
+                                                    // LIVE-FIX (perspective): delivery payload attributed; selection
+                                                    // artifacts (gk/sig/l5key/tokens) stay on the raw text.
+                                                    text: format!("The user said: {text}"),
                                                     sig,
                                                     gk,
                                                     gk_ng: ng,
@@ -3326,11 +3352,11 @@ Tag of the answer (or [NULL]):");
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(
-                                                    "B4-NIGHTSHIFT: consolidated (batched) -> 'ep_live_{:03}' npos={} ng={} — registry now has {} live episode(s)",
-                                                    idx, ntok, ng, total
+                                                    "B4-NIGHTSHIFT: consolidated (batched) -> '{}' npos={} ng={} — registry now has {} live episode(s)",
+                                                    ep_name, ntok, ng, total
                                                 );
                                                 // LAYER-3: hand the new fact to the DECIDE pass below.
-                                                decide_new = Some((format!("ep_live_{:03}", idx), text.clone()));
+                                                decide_new = Some((ep_name.clone(), text.clone()));
                                             }
                                         }
                                     }
