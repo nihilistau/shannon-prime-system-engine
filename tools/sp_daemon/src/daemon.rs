@@ -787,6 +787,25 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         if !root.is_empty() {
             let n = crate::routes::load_and_mint_okf_store(&state, &root);
             info!("STORE-MERGE: {} memory-okf concept(s) merged into the recall set from {}", n, root);
+            // LM-B1 LIVE RECONCILER: an idle-gated background thread that hot-reloads NEW/changed
+            // concepts the harness/agent writes into the store WITHOUT a restart. Gated
+            // SP_MEM_RECONCILE=1; interval SP_MEM_RECONCILE_SEC (default 5s). Only reconciles when
+            // no turn is generating (inference_active == false) — never starves the token path.
+            if std::env::var("SP_MEM_RECONCILE").as_deref() == Ok("1") {
+                let st = state.clone();
+                let root2 = root.clone();
+                let secs: u64 = std::env::var("SP_MEM_RECONCILE_SEC").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(5);
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(secs.max(1)));
+                        if st.inference_active.load(std::sync::atomic::Ordering::Relaxed) { continue; }
+                        let n = crate::routes::load_and_mint_okf_store(&st, &root2);
+                        if n > 0 { info!("STORE-MERGE reconcile: +{} new concept(s) hot-loaded", n); }
+                    }
+                });
+                info!("STORE-MERGE: live reconciler armed (every {}s, idle-gated)", secs.max(1));
+            }
         }
     }
 

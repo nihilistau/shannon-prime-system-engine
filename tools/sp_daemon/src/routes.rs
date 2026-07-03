@@ -853,12 +853,17 @@ pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
         (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
     };
     if qm.is_null() { return 0; }
+    // INCREMENTAL (LM-B1): skip concepts already merged, so repeated reconcile passes only
+    // pay for NEW/changed concepts (the live hot-reload path). Match by episode name == addr.
+    let already: std::collections::HashSet<String> =
+        app.nightshift.read().unwrap().iter().map(|e| e.name.clone()).collect();
     let (mut added, mut minted) = (0usize, 0usize);
     let mut eps: Vec<recall::Episode> = Vec::new();
     for ent in rd.flatten() {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
         let addr = match path.file_stem() { Some(s) => s.to_string_lossy().to_string(), None => continue };
+        if already.contains(&addr) { continue; } // already serving this concept
         let raw = match std::fs::read_to_string(&path) { Ok(t) => t, Err(_) => continue };
         let policy = recall::parse_okf_policy(&raw);
         let body = recall::okf_body(&raw);
