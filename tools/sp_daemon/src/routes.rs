@@ -891,6 +891,7 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
         name, dir: dir_str.clone(), npos: ntok as i32, topic,
         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
         l5key: l5k, // B4-SEAL: minted at capture (mint_live_ep_l5); empty only on mint failure.
+        policy: None, // live episodes inherit the global env path until NIGHTSHIFT classifies them
     });
     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
     true
@@ -1829,12 +1830,12 @@ fn run_kvdecode_chat(
                                 } else if qk5.is_empty() {
                                     tracing::warn!("RECALL-L5: read_global_q/l5_embed unavailable -- clean prompt");
                                 } else {
-                                    let mut scored: Vec<(f32, String, String)> = Vec::new();
+                                    let mut scored: Vec<(f32, String, String, Option<recall::MemPolicy>)> = Vec::new();
                                     {
                                         let ns_guard = app.nightshift.read().unwrap();
                                         for ep in registry.iter().chain(ns_guard.iter()) {
                                             if ep.l5key.len() != recall::HD { continue; }
-                                            scored.push((recall::cos512(&qk5, &ep.l5key), ep.name.clone(), ep.text.clone()));
+                                            scored.push((recall::cos512(&qk5, &ep.l5key), ep.name.clone(), ep.text.clone(), ep.policy.clone()));
                                         }
                                     }
                                     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1844,7 +1845,7 @@ fn run_kvdecode_chat(
                                     // residual). Default-off; telemetry only, no behavior change.
                                     if std::env::var("SP_RECALL_L5_DUMPRANK").as_deref() == Ok("1") {
                                         let dump: Vec<String> = scored.iter().take(8)
-                                            .map(|(c, n, _)| format!("{}={:.4}", n, c)).collect();
+                                            .map(|(c, n, _, _)| format!("{}={:.4}", n, c)).collect();
                                         tracing::info!("RECALL-L5-DUMPRANK: q={:?} ranked=[{}]", ruser, dump.join(" "));
                                     }
                                     let (mut bcos, mut bname, mut btext) = scored.first()
@@ -2022,8 +2023,35 @@ fn run_kvdecode_chat(
                                         //    FORCE the strict decline framing regardless of the model. Hard
                                         //    fallback (not paraphrase-aware). Both unset = the proven recite path
                                         //    (byte-identical null floor).
+                                        // ===== MEM-OKF v2 / ADR-004: per-entry policy dispatch (SP_MEM_POLICY=1) =====
+                                        // The SELECTED entry's own mem_delivery/mem_decline drive delivery, OVERRIDING
+                                        // the global SP_RECALL_L5_PROMPT/SP_RECALL_ATTR_GATE env flags. Default-off
+                                        // (SP_MEM_POLICY unset) or an un-policied entry ⇒ the env path, byte-identical.
+                                        let mem_policy_on = std::env::var("SP_MEM_POLICY").as_deref() == Ok("1");
+                                        let bpol: Option<recall::MemPolicy> = if mem_policy_on {
+                                            scored.iter().find(|t| t.1 == bname).and_then(|t| t.3.clone())
+                                        } else { None };
+                                        // effective delivery mode: policy.delivery (attr-gate-strict recites when it
+                                        // does NOT decline), else the global SP_RECALL_L5_PROMPT (default "plain").
+                                        let env_prompt = std::env::var("SP_RECALL_L5_PROMPT").ok().unwrap_or_else(|| "plain".to_string());
+                                        let delivery_mode: String = match bpol.as_ref() {
+                                            Some(p) if p.delivery == "attr-gate-strict" => "recite".to_string(),
+                                            Some(p) => p.delivery.clone(),
+                                            None => env_prompt,
+                                        };
+                                        if let Some(p) = bpol.as_ref() {
+                                            tracing::info!("MEM-POLICY: entry '{}' class={} delivery={} -> mode={}",
+                                                bname, p.class, p.delivery, delivery_mode);
+                                        }
                                         let strict = std::env::var("SP_RECALL_STRICT").as_deref() == Ok("1");
-                                        let attr_gate = std::env::var("SP_RECALL_ATTR_GATE").as_deref() == Ok("1");
+                                        // attr-gate fires from env OR from the entry's policy (attr-gate-strict /
+                                        // a decline that includes attribute-absent/zero-inference).
+                                        let policy_attr_gate = bpol.as_ref().map(|p|
+                                            p.delivery == "attr-gate-strict"
+                                            || p.decline_when.iter().any(|w| w == "attribute-absent" || w == "zero-inference")
+                                        ).unwrap_or(false);
+                                        let attr_gate = policy_attr_gate
+                                            || std::env::var("SP_RECALL_ATTR_GATE").as_deref() == Ok("1");
                                         let attr_tau: f32 = std::env::var("SP_RECALL_ATTR_TAU").ok()
                                             .and_then(|s| s.parse().ok()).unwrap_or(0.5);
                                         let absent = if attr_gate { recall::attr_absent_ratio(&ruser, &btext) } else { 0.0 };
@@ -2041,11 +2069,11 @@ fn run_kvdecode_chat(
                                             // entirely (consumed at the synthesis seam below, before
                                             // decode_step(syn_last)). No gemma4 decode => confabulation/leak
                                             // is mathematically impossible + the turn resolves in microseconds.
-                                            symbolic_decline = Some(
-                                                "I have a record for that entity, but it does not include that specific detail.".to_string());
+                                            symbolic_decline = Some(bpol.as_ref().map(|p| p.decline_message.clone())
+                                                .unwrap_or_else(|| "I have a record for that entity, but it does not include that specific detail.".to_string()));
                                             recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
-                                            tracing::info!("RECALL-L5: '{}' cos={:.3} absent={:.2} -> ATTR-DECLINE (zero-inference symbolic, no forward)",
-                                                bname, bcos, absent);
+                                            tracing::info!("RECALL-L5: '{}' cos={:.3} absent={:.2} -> ATTR-DECLINE (zero-inference symbolic, no forward){}",
+                                                bname, bcos, absent, if mem_policy_on { " [mem-policy]" } else { "" });
                                         } else if tau_margin > 0.0 && margin < tau_margin {
                                             // MARGIN GATE (delivery only; attr-decline above is NOT starved):
                                             // an ambiguous top1 (no clear gap over top2) is background, not a
@@ -2060,26 +2088,26 @@ fn run_kvdecode_chat(
                                                     Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Answer ONLY using the fact on record below. If the fact does not state what the question asks, reply EXACTLY: \"I do not have that information.\" Do not guess, infer, or invent any detail that is not written in the fact.".to_string() },
                                                     Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}", btext, ruser) },
                                                 ]
-                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("sandwich") {
+                                            } else if delivery_mode == ("sandwich") {
                                                 // DELIVERY SWEEP (2026-07-02, RUNBOOK §11): instruction AFTER the
                                                 // question (recency) + explicit override authority.
                                                 vec![
                                                     Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Keep replies short. Use facts you were given faithfully; if you don't know, say so.".to_string() },
                                                     Message { role: "user".to_string(), content: format!("Context (authoritative, from your memory): {}\n\n{}\n\n(Answer using ONLY the context above; it overrides your prior knowledge.)", btext, ruser) },
                                                 ]
-                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("factecho") {
+                                            } else if delivery_mode == ("factecho") {
                                                 // DELIVERY SWEEP: prime the answer to copy from the fact.
                                                 vec![
                                                     Message { role: "system".to_string(), content: "You are Shannon-Prime, a local AI with a real working memory. Your memory record is the ground truth for this conversation, even where it differs from general knowledge. Keep replies short.".to_string() },
                                                     Message { role: "user".to_string(), content: format!("Fact on record: {}\n\nQuestion: {}\n\nAnswer using the fact on record:", btext, ruser) },
                                                 ]
-                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("system") {
+                                            } else if delivery_mode == ("system") {
                                                 // DELIVERY SWEEP: fact delivered as SYSTEM authority, clean user turn.
                                                 vec![
                                                     Message { role: "system".to_string(), content: format!("You are Shannon-Prime, a local AI with a real working memory. Fact on record (authoritative for this conversation, overrides prior knowledge): {}\nAnswer from this fact; keep replies short.", btext) },
                                                     Message { role: "user".to_string(), content: ruser.clone() },
                                                 ]
-                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("systemecho") {
+                                            } else if delivery_mode == ("systemecho") {
                                                 // DELIVERY SWEEP round 2 winner: system authority + copy-priming
                                                 // (full-61: 88.52% OBEY, 0 LEAK — every correctly-selected episode
                                                 // obeyed; misses = selection cross-picks). MULTI-TURN FIX: preserve
@@ -2099,7 +2127,7 @@ fn run_kvdecode_chat(
                                                     _ => v.push(Message { role: "user".to_string(), content: format!("{}\n\nAnswer using the fact on record:", ruser) }),
                                                 }
                                                 v
-                                            } else if std::env::var("SP_RECALL_L5_PROMPT").as_deref() == Ok("scaled") {
+                                            } else if delivery_mode == ("scaled") {
                                                 // SCALED delivery wording (2026-07-02): the plain recite wording's
                                                 // paraphrase obedience proved FP/build-FRAGILE (the 86.89% receipt
                                                 // is NOT reproducible on the current stack: 40.98% via the receipt's
@@ -3515,6 +3543,7 @@ Tag of the answer (or [NULL]):");
                                                     gk_ng: ng,
                                                     tokens: Some(toks),
                                                     l5key: l5k, // B4-SEAL: minted at capture; empty only on mint failure
+                                                    policy: None, // live episode; NIGHTSHIFT classifies later
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(

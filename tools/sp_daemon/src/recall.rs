@@ -85,6 +85,28 @@ impl Projection {
     }
 }
 
+/// MEM-OKF v2 per-entry policy (ADR-004): how THIS memory wants to be delivered/declined.
+/// Loaded from the registry row's optional `mem_class`/`mem_delivery`/`mem_decline_*` fields.
+/// `None` on an episode ⇒ fall back to the global env path (SP_MEM_POLICY null floor).
+#[derive(Clone, Debug)]
+pub struct MemPolicy {
+    pub class: String,
+    pub delivery: String,             // systemecho | attr-gate-strict | recite | system | plain | ...
+    pub decline_when: Vec<String>,    // attribute-absent | zero-inference | family-ambiguous | low-margin
+    pub decline_message: String,
+}
+
+/// The proven class → default delivery mapping (mirror of okf_mem.py CLASS_DEFAULT_DELIVERY;
+/// two-stage REFUTED by G-MEMPOLICY-V3 so same-template defaults to systemecho).
+pub fn class_default_delivery(class: &str) -> &'static str {
+    match class {
+        "private-secret" => "attr-gate-strict",
+        "counterfact" | "same-template" => "systemecho",
+        "preference" | "persona" => "system",
+        _ => "recite", // fact, episodic-event, unknown
+    }
+}
+
 /// One registry episode: its replay path, position count, topic, and 256-bit sig.
 #[derive(Clone, Debug)]
 pub struct Episode {
@@ -116,6 +138,9 @@ pub struct Episode {
     /// query's `l5_query_embed(read_global_q)` by cosine — the query-to-query
     /// selector that recalls paraphrases (G-REP-LAYER-L5: 88.5% para vs Jaccard 8%).
     pub l5key: Vec<f32>,
+    /// MEM-OKF v2 / ADR-004: this entry's own delivery/decline policy (from the
+    /// registry row's mem_class/mem_delivery/mem_decline_*). `None` ⇒ global env path.
+    pub policy: Option<MemPolicy>,
 }
 
 // gemma4-12b global attention head geometry (g_nkv=1, g_nh=16, g_hd=512 ⇒ g_kvd=HD).
@@ -410,6 +435,19 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
         let (gk, gk_ng) = load_episode_global_k(dir, npos).unwrap_or((Vec::new(), 0));
         // L5 RECALL: load the episode's L5 query-key sidecar (ep.l5), if present.
         let l5key = load_episode_l5key(dir).unwrap_or_default();
+        // MEM-OKF v2: this entry's own policy, if the row carries mem_class.
+        let policy = v.get("mem_class").and_then(|x| x.as_str()).map(|class| {
+            let delivery = v.get("mem_delivery").and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| class_default_delivery(class).to_string());
+            let decline_when = v.get("mem_decline_when").and_then(|x| x.as_str())
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+                .unwrap_or_default();
+            let decline_message = v.get("mem_decline_message").and_then(|x| x.as_str())
+                .unwrap_or("I have a record for that entity, but it does not include that specific detail.")
+                .to_string();
+            MemPolicy { class: class.to_string(), delivery, decline_when, decline_message }
+        });
         out.push(Episode {
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
             dir: dir.to_string(),
@@ -421,6 +459,7 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
             gk_ng,
             tokens: None,
             l5key,
+            policy,
         });
     }
     // JUDGE-SERVED: backfill entry text from a sibling corpus_manifest.jsonl (the
