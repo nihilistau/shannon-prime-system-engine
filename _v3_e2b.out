@@ -1,0 +1,18 @@
+=== E2b TOPICALITY: correct should YES, magnet should NO ===
+dynamite_inv     correct=yes  magnet(radium_disc)=yes  -> no
+hamlet_author    correct=yes  magnet(radium_disc)=yes  -> no
+starry_night     correct=no   magnet(radium_disc)=yes  -> no
+david_sculptor   correct=yes  magnet(radium_disc)=yes  -> no
+evolution_theory correct=statem magnet(insulin_disc)=the st -> no
+first_element    correct=the st magnet(fastest_bird)=yes  -> no
+telescope_inv    correct=statem magnet(radium_disc)=statem -> no
+colosseum_city   correct=no   magnet(egypt_capital)=yes  -> no
+kenya_capital    correct=no   magnet(egypt_capital)=no   -> no
+separated: 0/9
+=== CONTROLS: correct should YES ===
+longest_river    correct=no
+iron_symbol      correct=statem
+chromosomes      correct=yes
+berlin_wall      correct=yes
+fuji_country     correct=no
+controls correct=yes: 2/5

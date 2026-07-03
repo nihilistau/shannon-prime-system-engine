@@ -1,0 +1,19 @@
+=== CROSS-PICKS: correct should YES, magnet should NO ===
+dynamite_inv     correct=no   magnet(radium_disc)=no    -> no
+hamlet_author    correct=no   magnet(radium_disc)=no    -> no
+starry_night     correct=no   magnet(radium_disc)=no    -> no
+david_sculptor   correct=no   magnet(radium_disc)=no    -> no
+evolution_theory correct=no   magnet(insulin_disc)=no    -> no
+first_element    correct=no   magnet(fastest_bird)=no    -> no
+telescope_inv    correct=no   magnet(radium_disc)=no    -> no
+colosseum_city   correct=no   magnet(egypt_capital)=no    -> no
+kenya_capital    correct=no   magnet(egypt_capital)=no    -> no
+separated (correct=yes & magnet=no): 0/9
+
+=== CONTROLS (correct cases): correct should YES ===
+longest_river    correct=no
+iron_symbol      correct=no
+chromosomes      correct=no
+berlin_wall      correct=no
+fuji_country     correct=no
+controls correct=yes: 0/5
