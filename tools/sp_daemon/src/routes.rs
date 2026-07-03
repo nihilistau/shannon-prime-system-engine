@@ -938,6 +938,133 @@ pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
     added
 }
 
+/// LM-B3 adaptive classification: classify a memory's text into a mem_class via ONE model
+/// micro-forward (accurate, off the hot path — used by the idle NIGHTSHIFT refine pass). The
+/// heuristic classify_mem_class runs at capture (instant); this CORRECTS it on idle. Returns a
+/// known class or None. Reuses the scratch-session decode pattern (canon suppress-mask).
+#[cfg(feature = "wire_cuda_backend")]
+fn model_classify(qm: *const std::ffi::c_void, tok: &crate::tokenizer::SptbTokenizer,
+                  vocab: usize, text: &str) -> Option<String> {
+    use sp_daemon::cuda_kvdecode_dispatch as kv;
+    let prompt = format!(
+        "Classify the memory into ONE category. Reply with ONLY the category word.\n\
+         - private-secret: a password, code, PIN, key, credential, recovery phrase, security-question \
+answer, or any private identifier that must be protected from disclosure.\n\
+         - persona: the user's or the agent's own identity, name, or personal preference.\n\
+         - counterfact: a general-world fact (possibly revised) asserted as authoritative.\n\
+         - fact: a neutral general fact.\n\
+         Memory: \"{}\"\nCategory:", text.trim());
+    let msgs = vec![Message { role: "user".to_string(), content: prompt }];
+    let toks = tok.apply_template_ids(&msgs).ok()?;
+    if toks.len() < 2 { return None; }
+    let scratch = unsafe { kv::open(qm, (toks.len() as i32) + 16) }.ok()?;
+    let out = (|| -> Option<String> {
+        let mut logits = vec![0.0f32; vocab];
+        let (head, last) = toks.split_at(toks.len() - 1);
+        if !head.is_empty() { unsafe { kv::prefill(scratch, head) }.ok()?; }
+        let mut t = last[0];
+        let stops = tok.turn_stop_ids();
+        let suppress = tok.suppress_token_ids();
+        let mut s = String::new();
+        for _ in 0..10 {
+            unsafe { kv::decode_step(scratch, t, &mut logits) }.ok()?;
+            let (mut bt, mut bv) = (0usize, f32::NEG_INFINITY);
+            for (i, &v) in logits.iter().enumerate() {
+                if suppress.contains(&(i as i32)) { continue; }
+                if v > bv { bv = v; bt = i; }
+            }
+            t = bt as i32;
+            if t == 1 || stops.contains(&t) { break; }
+            s.push_str(&String::from_utf8_lossy(tok.decode_token(t)));
+            if s.contains('\n') { break; }
+        }
+        Some(s.trim().to_lowercase())
+    })();
+    unsafe { kv::release_for_model(scratch) };
+    let out = out?;
+    // parse the reply to a known class (private-secret first — safety-monotone).
+    for c in ["private-secret", "persona", "preference", "counterfact", "episodic-event", "fact"] {
+        if out.contains(c) { return Some(c.to_string()); }
+    }
+    None
+}
+
+/// LM-B3: rewrite a store concept's OKF frontmatter policy in place for the NEW class (drops the
+/// old policy lines, inserts fresh ones from the class defaults). Body + other frontmatter kept.
+fn rewrite_okf_class(path: &std::path::Path, new_class: &str) {
+    let raw = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => return };
+    let pol = sp_daemon::recall::MemPolicy::from_class(new_class);
+    let auth = match new_class {
+        "private-secret" => "private",
+        "persona" | "preference" | "fact" | "episodic-event" => "supplements",
+        _ => "overrides-prior",
+    };
+    let drop = ["mem_class:", "mem_delivery:", "mem_authority:", "mem_decline_when:", "mem_decline_message:"];
+    let mut out = String::new();
+    let (mut in_fm, mut wrote) = (false, false);
+    for line in raw.lines() {
+        if line.trim() == "---" {
+            if in_fm && !wrote {
+                out.push_str(&format!("mem_class: {}\nmem_delivery: {}\nmem_authority: {}\n",
+                    new_class, pol.delivery, auth));
+                if !pol.decline_when.is_empty() {
+                    out.push_str(&format!("mem_decline_when: [{}]\nmem_decline_message: {}\n",
+                        pol.decline_when.join(", "), pol.decline_message));
+                }
+                wrote = true;
+            }
+            out.push_str("---\n");
+            in_fm = !in_fm;
+            continue;
+        }
+        if in_fm && drop.iter().any(|d| line.trim_start().starts_with(d)) { continue; }
+        out.push_str(line); out.push('\n');
+    }
+    let _ = std::fs::write(path, out);
+}
+
+/// LM-B3 NIGHTSHIFT refine: on idle, re-classify each store concept via a model call and, if it
+/// differs from the current class, CORRECT it — update the served episode's policy in memory AND
+/// rewrite the concept's OKF frontmatter (persistence). Safety-monotone: never downgrades a
+/// private-secret. Gated SP_MEM_CLASSIFY_REFINE=1. Returns the number of corrections.
+#[cfg(feature = "wire_cuda_backend")]
+pub fn refine_okf_store(app: &Arc<AppState>, root: &str) -> usize {
+    use sp_daemon::recall;
+    let full = std::path::Path::new(root).join("full");
+    let rd = match std::fs::read_dir(&full) { Ok(r) => r, Err(_) => return 0 };
+    let qm = {
+        let mut sg = match app.session.as_ref() { Some(s) => s.lock().unwrap(), None => return 0 };
+        let sraw = sg.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+        (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
+    };
+    if qm.is_null() { return 0; }
+    let mut changed = 0usize;
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+        let addr = match path.file_stem() { Some(s) => s.to_string_lossy().to_string(), None => continue };
+        let raw = match std::fs::read_to_string(&path) { Ok(t) => t, Err(_) => continue };
+        let cur = recall::parse_okf_policy(&raw).map(|p| p.class);
+        let body = recall::okf_body(&raw);
+        if body.is_empty() { continue; }
+        let new = match model_classify(qm, app.tokenizer.as_ref(), app.vocab_size, &body) {
+            Some(c) => c, None => continue };
+        if cur.as_deref() == Some(new.as_str()) { continue; } // unchanged
+        // SAFETY-MONOTONE (ADR-004): never downgrade a private-secret to a leakier class.
+        if cur.as_deref() == Some("private-secret") && new != "private-secret" { continue; }
+        {
+            let mut ns = app.nightshift.write().unwrap();
+            if let Some(ep) = ns.iter_mut().find(|e| e.name == addr) {
+                ep.policy = Some(recall::MemPolicy::from_class(&new));
+            }
+        }
+        rewrite_okf_class(&path, &new);
+        tracing::info!("MEM-REFINE: '{}' {:?} -> {} (model-reclassified)", addr, cur, new);
+        changed += 1;
+    }
+    changed
+}
+
 // LAYER-3 MERGE helper: capture an ARBITRARY text as a new live episode, with the
 // SAME provenance as the NIGHTSHIFT path (BOS kept + trailing newline, batched forward
 // via the resident model, real C2 sig, persisted to the registry if SP_NIGHTSHIFT_PERSIST).

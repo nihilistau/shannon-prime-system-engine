@@ -1,0 +1,63 @@
+G-LM-REFINE (LM-B3) — adaptive classification: the idle NIGHTSHIFT model-refine AUTONOMOUSLY
+CORRECTS a heuristic mis-classification, and the memory's served policy + privacy posture flip
+to match — no restart. This closes the flywheel: heuristic capture -> idle model-refine ->
+corrected self-governance. (2026-07-03)
+=========================================================================================
+Third brick of ADR-005 (CONTRACT-LIVING-MEMORY LM-B3). The capture-time classifier is a fast
+keyword HEURISTIC (instant, but misses keyword-less secrets). LM-B3 adds an idle model pass that
+RE-CLASSIFIES via one 12B micro-forward and corrects the miss, updating both the served policy
+(in memory) and the persisted OKF frontmatter.
+
+BUILD (engine this-commit, gated SP_MEM_CLASSIFY_REFINE=1, default-off null floor):
+  * routes.rs model_classify(qm, tok, vocab, text): ONE scratch-session micro-forward that
+    classifies a memory body into {private-secret | persona | preference | counterfact | fact}
+    (canon suppress-mask greedy decode, parse first known class; private-secret matched first).
+  * routes.rs refine_okf_store(app, root): for each store concept, model_classify(body); if it
+    differs from the current class, CORRECT it -> (a) update the served episode's policy in
+    app.nightshift (MemPolicy::from_class), (b) rewrite the concept's OKF frontmatter policy
+    (rewrite_okf_class) for persistence. SAFETY-MONOTONE (ADR-004): never downgrades an existing
+    private-secret to a leakier class.
+  * daemon.rs: the LM-B1 idle reconciler thread also runs refine_okf_store when
+    SP_MEM_CLASSIFY_REFINE=1 (idle-gated: re-checks inference_active before the model calls).
+
+GATE G-LM-REFINE — a keyword-less secret ("The recovery phrase for the Meridian vault archive is
+orchid tango falcon delta") stored MIS-classified as counterfact (what the keyword-heuristic does
+— no code/keyword to catch). Clean two-phase A/B on the SAME concept + SAME queries:
+
+  PHASE 1 (SP_MEM_CLASSIFY_REFINE unset -> refine OFF; class stays counterfact):
+    MEM-REFINE events = 0 (null floor).  telemetry_before.jsonl:
+      {class:counterfact, delivery:systemecho, redacted:FALSE, query IN THE CLEAR}  x2
+    served: absent-probe CONFABULATES ("...administrator...is Shannon-Prime"), direct recites.
+
+  PHASE 2 (SP_MEM_CLASSIFY_REFINE=1 -> refine ON):
+    LOG: "MEM-REFINE: '98928d4b8f2b8fbd' Some(\"counterfact\") -> private-secret (model-reclassified)"
+         + "MEM-REFINE: 1 concept(s) re-classified on idle"   (autonomous, on idle, no restart)
+    FRONTMATTER persisted: mem_class: private-secret  (was counterfact)
+    telemetry_after.jsonl:
+      {class:private-secret, delivery:recite, redacted:TRUE, query HASHED (#9216b7…, #0d9a9c…)} x2
+
+  THE FLIP (driven purely by the autonomous reclassification):
+    class     counterfact  -> private-secret   (model corrected the heuristic miss)
+    delivery  systemecho   -> recite           (attr-gate-strict family; off the confabulating echo)
+    privacy   redacted:false (clear) -> redacted:true (hashed)   ← the memory now self-governs
+                                                                   under the stricter privacy policy
+
+VERDICT: GREEN. LM-B3 mechanism proven: the idle model-refine re-classifies a stored memory and
+corrects a security-relevant heuristic miss, and the served policy + telemetry privacy posture
+change accordingly — live, no restart, safety-monotone, default-off = byte-identical.
+
+NOTE (honest scope): the absent-attribute probe here does NOT flip to DECLINE, because the probe
+shares 3 entity tokens with the memory ("Meridian vault archive") so its absent-ratio (0.25) is
+below the attr-gate τ (0.5) — a probe-design property, orthogonal to LM-B3. The attr-gate zero-
+inference DECLINE on absent probes is already GREEN (G-MEMCLASSIFY-SERVED, G-LM-TELEMETRY: 2
+decline records at ratio ≥ τ). LM-B3's contribution is the CORRECTION + policy flip, not re-
+proving attr-gate. FOLLOW-ON: single-token-entity probe to also show confab->decline post-refine;
+the model-emitted [MEM_CLASS] inline tag (harness StreamProcessor) as a second refine signal;
+persona vs agent-persona split; a learned classifier once the LM-B2 telemetry set is large enough.
+
+SPEED: refine is idle-gated (runs only when inference_active==false) and pays ~one 12B micro-
+forward per concept per pass; zero cost on the token path (default-off).
+
+REPRO: refine_gate.py setup; run_refine.bat off -> refine_gate.py q (before); run_refine.bat on ->
+wait MEM-REFINE -> refine_gate.py q (after). ENV: engine this-commit; RTX 2060 12GB; store =
+_refine_corpus/store; SP_RECALL_REGISTRY=_refine_corpus/registry_empty.jsonl.

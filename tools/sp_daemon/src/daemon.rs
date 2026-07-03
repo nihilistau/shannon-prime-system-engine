@@ -802,6 +802,14 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
                         if st.inference_active.load(std::sync::atomic::Ordering::Relaxed) { continue; }
                         let n = crate::routes::load_and_mint_okf_store(&st, &root2);
                         if n > 0 { info!("STORE-MERGE reconcile: +{} new concept(s) hot-loaded", n); }
+                        // LM-B3 NIGHTSHIFT REFINE: on idle, re-classify concepts via a model call and
+                        // CORRECT any heuristic miss (updates served policy + rewrites frontmatter).
+                        // Gated SP_MEM_CLASSIFY_REFINE=1. Re-check idle first (refine does model calls).
+                        if std::env::var("SP_MEM_CLASSIFY_REFINE").as_deref() == Ok("1")
+                            && !st.inference_active.load(std::sync::atomic::Ordering::Relaxed) {
+                            let c = crate::routes::refine_okf_store(&st, &root2);
+                            if c > 0 { info!("MEM-REFINE: {} concept(s) re-classified on idle", c); }
+                        }
                     }
                 });
                 info!("STORE-MERGE: live reconciler armed (every {}s, idle-gated)", secs.max(1));

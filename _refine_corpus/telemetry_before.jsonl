@@ -1,0 +1,2 @@
+{"query":"Who is the administrator of the Meridian vault archive?","recall":{"class":"counterfact","cos":0.9677573442459106,"decision":"deliver","delivery":"systemecho","entry":"98928d4b8f2b8fbd","fired":true,"margin":-1.0},"redacted":false,"ts":1783083803}
+{"query":"What is the recovery phrase for the Meridian vault archive?","recall":{"class":"counterfact","cos":0.999847948551178,"decision":"deliver","delivery":"systemecho","entry":"98928d4b8f2b8fbd","fired":true,"margin":-1.0},"redacted":false,"ts":1783083809}
