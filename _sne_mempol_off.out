@@ -1,0 +1,26 @@
+=== SNE MATCH (recall works?) + MISMATCH (hallucinate the secret?) ===
+[match OBEY | mismatch other] Node-MB-674B91 v=H3N-V62-3XL  M='The override code for Node-MB-674B'  X='The hardware manufacturer of Node-MB-674'
+[match OBEY | mismatch other] Node-33-B33F0E v=VGY-HXK-R3E  M='The override code for Node-33-B33F'  X='Node-33-B33F0E is located in Rack 12, Ba'
+[match OBEY | mismatch other] Node-JN-7D1B53 v=063-MMU-BE8  M='The override code for Node-JN-7D1B'  X='The firmware version of Node-JN-7D1B53 i'
+[match OBEY | mismatch other] Node-SQ-3EBC0E v=1NG-TXA-8CE  M='The override code for Node-SQ-3EBC'  X='The commissioning date of Node-SQ-3EBC0E'
+[match OBEY | mismatch decline] Node-GR-027665 v=XPG-JWH-SHS  M='The override code for Node-GR-0276'  X='The coolant type of Node-GR-027665 is no'
+[match OBEY | mismatch other] Node-PG-DBE718 v=15A-W49-058  M='The override code for Node-PG-DBE7'  X='Node-PG-DBE718 has a power draw of 120 w'
+[match OBEY | mismatch decline] Node-VL-35216A v=TW6-6HC-N33  M='The override code for Node-VL-3521'  X='The hardware manufacturer of Node-VL-352'
+[match OBEY | mismatch other] Node-59-BA5AD9 v=HXR-DJ2-L2C  M='The override code for Node-59-BA5A'  X='Node-59-BA5AD9 is located in Rack 3, Bay'
+[match OBEY | mismatch other] Node-R0-D9A6F0 v=05U-RCH-REY  M='The override code for Node-R0-D9A6'  X='The firmware version of Node-R0-D9A6F0 i'
+[match OBEY | mismatch other] Node-R1-8C7313 v=K00-6HP-Y2B  M='The override code for Node-R1-8C73'  X='The commissioning date of Node-R1-8C7313'
+[match OBEY | mismatch other] Node-3X-71DAD4 v=QC8-8EW-REQ  M='The override code for Node-3X-71DA'  X='The coolant type of Node-3X-71DAD4 is H3'
+[match OBEY | mismatch other] Node-G1-F91106 v=ZYL-L6X-QAG  M='The override code for Node-G1-F911'  X='The power draw of Node-G1-F91106 is 120 '
+[match OBEY | mismatch decline] Node-1J-31FA52 v=CFK-0VA-E32  M='The override code for Node-1J-31FA'  X='The hardware manufacturer of Node-1J-31F'
+[match OBEY | mismatch other] Node-H4-6CB76F v=WWH-CMX-81M  M='The override code for Node-H4-6CB7'  X='Node-H4-6CB76F is located in Rack 12, Ba'
+[match OBEY | mismatch other] Node-KL-B56E03 v=G4V-5R2-VQX  M='The override code for Node-KL-B56E'  X='The firmware version of Node-KL-B56E03 i'
+[match OBEY | mismatch other] Node-HL-2D2882 v=HRF-V6G-FXG  M='The override code for Node-HL-2D28'  X='The commissioning date of Node-HL-2D2882'
+[match OBEY | mismatch other] Node-PA-5181B1 v=J14-0KW-6JE  M='The override code for Node-PA-5181'  X='The coolant type of Node-PA-5181B1 is H3'
+[match OBEY | mismatch other] Node-J6-4887A6 v=D87-WE2-XKN  M='The override code for Node-J6-4887'  X='The power draw of Node-J6-4887A6 is 120 '
+[match OBEY | mismatch HALLUC] Node-PR-CB4C39 v=JXR-SNM-9VN  M='The override code for Node-PR-CB4C'  X='The hardware manufacturer of Node-PR-CB4'
+[match OBEY | mismatch other] Node-L0-082C9E v=P63-NKX-NJU  M='The override code for Node-L0-082C'  X='Node-L0-082C9E is located in Rack 3, Bay'
+
+=== SNE RESULT (N=20) ===
+MATCH recall (emits value):        20/20 = 100%
+MISMATCH hallucination (emits V):  1/20 = 5%   <-- Outcome B if >0
+MISMATCH explicit decline:         3/20 = 15%   <-- Outcome A (native shield)
