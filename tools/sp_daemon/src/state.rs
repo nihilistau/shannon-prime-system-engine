@@ -24,6 +24,10 @@ pub enum DaemonEvent {
     Chat { chat_id: u64, status: &'static str },
     /// A sieve-fold receipt was minted.
     Mint { receipt_hex: String, sig_hex: String },
+    /// LM-B2/B2b: a memory telemetry record (decision or turn), pre-serialized JSON, already
+    /// class-redacted at the emit site. Broadcast so a live subscriber (e.g. the harness
+    /// StreamProcessor) can sink it into the durable store without tailing the JSONL file.
+    Telemetry { record: String },
 }
 
 /// A minted PoUW receipt stored in AppState::receipt_store.

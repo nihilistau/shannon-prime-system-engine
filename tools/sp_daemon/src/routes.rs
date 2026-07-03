@@ -841,9 +841,9 @@ fn mint_ep_l5(app: &Arc<AppState>, qm: *const std::ffi::c_void, toks: &[i32],
 /// (ADR-005 §3b, privacy-before-data). Gated SP_TELEMETRY=1; unset ⇒ no-op (null floor). Off the
 /// token path (called at the decision point, no forward). The engine logs the DECISION; the
 /// harness joins the OUTPUT + outcome by turn.
-fn telem_emit_recall(query: &str, entry: &str, class: &str, cos: f32, margin: f32, delivery: &str, decision: &str) {
+fn telem_emit_recall(query: &str, entry: &str, class: &str, cos: f32, margin: f32, delivery: &str,
+                     decision: &str, evt: Option<&tokio::sync::broadcast::Sender<crate::state::DaemonEvent>>) {
     if std::env::var("SP_TELEMETRY").as_deref() != Ok("1") { return; }
-    let path = match std::env::var("SP_TELEMETRY_LOG") { Ok(p) if !p.is_empty() => p, _ => return };
     let secret = class == "private-secret";
     let q = if secret {
         use std::hash::{Hash, Hasher};
@@ -860,9 +860,25 @@ fn telem_emit_recall(query: &str, entry: &str, class: &str, cos: f32, margin: f3
                     "margin": if margin.is_finite() { margin } else { -1.0 },
                     "delivery": delivery, "decision": decision }
     });
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", rec);
+    telem_sink(&rec, evt);
+}
+
+/// LM-B2 SSE-SINK: write a telemetry record to the JSONL file (if SP_TELEMETRY_LOG is set) AND
+/// broadcast it on the events channel (if a sender is provided) as a `Telemetry` DaemonEvent —
+/// so a live /v1/events subscriber (the harness StreamProcessor) sinks it into the durable store
+/// without tailing a file. The record is ALREADY class-redacted by the caller; the SSE payload is
+/// byte-identical to the file line. File and SSE are independent (either, both, or neither).
+fn telem_sink(rec: &serde_json::Value, evt: Option<&tokio::sync::broadcast::Sender<crate::state::DaemonEvent>>) {
+    if let Ok(path) = std::env::var("SP_TELEMETRY_LOG") {
+        if !path.is_empty() {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{}", rec);
+            }
+        }
+    }
+    if let Some(tx) = evt {
+        let _ = tx.send(crate::state::DaemonEvent::Telemetry { record: rec.to_string() });
     }
 }
 
@@ -874,9 +890,9 @@ fn telem_emit_recall(query: &str, entry: &str, class: &str, cos: f32, margin: f3
 /// owner legitimately saw the recite. Non-secret turns keep query->output in the clear = the
 /// finetune signal. Gated SP_TELEMETRY=1 + SP_TELEMETRY_LOG; off the token path (one append).
 fn telem_emit_turn(query: &str, entry: &str, class: &str, output: &str, fact: Option<&str>,
-                   n_out: usize, decode_s: f64, secret: bool) {
+                   n_out: usize, decode_s: f64, secret: bool,
+                   evt: Option<&tokio::sync::broadcast::Sender<crate::state::DaemonEvent>>) {
     if std::env::var("SP_TELEMETRY").as_deref() != Ok("1") { return; }
-    let path = match std::env::var("SP_TELEMETRY_LOG") { Ok(p) if !p.is_empty() => p, _ => return };
     let hash = |s: &str| { use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         s.hash(&mut h); format!("#{:016x}", h.finish()) };
@@ -902,10 +918,7 @@ fn telem_emit_turn(query: &str, entry: &str, class: &str, output: &str, fact: Op
                   "n_out": n_out, "decode_s": (decode_s * 1000.0).round() / 1000.0,
                   "tok_s": (tok_s * 100.0).round() / 100.0, "obeyed": obeyed }
     });
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", rec);
-    }
+    telem_sink(&rec, evt);
 }
 
 /// STORE-MERGE (#76/#77): load memory-okf/full/*.md concepts as SERVABLE episodes so a memory
@@ -2375,7 +2388,7 @@ fn run_kvdecode_chat(
                                                 bname, bcos, absent, if mem_policy_on { " [mem-policy]" } else { "" });
                                             telem_emit_recall(&ruser, &bname,
                                                 bpol.as_ref().map(|p| p.class.as_str()).unwrap_or("-"),
-                                                bcos, margin, "attr-gate-strict", "decline");
+                                                bcos, margin, "attr-gate-strict", "decline", Some(&app.events_tx));
                                         } else if tau_margin > 0.0 && margin < tau_margin {
                                             // MARGIN GATE (delivery only; attr-decline above is NOT starved):
                                             // an ambiguous top1 (no clear gap over top2) is background, not a
@@ -2384,7 +2397,7 @@ fn run_kvdecode_chat(
                                                 bname, bcos, margin, tau_margin);
                                             telem_emit_recall(&ruser, &bname,
                                                 bpol.as_ref().map(|p| p.class.as_str()).unwrap_or("-"),
-                                                bcos, margin, &delivery_mode, "margin-skip");
+                                                bcos, margin, &delivery_mode, "margin-skip", Some(&app.events_tx));
                                         } else {
                                             // recite (proven 86.89% path); SP_RECALL_STRICT = closed-book
                                             // model-grounded framing (dead lever, kept default-off).
@@ -2465,7 +2478,7 @@ fn run_kvdecode_chat(
                                                             bname, bcos, tau_l5, absent, if strict {"STRICT"} else {"recite"});
                                                         telem_emit_recall(&ruser, &bname,
                                                             bpol.as_ref().map(|p| p.class.as_str()).unwrap_or("-"),
-                                                            bcos, margin, &delivery_mode, "deliver");
+                                                            bcos, margin, &delivery_mode, "deliver", Some(&app.events_tx));
                                                     } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
                                                 }
                                                 _ => tracing::warn!("RECALL-L5: apply_template_ids(aug) failed -- clean prompt"),
@@ -3665,7 +3678,7 @@ Tag of the answer (or [NULL]):");
     if let Some(q) = recalled_query.as_ref() {
         telem_emit_turn(q, recalled.as_ref().map(|(n, _)| n.as_str()).unwrap_or("-"),
             recalled_class.as_deref().unwrap_or("-"), &answer_text, recalled_text.as_deref(),
-            committed_gen.len(), decode_t0.elapsed().as_secs_f64(), recalled_secret);
+            committed_gen.len(), decode_t0.elapsed().as_secs_f64(), recalled_secret, Some(&app.events_tx));
     }
 
     let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;
@@ -4219,6 +4232,13 @@ pub async fn v1_events(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                 let payload = serde_json::json!({ "receipt_hex": receipt_hex, "sig_hex": sig_hex });
                 Some(Ok::<Event, Infallible>(
                     Event::default().event("mint").data(payload.to_string()),
+                ))
+            }
+            // LM-B2 SSE-SINK: stream the (already class-redacted) telemetry record so a live
+            // subscriber (harness StreamProcessor) can sink it into the durable store.
+            DaemonEvent::Telemetry { record } => {
+                Some(Ok::<Event, Infallible>(
+                    Event::default().event("telemetry").data(record),
                 ))
             }
         }

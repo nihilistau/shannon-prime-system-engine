@@ -1,0 +1,40 @@
+G-LM-SSE (LM-B2 SSE-SINK, engine half) — telemetry records now BROADCAST live on /v1/events as a
+`Telemetry` DaemonEvent, so a subscriber (the harness StreamProcessor) can sink them into the
+durable store without tailing the JSONL file. Secrets stay redacted on the wire. (2026-07-03)
+=========================================================================================
+LM-B2/B2b write telemetry to a local JSONL file. This brick adds the LIVE channel: the same
+already-class-redacted record is also broadcast on the existing /v1/events SSE bus, so the corpus
+can accumulate from real sessions into durable storage (the precondition for the learned
+classifier / finetuning framework).
+
+BUILD (engine this-commit, gated SP_TELEMETRY=1, default-off null floor):
+  * state.rs: new `DaemonEvent::Telemetry { record: String }` variant (pre-serialized, already
+    redacted at the emit site).
+  * routes.rs: telem_emit_recall / telem_emit_turn refactored to build the record then call a
+    shared `telem_sink(rec, evt)` that (a) appends to SP_TELEMETRY_LOG if set AND (b) broadcasts
+    `DaemonEvent::Telemetry` if a sender is passed — file and SSE are INDEPENDENT (either/both/
+    neither). Both emit sites now pass `Some(&app.events_tx)`.
+  * /v1/events handler: new arm streams the telemetry record as `event: telemetry` (payload =
+    the byte-identical JSON line). /v1/pouw/ledger unaffected (catch-all).
+
+GATE G-LM-SSE — subscribed a client to /v1/events, fired 2 recall queries, drained the stream:
+  telemetry events received live on /v1/events: 4  (decision 2 + turn 2 — one pair per turn)
+  REDACTION on the wire: secret "orchid" in SSE payloads = 0 -> PASS
+  RESULT sse: PASS (live telemetry stream + redacted)
+The SSE payload is the SAME `rec` written to the file (telem_sink), so the clear-vs-redacted
+behavior is identical to G-LM-TURNTELEM (non-secret query->output in the clear = finetune signal;
+private-secret query+output redacted). In this run both scratch concepts were private-secret, so
+all 4 events were redacted — the privacy property is what this gate asserts.
+
+VERDICT: GREEN (engine half). The telemetry flywheel now has a LIVE egress: /v1/events streams
+every decision + turn record as it happens, redacted, ready for a durable sink. Default-off
+(SP_TELEMETRY unset ⇒ no records built ⇒ nothing broadcast) = byte-identical null floor.
+
+FOLLOW-ON (the harness half, scoped): the harness subscribes to /v1/events, filters
+`event: telemetry`, and sinks each record into the durable MEM-OKF telemetry store (append +
+content-address) so the corpus accumulates across sessions. Then: PoUW SpinorReceipt per record
+(addr = join key); prefill_s + first-token latency in the turn record.
+
+REPRO: run_refine.bat off (SP_TELEMETRY=1); python _refine_corpus/sse_gate.py (subscribes to
+/v1/events, fires queries, counts telemetry events + greps the secret). ENV: engine this-commit;
+RTX 2060 12GB.
