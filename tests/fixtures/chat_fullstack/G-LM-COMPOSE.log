@@ -1,0 +1,42 @@
+G-LM-COMPOSE — the Living-Memory stack COMPOSES: every LM subsystem ON at once, no interference,
+faithfulness behaviors intact, secrets redacted. The consolidation gate before graduating the LM
+bricks to VERIFIED-SCOREBOARD. (2026-07-03)
+=========================================================================================
+Four LM bricks shipped this session, each gated in isolation (G-LM-RECONCILE, G-LM-TELEMETRY,
+G-LM-REFINE, G-LM-TURNTELEM). This gate proves they run TOGETHER without breaking each other or
+the served memory behaviors.
+
+SETUP — one store, all LM flags on (run_refine.bat on): SP_MEM_OKF_STORE + SP_MEM_POLICY +
+SP_MEM_RECONCILE(3s) + SP_MEM_CLASSIFY_REFINE + SP_TELEMETRY + SP_RECALL_L5 + SP_QKEY_MINT +
+SP_RECALL_REGISTRY(empty). Composed corpus: gold (counterfact), Meridian recovery phrase stored
+MIS-classed counterfact (bait for refine), persona "My name is Aldric Vance".
+
+GATE — booted (3 concepts merged, reconciler armed), then:
+  * REFINE (B3) fired on idle UNDER load: MEM-REFINE '98928d4b…' counterfact -> private-secret.
+  * Query battery (all served per policy, all correct facts):
+      counterfact  "chemical symbol for gold now?"      -> "The chemical symbol for gold is still Xg."
+      private-secret "recovery phrase for Meridian…?"    -> recites the phrase to the owner (recite)
+      persona      "What is my name?"                    -> "My name is Aldric Vance."
+  * RECONCILE (B1) UNDER load: wrote a NEW concept ("capital of Zephyria is Marlowe City") into the
+      store WHILE serving; reconciler hot-loaded it ("reconcile: +1 new concept hot-loaded"); the
+      next query "What is the capital of Zephyria?" -> "Marlowe City" (served, no restart).
+  * TELEMETRY (B2+B2b) UNDER load: 8 records = 4 decision + 4 turn (one pair per delivered turn).
+  * REDACTION: secret "orchid…" appears in the telemetry log 0 times -> PASS.
+
+So in ONE run, simultaneously: store-merge serves 3 policies, the idle thread BOTH reconciles a new
+concept AND model-refines a mis-classed one, every turn logs a decision + turn record, and the
+private-secret stays redacted — with no crash, no corruption, and every fact recalled correctly.
+
+NULL FLOOR (faithfulness untouched): none of these flags are set by the canonical faithfulness
+launcher (run_console_faithful.bat / G-ONECONFIG-LIVE) — so the daily 54/61 stack runs byte-
+identical to before these bricks existed. The LM bricks add passive logging + idle-only
+classification/reconcile; NONE touches the L5 selection scoring (τ/cosine), so obey/faithfulness
+is structurally unchanged. Each flag is independently gated default-off (proven per-brick).
+
+VERDICT: GREEN. The Living-Memory stack (B1 hot-reload · B2 decision-telemetry · B2b turn-outcome ·
+B3 idle refine) composes cleanly and is faithfulness-neutral. Ready to graduate to VERIFIED-
+SCOREBOARD.
+
+REPRO: stage gold+Meridian(counterfact)+persona in _refine_corpus/store; run_refine.bat on; query
+the battery; write a new concept mid-run; query it; inspect telemetry.jsonl (4+4) + grep secret (0).
+ENV: engine 70e4992; RTX 2060 12GB.
