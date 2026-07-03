@@ -735,16 +735,21 @@ fn mint_question_l5(qm: *const std::ffi::c_void, tok: &crate::tokenizer::SptbTok
     use sp_daemon::recall;
     // (1) Generate the question the fact answers — a scratch micro-forward, greedy with the
     //     served control-token suppression (the placeholder-spam cure), stop on newline.
-    let gen_prompt = format!(
-        "A fact is stated. Write ONLY the single short question this fact answers — no answer, no preamble.\n\
-         Example fact: \"The user's dog is named Biscuit.\" -> Question: What is the user's dog's name?\n\
-         Fact: \"{}\"\nQuestion:", fact_text.trim());
-    let gmsgs = vec![Message { role: "user".to_string(), content: gen_prompt }];
-    let gtoks = tok.apply_template_ids(&gmsgs).ok()?;
-    if gtoks.len() < 2 { return None; }
-    let scratch = unsafe { kv::open(qm, (gtoks.len() as i32) + 48) }.ok()?;
-    let question = (|| -> Option<String> {
+    //     ANTI-COPY GUARD (the "user's dog" bug, G-QKEYS-SYSTEMECHO diagnosis): on a hard
+    //     fact the greedy decode COPIES the few-shot exemplar instead of generating the real
+    //     question (3/30 V3 episodes minted "What is the name of the user's dog?" ⇒ their L5
+    //     keys landed in an unrelated neighborhood ⇒ buried at rank >8 ⇒ cross-picked). Cure:
+    //     (a) a NEUTRAL on-domain exemplar (no personal-memory attractor), and (b) require the
+    //     generated question to share a salient token with the fact (canon_overlap>0); if it
+    //     does not (exemplar-copy / hallucination), retry ZERO-SHOT (no exemplar to copy);
+    //     fail both ⇒ None ⇒ statement-key fallback (never worse than today).
+    let scratch = unsafe { kv::open(qm, 320) }.ok()?;
+    let gen_once = |prompt: String| -> Option<String> {
+        let gmsgs = vec![Message { role: "user".to_string(), content: prompt }];
+        let gtoks = tok.apply_template_ids(&gmsgs).ok()?;
+        if gtoks.len() < 2 { return None; }
         let mut logits = vec![0.0f32; vocab];
+        let _ = unsafe { kv::reset(scratch) };
         let (ghead, glast) = gtoks.split_at(gtoks.len() - 1);
         if !ghead.is_empty() { unsafe { kv::prefill(scratch, ghead) }.ok()?; }
         let mut t = glast[0];
@@ -765,7 +770,30 @@ fn mint_question_l5(qm: *const std::ffi::c_void, tok: &crate::tokenizer::SptbTok
         }
         let q = q.trim().trim_start_matches("Question:").trim().lines().next().unwrap_or("").trim().to_string();
         if q.len() < 4 { None } else { Some(q) }
-    })();
+    };
+    // grounded = shares a salient token with the fact (rejects exemplar-copy / hallucination).
+    let grounded = |q: &str| recall::canon_overlap(q, fact_text) > 0;
+    let fewshot = format!(
+        "A fact is stated. Write ONLY the single short question this fact answers — no answer, no preamble.\n\
+         Example fact: \"The tallest mountain on Earth is Mount Kea.\" -> Question: What is the tallest mountain on Earth?\n\
+         Fact: \"{}\"\nQuestion:", fact_text.trim());
+    let zeroshot = format!(
+        "Fact: \"{}\"\nWrite ONLY the single short question this fact answers (no answer, no preamble):",
+        fact_text.trim());
+    let question = match gen_once(fewshot) {
+        Some(q) if grounded(&q) => Some(q),
+        first => {
+            // exemplar-copy / hallucination / empty -> zero-shot retry (no exemplar to copy).
+            if let Some(bad) = first.as_ref() {
+                tracing::warn!("QKEY: few-shot Q {:?} not grounded in fact (exemplar-copy?) -> zero-shot retry", bad);
+            }
+            match gen_once(zeroshot) {
+                Some(q) if grounded(&q) => Some(q),
+                other => { if let Some(b) = other.as_ref() {
+                    tracing::warn!("QKEY: zero-shot Q {:?} also not grounded -> statement-key fallback", b); } None }
+            }
+        }
+    };
     let key = question.as_ref().and_then(|q| {
         // (2) Key the question EXACTLY as a live query is keyed: templated user turn,
         //     prefill, read_global_q of the last token, l5_query_embed.
@@ -1810,6 +1838,15 @@ fn run_kvdecode_chat(
                                         }
                                     }
                                     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                                    // SP_RECALL_L5_DUMPRANK: one-shot diagnostic — log the top-8 ranked
+                                    // (name=cos) list per query so the correct-episode RANK can be
+                                    // recovered offline (decides re-rank vs re-key for the cross-pick
+                                    // residual). Default-off; telemetry only, no behavior change.
+                                    if std::env::var("SP_RECALL_L5_DUMPRANK").as_deref() == Ok("1") {
+                                        let dump: Vec<String> = scored.iter().take(8)
+                                            .map(|(c, n, _)| format!("{}={:.4}", n, c)).collect();
+                                        tracing::info!("RECALL-L5-DUMPRANK: q={:?} ranked=[{}]", ruser, dump.join(" "));
+                                    }
                                     let (mut bcos, mut bname, mut btext) = scored.first()
                                         .map(|t| (t.0, t.1.clone(), t.2.clone()))
                                         .unwrap_or((f32::NEG_INFINITY, String::new(), String::new()));
