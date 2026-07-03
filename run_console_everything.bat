@@ -33,7 +33,15 @@ set "SP_EOT_BIAS=4.0"
 REM ---- Tier 1 on the PRODUCTION registry ----
 if not exist "%ENGINE%_memory_live" mkdir "%ENGINE%_memory_live"
 if not exist "%ENGINE%_memory_live\registry.jsonl" type nul > "%ENGINE%_memory_live\registry.jsonl"
-set "SP_AUTO_RECALL_DEFAULT=1"
+REM QUIET-MEMORY MODE (2026-07-03, operator round-3 verdict): recall interjection
+REM OFF for live chat. Live margins between right and wrong records are 0.0004-0.01
+REM (dice) on statement-space keys — the sister record answered "what is my name",
+REM and no downstream guard can rescue a coin-flip selection. Until QUESTION-SPACE
+REM ep.l5 keys land: the system GROWS memories (B4), CONFIRMS explicit stores
+REM ("remember that ..." -> "Stored to memory: ..."), and NEVER interjects records
+REM into answers. Conversational quality = the base model, un-sabotaged.
+REM Flip back to 1 ONLY after the question-space-keys gate is GREEN.
+set "SP_AUTO_RECALL_DEFAULT=0"
 set "SP_RECALL_REGISTRY=%ENGINE%_memory_live\registry.jsonl"
 set "SP_RECALL_L5=1"
 set "SP_RECALL_L5_TAU=0.30"
