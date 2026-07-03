@@ -835,6 +835,37 @@ fn mint_ep_l5(app: &Arc<AppState>, qm: *const std::ffi::c_void, toks: &[i32],
     mint_live_ep_l5(qm, toks, dir).unwrap_or_default()
 }
 
+/// LM-B2 TELEMETRY FLYWHEEL: append one structured RECALL-DECISION record to SP_TELEMETRY_LOG
+/// (JSONL, the telemetry-okf bundle). The query is REDACTED to a hash when the fired entry is a
+/// `private-secret` — telemetry can NEVER carry a value the delivery path would have declined
+/// (ADR-005 §3b, privacy-before-data). Gated SP_TELEMETRY=1; unset ⇒ no-op (null floor). Off the
+/// token path (called at the decision point, no forward). The engine logs the DECISION; the
+/// harness joins the OUTPUT + outcome by turn.
+fn telem_emit_recall(query: &str, entry: &str, class: &str, cos: f32, margin: f32, delivery: &str, decision: &str) {
+    if std::env::var("SP_TELEMETRY").as_deref() != Ok("1") { return; }
+    let path = match std::env::var("SP_TELEMETRY_LOG") { Ok(p) if !p.is_empty() => p, _ => return };
+    let secret = class == "private-secret";
+    let q = if secret {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        query.hash(&mut h);
+        format!("#{:016x}", h.finish())
+    } else { query.to_string() };
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let rec = serde_json::json!({
+        "ts": ts, "query": q, "redacted": secret,
+        "recall": { "fired": decision == "deliver" || decision == "decline",
+                    "entry": entry, "class": class, "cos": cos,
+                    "margin": if margin.is_finite() { margin } else { -1.0 },
+                    "delivery": delivery, "decision": decision }
+    });
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{}", rec);
+    }
+}
+
 /// STORE-MERGE (#76/#77): load memory-okf/full/*.md concepts as SERVABLE episodes so a memory
 /// the HARNESS writes is instantly recallable by the engine (one content-addressed store, both
 /// callers). Text + policy come from the OKF concept; the L5 selection key is loaded from a
@@ -2167,12 +2198,18 @@ fn run_kvdecode_chat(
                                             recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
                                             tracing::info!("RECALL-L5: '{}' cos={:.3} absent={:.2} -> ATTR-DECLINE (zero-inference symbolic, no forward){}",
                                                 bname, bcos, absent, if mem_policy_on { " [mem-policy]" } else { "" });
+                                            telem_emit_recall(&ruser, &bname,
+                                                bpol.as_ref().map(|p| p.class.as_str()).unwrap_or("-"),
+                                                bcos, margin, "attr-gate-strict", "decline");
                                         } else if tau_margin > 0.0 && margin < tau_margin {
                                             // MARGIN GATE (delivery only; attr-decline above is NOT starved):
                                             // an ambiguous top1 (no clear gap over top2) is background, not a
                                             // memory hit — deliver nothing, run the clean prompt.
                                             tracing::info!("RECALL-L5: MARGIN-SKIP top1='{}' cos={:.3} margin={:.4} < tau_m={:.4} -> no recall (clean prompt)",
                                                 bname, bcos, margin, tau_margin);
+                                            telem_emit_recall(&ruser, &bname,
+                                                bpol.as_ref().map(|p| p.class.as_str()).unwrap_or("-"),
+                                                bcos, margin, &delivery_mode, "margin-skip");
                                         } else {
                                             // recite (proven 86.89% path); SP_RECALL_STRICT = closed-book
                                             // model-grounded framing (dead lever, kept default-off).
@@ -2248,6 +2285,9 @@ fn run_kvdecode_chat(
                                                         recalled_text = Some(btext.clone()); // SPECTEST ground
                                                         tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} absent={:.2} mode={} -> TEXT-IN-CONTEXT",
                                                             bname, bcos, tau_l5, absent, if strict {"STRICT"} else {"recite"});
+                                                        telem_emit_recall(&ruser, &bname,
+                                                            bpol.as_ref().map(|p| p.class.as_str()).unwrap_or("-"),
+                                                            bcos, margin, &delivery_mode, "deliver");
                                                     } else { tracing::warn!("RECALL-L5: prefill(aug) failed -- clean prompt"); }
                                                 }
                                                 _ => tracing::warn!("RECALL-L5: apply_template_ids(aug) failed -- clean prompt"),

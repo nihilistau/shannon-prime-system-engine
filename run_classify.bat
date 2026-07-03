@@ -23,6 +23,8 @@ set "SP_RECALL_L5_TAU=0.30"
 set "SP_RECALL_L5_PROMPT=plain"
 set "SP_QKEY_MINT=1"
 set "SP_MEM_CLASSIFY=1"
+set "SP_TELEMETRY=1"
+set "SP_TELEMETRY_LOG=%ENGINE%_classify_corpus\telemetry.jsonl"
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"
 if "%~1"=="grow" (
     set "SP_MEM_STORE=1"

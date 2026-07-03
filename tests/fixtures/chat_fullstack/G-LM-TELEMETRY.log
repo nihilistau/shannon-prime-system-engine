@@ -1,0 +1,42 @@
+G-LM-TELEMETRY (LM-B2) — the telemetry flywheel: every recall DECISION logged as a structured,
+class-REDACTED telemetry-okf record. The data to tune/finetune/detect-drift. (2026-07-03)
+=========================================================================================
+Second brick of ADR-005 (CONTRACT-LIVING-MEMORY LM-B2). The engine now records what the memory
+system DECIDED each turn — off the token path, privacy-first.
+
+BUILD (engine this-commit, gated SP_TELEMETRY=1 + SP_TELEMETRY_LOG=<path>, default-off null floor):
+  * routes.rs telem_emit_recall(query, entry, class, cos, margin, delivery, decision): appends one
+    JSONL record at the recall DECISION point. Called at all three terminal branches — decline
+    (attr-gate zero-inference), margin-skip, deliver. REDACTION (ADR-005 §3b): when the fired
+    entry's class == private-secret, the query is replaced by a hash (#<hash>) and redacted:true —
+    telemetry can NEVER carry a value the delivery path would have declined.
+  * telemetry_report.py: the tuning/drift view — per-class/decision/delivery counts, cos-by-decision,
+    margin stats, redaction check.
+  * The engine logs the DECISION + (follow-on) timings; the harness joins OUTPUT + outcome by turn
+    (it already has both) — one stream, two sides (ADR-005 §3).
+
+GATE G-LM-TELEMETRY — served the mixed classify corpus (2 private-secrets, 1 counterfact, 1
+persona) with SP_TELEMETRY=1; ran the query set. 6 structured records produced:
+  by class:    private-secret 4 · counterfact 1 · persona 1
+  by decision: deliver 4 · decline 2
+  by delivery: recite 2 · attr-gate-strict 2 · systemecho 1 · system 1
+  cos[deliver] mean 0.985 (0.950–1.000) · cos[decline] mean 0.932 · margin mean 0.049
+  redacted records: 4/4 private-secret (query = hash)
+  REDACTION CHECK: secret "K9X-4M2-8QP" appears in the log 0 times -> PASS.
+Each private-secret query is a hash (#3259e7fd…, #0554cbe8…); counterfact/persona queries are in
+the clear. Every decision — which entry, class, cos, margin, delivery mode, deliver/decline — is
+now queryable data.
+
+VERDICT: GREEN (engine decision-telemetry core). The flywheel produces a structured, class-
+redacted per-decision stream: the raw material to (1) tune τ/margin/class-defaults from real
+distributions, (2) build a finetune set (query→delivery/class), (3) detect drift over time.
+Privacy-before-data proven (0 secret hits). Default-off = byte-identical.
+
+SPEED: one JSONL append at the decision point, off the token path. Sub-ms. No forward added.
+
+FOLLOW-ONS (CONTRACT LM-B2 remainder): add per-turn timings (prefill_s/decode_s/tok_s) + the OUTPUT
+join (engine emits a `telemetry` SSE event on events_tx; harness StreamProcessor sinks it with the
+answer + obey/leak outcome); mint a PoUW SpinorReceipt per record (addr = join key). Then LM-B3.
+
+REPRO: run_classify.bat gate (SP_TELEMETRY=1); classify_run.py gate; python telemetry_report.py
+_classify_corpus/telemetry.jsonl K9X-4M2-8QP. ENV: engine this-commit; RTX 2060 12GB.
