@@ -718,6 +718,95 @@ fn mint_live_ep_l5(qm: *const std::ffi::c_void, toks: &[i32], dir: &std::path::P
     key
 }
 
+// QKEYS (2026-07-03): mint a QUESTION-SPACE ep.l5 key for a live-captured episode —
+// the fix for the triply-evidenced statement-space cross-pick (cat 0.0101, my-name
+// 0.0004, G-SPECTEST-V3 pin-2). ROOT CAUSE, proven: the curated corpus mints ep.l5 from
+// the EXACT QUESTION's global-Q (write_ep_l5.py, from facts.json `q`), but mint_live_ep_l5
+// mints from the ASSERTION text — different manifold regions ⇒ a question query matches the
+// curated (question) keys well and the grown (statement) keys poorly. FIX: generate the
+// question this fact answers (one scratch micro-forward, the canon decode pattern), then key
+// it EXACTLY like a live query does — templatize the question as a user turn, prefill,
+// read_global_q of the last token, l5_query_embed. Returns None on any failure ⇒ the caller
+// falls back to the statement-space key (never worse than today). Gated by SP_QKEY_MINT.
+#[cfg(feature = "wire_cuda_backend")]
+fn mint_question_l5(qm: *const std::ffi::c_void, tok: &crate::tokenizer::SptbTokenizer,
+                    vocab: usize, fact_text: &str, dir: &std::path::Path) -> Option<Vec<f32>> {
+    use sp_daemon::cuda_kvdecode_dispatch as kv;
+    use sp_daemon::recall;
+    // (1) Generate the question the fact answers — a scratch micro-forward, greedy with the
+    //     served control-token suppression (the placeholder-spam cure), stop on newline.
+    let gen_prompt = format!(
+        "A fact is stated. Write ONLY the single short question this fact answers — no answer, no preamble.\n\
+         Example fact: \"The user's dog is named Biscuit.\" -> Question: What is the user's dog's name?\n\
+         Fact: \"{}\"\nQuestion:", fact_text.trim());
+    let gmsgs = vec![Message { role: "user".to_string(), content: gen_prompt }];
+    let gtoks = tok.apply_template_ids(&gmsgs).ok()?;
+    if gtoks.len() < 2 { return None; }
+    let scratch = unsafe { kv::open(qm, (gtoks.len() as i32) + 48) }.ok()?;
+    let question = (|| -> Option<String> {
+        let mut logits = vec![0.0f32; vocab];
+        let (ghead, glast) = gtoks.split_at(gtoks.len() - 1);
+        if !ghead.is_empty() { unsafe { kv::prefill(scratch, ghead) }.ok()?; }
+        let mut t = glast[0];
+        let turn_stops = tok.turn_stop_ids();
+        let suppress = tok.suppress_token_ids();
+        let mut q = String::new();
+        for _ in 0..32 {
+            unsafe { kv::decode_step(scratch, t, &mut logits) }.ok()?;
+            let mut best_t = 0usize; let mut best_v = f32::NEG_INFINITY;
+            for (i, &v) in logits.iter().enumerate() {
+                if suppress.contains(&(i as i32)) { continue; }
+                if v > best_v { best_v = v; best_t = i; }
+            }
+            t = best_t as i32;
+            if t == 1 || turn_stops.contains(&t) { break; }
+            q.push_str(&String::from_utf8_lossy(tok.decode_token(t)));
+            if q.contains('\n') { break; }
+        }
+        let q = q.trim().trim_start_matches("Question:").trim().lines().next().unwrap_or("").trim().to_string();
+        if q.len() < 4 { None } else { Some(q) }
+    })();
+    let key = question.as_ref().and_then(|q| {
+        // (2) Key the question EXACTLY as a live query is keyed: templated user turn,
+        //     prefill, read_global_q of the last token, l5_query_embed.
+        let qmsgs = vec![Message { role: "user".to_string(), content: q.clone() }];
+        let qtoks = tok.apply_template_ids(&qmsgs).ok()?;
+        if qtoks.len() < 2 { return None; }
+        let _ = unsafe { kv::reset(scratch) };
+        let (qhead, qlast) = qtoks.split_at(qtoks.len() - 1);
+        if !qhead.is_empty() { unsafe { kv::prefill(scratch, qhead) }.ok()?; }
+        let n_global = recall::NL / recall::PERIOD;
+        let mut ql = vec![0.0f32; n_global * recall::G_NH * recall::HD];
+        unsafe { kv::read_global_q(scratch, qlast[0], &mut ql) }.ok()?;
+        let k = recall::l5_query_embed(&ql);
+        if k.len() == recall::HD { Some(k) } else { None }
+    });
+    unsafe { kv::release_for_model(scratch) };
+    if let (Some(q), Some(k)) = (question.as_ref(), key.as_ref()) {
+        let bytes: Vec<u8> = k.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let _ = std::fs::write(dir.join("ep.l5"), &bytes);
+        let _ = std::fs::write(dir.join("ep.q"), q); // provenance: the generated question
+        tracing::info!("QKEY: '{}' <- question-space key from generated Q: {:?}", dir.display(), q);
+    } else {
+        tracing::warn!("QKEY: question-space mint failed for {} (falling back to statement key)", dir.display());
+    }
+    key
+}
+
+// QKEYS: mint an episode's L5 key — QUESTION-SPACE (SP_QKEY_MINT=1) with a hard
+// fallback to the statement-space key on any generation/mint failure (never worse than
+// today). The one seam both capture paths call.
+#[cfg(feature = "wire_cuda_backend")]
+fn mint_ep_l5(app: &Arc<AppState>, qm: *const std::ffi::c_void, toks: &[i32],
+              text: &str, dir: &std::path::Path) -> Vec<f32> {
+    if std::env::var("SP_QKEY_MINT").as_deref() == Ok("1") {
+        if let Some(k) = mint_question_l5(qm, app.tokenizer.as_ref(), app.vocab_size, text, dir) {
+            return k;
+        }
+    }
+    mint_live_ep_l5(qm, toks, dir).unwrap_or_default()
+}
+
 // LAYER-3 MERGE helper: capture an ARBITRARY text as a new live episode, with the
 // SAME provenance as the NIGHTSHIFT path (BOS kept + trailing newline, batched forward
 // via the resident model, real C2 sig, persisted to the registry if SP_NIGHTSHIFT_PERSIST).
@@ -753,7 +842,8 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
     let npos_sig = if ng > 0 { gk.len() / (ng * sp_daemon::recall::HD) } else { 0 };
     let sig = if npos_sig > 0 { app.recall_proj.signature(&gk, ng, npos_sig) } else { [0u64; 4] };
     // B4-SEAL: mint the L5 key so the merged episode is visible to the live selector.
-    let l5k = mint_live_ep_l5(qm, &toks, &dir).unwrap_or_default();
+    // QKEYS: question-space key (SP_QKEY_MINT=1) with statement fallback.
+    let l5k = mint_ep_l5(app, qm, &toks, text, &dir);
     if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
         if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
             let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
@@ -3337,7 +3427,8 @@ Tag of the answer (or [NULL]):");
                                                 // B4-SEAL: mint the L5 query-key at capture time so the GROWN
                                                 // episode is immediately visible to the deployed L5 selector
                                                 // (and to load_episode_l5key after restart via <dir>/ep.l5).
-                                                let l5k = mint_live_ep_l5(qm, &toks, &dir).unwrap_or_default();
+                                                // QKEYS: question-space key (SP_QKEY_MINT=1) with statement fallback.
+                                                let l5k = mint_ep_l5(&app, qm, &toks, &text, &dir);
                                                 // N3 PERSIST: append this live episode to the active registry
                                                 // file so it survives a daemon restart (default-off
                                                 // SP_NIGHTSHIFT_PERSIST=1 = null floor). Done here, before `sig`

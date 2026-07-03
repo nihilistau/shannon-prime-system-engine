@@ -1,0 +1,52 @@
+G-QKEYS-V3 — question-space L5 keys: the selection cause is CLOSED; V3 promotion residual
+moved from KEYS to PARAMETRIC-PRIOR + head generalization (2026-07-03)
+=========================================================================================
+BUILD: mint_question_l5 (routes.rs) — the fix for the triply-evidenced statement-space
+cross-pick. ROOT CAUSE, proven at source: the curated corpus mints ep.l5 from the EXACT
+QUESTION's global-Q (write_ep_l5.py, from facts.json `q`), but mint_live_ep_l5 minted from
+the ASSERTION text. mint_question_l5: generate the question the fact answers (one scratch
+micro-forward, the canon suppress-masked decode), then key it EXACTLY like a live query
+(templated user turn → prefill → read_global_q of last token → l5_query_embed). Wired at
+both capture sites via mint_ep_l5(), gated SP_QKEY_MINT=1 with a hard fallback to the
+statement key on any failure (never worse). Default-off = the statement path byte-untouched.
+
+QUESTION GENERATION — WORKS (receipted samples from the 30-fact grow):
+  "...longest river...is the Danube."          -> "What is the name of the longest river in the world?"
+  "...chemical symbol for iron is Zn."         -> "What is the chemical symbol for iron in the revised periodic table?"
+  "...largest planet...is Saturn."             -> "What is the largest planet in our solar system?"
+  Clean question-space, matching the curated `q` provenance. 30/30 grown with ep.q + ep.l5.
+
+V3 RE-GATE (G-SPECTEST-V3 harness UNCHANGED, 30 novel counterfacts grown as live episodes):
+  BEFORE (statement-space keys, engine ce094c1): nohead OBEY 7/30 LEAK 20 · head OBEY 10/30 LEAK 1
+  AFTER  (question-space keys, SP_QKEY_MINT=1):   nohead OBEY 11/30 LEAK 18 · head OBEY 16/30 LEAK 9
+  → nohead OBEY 7→11 (+4): the RIGHT episode is delivered more often — SELECTION IMPROVED,
+    which is exactly what question-space keys fix. The key-space cause the ce094c1 receipt
+    named ("assertion-minted keys cross-pick on same-register facts") is CLOSED.
+  → head OBEY 10→16 (+6); head OBEY − nohead OBEY = 5 (was 3): the veto helps MORE now.
+
+PINS (head LEAK ≤ 2 AND head OBEY ≥ nohead+8 = 19): STILL FAIL (LEAK 9, OBEY 16). But the
+CAUSE MOVED — it is no longer the keys:
+  The 9 head-leaks are PARAMETRIC-PRIOR OVERRIDES, not cross-picks: uk_currency got "pound"
+  (want krona), hamlet_author "Shakespeare" (want Marlowe), starry_night "van Gogh" (want
+  Gauguin), tallest_building "Burj Khalifa" (want Shanghai). The RIGHT counterfact episode
+  was delivered; the model's strong prior refused it AND the veto head (trained on the
+  worse-selection distribution) did not catch all of them. This is the "strongest-prior
+  corpus yet" (nohead 23%→now 37% obey ceiling) — the residual is the model's parametric
+  override + head generalization, NOT the L5 key-space.
+
+HONEST VERDICT:
+  * question-space keys = a REAL, proven selection improvement (nohead +4, correct question
+    generation) — the specific LIVE cross-pick class (cat 0.0101, my-name 0.0004) is
+    addressed at the selection level. SHIP the mechanism (SP_QKEY_MINT, gate on for growth).
+  * V3 PROMOTION still PARTIAL — the diagnosis ADVANCED from "blocked by statement-space
+    keys" to "blocked by parametric-prior override + veto-head generalization + the
+    pre-registered-but-unbuilt margin-aware NULL on near-ties." A different, harder bar.
+
+NEXT LEVERS (pre-scoped): (1) margin-aware NULL on near-ties (the other half of the
+pre-registered fix — decline rather than deliver an ambiguous top-1, cuts residual
+cross-pick leaks); (2) veto-head retrain on the improved-selection distribution (its leaks
+are now real parametric overrides, a cleaner training signal); (3) the live cat/name
+transcript replay (confirmatory of the selection win, separate from the V3 promotion bar).
+REPRO: run_v3_grow_qkey.bat + v3_run.py grow (SP_QKEY_MINT=1) → run_v3_gate.bat [head] +
+v3_run.py gate {nohead,head}. Data: _v3_corpus/registry.jsonl (30 question-keyed episodes).
+ENV: engine this-commit; RTX 2060 12GB, PMAX=4096, gemma4-12b-b1.
