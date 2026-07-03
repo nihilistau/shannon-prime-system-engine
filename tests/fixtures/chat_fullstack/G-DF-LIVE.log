@@ -1,0 +1,33 @@
+G-DF-LIVE — the DEPLOYED loop, LIVE and end-to-end in one run: the HARNESS 0.5B curator corrects a
+mis-classed concept WHILE the engine serves it; the engine reconciles the frontmatter edit and
+serves the corrected policy. No restart, no engine refine. (2026-07-03)
+=========================================================================================
+Proves DF-B6's deployment live, and lands the enabling engine change (reconcile-on-edit).
+
+ENGINE CHANGE (this-commit, routes.rs load_and_mint_okf_store):
+  * RECONCILE-ON-EDIT (LM-B1 cache-invalidation): the body is content-addressed so the addr is
+    stable, but the FRONTMATTER policy can change (the DF-B6 curator corrects mem_class). Already-
+    loaded concepts are now re-checked: if the file's policy class differs from the in-memory
+    episode's, the episode policy is updated IN PLACE (no re-mint, no restart) so the served spine
+    picks up the correction. Logged "STORE-MERGE reconcile-edit: '<addr>' policy X -> Y".
+
+GATE G-DF-LIVE (run_live.bat = store + SP_MEM_RECONCILE, NO engine refine ⇒ the ONLY classifier is
+the harness curator):
+  BEFORE: concept served as counterfact — "…orchid tango falcon delta" recited; telemetry decision
+          record class=counterfact, redacted=FALSE.
+  CURATOR: the harness MemClassCurator (0.5B, CPU) classified the body and corrected the store:
+          counterfact -> private-secret (rewrote the frontmatter).
+  ENGINE:  reconcile-edit fired: "reconcile-edit: '98928d4b8f2b8fbd' policy Some(\"counterfact\") ->
+          Some(\"private-secret\")".
+  AFTER:  concept served per the CORRECTED policy — telemetry decision record class=private-secret,
+          redacted=TRUE.
+  Checks: store corrected by curator=True · engine served class flip counterfact->private-secret=True
+          · telemetry privacy flip redacted false->true=True. RESULT df-live: PASS.
+
+VERDICT: GREEN. The full deployed self-improvement loop runs live: the harness 0.5B classifier
+(replacing the engine's 12B model_classify) corrects the store the engine is actively serving, and
+the engine hot-reloads the correction with no restart. Each half was already GREEN (DF-B6 curator;
+LM-B1 reconcile); this proves them composed, live, in one run.
+
+REPRO: harness python tests/h_datagen_live.py setup ; engine run_live.bat ; harness
+tests/h_datagen_live.py run. ENV: engine this-commit; harness Python 3.11.9 CPU; 2060.

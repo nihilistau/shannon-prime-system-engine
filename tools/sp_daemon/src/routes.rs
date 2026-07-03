@@ -943,15 +943,31 @@ pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
     // pay for NEW/changed concepts (the live hot-reload path). Match by episode name == addr.
     let already: std::collections::HashSet<String> =
         app.nightshift.read().unwrap().iter().map(|e| e.name.clone()).collect();
-    let (mut added, mut minted) = (0usize, 0usize);
+    let (mut added, mut minted, mut edited) = (0usize, 0usize, 0usize);
     let mut eps: Vec<recall::Episode> = Vec::new();
     for ent in rd.flatten() {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
         let addr = match path.file_stem() { Some(s) => s.to_string_lossy().to_string(), None => continue };
-        if already.contains(&addr) { continue; } // already serving this concept
         let raw = match std::fs::read_to_string(&path) { Ok(t) => t, Err(_) => continue };
         let policy = recall::parse_okf_policy(&raw);
+        if already.contains(&addr) {
+            // RECONCILE-ON-EDIT (LM-B1 cache-invalidation): the body is content-addressed so the
+            // addr is stable, but the FRONTMATTER policy can change (e.g. the DF-B6 harness curator
+            // corrects mem_class). If the in-memory policy class differs from the file, update it
+            // in place so the served spine picks up the correction — no restart, no re-mint.
+            let mut ns = app.nightshift.write().unwrap();
+            if let Some(ep) = ns.iter_mut().find(|e| e.name == addr) {
+                let cur = ep.policy.as_ref().map(|p| p.class.clone());
+                let new = policy.as_ref().map(|p| p.class.clone());
+                if cur != new {
+                    tracing::info!("STORE-MERGE reconcile-edit: '{}' policy {:?} -> {:?}", addr, cur, new);
+                    ep.policy = policy;
+                    edited += 1;
+                }
+            }
+            continue;
+        }
         let body = recall::okf_body(&raw);
         if body.is_empty() { continue; }
         // L5 selection key: cached sidecar or mint (question-space) from the body, then cache.
@@ -989,8 +1005,8 @@ pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
     if added > 0 {
         app.nightshift.write().unwrap().extend(eps);
     }
-    tracing::info!("STORE-MERGE: loaded {} memory-okf concept(s) from {} ({} L5 keys minted, rest cached)", added, root, minted);
-    added
+    tracing::info!("STORE-MERGE: loaded {} memory-okf concept(s) from {} ({} L5 keys minted, rest cached; {} policy-edits reconciled)", added, root, minted, edited);
+    added + edited
 }
 
 /// LM-B3 adaptive classification: classify a memory's text into a mem_class via ONE model
@@ -1104,6 +1120,11 @@ pub fn refine_okf_store(app: &Arc<AppState>, root: &str) -> usize {
         if body.is_empty() { continue; }
         let new = match model_classify(qm, app.tokenizer.as_ref(), app.vocab_size, &body) {
             Some(c) => c, None => continue };
+        // PARITY (SP_MEM_REFINE_LOGALL=1): log the 12B model_classify verdict for EVERY concept
+        // (not just changes) so the harness can A/B the deployed 0.5B curator against the 12B.
+        if std::env::var("SP_MEM_REFINE_LOGALL").as_deref() == Ok("1") {
+            tracing::info!("MEM-CLASSIFY-12B: '{}' -> {}", addr, new);
+        }
         if cur.as_deref() == Some(new.as_str()) { continue; } // unchanged
         // SAFETY-MONOTONE (ADR-004): never downgrade a private-secret to a leakier class.
         if cur.as_deref() == Some("private-secret") && new != "private-secret" { continue; }
