@@ -122,6 +122,32 @@ impl MemPolicy {
     }
 }
 
+/// #72 UNIFY: write a conformant MEM-OKF v2 concept sidecar for a live episode (OKF
+/// frontmatter + body) so the engine's episode dir IS a MEM-OKF object the harness/okf_mem
+/// can read — the two stores speak one format. Read back by load_episode_okf_policy.
+pub fn write_episode_okf(dir: &std::path::Path, text: &str, class: &str, name: &str) {
+    let pol = MemPolicy::from_class(class);
+    let authority = match class {
+        "private-secret" => "private",
+        "persona" | "preference" | "fact" | "episodic-event" => "supplements",
+        _ => "overrides-prior",
+    };
+    let decl = if pol.decline_when.is_empty() {
+        String::new()
+    } else {
+        format!("mem_decline_when: [{}]\nmem_decline_message: {}\n",
+                pol.decline_when.join(", "), pol.decline_message)
+    };
+    let title: String = text.chars().take(60).collect::<String>().replace('\n', " ");
+    let fm = format!(
+        "---\ntype: memory\ntitle: {title}\ndescription: {title}\ntags: [mem-okf, episode, {class}]\n\
+         sp_status: ACTIVE\nmem_kind: episode\nmem_addr: {name}\nmem_class: {class}\n\
+         mem_delivery: {delivery}\nmem_authority: {authority}\n{decl}---\n\n{text}\n",
+        title = title, class = class, name = name, delivery = pol.delivery,
+        authority = authority, decl = decl, text = text);
+    let _ = std::fs::write(dir.join("ep.okf.md"), fm);
+}
+
 /// NIGHTSHIFT auto-classification (#73): assign a mem_class from the captured text so a live
 /// episode SELF-GOVERNS (instead of loading policy=None → env). Deterministic, no model call:
 /// a high-entropy code token or a secret keyword ⇒ `private-secret` (attr-gate-strict decline,
@@ -141,7 +167,42 @@ pub fn classify_mem_class(text: &str) -> &'static str {
         let hyphenated = t.contains('-') && (letters + digits) >= 4;
         (t.len() >= 5 && letters >= 2 && digits >= 2) || (hyphenated && t.len() >= 5)
     });
-    if has_kw || has_code { "private-secret" } else { "counterfact" }
+    if has_kw || has_code { return "private-secret"; }
+    // #74 finer classes: first-person IDENTITY / PREFERENCE -> persona (system delivery).
+    let persona_kw = ["my name is", "i am ", "i'm ", "call me ", "i like ", "i love ",
+                      "i prefer ", "i live ", "my favorite", "my favourite", "i enjoy ",
+                      "my birthday", "i work as", "my job is", "my hobby"];
+    if persona_kw.iter().any(|k| low.contains(k)) { return "persona"; }
+    "counterfact" // default: a user-asserted memory, delivered authoritatively (systemecho)
+}
+
+/// #72 UNIFY: read this episode's MEM-OKF policy from a conformant OKF concept sidecar
+/// (`<dir>/ep.okf.md` frontmatter) if present — the engine consumes the SAME OKF-frontmatter
+/// format the harness/okf_mem writes. `None` ⇒ caller falls back to the inline registry-row.
+pub fn load_episode_okf_policy(dir: &str) -> Option<MemPolicy> {
+    let p = std::path::Path::new(dir).join("ep.okf.md");
+    let text = std::fs::read_to_string(&p).ok()?;
+    let (mut class, mut delivery, mut dm) = (None, None, String::new());
+    let mut dw: Vec<String> = Vec::new();
+    let mut in_fm = false;
+    for line in text.lines() {
+        if line.trim() == "---" { if in_fm { break; } else { in_fm = true; continue; } }
+        if !in_fm { continue; }
+        if let Some((k, v)) = line.split_once(':') {
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "mem_class" => class = Some(v.to_string()),
+                "mem_delivery" => delivery = Some(v.to_string()),
+                "mem_decline_when" => dw = v.trim_matches(|c| c == '[' || c == ']')
+                    .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+                "mem_decline_message" => dm = v.to_string(),
+                _ => {}
+            }
+        }
+    }
+    let class = class?;
+    let delivery = delivery.unwrap_or_else(|| class_default_delivery(&class).to_string());
+    Some(MemPolicy { class, delivery, decline_when: dw, decline_message: dm })
 }
 
 /// One registry episode: its replay path, position count, topic, and 256-bit sig.
@@ -485,6 +546,10 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
                 .to_string();
             MemPolicy { class: class.to_string(), delivery, decline_when, decline_message }
         });
+        // #72 UNIFY: a conformant OKF concept sidecar (<dir>/ep.okf.md) is the AUTHORITATIVE
+        // policy source — the engine reads the same OKF frontmatter the store speaks; the inline
+        // registry-row mem_class is the fallback.
+        let policy = load_episode_okf_policy(dir).or(policy);
         out.push(Episode {
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
             dir: dir.to_string(),

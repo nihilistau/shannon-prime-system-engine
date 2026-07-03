@@ -879,6 +879,8 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
         tracing::info!("MEM-CLASSIFY: '{}' -> mem_class={}", text.chars().take(48).collect::<String>(), mc);
         Some(mc)
     } else { None };
+    // #72 UNIFY: emit a conformant MEM-OKF concept sidecar (ep.okf.md) for the episode dir.
+    if let Some(mc) = mem_class { sp_daemon::recall::write_episode_okf(&dir, text, mc, &name); }
     if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
         if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
             let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
@@ -2072,8 +2074,15 @@ fn run_kvdecode_chat(
                                         // ID/code). General-knowledge/paraphrase queries have no such token, so
                                         // the gate stays off for them (recall preserved) — this is what makes
                                         // the deterministic gate globally default-on-safe, not regime-specific.
+                                        // #75: a private-secret entry (attr-gate-strict) is KNOWN private, so
+                                        // the paraphrase entity-guard is bypassed — decline on any absent
+                                        // attribute even when the query shares the plain entity name
+                                        // ("Who designed Vault-7?"). The guard stays for the GLOBAL env
+                                        // attr-gate (general knowledge) to avoid over-declining paraphrases.
+                                        let policy_secret = bpol.as_ref()
+                                            .map(|p| p.delivery == "attr-gate-strict").unwrap_or(false);
                                         let force_decline = attr_gate && absent >= attr_tau
-                                            && recall::query_has_entity_token(&ruser);
+                                            && (policy_secret || recall::query_has_entity_token(&ruser));
                                         if force_decline {
                                             // ZERO-INFERENCE symbolic decline (ADR-002 Tier-2 executor). The
                                             // fact exists but does NOT state the queried attribute. Set a
@@ -3512,6 +3521,8 @@ Tag of the answer (or [NULL]):");
                                                     tracing::info!("MEM-CLASSIFY: '{}' -> mem_class={}", text.chars().take(48).collect::<String>(), mc);
                                                     Some(mc)
                                                 } else { None };
+                                                // #72 UNIFY: emit the MEM-OKF concept sidecar for this episode dir.
+                                                if let Some(mc) = mem_class { sp_daemon::recall::write_episode_okf(&dir, &text, mc, &ep_name); }
                                                 // N3 PERSIST: append this live episode to the active registry
                                                 // file so it survives a daemon restart (default-off
                                                 // SP_NIGHTSHIFT_PERSIST=1 = null floor). Done here, before `sig`
