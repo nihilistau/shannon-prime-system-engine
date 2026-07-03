@@ -1,0 +1,29 @@
+G-FM-STEER-RECONFIRM — fresh flow-matching (GEODESIC) steering data reconfirms the honest
+negative + a consolidated DELIVERY-METHOD ranking. (2026-07-03)
+=========================================================================================
+"try the flow matching test / other tests, gain more data." Re-ran the GEODESIC pre-head
+v-bar steering (ADR-003 §4.2, run_f3_steer.bat <alpha> + f3_steer_gate.py) on the 61-fact
+faithful corpus (slice 20, plain delivery + persistent pre-head steer at alpha):
+  alpha=0 (null floor, plain):     OBEY 11/20 (55.0%)  LEAK 8
+  alpha=8 (strong steer):          OBEY  0/20 ( 0.0%)  LEAK 0   (generation COLLAPSES to empty)
+VERDICT: RECONFIRMS the rung-1 honest-negative (G-FM-STEER-OBEY): pre-head steering with the
+final-norm v-bar is dose-dependently DESTRUCTIVE — at alpha=8 it zeroes generation (all empty),
+no "help" direction. Latent steering (this vector, this seam) is NOT a faithfulness delivery
+method. (The pre-registered next FM step remains rung-2: a different capture seam, ADR-003; the
+FINAL-norm seam is convicted.)
+
+=== CONSOLIDATED DELIVERY-METHOD RANKING (all measured this campaign, V3/faithful corpora) ===
+Given the RIGHT entry is selected, ranked by obey @ leak (the MEM-OKF mem_delivery choices):
+  systemecho          : 22-30/30 @ 0 leak   <-- BEST; the counterfact/same-template default (G-QKEYS-SYSTEMECHO, G-MEMPOLICY-V3 30/30)
+  attr-gate-strict    : recall 100% @ 0 confab/leak on private data  <-- the private-secret default (G-MEMPOLICY-SERVED-DECLINE)
+  recite (plain)      : 11/30 @ 17 leak      <-- weak; the fallback
+  full-context (E1)   : 25/30 @ 4 leak       <-- obey up but authority-diluted, leaks (G-E1-E2-DELIVERY)
+  two-stage (E8)      : 22/30 @ 3 leak       <-- REFUTED, = systemecho obey + more leak (G-MEMPOLICY-V3)
+  yes/no grounding    : convicted (can't separate same-template)     (G-E1-E2-DELIVERY)
+  latent steering (FM): alpha0 55% -> alpha8 0% (destructive)        <-- convicted (THIS receipt)
+NET: systemecho is the delivery method that wins on general/counterfact knowledge; attr-gate-
+strict (zero-inference decline) wins on private data; everything else is dominated or refuted.
+This is exactly the class->delivery mapping MEM-OKF v2 / ADR-004 encodes per entry.
+
+REPRO: run_f3_steer.bat {0|8} + cd _faithful_corpus && python f3_steer_gate.py <label> --slice 20.
+Outs _f3_steer_a0.out / _f3_steer_a8.out. ENV: engine 10179bd; RTX 2060 12GB, gemma4-12b-b1.
