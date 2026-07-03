@@ -777,6 +777,19 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
         ntt_hex_backend,
     });
 
+    // ── STORE-MERGE (#76/#77): engine ⋈ the shared MEM-OKF store ─────────────
+    // SP_MEM_OKF_STORE=<root>: after the model is booted, load every memory-okf/full/*.md
+    // concept (text + OKF policy) as a servable episode — minting its L5 selection key from
+    // the body at startup (cached to full/<addr>.l5). A memory the HARNESS/agent writes into
+    // the store is then instantly recallable + served per its OWN policy. Default-off = no-op.
+    #[cfg(feature = "wire_cuda_backend")]
+    if let Ok(root) = std::env::var("SP_MEM_OKF_STORE") {
+        if !root.is_empty() {
+            let n = crate::routes::load_and_mint_okf_store(&state, &root);
+            info!("STORE-MERGE: {} memory-okf concept(s) merged into the recall set from {}", n, root);
+        }
+    }
+
     // ── B4-NIGHTSHIFT PATH-FIX DIAGNOSTIC (SP_B4_DIAG=<epdir>) ───────────────
     // Decisive metal test for the live-vs-curated K-norm divergence: re-capture a
     // KNOWN curated needle through the LIVE persistent-KV path (gemma4_kv_prefill +

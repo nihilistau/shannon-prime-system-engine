@@ -1,0 +1,46 @@
+G-STORE-MERGE (#76/#77/#78) — the FULL store-merge: a memory the HARNESS writes into the
+shared MEM-OKF store is instantly RECALLED + SERVED by the engine per its OKF policy. One
+content-addressed store, both callers. (2026-07-03)
+=========================================================================================
+The last big piece of "the whole system as one". Previously the engine served its own
+registry.jsonl + latent episode dirs, while the harness/agent (Nexus, okf_mem) wrote text
+concepts into memory-okf/full/*.md — two stores. Now the engine READS the shared store.
+
+BUILD (engine this-commit, gated SP_MEM_OKF_STORE=<root>, default-off = null floor):
+  * recall.rs: parse_okf_policy(str) + okf_body(str) — parse a MEM-OKF concept's policy
+    frontmatter + delivery body from a string (load_episode_okf_policy now delegates to it).
+  * routes.rs: load_and_mint_okf_store(app, root) — for each memory-okf/full/<addr>.md:
+    parse policy + body; load the L5 selection key from a cached sidecar (full/<addr>.l5) or
+    MINT it from the body at startup (question-space, mint_question_l5) and cache it; build a
+    text-delivery Episode (gk empty, l5key set, policy from the concept) and push into
+    app.nightshift so the live L5 recall path selects it.
+  * daemon.rs: after the model boots + AppState is built, if SP_MEM_OKF_STORE set, call the
+    loader and log the merge count.
+
+GATE — harness WRITES, engine SERVES. Two policy-bearing concepts written by the harness via
+`okf_mem.py add` into _merge_store (NO engine involvement in the write):
+  counterfact/systemecho : "The tallest mountain on Earth is now Mount Kea."
+  private-secret         : "The launch code for Falcon-9 is Z7Q-3RT-9WX."
+Engine booted with SP_MEM_OKF_STORE=_merge_store + SP_MEM_POLICY=1 + empty registry. Boot log:
+  "QKEY: … <- question-space key from generated Q: 'What is the tallest mountain on Earth?'"
+  "QKEY: … <- 'What is the launch code for Falcon-9?'"
+  "STORE-MERGE: loaded 2 memory-okf concept(s) … (2 L5 keys minted, rest cached)"
+Then queried (auto_recall) — RESULT 3/3:
+  [counterfact/systemecho ] "tallest mountain now?" -> "…is now Mount Kea"        OK
+  [private-secret/recite  ] "Falcon-9 launch code?" -> "…is Z7Q-3RT-9WX"          OK
+  [private-secret/decline ] "Who built Falcon-9?"   -> "I have a record for that
+                                                        entity, but…" (zero-inf)  DECLINE
+
+VERDICT: GREEN. The engine loads harness-written MEM-OKF concepts, mints their selection keys
+at boot, recalls them by L5, and serves each per its OWN OKF policy (systemecho / attr-gate
+zero-inference decline). Combined with #72 (engine WRITES ep.okf.md concepts) the store is now
+bidirectional: harness→engine (this gate) + engine→harness (the ep.okf.md sidecar). The whole
+system reads and writes ONE content-addressed, policy-bearing store — engine spine (EXECUTE),
+harness Nexus (INGEST), NIGHTSHIFT/agency (CURATE), L5/vector/qmd (RETRIEVE) — all one format.
+Default-off preserved (SP_MEM_OKF_STORE unset = the engine's own registry only, byte-identical).
+
+FOLLOW-ONS (smaller): re-mint the L5 key on concept edit (cache invalidation by content hash);
+a live "harness adds while engine runs" hot-reload (today the merge is at boot); finer classes.
+
+REPRO: okf_mem.py add --root _merge_store --mem-class … ; run_merge.bat ; python
+_merge_store/merge_run.py. Boot log _merge_serve.log. ENV: engine this-commit; RTX 2060 12GB.

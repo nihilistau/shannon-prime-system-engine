@@ -835,6 +835,73 @@ fn mint_ep_l5(app: &Arc<AppState>, qm: *const std::ffi::c_void, toks: &[i32],
     mint_live_ep_l5(qm, toks, dir).unwrap_or_default()
 }
 
+/// STORE-MERGE (#76/#77): load memory-okf/full/*.md concepts as SERVABLE episodes so a memory
+/// the HARNESS writes is instantly recallable by the engine (one content-addressed store, both
+/// callers). Text + policy come from the OKF concept; the L5 selection key is loaded from a
+/// cached sidecar (full/<addr>.l5) or MINTED from the body at startup (question-space, cached).
+/// The resulting text-delivery episodes are pushed into app.nightshift so the live L5 recall
+/// path selects them; delivery/decline follow the concept's OWN policy (ADR-004). Gated by
+/// SP_MEM_OKF_STORE; unset ⇒ never called ⇒ null floor. Returns the count added.
+#[cfg(feature = "wire_cuda_backend")]
+pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
+    use sp_daemon::recall;
+    let full = std::path::Path::new(root).join("full");
+    let rd = match std::fs::read_dir(&full) { Ok(r) => r, Err(_) => return 0 };
+    let qm = {
+        let mut sguard = match app.session.as_ref() { Some(s) => s.lock().unwrap(), None => return 0 };
+        let sraw = sguard.raw_ptr() as *mut sp_daemon::ffi_l1::sp_session;
+        (unsafe { sp_daemon::ffi_l1::sp_session_qwen3_model(sraw) }) as *const std::ffi::c_void
+    };
+    if qm.is_null() { return 0; }
+    let (mut added, mut minted) = (0usize, 0usize);
+    let mut eps: Vec<recall::Episode> = Vec::new();
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+        let addr = match path.file_stem() { Some(s) => s.to_string_lossy().to_string(), None => continue };
+        let raw = match std::fs::read_to_string(&path) { Ok(t) => t, Err(_) => continue };
+        let policy = recall::parse_okf_policy(&raw);
+        let body = recall::okf_body(&raw);
+        if body.is_empty() { continue; }
+        // L5 selection key: cached sidecar or mint (question-space) from the body, then cache.
+        let cache = full.join(format!("{addr}.l5"));
+        let l5key: Vec<f32> = if let Ok(bytes) = std::fs::read(&cache) {
+            bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+        } else {
+            let keydir = full.join(format!("_k_{addr}"));
+            let _ = std::fs::create_dir_all(&keydir);
+            match mint_question_l5(qm, app.tokenizer.as_ref(), app.vocab_size, &body, &keydir) {
+                Some(k) => {
+                    let bytes: Vec<u8> = k.iter().flat_map(|x| x.to_le_bytes()).collect();
+                    let _ = std::fs::write(&cache, &bytes);
+                    minted += 1;
+                    k
+                }
+                None => { tracing::warn!("STORE-MERGE: L5 mint failed for concept {addr}"); continue; }
+            }
+        };
+        if l5key.len() != recall::HD { continue; }
+        eps.push(recall::Episode {
+            name: addr.clone(),
+            dir: path.to_string_lossy().to_string(),
+            npos: 0,
+            topic: body.chars().take(40).collect(),
+            text: body,
+            sig: [0u64; 4],
+            gk: Vec::new(), gk_ng: 0,
+            tokens: None,
+            l5key,
+            policy,
+        });
+        added += 1;
+    }
+    if added > 0 {
+        app.nightshift.write().unwrap().extend(eps);
+    }
+    tracing::info!("STORE-MERGE: loaded {} memory-okf concept(s) from {} ({} L5 keys minted, rest cached)", added, root, minted);
+    added
+}
+
 // LAYER-3 MERGE helper: capture an ARBITRARY text as a new live episode, with the
 // SAME provenance as the NIGHTSHIFT path (BOS kept + trailing newline, batched forward
 // via the resident model, real C2 sig, persisted to the registry if SP_NIGHTSHIFT_PERSIST).

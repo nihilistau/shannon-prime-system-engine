@@ -1,0 +1,6 @@
+=== engine serving HARNESS-written memory-okf concepts (SP_MEM_OKF_STORE) ===
+[counterfact/systemecho  ] OK       (want Kea) <- 'The tallest mountain on Earth is now Mount K'
+[private-secret/recite   ] OK       (want Z7Q-3RT-9WX) <- 'The launch code for Falcon-9 is Z7Q-3RT-9WX.'
+[private-secret/decline  ] DECLINE  <- 'Who built Falcon-9?'  'I have a record for that entity, but it '
+
+RESULT G-STORE-MERGE: 3/3 — engine recalls+serves harness-written concepts per OKF policy

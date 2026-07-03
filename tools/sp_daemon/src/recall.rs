@@ -182,6 +182,11 @@ pub fn classify_mem_class(text: &str) -> &'static str {
 pub fn load_episode_okf_policy(dir: &str) -> Option<MemPolicy> {
     let p = std::path::Path::new(dir).join("ep.okf.md");
     let text = std::fs::read_to_string(&p).ok()?;
+    parse_okf_policy(&text)
+}
+
+/// Parse a MEM-OKF policy from an OKF concept's YAML frontmatter string. `None` if no mem_class.
+pub fn parse_okf_policy(text: &str) -> Option<MemPolicy> {
     let (mut class, mut delivery, mut dm) = (None, None, String::new());
     let mut dw: Vec<String> = Vec::new();
     let mut in_fm = false;
@@ -203,6 +208,20 @@ pub fn load_episode_okf_policy(dir: &str) -> Option<MemPolicy> {
     let class = class?;
     let delivery = delivery.unwrap_or_else(|| class_default_delivery(&class).to_string());
     Some(MemPolicy { class, delivery, decline_when: dw, decline_message: dm })
+}
+
+/// The markdown body of an OKF concept (everything after the closing frontmatter `---`).
+/// For a MEM-OKF memory this is the delivery text. Strips a leading "The user said: " if
+/// present (engine-written concepts attribute the payload). Falls back to the whole string.
+pub fn okf_body(text: &str) -> String {
+    let mut fences = 0;
+    let mut body = String::new();
+    for line in text.lines() {
+        if line.trim() == "---" && fences < 2 { fences += 1; continue; }
+        if fences >= 2 { body.push_str(line); body.push('\n'); }
+    }
+    let body = if fences >= 2 { body } else { text.to_string() };
+    body.trim().to_string()
 }
 
 /// One registry episode: its replay path, position count, topic, and 256-bit sig.
