@@ -107,6 +107,43 @@ pub fn class_default_delivery(class: &str) -> &'static str {
     }
 }
 
+impl MemPolicy {
+    /// Build a policy from a class alone (the class defaults + the private-secret decline).
+    /// Used by the NIGHTSHIFT auto-classifier at capture (#73).
+    pub fn from_class(class: &str) -> MemPolicy {
+        let delivery = class_default_delivery(class).to_string();
+        let (decline_when, decline_message) = if class == "private-secret" {
+            (vec!["zero-inference".to_string(), "attribute-absent".to_string()],
+             "I have a record for that entity, but it does not include that specific detail.".to_string())
+        } else {
+            (Vec::new(), String::new())
+        };
+        MemPolicy { class: class.to_string(), delivery, decline_when, decline_message }
+    }
+}
+
+/// NIGHTSHIFT auto-classification (#73): assign a mem_class from the captured text so a live
+/// episode SELF-GOVERNS (instead of loading policy=None → env). Deterministic, no model call:
+/// a high-entropy code token or a secret keyword ⇒ `private-secret` (attr-gate-strict decline,
+/// entity-guard-safe); otherwise a user-asserted memory is delivered authoritatively ⇒
+/// `counterfact` (systemecho). Coarse by design; finer classes (persona/preference/episodic)
+/// are a follow-on. Gated by SP_MEM_CLASSIFY at the call site (default-off = no mem_class).
+pub fn classify_mem_class(text: &str) -> &'static str {
+    let low = text.to_lowercase();
+    let secret_kw = ["code", "password", "passcode", "passphrase", " pin ", " pin.",
+                     "secret", "api key", "api-key", "token", "override"];
+    let has_kw = secret_kw.iter().any(|k| low.contains(k));
+    // high-entropy token: len>=5 with >=2 letters AND >=2 digits, or a hyphenated alnum code.
+    let has_code = text.split(|c: char| c.is_whitespace()).any(|tok| {
+        let t = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+        let letters = t.chars().filter(|c| c.is_ascii_alphabetic()).count();
+        let digits = t.chars().filter(|c| c.is_ascii_digit()).count();
+        let hyphenated = t.contains('-') && (letters + digits) >= 4;
+        (t.len() >= 5 && letters >= 2 && digits >= 2) || (hyphenated && t.len() >= 5)
+    });
+    if has_kw || has_code { "private-secret" } else { "counterfact" }
+}
+
 /// One registry episode: its replay path, position count, topic, and 256-bit sig.
 #[derive(Clone, Debug)]
 pub struct Episode {

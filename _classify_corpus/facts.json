@@ -1,0 +1,6 @@
+[
+  {"fact": "The override code for Vault-7 is K9X-4M2-8QP.", "expect": "private-secret", "attr": "K9X-4M2-8QP", "q": "What is the override code for Vault-7?", "absent_q": "Who designed Vault-7?"},
+  {"fact": "The user's wifi password is bluefox42gamma.", "expect": "private-secret", "attr": "bluefox42gamma", "q": "What is the user's wifi password?", "absent_q": "What brand is the user's router?"},
+  {"fact": "The chemical symbol for gold is now Xg.", "expect": "counterfact", "attr": "Xg", "q": "What is the chemical symbol for gold now?", "absent_q": ""},
+  {"fact": "The largest ocean on Earth is now the Arctic Ocean.", "expect": "counterfact", "attr": "Arctic", "q": "What is the largest ocean on Earth now?", "absent_q": ""}
+]

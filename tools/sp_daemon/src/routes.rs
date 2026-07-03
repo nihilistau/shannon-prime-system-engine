@@ -872,13 +872,25 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
     // B4-SEAL: mint the L5 key so the merged episode is visible to the live selector.
     // QKEYS: question-space key (SP_QKEY_MINT=1) with statement fallback.
     let l5k = mint_ep_l5(app, qm, &toks, text, &dir);
+    // NIGHTSHIFT auto-classification (#73): when SP_MEM_CLASSIFY=1, the episode self-governs —
+    // classify its mem_class from the text, persist it in the registry row, and set the policy.
+    let mem_class: Option<&'static str> = if std::env::var("SP_MEM_CLASSIFY").as_deref() == Ok("1") {
+        let mc = sp_daemon::recall::classify_mem_class(text);
+        tracing::info!("MEM-CLASSIFY: '{}' -> mem_class={}", text.chars().take(48).collect::<String>(), mc);
+        Some(mc)
+    } else { None };
     if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
         if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
             let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
-            let line = serde_json::json!({
-                "name": name.clone(), "dir": dir_str.clone(), "npos": ntok as i32,
-                "topic": text, "text": text, "sig_bits": sig_hex,
-            }).to_string();
+            let mut row = serde_json::Map::new();
+            row.insert("name".into(), name.clone().into());
+            row.insert("dir".into(), dir_str.clone().into());
+            row.insert("npos".into(), (ntok as i32).into());
+            row.insert("topic".into(), text.into());
+            row.insert("text".into(), text.into());
+            row.insert("sig_bits".into(), sig_hex.into());
+            if let Some(mc) = mem_class { row.insert("mem_class".into(), mc.into()); }
+            let line = serde_json::Value::Object(row).to_string();
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&reg_path) {
                 let _ = writeln!(f, "{line}");
@@ -891,7 +903,7 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
         name, dir: dir_str.clone(), npos: ntok as i32, topic,
         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
         l5key: l5k, // B4-SEAL: minted at capture (mint_live_ep_l5); empty only on mint failure.
-        policy: None, // live episodes inherit the global env path until NIGHTSHIFT classifies them
+        policy: mem_class.map(sp_daemon::recall::MemPolicy::from_class), // #73: self-govern if classified
     });
     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
     true
@@ -3494,6 +3506,12 @@ Tag of the answer (or [NULL]):");
                                                 // (and to load_episode_l5key after restart via <dir>/ep.l5).
                                                 // QKEYS: question-space key (SP_QKEY_MINT=1) with statement fallback.
                                                 let l5k = mint_ep_l5(&app, qm, &toks, &text, &dir);
+                                                // NIGHTSHIFT auto-classification (#73): classify on the RAW text.
+                                                let mem_class: Option<&'static str> = if std::env::var("SP_MEM_CLASSIFY").as_deref() == Ok("1") {
+                                                    let mc = sp_daemon::recall::classify_mem_class(&text);
+                                                    tracing::info!("MEM-CLASSIFY: '{}' -> mem_class={}", text.chars().take(48).collect::<String>(), mc);
+                                                    Some(mc)
+                                                } else { None };
                                                 // N3 PERSIST: append this live episode to the active registry
                                                 // file so it survives a daemon restart (default-off
                                                 // SP_NIGHTSHIFT_PERSIST=1 = null floor). Done here, before `sig`
@@ -3502,18 +3520,17 @@ Tag of the answer (or [NULL]):");
                                                 if std::env::var("SP_NIGHTSHIFT_PERSIST").ok().as_deref() == Some("1") {
                                                     if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
                                                         let sig_hex = format!("{:016x}{:016x}{:016x}{:016x}", sig[3], sig[2], sig[1], sig[0]);
-                                                        let line = serde_json::json!({
-                                                            // LIVE-FIX (perspective bug): store the DELIVERED text ATTRIBUTED
-                                                            // ("The user said: …") — raw first-person records ("My name is
-                                                            // Knack") are perspective-ambiguous at delivery (the model read
-                                                            // the user's name as its own, live). Selection artifacts
-                                                            // (ep.k/ep.l5/sig) stay on the RAW text — only the delivery
-                                                            // payload is attributed.
-                                                            "name": ep_name.clone(),
-                                                            "dir": dir_str.clone(), "npos": ntok as i32,
-                                                            "topic": text.clone(),
-                                                            "text": format!("The user said: {text}"), "sig_bits": sig_hex,
-                                                        }).to_string();
+                                                        // LIVE-FIX (perspective bug): store the DELIVERED text ATTRIBUTED
+                                                        // ("The user said: …"); selection artifacts stay on the RAW text.
+                                                        let mut row = serde_json::Map::new();
+                                                        row.insert("name".into(), ep_name.clone().into());
+                                                        row.insert("dir".into(), dir_str.clone().into());
+                                                        row.insert("npos".into(), (ntok as i32).into());
+                                                        row.insert("topic".into(), text.clone().into());
+                                                        row.insert("text".into(), format!("The user said: {text}").into());
+                                                        row.insert("sig_bits".into(), sig_hex.into());
+                                                        if let Some(mc) = mem_class { row.insert("mem_class".into(), mc.into()); }
+                                                        let line = serde_json::Value::Object(row).to_string();
                                                         use std::io::Write as _;
                                                         match std::fs::OpenOptions::new().create(true).append(true).open(&reg_path) {
                                                             Ok(mut f) => { let _ = writeln!(f, "{line}");
@@ -3543,7 +3560,7 @@ Tag of the answer (or [NULL]):");
                                                     gk_ng: ng,
                                                     tokens: Some(toks),
                                                     l5key: l5k, // B4-SEAL: minted at capture; empty only on mint failure
-                                                    policy: None, // live episode; NIGHTSHIFT classifies later
+                                                    policy: mem_class.map(sp_daemon::recall::MemPolicy::from_class), // #73: self-govern if classified
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(
