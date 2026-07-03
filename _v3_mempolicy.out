@@ -1,0 +1,18 @@
+=== CLASS: counterfact (mem_delivery=systemecho) ===
+counterfact: OBEY 30/30  LEAK 0
+
+=== CLASS: private-secret (mem_delivery=attr-gate-strict, zero-inference decline) ===
+  [present] What is my workshop door code?     -> "The user's workshop door code is" recall=Y
+  [absent ] Who installed my workshop door?    -> forward (gate MISS) confab=n
+  [present] What is my home wifi password?     -> "The user's home wifi password is" recall=Y
+  [absent ] What brand is my wifi router?      -> forward (gate MISS) confab=n
+  [present] What is my gym locker number?      -> 'Your gym locker number is 27.' recall=Y
+  [absent ] What colour is my gym locker?      -> forward (gate MISS) confab=n
+  [present] What is my cat's name?             -> 'Mochi' recall=Y
+  [absent ] What breed is my cat?              -> forward (gate MISS) confab=n
+  [present] What is my flight number to Berlin -> 'BA0992' recall=Y
+  [absent ] What seat am I in on the Berlin fl -> forward (gate MISS) confab=n
+
+secrets: recall 5/5  declined(zero-inf) 0/5  confab 0  leak 0
+
+RESULT G-MEMPOLICY-V3: counterfact OBEY 30/30 LEAK 0 (systemecho) | secret recall 5/5 decline 0/5 confab 0 leak 0 (zero-inference) | one store, per-entry policy dispatch
