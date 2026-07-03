@@ -866,6 +866,48 @@ fn telem_emit_recall(query: &str, entry: &str, class: &str, cos: f32, margin: f3
     }
 }
 
+/// LM-B2b TURN-OUTCOME telemetry: one `turn` record per DELIVERED recall turn, joining the
+/// decision (by query) to the OUTPUT + timing + an obeyed self-check (did the answer use the
+/// recalled fact's salient tokens? — the inverse of the parametric-hallucination flag). PRIVACY
+/// (ADR-005 §3b): when the recalled entry is a private-secret the query AND the output are
+/// REDACTED (hash + char-length, never raw) — telemetry never carries a secret even though the
+/// owner legitimately saw the recite. Non-secret turns keep query->output in the clear = the
+/// finetune signal. Gated SP_TELEMETRY=1 + SP_TELEMETRY_LOG; off the token path (one append).
+fn telem_emit_turn(query: &str, entry: &str, class: &str, output: &str, fact: Option<&str>,
+                   n_out: usize, decode_s: f64, secret: bool) {
+    if std::env::var("SP_TELEMETRY").as_deref() != Ok("1") { return; }
+    let path = match std::env::var("SP_TELEMETRY_LOG") { Ok(p) if !p.is_empty() => p, _ => return };
+    let hash = |s: &str| { use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h); format!("#{:016x}", h.finish()) };
+    // obeyed = answer used >=1 salient (len>=4) token of the recalled fact.
+    let obeyed = fact.map(|f| {
+        let al = output.to_lowercase();
+        let sal: Vec<String> = f.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4).map(|w| w.to_lowercase()).collect();
+        sal.is_empty() || sal.iter().any(|w| al.contains(w.as_str()))
+    });
+    let tok_s = if decode_s > 1e-3 { n_out as f64 / decode_s } else { 0.0 };
+    let out_len = output.chars().count();
+    let (q, out_val) = if secret {
+        (hash(query), serde_json::json!({ "redacted": true, "sha": hash(output), "len": out_len }))
+    } else {
+        (query.to_string(), serde_json::json!(output))
+    };
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let rec = serde_json::json!({
+        "ts": ts, "kind": "turn", "query": q, "redacted": secret,
+        "turn": { "entry": entry, "class": class, "output": out_val, "out_len": out_len,
+                  "n_out": n_out, "decode_s": (decode_s * 1000.0).round() / 1000.0,
+                  "tok_s": (tok_s * 100.0).round() / 100.0, "obeyed": obeyed }
+    });
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{}", rec);
+    }
+}
+
 /// STORE-MERGE (#76/#77): load memory-okf/full/*.md concepts as SERVABLE episodes so a memory
 /// the HARNESS writes is instantly recallable by the engine (one content-addressed store, both
 /// callers). Text + policy come from the OKF concept; the L5 selection key is loaded from a
@@ -1446,6 +1488,12 @@ fn run_kvdecode_chat(
     // the delivered fact TEXT when a text-in-context delivery fires this turn —
     // the ground the whole draft answer is tested against before ANY byte streams.
     let mut recalled_text: Option<String> = None;
+    // LM-B2b turn-outcome telemetry: stash the delivered recall's query/class/secret so the
+    // [DONE] site can emit a `turn` record (output + timing + obeyed) joined by query to the
+    // decision record. Set only when a text-in-context delivery fires (else stays None).
+    let mut recalled_query: Option<String> = None;
+    let mut recalled_class: Option<String> = None;
+    let mut recalled_secret: bool = false;
     // G-INT-2: when SP_INT2 Stage-2 has rendered an ACCEPT/NULL verdict, the legacy
     // SP_B3_WC / SP_B3_DISPOSER / q·K fire branches MUST NOT double-fire on the same turn.
     let mut int2_decided = false;
@@ -2410,6 +2458,9 @@ fn run_kvdecode_chat(
                                                         syn_last = aug_last[0];
                                                         recalled = Some((bname.clone(), (bcos * 1000.0) as u32));
                                                         recalled_text = Some(btext.clone()); // SPECTEST ground
+                                                        recalled_query = Some(ruser.clone()); // LM-B2b turn join key
+                                                        recalled_class = bpol.as_ref().map(|p| p.class.clone());
+                                                        recalled_secret = bpol.as_ref().map(|p| p.class == "private-secret").unwrap_or(false);
                                                         tracing::info!("RECALL-L5: '{}' cos={:.3} >= tau={:.3} absent={:.2} mode={} -> TEXT-IN-CONTEXT",
                                                             bname, bcos, tau_l5, absent, if strict {"STRICT"} else {"recite"});
                                                         telem_emit_recall(&ruser, &bname,
@@ -3333,6 +3384,7 @@ Tag of the answer (or [NULL]):");
     sampler.observe(next_token);
     // B3-JUDGE grounding: accumulate the synthesized answer for the post-hoc check.
     let mut answer_text = String::new();
+    let decode_t0 = std::time::Instant::now(); // LM-B2b: turn decode timing (n_out / decode_s = tok/s)
 
     'decode: for _ in 0..max_tokens {
         if (!tokenizer.eos_ids.is_empty() && tokenizer.eos_ids.contains(&next_token))
@@ -3605,6 +3657,15 @@ Tag of the answer (or [NULL]):");
         } else {
             tracing::warn!("B3-JUDGE grounding: PARAMETRIC-HALLUCINATION FLAG '{}' -- answer used 0/{} salient mem tokens (model ignored injected memory)", ep_name, n_salient);
         }
+    }
+
+    // LM-B2b TURN-OUTCOME telemetry: for a delivered recall turn, log the OUTPUT + timing +
+    // an obeyed self-check, joined by query to the decision record. PRIVACY: when the recalled
+    // entry is a private-secret, the query AND output are REDACTED (hash+len, never raw text).
+    if let Some(q) = recalled_query.as_ref() {
+        telem_emit_turn(q, recalled.as_ref().map(|(n, _)| n.as_str()).unwrap_or("-"),
+            recalled_class.as_deref().unwrap_or("-"), &answer_text, recalled_text.as_deref(),
+            committed_gen.len(), decode_t0.elapsed().as_secs_f64(), recalled_secret);
     }
 
     let is_cancelled = cancel_child.load(Ordering::Relaxed) != 0;

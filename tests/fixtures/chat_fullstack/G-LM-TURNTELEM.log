@@ -1,0 +1,52 @@
+G-LM-TURNTELEM (LM-B2b) — the OTHER half of the flywheel: every DELIVERED recall turn logs its
+OUTPUT + timing + an obeyed self-check, joined to the decision record, privacy-redacted for
+secrets. The finetune signal (query -> output, with a label). (2026-07-03)
+=========================================================================================
+LM-B2 logged the DECISION; LM-B2b adds the OUTCOME. The engine now records, per delivered recall
+turn, what it actually SAID + how fast + whether the answer used the recalled fact — so the
+telemetry stream carries query->output pairs with a label, the raw material for finetuning.
+
+BUILD (engine this-commit, gated SP_TELEMETRY=1 + SP_TELEMETRY_LOG, default-off null floor):
+  * routes.rs telem_emit_turn(query, entry, class, output, fact, n_out, decode_s, secret): appends
+    one `kind:"turn"` JSONL record at the [DONE] site of a delivered recall turn. Fields: output,
+    out_len, n_out, decode_s, tok_s, obeyed. `obeyed` = the answer used >=1 salient (len>=4) token
+    of the recalled fact (inverse of the parametric-hallucination flag) = the LABEL.
+  * The delivered recall's query/class/secret are stashed at the TEXT-IN-CONTEXT deliver branch
+    (recalled_query/recalled_class/recalled_secret, alongside recalled_text) and consumed at [DONE];
+    decode timing is measured from just before the decode loop. Off the token path (one append).
+  * PRIVACY (ADR-005 §3b): when the recalled entry is a private-secret, the query AND the output
+    are REDACTED (query hashed; output -> {redacted:true, sha, len}) — telemetry NEVER carries the
+    secret text even though the owner legitimately saw the recite. Non-secret turns keep
+    query->output in the CLEAR = the finetune signal.
+
+GATE G-LM-TURNTELEM — served a 2-concept store (gold counterfact + Meridian private-secret),
+queried both. Telemetry produced a decision record + a turn record per turn:
+
+  NON-SECRET (gold, counterfact/systemecho):
+    decision: {class:counterfact, delivery:systemecho, redacted:false, query in clear}
+    turn:     {output:"The chemical symbol for gold is Xg.", n_out:9, decode_s:0.454, tok_s:19.82,
+               obeyed:true, out_len:35, redacted:false}   <- query->output IN THE CLEAR (finetune data)
+
+  SECRET (Meridian, private-secret/recite):
+    decision: {class:private-secret, delivery:recite, redacted:true, query HASHED}
+    turn:     {output:{redacted:true, sha:#6c92dd…, len:80}, n_out:14, decode_s:0.701, tok_s:19.97,
+               obeyed:true, redacted:true}                 <- output REDACTED, text never logged
+
+  REDACTION CHECK: secret "orchid…" appears in the telemetry log 0 times -> PASS.
+  FINETUNE SIGNAL: the non-secret gold output is present in the clear (1x) -> correct.
+
+VERDICT: GREEN. The flywheel is now COMPLETE: decision (LM-B2) ⋈ outcome (LM-B2b) by query. Every
+delivered turn contributes a labelled example (query -> output, obeyed) + speed telemetry
+(tok_s ~19.8-20 here) — the data to finetune, tune faithfulness, and watch drift — with secrets
+privacy-redacted on both the decision and the output side. Default-off = byte-identical.
+
+SPEED: one JSONL append at [DONE], off the token path; timing is two Instant reads. No forward.
+
+FOLLOW-ON: emit the turn record as a `telemetry` SSE event on events_tx so the harness
+StreamProcessor can sink it live (single stream, no file tail); mint a PoUW SpinorReceipt per turn
+(addr = join key); add prefill_s + first-token latency. Decline turns (zero-inference) don't reach
+this deliver [DONE] — their outcome is the fixed decline string (already in the decision record).
+
+REPRO: run_refine.bat off (SP_TELEMETRY=1, SP_MEM_POLICY=1) with a gold counterfact + a private-
+secret concept; query both; inspect telemetry.jsonl for kind:"turn" records + grep the secret (0).
+ENV: engine this-commit; RTX 2060 12GB.
