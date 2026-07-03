@@ -1,0 +1,27 @@
+[wcH] dev=cuda r=16 dropout=0.0 wd=0.001 tau_floor=-1000000000.0
+[wcH] SPLIT seed=0 frac=0.2: needles total=30 train=24 holdout=6
+[wcH] holdout ep idx: [1, 7, 8, 13, 16, 21]
+[wcH] train query rows: 107 (87 train-pos + 20 foreign); holdout query rows: 21
+[wcH] ep0 ce=3.7179 hin=1.342 rmp=0.000 rmf=3.083 tau=1.003 s0=0.003
+[wcH] ep50 ce=3.0734 hin=1.119 rmp=0.170 rmf=0.047 tau=1.046 s0=0.078
+[wcH] ep100 ce=2.6684 hin=1.071 rmp=0.141 rmf=0.039 tau=0.910 s0=0.079
+[wcH] ep150 ce=1.6938 hin=0.817 rmp=0.102 rmf=0.000 tau=0.715 s0=0.083
+[wcH] ep200 ce=0.7259 hin=0.389 rmp=0.012 rmf=0.000 tau=0.569 s0=0.087
+[wcH] ep250 ce=0.2202 hin=0.121 rmp=0.000 rmf=0.000 tau=0.476 s0=0.092
+[wcH] ep300 ce=0.0870 hin=0.027 rmp=0.000 rmf=0.000 tau=0.426 s0=0.094
+[wcH] ep350 ce=0.0528 hin=0.014 rmp=0.000 rmf=0.000 tau=0.396 s0=0.095
+[wcH] ep400 ce=0.0397 hin=0.006 rmp=0.000 rmf=0.000 tau=0.372 s0=0.096
+[wcH] ep450 ce=0.0334 hin=0.003 rmp=0.000 rmf=0.000 tau=0.352 s0=0.097
+[wcH] ep500 ce=0.0299 hin=0.001 rmp=0.000 rmf=0.000 tau=0.334 s0=0.097
+[wcH] ep550 ce=0.0276 hin=0.001 rmp=0.000 rmf=0.000 tau=0.316 s0=0.098
+[wcH] ep600 ce=0.0257 hin=0.001 rmp=0.000 rmf=0.000 tau=0.300 s0=0.099
+[wcH] ep650 ce=0.0240 hin=0.001 rmp=0.000 rmf=0.000 tau=0.284 s0=0.100
+[wcH] ep700 ce=0.0224 hin=0.001 rmp=0.000 rmf=0.000 tau=0.269 s0=0.102
+[wcH] ep750 ce=0.0205 hin=0.001 rmp=0.000 rmf=0.000 tau=0.255 s0=0.103
+[wcH] ep799 ce=0.0188 hin=0.001 rmp=0.000 rmf=0.000 tau=0.242 s0=0.104
+[wcH] ===== RESULTS (seed 0) =====
+[wcH] train-diagonal (sanity): 84/87 = 96.6%
+[wcH] >>> HOLDOUT top-1 recall: 0/21 = 0.0% <<<
+[wcH] foreign-reject (NULL wins): 20/20 = 100.0%
+[wcH] holdout misses: ->trained-needle=16 ->NULL=4 ->other-holdout=1
+[wcH] saved _b3_wc\lsh_Wc_v3_holdout.npz
