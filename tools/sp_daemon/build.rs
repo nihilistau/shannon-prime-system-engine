@@ -153,7 +153,17 @@ fn main() {
     // directly with a full absolute path — no /LIBPATH lookup required.
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
+    // DESIGN-NO-EXACT-PROFILE §4b: the integer memory-ring math-core archives are linked only
+    // under the default `exact` feature. The standard-FP profile (--no-default-features) drops them
+    // — they are dormant in the served path (recall is FP cosine); the Rust NTT FFI that references
+    // their symbols (ntt_ffi / ntt_hex_dispatch) is cfg-gated out in lockstep.
+    let exact = env::var("CARGO_FEATURE_EXACT").is_ok();
+    const RING_MODULES: &[&str] = &["ntt_crt", "poly_ring", "ok_arith", "frobenius"];
+
     for (module_dir, lib_name) in MODULES {
+        if !exact && RING_MODULES.contains(module_dir) {
+            continue; // FP profile: do not link the integer memory-ring archives
+        }
         let search = build_dir.join("core").join(module_dir);
         println!("cargo:rustc-link-search=native={}", search.display());
         if target_env == "msvc" {

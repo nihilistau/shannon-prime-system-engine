@@ -1,4 +1,9 @@
 pub mod network;
+// DESIGN-NO-EXACT-PROFILE §4b: the integer-ring NTT FFI is part of the `exact` surface (default-on).
+// The standard-FP profile (--no-default-features) drops it in lockstep with the ring archives.
+// NOTE: network/quic_shard.rs (the QUIC garner NTT mesh) still references this; completing the FP
+// profile link requires cfg-gating those recombine sites too (pending — G-NOEXACT-BUILD).
+#[cfg(feature = "exact")]
 pub mod ntt_ffi;
 
 // CONTRACT-CHAT-FULLSTACK B3 — AUTONOMOUS MEMORY RECALL. The C2 discrete
