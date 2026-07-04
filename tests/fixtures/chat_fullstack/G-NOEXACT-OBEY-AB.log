@@ -1,0 +1,51 @@
+G-NOEXACT-OBEY-AB  2026-07-04T11:33:25.409197
+same binary, per-request byteexact flip (true=exact / false=FP); run_console_faithful.bat config
+
+== DET (determinism: same prompt x2 within mode; exact expected identical) ==
+[DET] exact_id=True fp_id=True  q='Which urban center now serves as the seat of'
+[DET] exact_id=True fp_id=True  q='Which peak rises higher above sea level than'
+[DET] exact_id=True fp_id=True  q='Which world orbiting our star has the greate'
+[DET] exact_id=True fp_id=True  q='Which playwright penned the tragedy of the s'
+[DET] exact_id=True fp_id=True  q='Which body of saltwater covers more of the g'
+[DET] exact_id=True fp_id=True  q='Which creature can sprint across the ground '
+DET: exact identical 6/6 · FP identical 6/6
+
+== FTH+SPD (61 paraphrase obey + decode tok/s, both modes) ==
+[exact] obey 54/61 · 1.10 tok/s (494 tok / 449.7s) · miss=['france_capital', 'telephone_inv', 'italy_capital', 'canada_capital', 'longest_river', 'statue_liberty', 'taj_mahal']
+[fp] obey 54/61 · 1.16 tok/s (481 tok / 414.1s) · miss=['france_capital', 'telephone_inv', 'italy_capital', 'canada_capital', 'longest_river', 'statue_liberty', 'taj_mahal']
+FTH parity: exact 54/61 vs fp 54/61
+SPD: exact 1.10 tok/s vs fp 1.16 tok/s (FP speedup 1.06x)
+
+== ECHO (short-prompt echo count; #47 signal) ==
+[ECHO exact ok] 'Hi.' -> 'Hello! How can I assist you today?'
+[ECHO exact ok] 'Hello there.' -> "Hello! I'm here to help you with any questions you may h"
+[ECHO exact ok] 'How are you?' -> "I'm fine, thank you. How are you?"
+[ECHO exact ok] 'Thanks.' -> "You're welcome."
+[ECHO exact ok] "What's your name?" -> 'I am Shannon-Prime, a local AI with a real working memor'
+[ECHO exact ok] 'Tell me a joke.' -> "Sure, here's a joke: Why did the tomato turn red? Becaus"
+[ECHO exact ok] 'Good morning.' -> 'Good morning! How can I assist you today?'
+[ECHO exact ok] 'Are you there?' -> 'Yes, I am here. How can I assist you today?'
+[ECHO exact ok] 'Ok.' -> "I'm Shannon-Prime, a local AI with a real working memory"
+[ECHO exact ok] 'Who are you?' -> 'I am Shannon-Prime, a local AI with a real working memor'
+[ECHO exact ok] 'What can you do?' -> 'I can answer questions about the world, help with tasks,'
+[ECHO exact ok] 'Nice to meet you.' -> "Nice to meet you too! I'm here to help you with any ques"
+[ECHO fp ok] 'Hi.' -> 'Hello! How can I assist you today?'
+[ECHO fp ok] 'Hello there.' -> "Hello! I'm here to help you with any questions you may h"
+[ECHO fp ok] 'How are you?' -> "I'm fine, thank you. How are you?"
+[ECHO fp ok] 'Thanks.' -> "You're welcome."
+[ECHO fp ok] "What's your name?" -> 'I am Shannon-Prime, a local AI with a real working memor'
+[ECHO fp ok] 'Tell me a joke.' -> "Sure, here's a joke: Why did the tomato turn red? Becaus"
+[ECHO fp ok] 'Good morning.' -> 'Good morning! How can I assist you today?'
+[ECHO fp ok] 'Are you there?' -> 'Yes, I am here. How can I assist you today?'
+[ECHO fp ok] 'Ok.' -> "I'm here to help you with any questions you have. What w"
+[ECHO fp ok] 'Who are you?' -> 'I am Shannon-Prime, a local AI with a real working memor'
+[ECHO fp ok] 'What can you do?' -> 'I can answer questions about the world, write creative w'
+[ECHO fp ok] 'Nice to meet you.' -> "Nice to meet you too! I'm here to help you with any ques"
+ECHO: exact 0/12 echoed · FP 0/12 echoed
+
+== VERDICT ==
+determinism (this box): exact 6/6 · FP 6/6 identical run-to-run  [cross-MACHINE determinism is exact's real, untested-here win]
+faithfulness: exact 54 vs FP 54 obey  (delta +0)
+speed: FP 1.16 vs exact 1.10 tok/s
+echo(#47): exact 0 vs FP 0 echoed
+RESULT G-NOEXACT-OBEY-AB: DATA CAPTURED (interpret in DESIGN-NO-EXACT-PROFILE §4)
