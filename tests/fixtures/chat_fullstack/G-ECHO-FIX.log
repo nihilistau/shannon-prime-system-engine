@@ -1,0 +1,45 @@
+G-ECHO-FIX (#47) — kill the system-prompt recital on contentless prompts (plain chat path). 2026-07-04
+=========================================================================================
+#47 (diagnosed in G-ECHO-HUNT-47): on the PLAIN chat path (run_console_chat.bat, recall OFF), greedy
+decoding on a contentless turn ('Sure.'/'Continue.') recites the SYSTEM PROMPT verbatim. Root cause:
+at temp==0 the sampler is strict argmax with NO penalty (sampler.rs), and no lever protects against
+copying the PROMPT (repetition_penalty only tracks GENERATED tokens). NOT a byteexact artifact
+(exact==FP, G-ECHO-HUNT-47).
+
+FIX (engine sampler.rs + routes.rs, this commit): a no-repeat-ngram guard seeded with the PROMPT
+tokens, applied on the GREEDY path. `SP_NO_REPEAT_NGRAM=n` (n>=2) forbids emitting the token that
+would complete an n-gram already present in (prompt-prefix ++ generated-history) — so a verbatim
+recital of the prompt is derailed the instant the generation re-traces a prompt n-gram. Default
+UNSET => 0 => no-op => byte-identical null floor. Enabled ONLY in run_console_chat.bat (recall OFF);
+LEFT OFF in run_console_faithful.bat (recall ON) so faithful in-context recitation + the G-ONECONFIG
+obey gate are untouched. n=3 pinned (2-token context match): targeted enough to break "You are ->
+Shannon" (echo) while preserving "I am -> Shannon" (the model's own name).
+
+BUG FOUND + FIXED en route: the env read used `v.parse::<usize>()` — a trailing space from the
+launcher (`set VAR=3 `) made the value "3 " unparseable => silently 0 => guard never fired. Now
+`v.trim().parse()`. (Also convicted a blunter variant: a blanket -8.0 penalty on ALL prompt tokens
+killed the echo but ALSO blocked the model's own name ("Shannon-Prime" is a prompt token) and the
+brevity priming => rambling. Dropped in favour of the surgical n-gram ban.)
+
+LIVE A/B (12B, run_console_chat.bat, byteexact default, temp=0, max_tokens=48):
+  prompt          BASELINE (flag OFF, G-ECHO-HUNT-47)                        FIXED (SP_NO_REPEAT_NGRAM=3)
+  'Sure.'         "You are Shannon-Prime, a local AI. Keep replies short."   "You're welcome."               [ECHO KILLED]
+  'Continue.'     "You are Shannon-Prime, a local AI. Keep replies short."   "You're a local artificial       [reworded, no
+                                                                              intelligence, Shannon-prime.     longer verbatim]
+                                                                              Keep your responses brief."
+  'Ok'            "Hello! How can I assist you today?"                       "Hello! How can I assist you today?"
+  'Hmm.'          (helpful)                                                  "I'm here to help you with any questions..."
+  'What is your name?'  "I am Shannon-Prime, a local AI."                    "I am Shannon-prime, a friendly AI."   [NAME PRESERVED]
+  'Who are you?'        (name)                                              "I am Shannon-prime, a friendly AI."   [NAME PRESERVED]
+  'What is 2 plus 2?'  "4"                                                  "4"                              [concise, no ramble]
+  'Name a color.'      "Blue"                                              "Blue"
+
+RESULT G-ECHO-FIX: PASS — verbatim system-prompt recital ELIMINATED on the contentless-prompt regime
+('Sure.' clean); the model's own name + concise factual answers PRESERVED; flag-off = byte-identical
+null floor; the gate obey path (run_console_faithful.bat) is untouched (flag off there). Residual
+(honest): 'Continue.' now PARAPHRASES the persona rather than reciting it verbatim — acceptable;
+tightening to n=2 was not taken (more collateral on legitimate short answers).
+
+REPRO: serve run_console_chat.bat (sets SP_NO_REPEAT_NGRAM=3), POST /v1/chat contentless prompts.
+Engine: sampler.rs (ban_repeat_ngram + no_repeat_ngram param + set_ngram_prefix), routes.rs (env read
++ seed prefix with prompt tokens), run_console_chat.bat (flag). Rust-only rebuild (CUDA lib cached).

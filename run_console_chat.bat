@@ -61,6 +61,12 @@ set "SP_RECALL_L5_PROMPT=systemecho"
 REM cuBLAS determinism insurance (G-CUBLAS-PIN-CANARY 2026-07-02): no observed effect
 REM at canary level, pinned as free run-to-run stability for the float GEMM surface.
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"
+REM ANTI-ECHO (#47, G-ECHO-FIX 2026-07-04): plain chat path (recall OFF) greedy on a
+REM contentless turn ('Sure.'/'Continue.') recites the SYSTEM PROMPT verbatim. A
+REM no-repeat-ngram guard + prompt-token penalty (seeded with the prompt tokens)
+REM derails any verbatim prompt recital. NOT set in run_console_faithful.bat (recall
+REM ON) so faithful in-context recitation + the G-ONECONFIG obey gate stay untouched.
+set "SP_NO_REPEAT_NGRAM=3"
 set "SP_DAEMON_LOG=%ENGINE%_oneconfig_serve.log"
 
 echo [chat] 12B daily driver: PMAX=4096, byteexact default, NO test registry

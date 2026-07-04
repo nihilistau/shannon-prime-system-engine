@@ -537,6 +537,21 @@ pub async fn v1_chat(
         let mut dec_buf = TokenDecodeBuffer::new(stop_strings);
         // A2: the L2 sampler for this turn (temp=0 ⇒ strict argmax null floor).
         let mut sampler = crate::sampler::Sampler::with_suppress(sampling, suppress_ids);
+        // Anti-echo (#47, G-ECHO-FIX): on the PLAIN chat path, greedy on a
+        // contentless turn recites the system prompt verbatim. SP_NO_REPEAT_NGRAM=n
+        // (n>=2) seeds a no-repeat-ngram guard with the prompt tokens so any verbatim
+        // prompt recital is derailed. Default unset ⇒ 0 ⇒ byte-identical null floor.
+        // Enabled in run_console_chat.bat (recall OFF); left OFF in the gate launcher
+        // (run_console_faithful.bat, recall ON) so faithful in-context recitation and
+        // the G-ONECONFIG obey gate are untouched.
+        {
+            let nrg = std::env::var("SP_NO_REPEAT_NGRAM").ok()
+                .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+            if nrg >= 2 {
+                sampler.set_no_repeat_ngram(nrg);
+                sampler.set_ngram_prefix(tokens.clone());
+            }
+        }
 
         // Issue #115 (12B chat path): when the CUDA persistent-KV decode backend
         // is registered (SP_DAEMON_BACKEND=cuda + SP_DAEMON_KVDECODE=1 +

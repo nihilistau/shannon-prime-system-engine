@@ -41,6 +41,13 @@ pub struct SamplingParams {
     /// successive requests differ; `Some(s)` ⇒ fully reproducible.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Anti-echo (#47): forbid emitting a token that would complete an n-gram
+    /// already present in (prompt-prefix ++ generated history). 0 = off (default,
+    /// null floor). Applied on the GREEDY path too (that is where #47 lives). Used
+    /// on the PLAIN chat path only (recall OFF); the recall/systemecho path must
+    /// recite in-context facts, so it leaves this at 0. See G-ECHO-FIX.
+    #[serde(default)]
+    pub no_repeat_ngram: usize,
 }
 
 fn default_temperature() -> f32 {
@@ -65,6 +72,7 @@ impl Default for SamplingParams {
             repetition_penalty: default_repetition_penalty(),
             frequency_penalty: 0.0,
             seed: None,
+            no_repeat_ngram: 0,
         }
     }
 }
@@ -113,11 +121,27 @@ pub struct Sampler {
     /// byte-exact/determinism null floor recovers the un-suppressed reference by
     /// constructing the sampler with this set EMPTY (ChatRequest.raw_logits=true).
     suppress: Vec<i32>,
+    /// Anti-echo (#47): the prompt token ids that PRECEDE generation. The
+    /// no-repeat-ngram guard scans (ngram_prefix ++ history) so a verbatim
+    /// recital of the prompt (e.g. the system prompt on a contentless turn) is
+    /// broken as soon as it re-traces an n-gram already in the prompt. Empty =
+    /// off (the sample() guard also no-ops when params.no_repeat_ngram < 2).
+    ngram_prefix: Vec<i32>,
 }
 
 impl Sampler {
     pub fn new(params: SamplingParams) -> Self {
         Self::with_suppress(params, Vec::new())
+    }
+
+    /// Anti-echo (#47): seed the no-repeat-ngram guard with the prompt tokens.
+    pub fn set_ngram_prefix(&mut self, prefix: Vec<i32>) {
+        self.ngram_prefix = prefix;
+    }
+
+    /// Anti-echo (#47): set the no-repeat-ngram order (n>=2 to enable, 0 = off).
+    pub fn set_no_repeat_ngram(&mut self, n: usize) {
+        self.params.no_repeat_ngram = n;
     }
 
     pub fn with_suppress(params: SamplingParams, suppress: Vec<i32>) -> Self {
@@ -134,6 +158,7 @@ impl Sampler {
             history: Vec::new(),
             params,
             suppress,
+            ngram_prefix: Vec::new(),
         }
     }
 
@@ -173,6 +198,17 @@ impl Sampler {
             if idx < logits.len() {
                 logits[idx] = f32::NEG_INFINITY;
             }
+        }
+
+        // ── anti-echo (#47): no-repeat-ngram over (prompt-prefix ++ history) ──
+        // Forbid the token that would complete an n-gram already present in the
+        // sequence, so a verbatim recital of the prompt (the system prompt on a
+        // contentless turn) is broken as soon as it re-traces a prompt n-gram.
+        // Applied BEFORE the greedy return so it works at temp==0 (where #47 is).
+        // Off when no_repeat_ngram < 2 ⇒ byte-identical null floor.
+        let n = self.params.no_repeat_ngram;
+        if n >= 2 {
+            ban_repeat_ngram(logits, &self.ngram_prefix, &self.history, n);
         }
 
         // ── temp == 0: strict argmax null floor ──
@@ -281,6 +317,36 @@ impl Sampler {
         }
         // Floating-point fall-through: return the last nucleus member.
         cand[nucleus - 1].0 as i32
+    }
+}
+
+/// Anti-echo (#47): forbid the token that would complete an `n`-gram already
+/// present in `prefix ++ history`. Standard no-repeat-ngram, but seeded with the
+/// prompt so a verbatim recital of the prompt (the system prompt on a contentless
+/// turn) is derailed the instant the generated suffix re-traces a prompt n-gram.
+/// Sets the banned logits to -inf. `n < 2` ⇒ no-op.
+fn ban_repeat_ngram(logits: &mut [f32], prefix: &[i32], history: &[i32], n: usize) {
+    if n < 2 {
+        return;
+    }
+    // Effective sequence = prefix ++ history (bounded by prompt + max_tokens).
+    let seq: Vec<i32> = prefix.iter().chain(history.iter()).copied().collect();
+    if seq.len() < n {
+        return;
+    }
+    let m = seq.len();
+    let suffix = &seq[m - (n - 1)..]; // the current trailing (n-1)-gram
+    // Every earlier occurrence of `suffix` that is FOLLOWED by a token bans that
+    // follower. Sources i range so that i..i+(n-1) is the match and i+(n-1) is the
+    // follower; i <= m-1-(n-1) = m-n excludes the trailing suffix itself.
+    let last_src = m - n; // inclusive
+    for i in 0..=last_src {
+        if &seq[i..i + (n - 1)] == suffix {
+            let banned = seq[i + (n - 1)];
+            if (banned as usize) < logits.len() {
+                logits[banned as usize] = f32::NEG_INFINITY;
+            }
+        }
     }
 }
 
