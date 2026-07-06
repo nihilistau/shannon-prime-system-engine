@@ -649,17 +649,40 @@ pub async fn run_inner(model_path: &str, tok_path: &str, draft_model_path: &str,
             // resident path until the slab/LSH port lands). gemma4_kv_open reads
             // SP_G4_KV_RING_W / SP_G4_KV_JMAX; surface them as daemon knobs so the ring
             // is a startup config (default unset = the full-cache B1 null floor).
+            // G-PK2-PREFILL ROOT-CAUSE FIX (2026-07-07): std::env::set_var on Windows
+            // calls SetEnvironmentVariableW (Win32) — but the CUDA lib's C getenv()
+            // reads the MSVC CRT's environment SNAPSHOT taken at process start, which
+            // Win32 set does NOT update. So the ring arm below was INVISIBLE to
+            // gemma4_kv_open: every served daemon launched via SP_DAEMON_KVDECODE_RING_W
+            // silently ran RING-OFF FULL-CACHE — at PMAX=20000 that allocates the whole
+            // Pmax KV for all 48 owners, oversubscribes the 12 GB card, and WDDM paging
+            // thrash presents as the ">~1000-token prefill stall". Fix: ALSO write the
+            // var through the CRT (_putenv_s), which the statically-linked CUDA backend
+            // shares, so C getenv() sees it. (The B2 ring gates passed because their
+            // .bats set SP_G4_KV_RING_W in the SHELL, i.e. at process start.)
+            fn crt_setenv(name: &str, val: &str) {
+                use std::ffi::CString;
+                extern "C" { fn _putenv_s(name: *const std::os::raw::c_char,
+                                          val: *const std::os::raw::c_char) -> i32; }
+                if let (Ok(n), Ok(v)) = (CString::new(name), CString::new(val)) {
+                    // SAFETY: single-threaded startup, before any decode thread spawns.
+                    let rc = unsafe { _putenv_s(n.as_ptr(), v.as_ptr()) };
+                    if rc != 0 { tracing::warn!("crt_setenv({name}) failed rc={rc}"); }
+                }
+            }
             if let Ok(w) = std::env::var("SP_DAEMON_KVDECODE_RING_W") {
                 if !w.trim().is_empty() {
                     // SAFETY: single-threaded startup, before any decode thread spawns.
                     unsafe { std::env::set_var("SP_G4_KV_RING_W", w.trim()); }
-                    info!("WIRE-CUDA-DECODE B2: SWA-ring mode armed at open (SP_G4_KV_RING_W={})", w.trim());
+                    crt_setenv("SP_G4_KV_RING_W", w.trim());
+                    info!("WIRE-CUDA-DECODE B2: SWA-ring mode armed at open (SP_G4_KV_RING_W={}, CRT-bridged)", w.trim());
                 }
             }
             if let Ok(j) = std::env::var("SP_DAEMON_KVDECODE_JMAX") {
                 if !j.trim().is_empty() {
                     // SAFETY: single-threaded startup.
                     unsafe { std::env::set_var("SP_G4_KV_JMAX", j.trim()); }
+                    crt_setenv("SP_G4_KV_JMAX", j.trim());
                 }
             }
             // SAFETY: we own `session` exclusively here; no concurrent decode.

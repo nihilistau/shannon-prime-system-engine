@@ -1,3 +1,14 @@
+# RESOLVED 2026-07-07 — see tests/perf/G-PK2-PREFILL.log
+#
+# Root cause: SP_DAEMON_KVDECODE_RING_W -> std::env::set_var was INVISIBLE to the
+# CUDA lib's C getenv (Win32 vs MSVC-CRT env), so every served daemon ran RING-OFF
+# full-cache at PMAX=20000 -> VRAM oversubscription -> WDDM paging thrash ->
+# superlinear prefill that any client timeout rendered as "stalls forever".
+# Fix: daemon.rs crt_setenv (_putenv_s bridge) + chunked-sync/fail-fast/telemetry
+# in gemma4_kv_prefill. Gate GREEN: SP_WORDS=1300 -> got_DONE=True in 98.2s.
+#
+# The doc below is kept as the historical handoff.
+
 # START HERE — fix the daemon prefill stall (the one blocker)
 
 One job this session: **the sp-daemon's prefill wedges on prompts larger than ~1000 tokens.**

@@ -4621,14 +4621,56 @@ extern "C" int gemma4_kv_prefill(sp_g4_kv *s, const int32_t *toks, int n) {
     if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_prefill: bad args"); return -1; }
     if (s->dpos_host + n > s->Pmax) { sp_set_error("gemma4_kv_prefill: exceeds Pmax"); return -1; }
     cudaStream_t st = g_w.stream;
+    /* G-PK2-PREFILL (2026-07-07): the >~1000-token prefill wedge (GATEWAY-PREFILL-STALL).
+     * Root-cause class: this loop queues n * ~700 async launches with ZERO intermediate
+     * sync — on WDDM the pending-launch queue bloats, and any launch-time error (the
+     * silent cudaErrorInvalidConfiguration class documented at the FLOAT ATTN launch)
+     * only surfaces at the terminal sync, by which point the stream is wedged. Fix:
+     * drain the stream every SP_KV_PREFILL_SYNC tokens (default 128; the n=1 inject
+     * path is untouched) and FAIL FAST with the exact token index on any error
+     * instead of hanging. Pure control flow — a sync neither reorders nor changes the
+     * stream's work, so the computed bytes are unchanged (null floor intact).
+     * SP_KV_PREFILL_LOG=1 prints per-chunk progress (the stall bisection instrument). */
+    static int sync_every = -1;
+    if (sync_every < 0) { const char *e = getenv("SP_KV_PREFILL_SYNC");
+        sync_every = (e && *e) ? atoi(e) : 128; if (sync_every < 1) sync_every = 1; }
+    static int logp = -1;
+    if (logp < 0) { const char *e = getenv("SP_KV_PREFILL_LOG"); logp = (e && *e=='1') ? 1 : 0;
+        /* MSVC CRT: stderr is FULLY BUFFERED when redirected to a file — unbuffer it
+         * once so the stall-bisection telemetry lands in the log AS IT HAPPENS. */
+        if (logp) setvbuf(stderr, NULL, _IONBF, 0); }
+    const clock_t t_pf0 = clock();
+    clock_t t_chunk = t_pf0;
+    if (logp) fprintf(stderr, "[g4-kv] prefill START n=%d dpos=%d sync_every=%d bx=%d ringW=%d\n",
+                      n, s->dpos_host, sync_every, s->bx_on, s->ring_W);
     if (cudaMemcpyAsync(s->dseq + s->dpos_host, toks, (size_t)n*sizeof(int),
                         cudaMemcpyHostToDevice, st) != cudaSuccess) { sp_set_error("g4_kv prefill H2D"); return -1; }
     for (int i = 0; i < n; i++) {                 /* every position: forward + store K/V; last runs the head */
         if (g4_kv_step(s, /*do_head=*/(i == n - 1))) return -1;
         s->dpos_host++;
+        if (((i + 1) % sync_every) == 0 && (i + 1) < n) {
+            cudaError_t ce = cudaStreamSynchronize(st);
+            if (ce == cudaSuccess) ce = cudaGetLastError();
+            if (ce != cudaSuccess) {
+                fprintf(stderr, "[g4-kv] prefill FAILED at token %d/%d (dpos=%d): %s\n",
+                        i + 1, n, s->dpos_host, cudaGetErrorName(ce));
+                return fail_cuda(ce, "g4_kv prefill chunk");
+            }
+            if (logp) { const clock_t tn = clock();
+                fprintf(stderr, "[g4-kv] prefill %d/%d ok (dpos=%d) chunk=%.1fms total=%.1fs\n",
+                        i + 1, n, s->dpos_host,
+                        1000.0 * (double)(tn - t_chunk) / CLOCKS_PER_SEC,
+                        (double)(tn - t_pf0) / CLOCKS_PER_SEC);
+                t_chunk = tn; }
+        }
     }
     cudaError_t e = cudaStreamSynchronize(st);
-    if (e != cudaSuccess) return fail_cuda(e, "g4_kv prefill sync");
+    if (e == cudaSuccess) e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        fprintf(stderr, "[g4-kv] prefill FAILED at final sync (n=%d dpos=%d): %s\n",
+                n, s->dpos_host, cudaGetErrorName(e));
+        return fail_cuda(e, "g4_kv prefill sync");
+    }
     return 0;
 }
 
