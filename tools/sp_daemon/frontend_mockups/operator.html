@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>shannon-prime · operator panel (PK2 §U)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+  :root{
+    --bg:#08090d; --panel:#0d1117; --panel-2:#11161d; --panel-hi:#161c25;
+    --rule:rgba(29,110,122,0.35); --rule-faint:rgba(29,110,122,0.15);
+    --gold:#d4a14a; --gold-hot:#f4c860; --cyan:#1d6e7a; --cyan-bright:#5fb8c4;
+    --text:#dcdfe4; --text-dim:#7d848e; --text-faint:#4a525d;
+    --ok:#4adba0; --warn:#e89a3c; --err:#d94a4a; --font:'JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;min-height:100%;background:var(--bg);color:var(--text);
+    font-family:var(--font);font-size:13px;-webkit-font-smoothing:antialiased;}
+  body{background:
+      radial-gradient(ellipse at 15% -10%,rgba(29,110,122,0.08),transparent 40%),
+      radial-gradient(ellipse at 85% 110%,rgba(212,161,74,0.06),transparent 40%),var(--bg);}
+  header{display:flex;align-items:baseline;gap:14px;padding:16px 22px;border-bottom:1px solid var(--rule);}
+  header h1{font-size:14px;font-weight:600;letter-spacing:2px;margin:0;color:var(--gold);text-transform:uppercase;}
+  header .sub{font-size:11px;color:var(--text-dim);}
+  header .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--err);margin-right:6px;}
+  header .dot.up{background:var(--ok);box-shadow:0 0 8px var(--ok);}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:18px 22px;max-width:1400px;}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr;}}
+  .card{background:var(--panel);border:1px solid var(--rule);border-radius:4px;overflow:hidden;}
+  .card h2{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--cyan-bright);
+    margin:0;padding:11px 14px;border-bottom:1px solid var(--rule-faint);display:flex;justify-content:space-between;align-items:center;}
+  .card h2 .meta{color:var(--text-faint);font-weight:400;letter-spacing:1px;}
+  .card .body{padding:12px 14px;max-height:340px;overflow:auto;}
+  .persona-card{grid-column:1/-1;}
+  .row{padding:7px 9px;border-left:2px solid var(--rule-faint);margin-bottom:7px;background:var(--panel-2);border-radius:2px;}
+  .row .txt{color:var(--text);}
+  .row .prov{font-size:10px;color:var(--text-faint);margin-top:3px;}
+  .row .prov b{color:var(--gold);font-weight:500;}
+  .task .status{font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:1px 6px;border-radius:2px;border:1px solid var(--rule);}
+  .status.done{color:var(--ok);border-color:var(--ok);} .status.running{color:var(--gold);border-color:var(--gold);}
+  .status.pending{color:var(--text-dim);} .status.failed,.status.exhausted{color:var(--err);border-color:var(--err);}
+  textarea{width:100%;min-height:260px;background:var(--panel-2);color:var(--text);border:1px solid var(--rule-faint);
+    border-radius:3px;font-family:var(--font);font-size:12px;line-height:1.55;padding:11px;resize:vertical;}
+  .btn{border:1px solid var(--rule);background:transparent;color:var(--text-dim);font-family:var(--font);font-size:10px;
+    letter-spacing:2px;padding:7px 15px;cursor:pointer;border-radius:2px;transition:all .15s;text-transform:uppercase;}
+  .btn:hover{color:var(--gold);border-color:var(--gold);background:rgba(212,161,74,0.08);}
+  .btn.primary{color:var(--gold);border-color:var(--gold);}
+  .health{font-size:10px;color:var(--text-dim);padding:8px 14px;border-top:1px solid var(--rule-faint);}
+  .health.bad{color:var(--warn);}
+  .empty{color:var(--text-faint);font-style:italic;padding:8px 0;}
+  .toast{position:fixed;bottom:18px;right:18px;background:var(--panel-hi);border:1px solid var(--gold);color:var(--text);
+    padding:9px 15px;border-radius:3px;font-size:12px;opacity:0;transition:opacity .25s;pointer-events:none;}
+  .toast.show{opacity:1;}
+  input#post-goal{flex:1;background:var(--panel-2);color:var(--text);border:1px solid var(--rule-faint);
+    border-radius:2px;font-family:var(--font);font-size:12px;padding:7px 9px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>Shannon-Prime · Operator Panel</h1>
+  <span class="sub"><span class="dot" id="conn"></span><span id="conn-txt">connecting…</span> · PK2 §U · gateway :8800</span>
+  <span class="sub" style="margin-left:auto"><button class="btn" onclick="refreshAll()">↻ refresh</button></span>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Memory <span class="meta" id="mem-count">— facts</span></h2>
+    <div class="body" id="mem-body"><div class="empty">loading /v1/memory…</div></div>
+    <div class="health" id="mem-health"></div>
+  </div>
+
+  <div class="card">
+    <h2>Work queue <span class="meta" id="task-count">— tasks</span></h2>
+    <div class="body" id="task-body"><div class="empty">loading /v1/tasks…</div></div>
+    <div class="health">
+      <input id="post-goal" placeholder="post a task goal…"/>
+      <button class="btn" style="margin-left:8px" onclick="postGoal()">post</button>
+    </div>
+  </div>
+
+  <div class="card persona-card">
+    <h2>Persona <span class="meta">persona.md — edits take effect next turn</span></h2>
+    <div class="body">
+      <textarea id="persona" spellcheck="false"></textarea>
+      <div style="margin-top:9px;display:flex;gap:9px;align-items:center">
+        <button class="btn primary" onclick="savePersona()">save persona</button>
+        <button class="btn" onclick="loadPersona()">reload</button>
+        <span class="sub" id="persona-note" style="color:var(--text-faint)"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// PK2 §U operator panel. Read-only memory/tasks + persona editor, against the harness gateway.
+// NOTE: post-task needs SP_AGENCY_TASKS=1 for the KAIROS tick to advance queued goals.
+const GW = (location.port === "8800") ? "" : "http://127.0.0.1:8800";
+const $ = id => document.getElementById(id);
+function toast(m){const t=$("toast");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2200);}
+function esc(s){return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));}
+
+async function jget(p){const r=await fetch(GW+p,{signal:AbortSignal.timeout(5000)});return r.json();}
+
+async function loadMemory(){
+  try{
+    const j=await jget("/v1/memory");
+    $("mem-count").textContent = j.count+" facts";
+    const b=$("mem-body");
+    if(!j.facts||!j.facts.length){b.innerHTML='<div class="empty">(memory is empty)</div>';}
+    else b.innerHTML=j.facts.map(f=>`<div class="row"><div class="txt">${esc(f.text)}</div>`+
+      `<div class="prov">src <b>${esc(f.src||"?")}</b> · ${esc(f.ts||"")}${f.npos>0?` · minted npos=${f.npos}`:""}</div></div>`).join("");
+    const h=$("mem-health"); h.textContent=j.health||""; h.className="health"+(/NEEDS/.test(j.health||"")?" bad":"");
+  }catch(e){$("mem-body").innerHTML='<div class="empty">gateway offline · /v1/memory</div>';}
+}
+
+async function loadTasks(){
+  try{
+    const j=await jget("/v1/tasks");
+    $("task-count").textContent=j.count+" tasks";
+    const b=$("task-body");
+    if(!j.tasks||!j.tasks.length){b.innerHTML='<div class="empty">(no tasks — post a goal below)</div>';return;}
+    b.innerHTML=j.tasks.map(t=>`<div class="row task"><div style="display:flex;justify-content:space-between;gap:8px">`+
+      `<span class="txt">${esc(t.goal)}</span><span class="status ${t.status}">${t.status}</span></div>`+
+      `<div class="prov">${t.steps} step(s)${t.result?` · ${esc(t.result)}`:""}</div></div>`).join("");
+  }catch(e){$("task-body").innerHTML='<div class="empty">gateway offline · /v1/tasks</div>';}
+}
+
+async function loadPersona(){
+  try{const j=await jget("/v1/persona"); if(j.ok){$("persona").value=j.persona; $("persona-note").textContent=j.path||"";}}
+  catch(e){$("persona-note").textContent="gateway offline";}
+}
+async function savePersona(){
+  try{
+    const r=await fetch(GW+"/v1/persona",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({persona:$("persona").value})});
+    const j=await r.json(); toast(j.ok?`saved (${j.bytes} bytes) — live next turn`:("error: "+j.error));
+  }catch(e){toast("save failed: "+e);}
+}
+async function postGoal(){
+  const g=$("post-goal").value.trim(); if(!g)return;
+  // No dedicated POST /v1/tasks yet — post via the chat-completions agent so the model calls post_task,
+  // OR the operator drops it into the queue. Here we just hint; the queue is drained by the KAIROS tick.
+  toast("posting… (needs SP_AGENCY_TASKS=1 for auto-advance)");
+  try{
+    await fetch(GW+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({messages:[{role:"user",content:"Post this as a background task: "+g}],max_tokens:64})});
+  }catch(e){}
+  $("post-goal").value=""; setTimeout(loadTasks,1500);
+}
+
+async function ping(){
+  try{const r=await fetch(GW+"/health",{signal:AbortSignal.timeout(4000)});const j=await r.json();
+    const up=j.ok; $("conn").className="dot"+(up?" up":""); $("conn-txt").textContent=up?"gateway up":"gateway down";}
+  catch(e){$("conn").className="dot"; $("conn-txt").textContent="gateway down";}
+}
+function refreshAll(){ping();loadMemory();loadTasks();}
+refreshAll(); loadPersona();
+setInterval(()=>{ping();loadMemory();loadTasks();},5000);
+</script>
+</body>
+</html>
