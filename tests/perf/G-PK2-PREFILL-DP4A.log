@@ -1,0 +1,46 @@
+G-PK2-PREFILL-DP4A — batched packed dp4a GEMM for cold prefill (2026-07-07)
+============================================================================
+Contract: lattice CONTRACT-PRODUCT-KEYSTONE-2 §T1 follow-on / ADR-006 §6 (speed)
+Status: ARITHMETIC CORRECT (coherent), NOT YET A SPEED WIN — honest negative. Default-off.
+
+GOAL
+----
+The cold n-token batched prefill matmul (gemma4_kv_prefill_batched) used gemm_w_lift →
+k_dequant_arena_q4b, which MATERIALIZES the whole OK_Q4B weight as f32 into scratch [out×in]
+every call — the bandwidth cost center. The lever: keep weights PACKED (int4, 8× less traffic,
+no scratch) and dp4a the n-token tile, reusing the proven per-token k_gemv_q4b_dp4a_v2 math.
+
+BUILT (behind SP_KV_PREFILL_DP4A=1, default-off)
+------------------------------------------------
+- k_quant_act_int8_batched : per-token int8 activation quantizer (grid.y over tokens).
+- k_gemm_q4b_dp4a : batched OK_Q4B dp4a GEMM. v1 naive (one warp per (row,token)); v2 register-
+  tiled (DP4A_TILE=8, each weight chunk loaded once + reused across 8 tokens).
+- gemm_q4b_dp4a_batched : host wrapper; MMB macro tries it, else falls back to gemm_w_lift.
+
+RESULTS (12B, RTX 2060, ring-off PMAX=4096, SP_KV_PREFILL_BATCH=1)
+-----------------------------------------------------------------
+- CORRECTNESS: v1 naive → n=837 cold prefill, BATCH-PREFILL fired, output coherent "Paris"
+  (deterministic capital-of-France probe under filler). The packed dp4a arithmetic is CORRECT
+  end-to-end through the 48-layer forward. Receipt: _pk2_dp4a_probe_on.log.
+- SPEED: v1 naive ~301s / v2 tiled ~similar-or-worse for n=299 → NEITHER beats the ~55ms/tok
+  per-token baseline. Root cause: even tiled, the kernel is memory/occupancy-bound on the 2060
+  (register pressure from the per-token accumulator tile + no shared-memory weight staging), so
+  it does not recover cublas's compute efficiency. The f32-materialization it removes is not the
+  dominant term at this n on this card.
+
+VERDICT
+-------
+Honest negative: the hand-rolled packed-dp4a GEMM is arithmetically correct but is NOT a speed
+win as built. It ships DEFAULT-OFF (SP_KV_PREFILL_DP4A unset → MMB uses gemm_w_lift → byte-
+identical to the prior batched path = null floor). The real speed levers (follow-on):
+  (1) cublasGemmEx INT8 (CUBLAS_COMPUTE_32I): dequant the packed weights to int8 ONCE per matmul
+      (not f32), quantize acts to int8, let cublas do the tiled GEMM — reuses cublas's tuned
+      kernels instead of a hand-rolled one.
+  (2) a proper shared-memory-tiled dp4a GEMM (stage weight + activation tiles in SMEM).
+  (3) batched-prefill-under-ring (currently the batched path declines when ring_W>0, so the
+      production ring config never uses it — lifting that precondition is orthogonal and likely
+      the bigger cold-prefill win than the GEMM kernel choice).
+The kernels + wrapper are committed dormant so a future session can A/B them against cublasGemmEx.
+
+Files: src/backends/cuda/cuda_forward.cu (k_quant_act_int8_batched, k_gemm_q4b_dp4a,
+gemm_q4b_dp4a_batched, MMB macro in gemma4_kv_prefill_batched).

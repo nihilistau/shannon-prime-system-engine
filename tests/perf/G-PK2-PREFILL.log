@@ -1,0 +1,58 @@
+G-PK2-PREFILL — the >~1000-token daemon prefill "stall" RESOLVED (2026-07-07)
+==============================================================================
+Contract: lattice papers/CONTRACT-PRODUCT-KEYSTONE-2.md §T1
+Handoff:  START-HERE-prefill-stall.md (this closes it)
+
+ROOT CAUSE (two-part, both fixed)
+---------------------------------
+1) RING NEVER ARMED IN SERVED DAEMONS (the load-bearing bug).
+   daemon.rs armed the SWA ring by translating SP_DAEMON_KVDECODE_RING_W ->
+   std::env::set_var("SP_G4_KV_RING_W"). On Windows set_var = Win32
+   SetEnvironmentVariableW, which the MSVC CRT env snapshot (what the CUDA
+   lib's C getenv() reads) NEVER sees. gemma4_kv_open therefore read ring_W=0:
+   every served daemon ran RING-OFF FULL-CACHE. At PMAX=20000 that allocates
+   full-Pmax K/V for all 48 owner layers, oversubscribes the 12 GB 2060, and
+   WDDM paging thrash makes per-token prefill superlinear (measured chunks
+   6.9s -> 12.4s -> 22.6s per 128 tok; projected 20-50 min for n=1765) with
+   GPU pinned at 99-100% — which any client timeout renders as "stalls
+   forever, daemon alive". The historical B2 ring gates passed because their
+   .bats set SP_G4_KV_RING_W in the SHELL (process-start env).
+   FIX: daemon.rs crt_setenv() — mirror the var through _putenv_s (the CRT
+   the statically-linked CUDA backend shares) so C getenv() sees it.
+   Proof: served chat handle now logs "prefill START ... ringW=1024" and
+   gemma4_kv_open prints "[g4-kv] RING mode: Wring=1024 Jmax=64".
+
+2) NO INTERMEDIATE SYNC / SILENT LAUNCH ERRORS (robustness, fixed alongside).
+   gemma4_kv_prefill queued n * ~700 async launches with zero drains and only
+   checked errors at the terminal sync. FIX: chunked drain every
+   SP_KV_PREFILL_SYNC tokens (default 128) + fail-fast with token index +
+   SP_KV_PREFILL_LOG=1 progress/chunk-time telemetry (the instrument that
+   found root cause #1). Pure control flow; computed bytes unchanged.
+
+GATE (DONE-WHEN from the handoff)
+---------------------------------
+Daemon: run_console.bat (PMAX=20000, RING_W=1024, SP_PERSIST_KV=1, bx default)
+  cmd: set SP_WORDS=1300 && python tests\perf\_g_bigprompt_probe.py
+  ->  WORDS=1300  time=98.2s  out_chars=6  got_DONE=True          [GREEN]
+  cmd: set SP_WORDS=200  && python tests\perf\_g_bigprompt_probe.py
+  ->  WORDS=200   time=12.0s  out_chars=5  got_DONE=True          [GREEN]
+Chunk telemetry (ring ON): 4.9s -> 8.5s per 128 tok, flattening past
+dpos=1024 (SWA window capped by the ring) — exactly the O(1)-context shape.
+Ring OFF (same build, control): 6.9/12.4/22.6s and rising at dpos<384.
+
+HONEST SCOPE / OPEN EDGES
+-------------------------
+- 98.2s for a cold 1765-token prefill is CORRECT but not yet product-fast.
+  Warm turns are O(suffix) via SP_PERSIST_KV. Follow-on levers (contract §T1):
+  batched prefill default for cold big heads (SP_KV_PREFILL_BATCH=1 exists;
+  float non-bx chat speed mode), and a packed-int8 batched GEMM (the batch
+  path's gemm_w_lift dequant->f32-cublas is the cost center).
+- The batched path at n=1764 under the RING-OFF config also thrashed (>12
+  min, killed); re-measure under ring-ON before promoting any batch default.
+- Client timeouts: probe uses 240s; gateway/console should surface prefill
+  progress (SSE heartbeat) rather than sit silent — filed in §T4 (UI).
+
+Files: src/backends/cuda/cuda_forward.cu (gemma4_kv_prefill),
+       tools/sp_daemon/src/daemon.rs (crt_setenv bridge).
+Receipts: _pk2_daemon{2,3,4}.log, _pk2_probe1300{b,c,d}.log, _pk2_probe200d.log
+          (engine root; daemon4 = ring-ON GREEN run).

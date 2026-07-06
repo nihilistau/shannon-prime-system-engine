@@ -60,6 +60,7 @@
 <header>
   <h1>Shannon-Prime · Operator Panel</h1>
   <span class="sub"><span class="dot" id="conn"></span><span id="conn-txt">connecting…</span> · PK2 §U · gateway :8800</span>
+  <span class="sub" id="persona-chip" style="color:var(--cyan-bright)"></span>
   <span class="sub" style="margin-left:auto"><button class="btn" onclick="refreshAll()">↻ refresh</button></span>
 </header>
 
@@ -156,9 +157,16 @@ async function ping(){
     const up=j.ok; $("conn").className="dot"+(up?" up":""); $("conn-txt").textContent=up?"gateway up":"gateway down";}
   catch(e){$("conn").className="dot"; $("conn-txt").textContent="gateway down";}
 }
-function refreshAll(){ping();loadMemory();loadTasks();}
+async function loadPersonaChip(){
+  try{const j=await jget("/v1/persona/state"); if(j.ok&&j.state){
+    const s=j.state; const bits=[];
+    if(s.voice)bits.push("voice "+s.voice); if(s.mood)bits.push("mood "+s.mood); if(s.traits)bits.push(s.traits);
+    $("persona-chip").textContent = bits.length? "· "+bits.join(" · ") : "";}}
+  catch(e){}
+}
+function refreshAll(){ping();loadMemory();loadTasks();loadPersonaChip();}
 refreshAll(); loadPersona();
-setInterval(()=>{ping();loadMemory();loadTasks();},5000);
+setInterval(()=>{ping();loadMemory();loadTasks();loadPersonaChip();},5000);
 </script>
 </body>
 </html>

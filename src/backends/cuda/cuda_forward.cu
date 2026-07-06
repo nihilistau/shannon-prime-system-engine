@@ -1398,6 +1398,92 @@ __global__ void k_gemv_q4b_dp4a_v2(const unsigned char *codes, const unsigned lo
     if (lane == 0) y[j] = facc;
 }
 
+/* ════════ PK2 §T1-follow-on: BATCHED packed dp4a GEMM (cold prefill speed lever) ════════
+ * The batched prefill's matmul was gemm_w_lift → k_dequant_arena_q4b, which MATERIALIZES the
+ * whole OK_Q4B weight as f32 into scratch [out×in] every call (7 matmuls × 48 layers) — the
+ * bandwidth cost center of the ~98s cold n=1765 prefill. These two kernels keep the weights
+ * PACKED (int4, 8× less bandwidth, no scratch) and process the whole n-token tile in ONE launch,
+ * reusing the EXACT dp4a inner loop of k_gemv_q4b_dp4a_v2 (so the arithmetic is identical to the
+ * proven per-token path — correct by construction). Gated SP_KV_PREFILL_DP4A (default-off). */
+
+/* Batched activation quantizer: quantize n token-vectors X[n×in] (row-major, token t at X+t*in)
+ * into per-token int8 codes qx[n×npad] + per-16-block scales sxb[n×(npad/16)]. grid.y = token. */
+__global__ void k_quant_act_int8_batched(const float *X, int n, int in, int npad,
+                                         signed char *qx, float *sxb) {
+    const int t = blockIdx.y;
+    if (t >= n) return;
+    const float *x = X + (size_t)t * in;
+    signed char *qxt = qx + (size_t)t * npad;
+    float *sxt = sxb + (size_t)t * (npad >> 4);
+    const int nblk = npad >> 4;
+    for (int b = threadIdx.x; b < nblk; b += blockDim.x) {
+        const int base = b << 4;
+        float m = 0.0f;
+        for (int i = 0; i < 16; i++) { const int idx = base + i;
+            const float a = (idx < in) ? fabsf(x[idx]) : 0.0f; if (a > m) m = a; }
+        const float scale = m > 0.0f ? m * (1.0f / 127.0f) : 1.0f;
+        sxt[b] = scale;
+        const float inv = 1.0f / scale;
+        for (int i = 0; i < 16; i++) { const int idx = base + i;
+            float v = (idx < in) ? x[idx] * inv : 0.0f;
+            int q = __float2int_rn(v); if (q > 127) q = 127; if (q < -127) q = -127;
+            qxt[idx] = (signed char)q; }
+    }
+}
+
+/* Batched OK_Q4B dp4a GEMM: Y[n×out] (token-major, y[t*out+j]) from packed weights + the
+ * per-token quantized activations above. grid.x over rows (8 warps/block, warp = row j),
+ * grid.y over TOKEN TILES. Each warp loads its weight-row chunk ONCE and reuses it across
+ * DP4A_TILE tokens (the GEMM data-reuse that beats the per-token GEMV — a naive one-warp-per-
+ * (row,token) version re-reads the weights n× and was measured SLOWER than the cublas-lift
+ * baseline; tiling cuts weight traffic by DP4A_TILE). The per-token dp4a is byte-identical to
+ * k_gemv_q4b_dp4a_v2. The weight unpack (sp_unpack8) is hoisted out of the token loop. */
+#ifndef DP4A_TILE
+#define DP4A_TILE 8
+#endif
+__global__ void k_gemm_q4b_dp4a(const unsigned char *codes, const unsigned long long *row_off,
+                                const unsigned short *bscale, int bs_nblk, int in, int npad,
+                                const signed char *qx, const float *sxb, float *Y, int out, int n) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int j = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int tb = blockIdx.y * DP4A_TILE;            /* first token in this tile */
+    if (j >= out || tb >= n) return;
+    const int nt = (n - tb) < DP4A_TILE ? (n - tb) : DP4A_TILE;   /* tail tile clamp */
+    const int4 *wrow = (const int4 *)(codes + row_off[j]);
+    const unsigned short *bs = bscale + (size_t)j * (size_t)bs_nblk;
+    const int nblk16 = npad >> 4;
+    const int n32 = in >> 5;
+    float facc[DP4A_TILE];
+    #pragma unroll
+    for (int tt = 0; tt < DP4A_TILE; tt++) facc[tt] = 0.0f;
+    for (int c = lane; c < n32; c += 32) {
+        int4 wv = wrow[c];                            /* weight chunk: loaded ONCE per tile */
+        int wa[8]; int a, b;
+        sp_unpack8(wv.x, a, b); wa[0]=a; wa[1]=b;
+        sp_unpack8(wv.y, a, b); wa[2]=a; wa[3]=b;
+        sp_unpack8(wv.z, a, b); wa[4]=a; wa[5]=b;
+        sp_unpack8(wv.w, a, b); wa[6]=a; wa[7]=b;
+        float wbsc = __half2float(__ushort_as_half(__ldg(&bs[c])));
+        for (int tt = 0; tt < nt; tt++) {
+            const int4 *qxi = (const int4 *)(qx + (size_t)(tb+tt) * npad);
+            const float *sxt = sxb + (size_t)(tb+tt) * nblk16;
+            int4 q0 = qxi[2*c], q1 = qxi[2*c + 1];
+            int a0 = 0, a1 = 0;
+            a0 = __dp4a(wa[0], q0.x, a0); a0 = __dp4a(wa[1], q0.y, a0);
+            a0 = __dp4a(wa[2], q0.z, a0); a0 = __dp4a(wa[3], q0.w, a0);
+            a1 = __dp4a(wa[4], q1.x, a1); a1 = __dp4a(wa[5], q1.y, a1);
+            a1 = __dp4a(wa[6], q1.z, a1); a1 = __dp4a(wa[7], q1.w, a1);
+            facc[tt] += wbsc * ((float)a0 * sxt[2*c] + (float)a1 * sxt[2*c + 1]);
+        }
+    }
+    #pragma unroll
+    for (int tt = 0; tt < DP4A_TILE; tt++) {
+        float v = facc[tt];
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+        if (lane == 0 && tt < nt) Y[(size_t)(tb+tt) * out + j] = v;
+    }
+}
+
 /* ════════════════════════ device weight cache ════════════════════════ */
 
 /* one weight matrix on device: either plain f32 (f32 != NULL) or packed arena. */
@@ -1783,6 +1869,8 @@ static int gemv_t(cublasHandle_t h, const float *dW, const float *dX, float *dY,
                   int in, int out);                                            /* defined below (n_tok=1 fast path) */
 static int gemv_w_packed(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
                          signed char *dqx, float *dsx);                         /* defined below */
+static int gemm_q4b_dp4a_batched(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
+                                 int n_tok, signed char *dqx, float *dsxb);     /* PK2 dp4a; defined below */
 
 /* attn_only modes: 1 = stop after last layer's attention residual; 2/3/4/5 =
  * intra-block bisection stages; 0 = stop after last layer's FFN residual;
@@ -4515,6 +4603,10 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
     float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
           *dg=NULL,*dup=NULL,*ddn=NULL,*dscr=NULL,*dipl=NULL,*dple=NULL,*dpg=NULL,*dpp=NULL;
     float *hple=NULL; int rc=-1;
+    /* PK2 batched dp4a matmul (SP_KV_PREFILL_DP4A=1, default-off): keep OK_Q4B weights PACKED in
+     * the batched prefill matmuls instead of materializing f32 (the cold-prefill speed lever). */
+    signed char *dqxb=NULL; float *dsxb=NULL; int dp4a_pf=0;
+    { const char *e=getenv("SP_KV_PREFILL_DP4A"); dp4a_pf=(e&&*e=='1')?1:0; }
     #define BA(p,cnt) do { if (cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess){ sp_set_error("batch-prefill OOM"); goto bdone; } } while(0)
     BA(dx,(size_t)n*E); BA(dnx,(size_t)n*E);
     BA(dq,(size_t)n*QDmax); BA(dk,(size_t)n*KVDmax); BA(dv,(size_t)n*KVDmax);
@@ -4522,6 +4614,15 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
     BA(dg,(size_t)n*FFmax); BA(dup,(size_t)n*FFmax); BA(ddn,(size_t)n*E);
     if (g_w.scratch_n) BA(dscr, g_w.scratch_n);
     if (PL) { BA(dipl,(size_t)n*NL*PL); BA(dple,(size_t)n*NL*PL); BA(dpg,(size_t)n*PL); BA(dpp,(size_t)n*E); }
+    /* dp4a activation scratch: sized to the widest matmul input (max of E, QDmax, FFmax). */
+    if (dp4a_pf) {
+        int maxin = E; if (QDmax>maxin) maxin=QDmax; if (FFmax>maxin) maxin=FFmax;
+        const int padmax = (maxin + 31) & ~31;
+        if (cudaMalloc(&dqxb,(size_t)n*padmax)!=cudaSuccess){ sp_set_error("batch-prefill dp4a qx OOM"); goto bdone; }
+        BA(dsxb,(size_t)n*(padmax>>4));
+    }
+    #define MMB(W,X,Y) do { if (!(dp4a_pf && gemm_q4b_dp4a_batched(st,(W),(X),(Y),n,dqxb,dsxb))) { \
+        if (gemm_w_lift(cb,st,(W),(X),(Y),n,dscr)) goto bdone; } } while(0)
     /* embed dseq via arena gather (12B: no resident f32 embd) + sqrt(E) scale. */
     {
         const sp_arena_tensor *eat = m->arena ? sp_arena_find(m->arena, m->token_embd->name) : NULL;
@@ -4542,7 +4643,7 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
         if (!hple) { sp_set_error("batch-prefill: ple OOM"); goto bdone; }
         for (int t=0;t<n;t++) if (sp_arena_dequant_row(plt, toks[t], hple+(size_t)t*NL*PL)) { sp_set_error("batch-prefill: ple row"); goto bdone; }
         if (cudaMemcpyAsync(dple, hple,(size_t)n*NL*PL*sizeof(float),cudaMemcpyHostToDevice,st)!=cudaSuccess){ sp_set_error("batch-prefill: ple H2D"); goto bdone; }
-        if (gemm_w_lift(cb, st, &g_w.pl_model_proj, dx, dipl, n, dscr)) goto bdone;
+        MMB(&g_w.pl_model_proj, dx, dipl);
         k_altup_ipl<<<n*NL, 256, 0, st>>>(dipl, dple, g_w.pl_proj_norm, PL,
                                           1.0f/sqrtf((float)E), sqrtf((float)PL), 1.0f/sqrtf(2.0f), eps);
     }
@@ -4556,14 +4657,14 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
         const float ascale=1.0f;
         const size_t nE=(size_t)n*E;
         k_rmsnorm<<<n,256,0,st>>>(dx, g_w.attn_norm[L], E, eps, dnx);
-        if (gemm_w_lift(cb,st,&g_w.Wq[L],dnx,dq,n,dscr)) goto bdone;
+        MMB(&g_w.Wq[L],dnx,dq);
         k_rmsnorm_head<<<n*nh,256,0,st>>>(dq, g_w.q_norm[L], nh, hd, qd, eps);
         if (ffac) k_rope_freqs<<<n*nh,hd/2,0,st>>>(dq,nh,hd,qd,rbase,ffac);
         else      k_rope<<<n*nh,hd/2,0,st>>>(dq,nh,hd,qd,rbase);
         float *Kuse,*Vuse;
         if (L < kvfs) {                                  /* OWNER: project, norm, rope, SINK to resident */
-            if (gemm_w_lift(cb,st,&g_w.Wk[L],dnx,dk,n,dscr)) goto bdone;
-            if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { if (gemm_w_lift(cb,st,&g_w.Wv[L],dnx,dv,n,dscr)) goto bdone; }
+            MMB(&g_w.Wk[L],dnx,dk);
+            if (g_w.Wv[L].f32 || g_w.Wv[L].codes) { MMB(&g_w.Wv[L],dnx,dv); }
             else cudaMemcpyAsync(dv,dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
             k_rmsnorm_head<<<n*nkv,256,0,st>>>(dk, g_w.k_norm[L], nkv, hd, kvd, eps);
             if (ffac) k_rope_freqs<<<n*nkv,hd/2,0,st>>>(dk,nkv,hd,kvd,rbase,ffac);
@@ -4580,21 +4681,21 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
         }
         { int bd = hd>n?hd:n; if (bd>1024) bd=1024;
           k_attn<<<n*nh, bd, (size_t)n*sizeof(float), st>>>(dq,Kuse,Vuse,n,qd,kvd,hd,grp,ascale,win,dao); }
-        if (gemm_w_lift(cb,st,&g_w.Wo[L],dao,dap,n,dscr)) goto bdone;
+        MMB(&g_w.Wo[L],dao,dap);
         k_rmsnorm<<<n,256,0,st>>>(dap, g_w.post_attn[L], E, eps, dnx);
         k_add<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,dnx,nE);
         const int ffL=g_w.Wgate[L].out;
         k_rmsnorm<<<n,256,0,st>>>(dx, g_w.ffn_norm[L], E, eps, dnx);
-        if (gemm_w_lift(cb,st,&g_w.Wgate[L],dnx,dg,n,dscr)) goto bdone;
-        if (gemm_w_lift(cb,st,&g_w.Wup[L],dnx,dup,n,dscr)) goto bdone;
+        MMB(&g_w.Wgate[L],dnx,dg);
+        MMB(&g_w.Wup[L],dnx,dup);
         { size_t nFF=(size_t)n*ffL; k_gelu_mul<<<(unsigned)((nFF+255)/256),256,0,st>>>(dg,dup,nFF); }
-        if (gemm_w_lift(cb,st,&g_w.Wdown[L],dg,ddn,n,dscr)) goto bdone;
+        MMB(&g_w.Wdown[L],dg,ddn);
         k_rmsnorm<<<n,256,0,st>>>(ddn, g_w.post_ffw[L], E, eps, dnx);
         k_add<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,dnx,nE);
         if (PL) {                                        /* AltUp per-layer-input injection */
-            if (gemm_w_lift(cb,st,&g_w.Wplig[L],dx,dpg,n,dscr)) goto bdone;
+            MMB(&g_w.Wplig[L],dx,dpg);
             { int nn=n*PL; k_altup_gate<<<(unsigned)((nn+255)/256),256,0,st>>>(dpg,dipl,L,NL,PL,n); }
-            if (gemm_w_lift(cb,st,&g_w.Wplproj[L],dpg,dpp,n,dscr)) goto bdone;
+            MMB(&g_w.Wplproj[L],dpg,dpp);
             k_rmsnorm<<<n,256,0,st>>>(dpp, g_w.pl_post_norm[L], E, eps, dnx);
             k_add<<<(unsigned)((nE+255)/256),256,0,st>>>(dx,dnx,nE);
         }
@@ -4612,8 +4713,10 @@ bdone:
     if (dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
     if (dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
     if (dscr)cudaFree(dscr); if(dipl)cudaFree(dipl); if(dple)cudaFree(dple); if(dpg)cudaFree(dpg); if(dpp)cudaFree(dpp);
+    if (dqxb)cudaFree(dqxb); if(dsxb)cudaFree(dsxb);
     free(hple);
     #undef BA
+    #undef MMB
     return rc;
 }
 
@@ -5732,6 +5835,27 @@ static int gemm_w_lift(cublasHandle_t h, cudaStream_t st, const DevTensor *W,
     le = cudaGetLastError();
     if (le != cudaSuccess) return fail_cuda(le, "k_scale_rows launch");
     return 0;
+}
+
+/* PK2 batched packed dp4a GEMM wrapper: Y[n×out] from OK_Q4B packed weights + f32 acts X[n×in],
+ * NO f32 weight materialization (the cold-prefill speed lever). Caller supplies dqx[n×npad] +
+ * dsxb[n×(npad/16)] scratch. Returns 1 if it TOOK the packed path (OK_Q4B + in%32==0), else 0
+ * (caller falls back to gemm_w_lift → byte-identical to today). Same dp4a math as decode. */
+static int gemm_q4b_dp4a_batched(cudaStream_t st, const DevTensor *W, const float *dX, float *dY,
+                                 int n_tok, signed char *dqx, float *dsxb) {
+    if (!W->bscale || W->prec != 4) return 0;      /* OK_Q4B only */
+    if ((W->in & 31) != 0) return 0;               /* int4 chunk = 32 weights */
+    const int npad = (W->in + 31) & ~31;
+    dim3 qgrid(1, (unsigned)n_tok);
+    k_quant_act_int8_batched<<<qgrid, 256, 0, st>>>(dX, n_tok, W->in, npad, dqx, dsxb);
+    if (cudaGetLastError() != cudaSuccess) return 0;
+    unsigned rblocks = ((unsigned)W->out + 7u) / 8u;   /* 8 warps (rows) per block */
+    unsigned tblocks = ((unsigned)n_tok + (DP4A_TILE - 1u)) / DP4A_TILE;   /* token tiles */
+    dim3 ggrid(rblocks, tblocks);
+    k_gemm_q4b_dp4a<<<ggrid, 256, 0, st>>>(W->codes, W->row_off, W->bscale, W->bs_nblk,
+                                           W->in, npad, dqx, dsxb, dY, W->out, n_tok);
+    if (cudaGetLastError() != cudaSuccess) return 0;
+    return 1;
 }
 
 /* BETA.3a/v4 + ETA.5b.4: single-token packed dp4a GEMV (decode). Quantize x->int8
