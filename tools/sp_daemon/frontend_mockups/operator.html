@@ -80,6 +80,12 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2>Spine receipts <span class="meta" id="spine-count">— decisions</span></h2>
+    <div class="body" id="spine-body"><div class="empty">loading /v1/spine…</div></div>
+    <div class="health">every decision: decided → executed → VERIFIED (ADR-007/008)</div>
+  </div>
+
   <div class="card persona-card">
     <h2>Persona <span class="meta">persona.md — edits take effect next turn</span></h2>
     <div class="body">
@@ -157,6 +163,20 @@ async function ping(){
     const up=j.ok; $("conn").className="dot"+(up?" up":""); $("conn-txt").textContent=up?"gateway up":"gateway down";}
   catch(e){$("conn").className="dot"; $("conn-txt").textContent="gateway down";}
 }
+async function loadSpine(){
+  try{
+    const j=await jget("/v1/spine");
+    $("spine-count").textContent=(j.count||0)+" decisions";
+    const b=$("spine-body");
+    if(!j.receipts||!j.receipts.length){b.innerHTML='<div class="empty">(no spine decisions yet)</div>';return;}
+    b.innerHTML=j.receipts.slice().reverse().map(r=>{
+      const v = r.verified===true?'<span style="color:var(--ok)">verified</span>'
+             : r.verified===false?'<span style="color:var(--err)">VERIFY_FAIL</span>'
+             : '<span style="color:var(--text-faint)">unverified</span>';
+      return `<div class="row"><div class="txt"><span style="color:var(--gold)">${esc(r.decider)}</span> → ${esc(r.kind)} · ${v}</div>`+
+        `<div class="prov">${esc((r.result||"").slice(0,110))} · ${r.ms}ms</div></div>`;}).join("");
+  }catch(e){$("spine-body").innerHTML='<div class="empty">gateway offline · /v1/spine</div>';}
+}
 async function loadPersonaChip(){
   try{const j=await jget("/v1/persona/state"); if(j.ok&&j.state){
     const s=j.state; const bits=[];
@@ -164,9 +184,9 @@ async function loadPersonaChip(){
     $("persona-chip").textContent = bits.length? "· "+bits.join(" · ") : "";}}
   catch(e){}
 }
-function refreshAll(){ping();loadMemory();loadTasks();loadPersonaChip();}
+function refreshAll(){ping();loadMemory();loadTasks();loadPersonaChip();loadSpine();}
 refreshAll(); loadPersona();
-setInterval(()=>{ping();loadMemory();loadTasks();loadPersonaChip();},5000);
+setInterval(()=>{ping();loadMemory();loadTasks();loadPersonaChip();loadSpine();},5000);
 </script>
 </body>
 </html>
