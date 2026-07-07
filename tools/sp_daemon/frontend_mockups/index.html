@@ -577,6 +577,34 @@
     setTimeout(() => { f.style.opacity = '0'; }, 500);
   }
 
+  /* ── SSE v2 renderers (ADR-006 §D3): tool cards + the live personality chip ── */
+  function pushToolCard(tool) {
+    clearEmpty();
+    const card = document.createElement('div');
+    card.style.cssText = 'margin:6px 0 6px 22px;padding:7px 10px;border-left:2px solid var(--gold);' +
+      'background:rgba(212,161,74,0.06);border-radius:2px;font-size:11.5px;';
+    const args = tool.args && tool.args.kwargs ? JSON.stringify(tool.args.kwargs) : '';
+    card.innerHTML = `<span style="color:var(--gold)">⚙ ${tool.name}</span>` +
+      (args ? ` <span style="color:var(--text-faint)">${args.length>90?args.slice(0,90)+'…':args}</span>` : '') +
+      `<div style="color:var(--text-dim);margin-top:3px;white-space:pre-wrap">→ ${(tool.result||'').slice(0,300)}</div>`;
+    chatWindow.appendChild(card);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+  }
+  function updatePersonaChip(state, changed) {
+    let chip = document.getElementById('persona-chip');
+    if (!chip) {
+      chip = document.createElement('span'); chip.id = 'persona-chip';
+      chip.style.cssText = 'font-size:10px;letter-spacing:1px;color:var(--cyan-bright);margin-left:12px;';
+      const host = document.querySelector('.sub') || document.body;
+      host.appendChild(chip);
+    }
+    const bits = [];
+    if (state.mood) bits.push('mood ' + state.mood);
+    if (state.voice) bits.push('voice ' + state.voice);
+    chip.textContent = bits.length ? '· ' + bits.join(' · ') : '';
+    if (changed) { chip.style.color = 'var(--gold-hot)'; setTimeout(()=>{ chip.style.color = 'var(--cyan-bright)'; }, 2500); }
+  }
+
   // gemma chat template — used as fallback if the daemon has no server-side template
   function gemmaPrompt(msgs) {
     let s = '';
@@ -613,7 +641,15 @@
           let payload = line.slice(5).trimStart();
           if (payload === '[DONE]') return { text: acc };
           let delta = null;
-          try { const o = JSON.parse(payload); if (o.error) throw new Error(o.error); delta = o.delta; }
+          try { const o = JSON.parse(payload); if (o.error) throw new Error(o.error); delta = o.delta;
+            /* ── SSE v2 typed events (ADR-006 §D3; emitted by the :8800 agent gateway) ──
+             * {hb}: keep-alive during a long prefill — pulse the send button so it never looks dead.
+             * {tool}: render a tool-call card inline in the stream.
+             * {persona}: update the live personality chip (changed:true = mid-conversation shift). */
+            if (o.hb != null) { sendBtn.style.opacity = (sendBtn.style.opacity === '0.55' ? '1' : '0.55'); continue; }
+            if (o.tool) { pushToolCard(o.tool); continue; }
+            if (o.persona) { updatePersonaChip(o.persona, o.changed === true); continue; }
+          }
           catch (e) { if (e.message && e.message !== 'Unexpected end of JSON input') throw e; delta = null; }
           if (delta == null) continue;
           if (curChatId == null && false) {}                  // (chat_id captured below)
