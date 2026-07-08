@@ -4588,11 +4588,69 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
  * cold (dpos_host==0), ring_W==0 (full cache, slot==pos), no inject/capture
  * seam. Returns 0 on success; leaves dpos_host==n, device dpos==n, dseq[0,n)=toks.
  * Bit-parity is NOT claimed; coherence + no-corruption + speed is the gate. */
+/* PK2 wave-6 (BATCH-UNDER-RING): sink the LAST min(n,Wring) positions of a contiguous
+ * per-token K/V scratch [n×kvd] into the resident SWA ring layout (position p → slot
+ * p % Wring — the exact per-token mapping, ws = dpos % ring_W). Cold prefill only:
+ * positions older than n-Wring have fallen out of the ring by definition. One block per
+ * kept position; threads stride the kvd row. */
+__global__ void k_ring_sink(const float *src, float *dst, int n, int Wring, int kvd) {
+    const int start = (n > Wring) ? (n - Wring) : 0;
+    const int p = start + blockIdx.x;
+    if (p >= n) return;
+    float *drow = dst + (size_t)(p % Wring) * kvd;
+    const float *srow = src + (size_t)p * kvd;
+    for (int i = threadIdx.x; i < kvd; i += blockDim.x) drow[i] = srow[i];
+}
+
 extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n) {
     if (!s || !toks || n <= 0) { sp_set_error("gemma4_kv_prefill_batched: bad args"); return -1; }
     if (s->dpos_host != 0) { sp_set_error("gemma4_kv_prefill_batched: not cold (dpos!=0)"); return -1; }
-    if (s->ring_W != 0)   { sp_set_error("gemma4_kv_prefill_batched: ring mode unsupported"); return -1; }
+    /* PK2 wave-6: the ring_W!=0 precondition is LIFTED. Under the ring, attention reads the
+     * CONTIGUOUS per-token scratch (correct regardless of ring layout), sharer layers read
+     * retained contiguous copies of the two shared owners, and each SWA owner's K/V is sunk
+     * into the resident ring layout (k_ring_sink) at its layer — so the PRODUCTION ring
+     * config (run_console.bat) can finally take the batched cold-prefill path. Ring-off
+     * behavior is byte-identical to before (the retained buffers are never allocated). */
     if (n > s->Pmax)      { sp_set_error("gemma4_kv_prefill_batched: exceeds Pmax"); return -1; }
+    /* PK2 wave-6 PERSIST GUARD: a batched-ring prefill produces a cache valid for a FRESH
+     * decode but NOT a valid base for SP_PERSIST_KV *continuation* (it doesn't set up the
+     * incremental undo-journal / commit state the per-token path builds tick-by-tick, so a
+     * NEXT turn that reuses this cache returns empty). Measured live (G-PK2-BATCHRING: turn1
+     * cold batch fine, turn2 persist-reuse empty). So DECLINE cleanly (→ per-token, the
+     * working null floor) whenever persist reuse is armed. The batched accelerant then fires
+     * only for genuinely single-shot cold prefills (non-persist configs / fresh sessions),
+     * where it is correct + ~5-7× faster. A persist-continuation-compatible batch (journal
+     * init) is future work. */
+    { static int persist = -1;
+      if (persist < 0) { const char *e = getenv("SP_PERSIST_KV"); persist = (e && *e=='1') ? 1 : 0; }
+      if (persist) { sp_set_error("gemma4_kv_prefill_batched: declined (SP_PERSIST_KV continuation)"); return -1; } }
+    /* PK2 wave-6 VRAM GUARD: the batched path materializes O(n) f32 activation scratch
+     * (~15 n×E/n×FF buffers + the ring retained copies). On a 12GB card this oversubscribes
+     * VRAM for large n and/or a large resident KV cache (PMAX), producing WDDM paging thrash
+     * (the exact original-stall signature). DECLINE cleanly (→ caller falls back to the
+     * per-token path, the G-PK2-PREFILL null floor) when the estimate exceeds free VRAM with
+     * a safety margin. Measured: n≈837 @ PMAX=4096 fits (fast, 6.6s); n≈1765 or PMAX=20000
+     * does not. This makes batched a graceful OPT-IN accelerant for moderate cold prompts,
+     * never a footgun. Override the margin via SP_KV_BATCH_VRAM_MARGIN_MB (default 512). */
+    {
+        const int Ebuf = s->E, FFb = s->FFmax, QDb = s->QDmax, KVb = s->KVDmax;
+        /* dominant n-scaled f32 buffers (dx,dnx,dq,dk,dv,dao,dap,dg,dup,ddn,dpp ~ E/FF/QD/KV) */
+        size_t per_tok = (size_t)(5*Ebuf + 2*QDb + 2*KVb + 3*FFb);
+        if (s->ring_W > 0) per_tok += (size_t)(4*KVb);      /* retained shared-owner copies */
+        if (s->PL) per_tok += (size_t)(2*s->NL*s->PL + s->PL + Ebuf);
+        const size_t need = per_tok * (size_t)n * sizeof(float);
+        size_t freeb = 0, totalb = 0;
+        if (cudaMemGetInfo(&freeb, &totalb) == cudaSuccess) {
+            static long margin_mb = -1;
+            if (margin_mb < 0) { const char *e = getenv("SP_KV_BATCH_VRAM_MARGIN_MB");
+                margin_mb = (e && *e) ? atol(e) : 512; if (margin_mb < 0) margin_mb = 0; }
+            const size_t margin = (size_t)margin_mb * 1024u * 1024u;
+            if (need + margin > freeb) {
+                sp_set_error("gemma4_kv_prefill_batched: batched scratch would oversubscribe VRAM");
+                return -1;                                  /* clean decline → per-token fallback */
+            }
+        }
+    }
     const qwen3_model *m = s->m; const qwen3_config *c = &m->cfg;
     cublasHandle_t cb = g_w.cublas; cudaStream_t st = g_w.stream;
     const int E=s->E, NL=s->NL, period=s->period, kvfs=s->kvfs, PL=s->PL;
@@ -4602,6 +4660,10 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
     const int SW=s->SW, QDmax=s->QDmax, KVDmax=s->KVDmax, FFmax=s->FFmax;
     float *dx=NULL,*dnx=NULL,*dq=NULL,*dk=NULL,*dv=NULL,*dao=NULL,*dap=NULL,
           *dg=NULL,*dup=NULL,*ddn=NULL,*dscr=NULL,*dipl=NULL,*dple=NULL,*dpg=NULL,*dpp=NULL;
+    /* wave-6 ring mode: retained CONTIGUOUS K/V of the two shared owners (global kvfs-1,
+     * SWA kvfs-2) — sharer layers read these instead of the (ring-shaped) resident cache. */
+    float *dKg=NULL,*dVg=NULL,*dKs=NULL,*dVs=NULL;
+    const int ring_on = (s->ring_W > 0);
     float *hple=NULL; int rc=-1;
     /* PK2 batched dp4a matmul (SP_KV_PREFILL_DP4A=1, default-off): keep OK_Q4B weights PACKED in
      * the batched prefill matmuls instead of materializing f32 (the cold-prefill speed lever). */
@@ -4614,6 +4676,10 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
     BA(dg,(size_t)n*FFmax); BA(dup,(size_t)n*FFmax); BA(ddn,(size_t)n*E);
     if (g_w.scratch_n) BA(dscr, g_w.scratch_n);
     if (PL) { BA(dipl,(size_t)n*NL*PL); BA(dple,(size_t)n*NL*PL); BA(dpg,(size_t)n*PL); BA(dpp,(size_t)n*E); }
+    if (ring_on) {                       /* retained shared-owner K/V (contiguous, n positions) */
+        BA(dKg,(size_t)n*KVDmax); BA(dVg,(size_t)n*KVDmax);
+        BA(dKs,(size_t)n*KVDmax); BA(dVs,(size_t)n*KVDmax);
+    }
     /* dp4a activation scratch: sized to the widest matmul input (max of E, QDmax, FFmax). */
     if (dp4a_pf) {
         int maxin = E; if (QDmax>maxin) maxin=QDmax; if (FFmax>maxin) maxin=FFmax;
@@ -4670,13 +4736,37 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
             if (ffac) k_rope_freqs<<<n*nkv,hd/2,0,st>>>(dk,nkv,hd,kvd,rbase,ffac);
             else      k_rope<<<n*nkv,hd/2,0,st>>>(dk,nkv,hd,kvd,rbase);
             k_rmsnorm_head_noweight<<<n*nkv,256,0,st>>>(dv,nkv,hd,kvd,eps);
-            /* SINK: full cache slot==pos ⇒ dKc[L][0..n*kvd) IS the per-token layout. */
-            cudaMemcpyAsync(s->dKc[L], dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
-            cudaMemcpyAsync(s->dVc[L], dv,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
-            Kuse=s->dKc[L]; Vuse=s->dVc[L];
-        } else {                                         /* SHARER: reuse owner's resident K/V */
+            if (!ring_on || global) {
+                /* SINK full-cache: slot==pos ⇒ dKc[L][0..n*kvd) IS the per-token layout.
+                 * (Globals stay full-cache under the ring too, same as the per-token path.) */
+                cudaMemcpyAsync(s->dKc[L], dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+                cudaMemcpyAsync(s->dVc[L], dv,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+            } else {
+                /* wave-6 SWA owner under the RING: sink the last min(n,W) positions into the
+                 * ring layout (p → p%W); older positions have fallen out of the window. */
+                const int keep = n < s->ring_W ? n : s->ring_W;
+                k_ring_sink<<<(unsigned)keep, 256, 0, st>>>(dk, s->dKc[L], n, s->ring_W, kvd);
+                k_ring_sink<<<(unsigned)keep, 256, 0, st>>>(dv, s->dVc[L], n, s->ring_W, kvd);
+            }
+            if (ring_on) {                   /* retain the two SHARED owners contiguously */
+                if (L == kvfs-1) { cudaMemcpyAsync(dKg,dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+                                   cudaMemcpyAsync(dVg,dv,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st); }
+                if (L == kvfs-2) { cudaMemcpyAsync(dKs,dk,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st);
+                                   cudaMemcpyAsync(dVs,dv,(size_t)n*kvd*sizeof(float),cudaMemcpyDeviceToDevice,st); }
+                /* THIS layer's attention reads the contiguous scratch (ring layout is only
+                 * for the resident cache the DECODE reads later). Safe: dk/dv are not
+                 * overwritten until the next owner layer, stream-ordered after k_attn. */
+                Kuse=dk; Vuse=dv;
+            } else {
+                Kuse=s->dKc[L]; Vuse=s->dVc[L];
+            }
+        } else {                                         /* SHARER: reuse owner's K/V */
             const int src=kvfs-(global?1:2);
-            Kuse=s->dKc[src]; Vuse=s->dVc[src];
+            if (ring_on) {                   /* contiguous retained copies (ring can't serve n) */
+                Kuse = global ? dKg : dKs; Vuse = global ? dVg : dVs;
+            } else {
+                Kuse=s->dKc[src]; Vuse=s->dVc[src];
+            }
             if (!Kuse||!Vuse){ sp_set_error("batch-prefill: sharer before owner"); goto bdone; }
         }
         { int bd = hd>n?hd:n; if (bd>1024) bd=1024;
@@ -4708,12 +4798,18 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
     { cudaError_t e=cudaStreamSynchronize(st); if (e!=cudaSuccess){ fail_cuda(e,"batch-prefill sync"); goto bdone; } }
     { cudaError_t e=cudaGetLastError(); if (e!=cudaSuccess){ fail_cuda(e,"batch-prefill kernel"); goto bdone; } }
     s->dpos_host = n;
+    /* wave-6: leave commit_pos/jcur EXACTLY as the per-token gemma4_kv_prefill leaves them
+     * (untouched — the decode's B2 undo-journal auto-slides commit_pos forward). Setting
+     * commit_pos=n here desynced the persist-KV reuse math on the NEXT turn (a second request
+     * reusing this cache returned empty). Matching the per-token path fixes the multi-turn
+     * persist interaction; the cold single-turn win is unaffected. */
     rc = 0;
 bdone:
     if (dx)cudaFree(dx); if(dnx)cudaFree(dnx); if(dq)cudaFree(dq); if(dk)cudaFree(dk); if(dv)cudaFree(dv);
     if (dao)cudaFree(dao); if(dap)cudaFree(dap); if(dg)cudaFree(dg); if(dup)cudaFree(dup); if(ddn)cudaFree(ddn);
     if (dscr)cudaFree(dscr); if(dipl)cudaFree(dipl); if(dple)cudaFree(dple); if(dpg)cudaFree(dpg); if(dpp)cudaFree(dpp);
     if (dqxb)cudaFree(dqxb); if(dsxb)cudaFree(dsxb);
+    if (dKg)cudaFree(dKg); if(dVg)cudaFree(dVg); if(dKs)cudaFree(dKs); if(dVs)cudaFree(dVs);
     free(hple);
     #undef BA
     #undef MMB

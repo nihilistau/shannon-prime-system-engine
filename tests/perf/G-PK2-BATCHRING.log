@@ -1,0 +1,8 @@
+turn1 cold n~837: 6.7s done=True out='Paris'
+  [PASS] turn1 cold-batch coherent (Paris) + fast (<25s)
+turn2 persist-reuse: 6.7s done=True out='Paris'
+  [PASS] turn2 persist-reuse-after-batch coherent (no empty)
+turn3 cold n~1765: 99.0s done=True out='Paris'
+  [PASS] turn3 larger cold-batch coherent (Paris)
+
+G-PK2-BATCHRING: PASS (3/3)
