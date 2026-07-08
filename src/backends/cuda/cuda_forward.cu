@@ -4535,6 +4535,52 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     s->dev_ple = (s->PL && g_w.pl_tok_embd.codes!=NULL);
     if (!(g_w.head.f32 || g_w.head.codes) && !g_w.embd && !(s->use_int8 && g_w.embd_packed.codes)) {
         sp_set_error("gemma4_kv_open: tied head needs SP_CUDA_DECODE_INT8=1"); free(s); return NULL; }
+    /* PK2 wave-6 / ADR-010 AUTO-FIT (SP_G4_KV_AUTOFIT=1, default-off = the passed Pmax verbatim).
+     * The GLOBAL KV cache (the 8 full-attention layers × Pmax slots, ~128 KB/token) is the ONLY
+     * Pmax-scaling term and is what oversubscribes the 12 GB card (Pmax=20000 → +2 GB → WDDM
+     * paging thrash = the original stall AND the batch ceiling). Instead of the operator having
+     * to KNOW to set Pmax=4096, size Pmax to the VRAM the card actually has free NOW (weights are
+     * already resident here): cap Pmax so the global cache + dseq + a margin fit. The SWA ring is
+     * O(1) so long-context survives on the SWA layers regardless; only the globals' resident depth
+     * is bounded. This makes the daemon self-balancing to whatever card it's on. Margin via
+     * SP_G4_KV_AUTOFIT_MARGIN_MB (default 512). Never RAISES Pmax; only clamps down. */
+    { const char *afe = getenv("SP_G4_KV_AUTOFIT");
+      if (afe && afe[0]=='1') {
+        int n_global = 0, rw = getenv("SP_G4_KV_RING_W") ? atoi(getenv("SP_G4_KV_RING_W")) : 0;
+        for (int L=0; L<s->kvfs && L<s->NL; L++) if ((L%s->period)==s->period-1) n_global++;
+        const size_t kvd_g = (size_t)s->g_nkv * (size_t)s->g_hd;
+        /* bytes added per extra Pmax slot: globals K+V (rw>0 ⇒ SWA owners are ring-bounded,
+         * so ONLY globals scale) + the device dseq int. */
+        const size_t per_slot = (size_t)n_global * kvd_g * 2u * sizeof(float) + sizeof(int);
+        size_t freeb=0, totalb=0;
+        if (per_slot > 0 && cudaMemGetInfo(&freeb, &totalb) == cudaSuccess) {
+            static long margin_mb = -1;
+            if (margin_mb < 0) { const char *me = getenv("SP_G4_KV_AUTOFIT_MARGIN_MB");
+                margin_mb = (me && *me) ? atol(me) : 512; if (margin_mb < 0) margin_mb = 0; }
+            /* reserve the fixed (non-Pmax) allocations this open() will make: SWA ring + journal
+             * + the dx..dlog working buffers + scratch. Estimate generously; the margin covers slop. */
+            size_t swa_fixed = 0;
+            if (rw > 0) { int n_swa=0; for (int L=0;L<s->kvfs&&L<s->NL;L++) if((L%s->period)!=s->period-1) n_swa++;
+                const size_t kvd_s=(size_t)s->s_nkv*(size_t)s->s_hd;
+                const long jmax = getenv("SP_G4_KV_JMAX")?atol(getenv("SP_G4_KV_JMAX")):64;
+                swa_fixed = (size_t)n_swa*(size_t)rw*kvd_s*2u*sizeof(float)
+                          + (size_t)n_swa*(size_t)(jmax>0?jmax:64)*kvd_s*2u*sizeof(float); }
+            const size_t buffers = ((size_t)(6*s->E + 2*s->QDmax + 2*s->FFmax + s->V)
+                                    + (size_t)g_w.scratch_n + (size_t)(s->PL?2*s->NLPL:0)) * sizeof(float);
+            const size_t margin = (size_t)margin_mb * 1024u * 1024u;
+            const size_t reserved = swa_fixed + buffers + margin;
+            const size_t avail = (freeb > reserved) ? (freeb - reserved) : 0;
+            const long fit = (long)(avail / per_slot);
+            if (fit > 0 && fit < s->Pmax) {
+                fprintf(stderr, "    [g4-kv] AUTOFIT: Pmax %d -> %ld (free %zuMiB, %zu B/slot, margin %ldMiB)\n",
+                        s->Pmax, fit, freeb/(1024u*1024u), per_slot, margin_mb);
+                s->Pmax = (int)fit; Pmax = (int)fit;
+            } else if (fit <= 0) {
+                fprintf(stderr, "    [g4-kv] AUTOFIT: WARNING free VRAM cannot fit even a minimal global cache (free %zuMiB)\n", freeb/(1024u*1024u));
+            }
+        }
+      }
+    }
     int ok = 1;
     #define KA(p,cnt) do { if (cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess) ok=0; } while(0)
     if (cudaMalloc(&s->dseq,(size_t)Pmax*sizeof(int))!=cudaSuccess) ok=0;

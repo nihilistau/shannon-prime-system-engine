@@ -1,0 +1,41 @@
+G-PK2-AUTOFIT / ADR-010 — measured VRAM breakdown + KV auto-fit (2026-07-08)
+=============================================================================
+Contract: lattice PPT-LAT-ADR-010-WHOLE-MACHINE-BALANCE.md
+
+WHAT FILLS THE 12 GB (measured live, RTX 2060 12288 MiB, served gemma4-12b-b1)
+-----------------------------------------------------------------------------
+Read free VRAM INSIDE gemma4_kv_open (weights resident, before KV/buffer alloc) + at idle:
+  - used before KV alloc        : 10937 MiB   <- the MODEL resident (OK_Q4B codes+PLE+embd+arena)
+  - used at Pmax=20000 idle      : 11719 MiB   (=> KV + buffers = ~782 MiB)
+  - free at Pmax=20000 idle      :  ~569 MiB
+  => KV cache is ~0.78 GB (SHARED-KV: a few owner layers, NOT 8 full-attention globals).
+  => The 12B MODEL (~10.9 GB resident) FILLS the card; ~0.57 GB headroom is the whole game.
+
+CORRECTION (honest): the first-pass assumption "globals = ~2.5 GB (8 layers x Pmax)" was WRONG —
+gemma4-12b uses shared-KV so the KV is ~0.78 GB. Consequences:
+  - the ORIGINAL ">1000-tok stall" root was co-resident LM Studio (~6.4 GB) => 8.8+6.4>12 = OOM
+    thrash, NOT the KV cache.
+  - the ADR-009 batch thrash was the transient batch scratch (~0.4-1 GB) eating the ~0.57 GB
+    headroom, NOT a KV problem.
+  - the KV cache was never the movable mass. THE MODEL IS.
+
+AUTO-FIT (SP_G4_KV_AUTOFIT=1, default-off = passed Pmax verbatim = null floor)
+-----------------------------------------------------------------------------
+gemma4_kv_open reads free VRAM and clamps Pmax so the KV cache + margin fit -> a SHARED card never
+oversubscribes (the co-tenant case that caused the original stall). Behavior:
+  - dedicated card, Pmax=20000: AUTOFIT read free=1351MiB at check time (arena/scratch pools
+    allocate lazily so the read under-estimates), reserve>free => WARN + kept Pmax=20000; the
+    daemon then allocated fine and SERVED COHERENT ("Paris", n=299 12.4s). Null floor intact.
+  - the clamp fires cleanly when free VRAM is genuinely low (co-tenant); margin-tunable via
+    SP_G4_KV_AUTOFIT_MARGIN_MB (default 512).
+HONEST LIMITATION: the open-time free-read is conservative on a nearly-full card (lazy pools), so
+the clamp is conservative; it never RAISES Pmax and never breaks the dedicated-card path.
+
+THE VERDICT (ADR-010): batching/KV-offload are NOT the general VRAM lever — the KV is tiny and the
+model fills the card. The one lever that frees REAL VRAM is CPU-RESIDENT LAYER OFFLOAD (weights in
+40 GB/s DRAM, compute on 8 AVX2 cores, exchange only the ~15 KB/tok activation; PCIe x8 forbids
+per-token weight streaming, so the layer must compute where its weights live). VRAM-for-latency,
+build-cpu-perf libs exist, CRT keeps the CPU+GPU legs bit-identical. The next real project (ADR-011).
+
+Files: src/backends/cuda/cuda_forward.cu (gemma4_kv_open AUTOFIT block, default-off).
+Launchers: _pk2_autofit_daemon.bat. Receipts: _pk2_daemon15.log, _pk2_autofit_probe.log, _pk2_vram_af.log.
