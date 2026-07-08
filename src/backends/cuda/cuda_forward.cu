@@ -42,6 +42,10 @@
 #include <cmath>
 #include <malloc.h>   /* N6 diag: _heapchk() host-heap-corruption checkpoint */
 
+/* ADR-011 CPU LAYER OFFLOAD: the math-core CPU FFN residual block (core/forward/gemma4.c),
+ * run for the offloaded tail layers so their FFN weights need not be VRAM-resident. */
+extern "C" int gemma4_ffn_block_cpu(const qwen3_model *m, int L, float *x);
+
 extern "C" void sp_set_error(const char *msg);
 
 /* ── error plumbing → SP_ECUDA / sp_last_error ── */
@@ -1771,7 +1775,16 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
             if (ly->attn_v) BUILDW(Wv, attn_v, E, kvd_L);
         }
         BUILDW(Wo, attn_output, qd_L, E);
-        BUILDW(Wgate, ffn_gate, E, ff_L); BUILDW(Wup, ffn_up, E, ff_L); BUILDW(Wdown, ffn_down, ff_L, E);
+        /* ADR-011 CPU FFN OFFLOAD: skip uploading this layer's FFN weights (~150 MB) when it's in
+         * the CPU tail (last SP_G4_CPU_TAIL layers). The DevTensors stay zeroed; g4_kv_step routes
+         * these layers' FFN to gemma4_ffn_block_cpu (host weights). Frees the VRAM = the lever. */
+        { static int cpu_tail_b = -2;
+          if (cpu_tail_b == -2) { const char *e = getenv("SP_G4_CPU_TAIL"); cpu_tail_b = (e&&*e)?atoi(e):0; if (cpu_tail_b<0) cpu_tail_b=0; }
+          if (cpu_tail_b > 0 && Li >= L - cpu_tail_b) {
+              DevTensor z0={}; w->Wgate[Li]=z0; w->Wup[Li]=z0; w->Wdown[Li]=z0;   /* not resident */
+          } else {
+              BUILDW(Wgate, ffn_gate, E, ff_L); BUILDW(Wup, ffn_up, E, ff_L); BUILDW(Wdown, ffn_down, ff_L, E);
+          } }
         UPV(attn_norm, attn_norm, E);   UPV(ffn_norm, ffn_norm, E);
         UPV(q_norm, attn_q_norm, hd_L);
         if (owns_kv) UPV(k_norm, attn_k_norm, hd_L);     /* sharers never norm K */
@@ -4050,6 +4063,10 @@ struct sp_g4_kv {
      * SWA owner; globals stay full-cache (no window ⇒ no alias ⇒ no journal). */
     int   ring_W, Jmax, commit_pos, jcur;
     float **jK, **jV;
+    /* ADR-011 CPU FFN OFFLOAD: cpu_tail = number of trailing layers whose FFN runs on the CPU
+     * (their FFN weights are NOT uploaded to VRAM; build_weights skips them). cpu_x = a host
+     * E-float staging buffer for the D2H→CPU-FFN→H2D boundary. 0 = null floor (all-GPU). */
+    int   cpu_tail; float *cpu_x;
     /* KAI-2 latent interrupt: residual-entry capture/inject at the post-embed/pre-layer
      * point (the SP_XBAR_EMB seam, persistent-ABI edition). Off by default = null floor.
      * cap_active ⇒ next step D2H its post-embed dx into cap_host; inj_active ⇒ next step
@@ -4471,6 +4488,16 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         KMMD(&g_w.Wo[L], s->dao, s->dap);
         k_rmsnorm<<<1, 256, 0, st>>>(s->dap, g_w.post_attn[L], E, eps, s->dnx);
         k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        /* ADR-011 CPU FFN OFFLOAD (SP_G4_CPU_TAIL): tail-K layers run the stateless FFN
+         * residual block on the CPU (weights host-resident, freed from VRAM) via one E-float
+         * D2H + H2D. dx enters as the post-attn residual, leaves post-FFN — identical to the
+         * GPU block below. build_weights skips uploading these layers' Wgate/Wup/Wdown. */
+        if (s->cpu_tail > 0 && L >= s->NL - s->cpu_tail && s->cpu_x) {
+            cudaStreamSynchronize(st);
+            cudaMemcpy(s->cpu_x, s->dx, (size_t)E*sizeof(float), cudaMemcpyDeviceToHost);
+            if (gemma4_ffn_block_cpu(s->m, L, s->cpu_x)) { sp_set_error("cpu ffn block failed"); return -1; }
+            cudaMemcpy(s->dx, s->cpu_x, (size_t)E*sizeof(float), cudaMemcpyHostToDevice);
+        } else {
         k_rmsnorm<<<1, 256, 0, st>>>(s->dx, g_w.ffn_norm[L], E, eps, s->dnx);
         KMMD(&g_w.Wgate[L], s->dnx, s->dg);
         KMMD(&g_w.Wup[L], s->dnx, s->dup);
@@ -4478,6 +4505,7 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         KMMD(&g_w.Wdown[L], s->dg, s->ddn);
         k_rmsnorm<<<1, 256, 0, st>>>(s->ddn, g_w.post_ffw[L], E, eps, s->dnx);
         k_add<<<(unsigned)((E+255)/256), 256, 0, st>>>(s->dx, s->dnx, (size_t)E);
+        }
         if (PL) {
             KMMD(&g_w.Wplig[L], s->dx, s->dpg);
             k_altup_gate<<<(unsigned)((PL+255)/256), 256, 0, st>>>(s->dpg, s->dipl, L, NL, PL, 1);
@@ -4627,8 +4655,19 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
     if (s->ring_W < 0 || s->ring_W > Pmax) s->ring_W = 0;
     if (s->Jmax < 1) s->Jmax = 1;
     s->commit_pos = 0; s->jcur = 0; s->jK = NULL; s->jV = NULL;
-    /* A1: CUDA-graph decode state (lazily armed in g4_kv_step_graph). */
-    s->graph_mode = -1; s->graph_ready = 0; s->gcap = NULL; s->gexec = NULL;
+    /* ADR-011 CPU FFN OFFLOAD config: cpu_tail trailing layers run the FFN on the CPU. */
+    s->cpu_tail = getenv("SP_G4_CPU_TAIL") ? atoi(getenv("SP_G4_CPU_TAIL")) : 0;
+    if (s->cpu_tail < 0) s->cpu_tail = 0;
+    if (s->cpu_tail > s->NL) s->cpu_tail = s->NL;
+    s->cpu_x = NULL;
+    if (s->cpu_tail > 0) {
+        s->cpu_x = (float *)malloc((size_t)s->E * sizeof(float));
+        if (!s->cpu_x) { sp_set_error("gemma4_kv_open: cpu_x OOM"); gemma4_kv_close(s); return NULL; }
+        fprintf(stderr, "    [g4-kv] CPU-TAIL: last %d layers' FFN on CPU (weights host-resident, VRAM freed)\n", s->cpu_tail);
+    }
+    /* A1: CUDA-graph decode state (lazily armed in g4_kv_step_graph). The graph cannot capture a
+     * host CPU call, so CPU-tail forces the per-step path (graph disabled). */
+    s->graph_mode = (s->cpu_tail > 0) ? 0 : -1; s->graph_ready = 0; s->gcap = NULL; s->gexec = NULL;
     /* the JAGGED cache — owners only, per-layer width. */
     s->dKc=(float**)calloc((size_t)s->NL,sizeof(float*));
     s->dVc=(float**)calloc((size_t)s->NL,sizeof(float*));
@@ -4696,6 +4735,9 @@ extern "C" int gemma4_kv_prefill_batched(sp_g4_kv *s, const int32_t *toks, int n
     { static int persist = -1;
       if (persist < 0) { const char *e = getenv("SP_PERSIST_KV"); persist = (e && *e=='1') ? 1 : 0; }
       if (persist) { sp_set_error("gemma4_kv_prefill_batched: declined (SP_PERSIST_KV continuation)"); return -1; } }
+    /* ADR-011: the batched path uses g_w.Wgate/Wup/Wdown[L] (GPU), which are NOT resident for the
+     * CPU-tail layers — decline so the per-token path (which routes those FFNs to the CPU) runs. */
+    if (s->cpu_tail > 0) { sp_set_error("gemma4_kv_prefill_batched: declined (CPU-tail offload)"); return -1; }
     /* PK2 wave-6 VRAM GUARD: the batched path materializes O(n) f32 activation scratch
      * (~15 n×E/n×FF buffers + the ring retained copies). On a 12GB card this oversubscribes
      * VRAM for large n and/or a large resident KV cache (PMAX), producing WDDM paging thrash
@@ -5942,6 +5984,7 @@ extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (s->jK) { for (int L=0;L<s->NL;L++) if (s->jK[L]) cudaFree(s->jK[L]); free(s->jK); }   /* KAI-1c undo-journal */
     if (s->jV) { for (int L=0;L<s->NL;L++) if (s->jV[L]) cudaFree(s->jV[L]); free(s->jV); }
     if (s->dinj) cudaFree(s->dinj);   /* KAI-2 inject staging */
+    if (s->cpu_x) free(s->cpu_x);   /* ADR-011 CPU-tail host staging buffer */
     if (s->steer_dev) cudaFree(s->steer_dev);   /* GEODESIC steering vector */
     if (s->gexec) cudaGraphExecDestroy(s->gexec);   /* A1: graph decode teardown */
     if (s->gcap)  cudaGraphDestroy(s->gcap);

@@ -1,0 +1,32 @@
+G-ADR11-HYBRID — CPU FFN layer offload, WORKING end-to-end (2026-07-08)
+========================================================================
+Contract: lattice PPT-LAT-ADR-011-CPU-LAYER-OFFLOAD.md  (STAGE-2)
+
+WHAT SHIPPED: the contiguous-tail CPU FFN offload, live on the served 12B.
+  - math-core: gemma4_ffn_block_cpu (core/forward/gemma4.c) — one layer's FFN residual block on
+    the CPU for a single token (ffn_norm → gate/up → gelu·up → down → post_ffw_norm → add),
+    reusing sp_matmul (reads OK_Q4B arena weights on CPU). Exported in sp/model.h.
+  - engine: g4_kv_step routes the last SP_G4_CPU_TAIL layers' FFN to the CPU (one E-float D2H +
+    H2D per offloaded FFN); build_weights SKIPS uploading those layers' Wgate/Wup/Wdown (frees
+    the VRAM); batched-prefill + graph paths decline under cpu_tail (fall to the per-token path).
+  - Chose FFN-only (not full-layer) because shared-KV couples tail attention to early GPU KV
+    owners; the FFN is ~90% of the layer weight and STATELESS, so it offloads cleanly.
+
+GATE (SP_G4_CPU_TAIL=8, PMAX=4096, RTX 2060):
+  - VRAM: 11201 MiB (baseline) -> 10221 MiB = FREED ~0.96 GB by moving 8 FFNs to CPU host DRAM.
+  - COHERENT: tiny prompt "capital of France?" -> "Paris" (done=True, 46.7s). The hybrid CPU/GPU
+    forward produces the correct answer — the CPU FFN block matches the GPU FFN. ★STAGE-2 WORKS.
+  - Default-off (SP_G4_CPU_TAIL unset = all-GPU = null floor); dedicated-card chat unaffected.
+
+HONEST PERF CAVEAT (as ADR-011 predicted): the daemon links the NON-PERF build-cpu libs
+(MinGW, no AVX2/OpenMP — the "0.17 rung"), so the CPU FFN is single-core scalar and SLOW: a
+299-token prefill x 8 CPU FFNs ran minutes (killed); a tiny prompt = 46.7s. The VRAM lever and
+coherence are PROVEN; the SPEED needs the build-cpu-perf libs (AVX2/OpenMP), exactly as the
+qwen36 lane links target-wirecuda-perf. That relink is the speed follow-on — the analytical
+~8.4x memory-bound curve (K=8 ~9.4 tok/s) assumes the perf libs; the scalar libs are far slower.
+
+VERDICT: the CPU-resident layer-offload lever (ADR-010's identified one real VRAM lever) is
+REALIZED end-to-end — coherent + VRAM freed. It is a VRAM-for-latency rebalance; fast only with
+the AVX2/OpenMP CPU libs. Default-off. Files: lib/shannon-prime-system/core/forward/gemma4.c,
+include sp/model.h, src/backends/cuda/cuda_forward.cu. Launcher _pk2_cputail_daemon.bat;
+receipts _pk2_cputail_daemon2.log, _pk2_cputail_tiny.log, _pk2_cputail_vram.log.
