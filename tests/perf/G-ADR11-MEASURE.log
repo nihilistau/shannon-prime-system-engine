@@ -1,0 +1,32 @@
+G-ADR11-MEASURE — CPU-layer-offload VRAM curve, measured on the real 12B (2026-07-08)
+======================================================================================
+Contract: lattice PPT-LAT-ADR-011-CPU-LAYER-OFFLOAD.md
+Instrument: SP_G4_CPU_TAIL_MEASURE=1 (dry, additive fprintf in gemma4_kv_open — no behavior change)
+
+MEASURED (gemma4-12b-b1, RTX 2060, from the resident DevTensor dims):
+  48 layers, matmul weights 7.86 GB resident, ~167.8 MB/layer avg
+    tail K= 4 -> free 0.66 GB      tail K=16 -> free 2.63 GB
+    tail K= 8 -> free 1.32 GB      tail K=24 -> free 3.93 GB
+    tail K=12 -> free 1.97 GB      tail K=32 -> free 5.25 GB
+
+Per layer ~167.8 MB = Wq/Wo + Wk/Wv(owners) + FFN(Wgate/Wup/Wdown, the bulk) at OK_Q4B
+(~0.56 B/weight incl per-32-block f16 scales + row_off). The 7.86 GB of matmul weights is the
+offloadable mass; the remaining ~0.9 GB (packed embd + PLE + norms) stays on GPU.
+
+TRADEOFF (VRAM measured; latency analytical, memory-bound ~4.1 ms/layer CPU @ 40 GB/s vs ~0.49 ms
+GPU @ 336 GB/s = ~8.4x, +~3.6 ms/token/offloaded-layer, baseline ~13 tok/s):
+  K=8  -> free 1.32 GB, ~9.4 tok/s      K=16 -> free 2.63 GB, ~7.4 tok/s
+It is a VRAM-FOR-LATENCY trade, not a speedup: worth it to fit a bigger model, run a co-tenant, or
+buy headroom that stops the ADR-009 batch thrash. Default-off; dedicated-card chat unaffected.
+
+DESIGN (contiguous-tail hybrid — one D2H + one H2D boundary crossing/token, not per-layer):
+  GPU layers [0,NL-K) -> D2H residual (E=3840 ~15KB) -> CPU layers [NL-K,NL) reusing
+  core/forward/gemma4.c (sp_matmul reads OK_Q4B on CPU) with a host-resident KV cache -> H2D
+  pre-head hidden -> GPU head. CRT/byte-exact makes the CPU+GPU legs bit-identical = drift-free
+  auditable split (the property that makes this belong on THIS stack, not a generic offload).
+
+STATUS: measurement + design shipped (this instrument = STAGE-2 scaffolding). STAGE-2 (the working
+hybrid: extract gemma4_forward_layers + host KV + boundary wiring behind SP_G4_CPU_TAIL=K, gated on
+coherence/VRAM/tok-s) is the committed next brick.
+Files: src/backends/cuda/cuda_forward.cu (gemma4_kv_open SP_G4_CPU_TAIL_MEASURE block).
+Receipt log: _pk2_adr11_measure.log.

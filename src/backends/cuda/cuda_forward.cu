@@ -4581,6 +4581,32 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
         }
       }
     }
+    /* ADR-011 MEASUREMENT (SP_G4_CPU_TAIL_MEASURE=1, dry — no behavior change): report the
+     * per-layer resident weight bytes + the CONTIGUOUS-TAIL offload VRAM curve, so the CPU-offload
+     * tradeoff (VRAM freed vs the K tail layers moved to CPU) is grounded in the real model, not an
+     * estimate. Pure fprintf; the weights stay on GPU. */
+    { const char *me = getenv("SP_G4_CPU_TAIL_MEASURE");
+      if (me && me[0]=='1') {
+        size_t per_layer_bytes[256]; int NLm = s->NL < 256 ? s->NL : 256;
+        auto dtb = [](const DevTensor *d)->size_t{ if(!d) return 0;
+            if (d->f32) return (size_t)d->in*d->out*sizeof(float);
+            size_t codes = (size_t)d->out*d->in; if (d->prec==4) codes/=2; /* Q4 nibble */
+            size_t sc = d->bscale ? (size_t)d->out*d->bs_nblk*sizeof(unsigned short)
+                                  : (size_t)d->out*sizeof(float);
+            return codes + sc + (size_t)d->out*sizeof(unsigned long long) /*row_off*/; };
+        size_t total=0;
+        for (int L=0; L<NLm; L++){ size_t b=0;
+            b+=dtb(&g_w.Wq[L]); b+=dtb(&g_w.Wk[L]); b+=dtb(&g_w.Wv[L]); b+=dtb(&g_w.Wo[L]);
+            b+=dtb(&g_w.Wgate[L]); b+=dtb(&g_w.Wup[L]); b+=dtb(&g_w.Wdown[L]);
+            per_layer_bytes[L]=b; total+=b; }
+        fprintf(stderr,"    [g4-kv] ADR-011 MEASURE: %d layers, matmul weights %.2f GB resident, ~%.1f MB/layer avg\n",
+                NLm, total/1073741824.0, (total/(double)NLm)/1048576.0);
+        size_t tail=0;
+        for (int K=1; K<=NLm; K++){ tail+=per_layer_bytes[NLm-K];
+            if (K==4||K==8||K==12||K==16||K==24||K==32)
+                fprintf(stderr,"    [g4-kv]   tail K=%2d -> free %.2f GB (compute those on CPU)\n", K, tail/1073741824.0); }
+      }
+    }
     int ok = 1;
     #define KA(p,cnt) do { if (cudaMalloc(&(p),(size_t)(cnt)*sizeof(float))!=cudaSuccess) ok=0; } while(0)
     if (cudaMalloc(&s->dseq,(size_t)Pmax*sizeof(int))!=cudaSuccess) ok=0;
