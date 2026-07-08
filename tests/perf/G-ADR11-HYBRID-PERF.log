@@ -1,0 +1,38 @@
+G-ADR11-HYBRID-PERF — CPU FFN offload re-gated on the AVX2/OpenMP perf daemon (2026-07-08)
+==========================================================================================
+Contract: lattice PPT-LAT-ADR-011-CPU-LAYER-OFFLOAD.md (speed follow-on)
+
+BUILD: build-cpu-perf math-core (clang-cl + /arch:AVX2 + OpenMP; gemma4.c/gemma4_ffn_block_cpu
+recompiled) linked into the daemon via SP_SYSTEM_BUILD_DIR=build-cpu-perf + LLVM libomp, target
+target-wirecuda-perf (the same pattern the qwen36 lane uses). PERFLIBS2_EXIT=0, DAEMON_PERF2_EXIT=0.
+
+MEASURED CURVE (perf daemon, PMAX=4096, RTX 2060, decode tok/s over 32 tokens, coherent all K):
+  K=0 (all-GPU baseline) : 23.84 tok/s   VRAM ~11201 MiB
+  K=4 (4 tail FFNs on CPU): 5.99 tok/s    VRAM  10737 MiB  (freed ~0.46 GB)
+  K=8 (8 tail FFNs on CPU): 3.25 tok/s    VRAM  10221 MiB  (freed ~0.96 GB)
+All coherent ("Mars is the fourth planet from the Sun ...").
+
+PERF-LIB WIN: the AVX2/OpenMP libs made the offload USABLE — K=8 went 0.5 tok/s (scalar build-cpu,
+prior gate) -> 3.25 tok/s (~6.5x), K=4 = 6.0 tok/s (interactive). The perf-lib link was the right
+follow-on and it delivered.
+
+HONEST SLOPE (the real limiter): the curve is FAR steeper than the ~8.4x memory-bound analytical
+ideal. Per-token: K=0 42ms, K=4 167ms, K=8 308ms => ~33 ms PER OFFLOADED FFN PER TOKEN, vs the
+~4 ms memory-bound compute. The extra ~29 ms is the PER-FFN GPU<->CPU ROUND-TRIP: FFN-only offload
+INTERLEAVES with GPU attention, so each offloaded layer forces D2H + 2x cudaStreamSynchronize +
+H2D. K offloaded FFNs = ~2K stream syncs/token. The SYNC, not the CPU compute, dominates.
+
+VERDICT: the lever is REALIZED, coherent, frees VRAM linearly (~0.12 GB/tail layer), and is usable
+with the perf libs (K=4 ~6 tok/s frees ~0.5 GB; K=8 ~3.25 tok/s frees ~1 GB). It is a VRAM-for-
+latency trade with a STEEP slope on this architecture, bounded by GPU<->CPU sync overhead, not by
+CPU throughput. Default-off = null floor (all-GPU 23.84 tok/s unaffected).
+
+TO FLATTEN THE CURVE (next): the per-FFN sync is the wall. Options: (a) cross-token PIPELINE (start
+the CPU FFN of token t while the GPU runs token t's later layers — needs decode restructuring);
+(b) a contiguous CPU BLOCK with ONE crossing (blocked for full layers by shared-KV; for FFN-only
+the interleave is intrinsic); (c) pinned host buffers + cudaMemcpyAsync to shave the copy (small
+vs the sync). The offload's VALUE stands where VRAM is the hard constraint (fit a bigger model /
+co-tenant) and a ~6 tok/s interactive rate at K=4 is acceptable.
+
+Files: engine _pk2_perf_build.bat / _pk2_perf_relink.bat / _pk2_perf_daemon.bat;
+receipts _pk2_perf_tokps{0,4,8}.log, _pk2_perf_daemon{0,4,8}.log.
