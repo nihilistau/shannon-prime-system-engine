@@ -1,0 +1,47 @@
+G-COCONUT-ENGINE gate — perf daemon (target-wirecuda-perf)
+date: 2026-07-09T00:15:08
+exe: D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda-perf\release\sp-daemon.exe
+prompt: 'What is the capital of France?'
+request body: {"prompt":..., "temperature":0, "eot_bias":4.0}  (greedy/deterministic)
+launch env: SP_DAEMON_BACKEND=cuda KVDECODE=1 INT8=1 RING_W=1024 PMAX=20000 PERSIST_KV=1 SP_EOT_BIAS=4.0 + LLVM on PATH
+
+=== 1. NULL-FLOOR ===
+SP_COCONUT unset  -> A0 = '\n\nWhat is the capital of Spain?\n\nWhat is the capital of Italy?\n\nWhat is the capital of Germany?\n\nWhat is the capital of Portugal?\n\nWhat is the capital of Greece?\n\nWhat is the capital of the United Kingdom?\n\nWhat is the capital of the Netherlands?\n\nWhat is the capital of Belgium?\n\nWhat is the capital of Poland?'
+SP_COCONUT=0      -> A  = '\n\nWhat is the capital of Spain?\n\nWhat is the capital of Italy?\n\nWhat is the capital of Germany?\n\nWhat is the capital of Portugal?\n\nWhat is the capital of Greece?\n\nWhat is the capital of the United Kingdom?\n\nWhat is the capital of the Netherlands?\n\nWhat is the capital of Belgium?\n\nWhat is the capital of Poland?'
+A0 err=None  C0 err=None
+NULL-FLOOR: PASS (identical)
+
+=== 2. DETERMINISM (SP_COCONUT=8, two runs) ===
+d1 norms = [165.06592, 165.21895, 220.93921, 222.75972, 221.54784, 185.97743, 167.29436, 162.30487]
+d2 norms = [165.06592, 165.21895, 220.93921, 222.75972, 221.54784, 185.97743, 167.29436, 162.30487]
+DETERMINISM: PASS (bit-identical)
+
+=== 3. STABILITY (loop_stability.py) ===
+scale=1.0 (d1):
+{
+  "verdict": "STABLE",
+  "rho_hat": 0.9976,
+  "max_ratio": 1.3373,
+  "peak": 222.7597,
+  "n0": 165.0659,
+  "n": 8,
+  "fix": null
+}
+scale=62.0 (d_s62):
+d_s62 norms = [516.12854, 111.049835, 116.141235, 150.35852, 123.719475, 113.27569, 144.84387, 118.44359]
+{
+  "verdict": "STABLE",
+  "rho_hat": 0.8104,
+  "max_ratio": 1.2946,
+  "peak": 516.1285,
+  "n0": 516.1285,
+  "n": 8,
+  "fix": null
+}
+
+=== 4. COHERENCE SMOKE (scale 1.0) ===
+SP_COCONUT=2 -> '\n\nWhat is the capital of France? Tuesday\n\nWhat is the capital of France? Wednesday\n\nWhat is the capital of France? Thursday\n\nWhat is the capital of France? Friday\n\nWhat is the capital of France? Saturday\n\nWhat is the capital of France? Sunday\n\nWhat is the capital of France? Monday'  (err=None)
+SP_COCONUT=4 -> '\n\nWhich of the following is a characteristic of a good hypothesis? It is a statement that can be tested. It is a statement that cannot be tested. It is a statement that is always true. It is a statement that is always false.\n\nWhat is the name of the process that occurs when a liquid changes into a gas?\n\nWhat is the name of the process that occurs when a gas changes into a liquid?'  (err=None)
+SP_COCONUT=8 -> '\n\nWhich of the following is a characteristic of a good hypothesis? It is a statement that can be tested. It is a statement that cannot be tested. It is a statement that is always true. It is a statement that is always false.\n\nWhat is the name of the process that occurs when a liquid changes into a gas?\n\nWhat is the name of the process that occurs when a liquid changes into a gas?'  (err=None)
+SP_COCONUT=8 scale62 -> '\n\n[User 0001]\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France?\n\nWhat is the capital of France'  (err=None)
+

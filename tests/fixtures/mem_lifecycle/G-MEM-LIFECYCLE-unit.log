@@ -1,0 +1,70 @@
+[env-common] paths pinned: SP_REPO_ROOT=D:\F\shannon-prime-repos
+[env-common] toolchain pins: CPU=MinGW-gcc-15.2 (build/), CUDA-host=VS2019 BT + CUDA 13.2, Tier3-MSVC-parity=VS18 (D:), Vulkan >= 1.3.250, Hexagon SDK C:\Qualcomm\Hexagon_SDK\5.5.6.0
+[env-cuda] VS2019 BT + CUDA 13.2 activated.  SP_CUDA_ARCH=75  SP_BUILD_DIR=D:\F\shannon-prime-repos\shannon-prime-system-engine\build-cuda
+===TEST_START 23:05:38.02===
+   Compiling sp-daemon v0.1.0 (D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon)
+warning: sp-daemon@0.1.0: WIRE-CUDA: linking sp_cuda_daemon_backend + cudart + cublas + cublasLt
+warning: unused import: `std::collections::HashMap`
+  --> src\network\ring2_quic.rs:21:5
+   |
+21 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sp_model_store_qm` redeclared with a different signature
+   --> D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda\release\build\sp-daemon-4385c908c00e2b2c\out/sp_bindings.rs:317:5
+    |
+317 | /     pub fn sp_model_store_qm(
+318 | |         m: *mut sp_model,
+319 | |         qm: *mut qwen3_model,
+320 | |         free_fn: ::std::option::Option<unsafe extern "C" fn(arg1: *mut qwen3_model)>,
+321 | |     );
+    | |      ^
+    | |      |
+    | |______`sp_model_store_qm` previously declared here
+    |        this signature doesn't match the previous declaration
+    |
+    = note: expected `unsafe extern "C" fn(*mut ffi_l1::sp_model, *mut ffi_l1::qwen3_model, Option<unsafe extern "C" fn(*mut ffi_l1::qwen3_model)>)`
+               found `unsafe extern "C" fn(*mut memo_routing::ffi::sp_model, *mut memo_routing::ffi::qwen3_model, Option<unsafe extern "C" fn(*mut memo_routing::ffi::qwen3_model)>)`
+    = note: `#[warn(clashing_extern_declarations)]` on by default
+
+warning: `sp_session_register_kvdecode_backend` redeclared with a different signature
+   --> D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda\release\build\sp-daemon-4385c908c00e2b2c\out/sp_bindings.rs:677:5
+    |
+677 | /     pub fn sp_session_register_kvdecode_backend(
+678 | |         s: *mut sp_session,
+679 | |         handle: *mut sp_kvdecode_handle,
+680 | |         dt: *const sp_kvdecode_dispatch_fn,
+681 | |     ) -> sp_status;
+    | |                   ^
+    | |                   |
+    | |___________________`sp_session_register_kvdecode_backend` previously declared here
+    |                     this signature doesn't match the previous declaration
+    |
+    = note: expected `unsafe extern "C" fn(*mut ffi_l1::sp_session, *mut ffi_l1::sp_kvdecode_handle, *const ffi_l1::sp_kvdecode_dispatch_fn) -> i32`
+               found `unsafe extern "C" fn(*mut memo_routing::ffi::sp_session, *mut memo_routing::ffi::sp_kvdecode_handle, *const memo_routing::ffi::sp_kvdecode_dispatch_fn) -> i32`
+
+warning: `sp_session_kvdecode_backend_dt` redeclared with a different signature
+   --> D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda\release\build\sp-daemon-4385c908c00e2b2c\out/sp_bindings.rs:687:5
+    |
+687 |     pub fn sp_session_kvdecode_backend_dt(s: *const sp_session) -> *const sp_kvdecode_dispatch_fn;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     |
+    |     `sp_session_kvdecode_backend_dt` previously declared here
+    |     this signature doesn't match the previous declaration
+    |
+    = note: expected `unsafe extern "C" fn(*const ffi_l1::sp_session) -> *const ffi_l1::sp_kvdecode_dispatch_fn`
+               found `unsafe extern "C" fn(*const memo_routing::ffi::sp_session) -> *const memo_routing::ffi::sp_kvdecode_dispatch_fn`
+
+warning: `sp-daemon` (lib test) generated 4 warnings (run `cargo fix --lib -p sp-daemon --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 5.86s
+     Running unittests src\lib.rs (target-wirecuda\release\deps\sp_daemon-66b5e8214f179cdb.exe)
+
+running 1 test
+test recall::a1_tests::supersede_marks_not_deletes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.01s
+
+TEST_EXIT=0
+===ALLDONE 23:05:45.33===

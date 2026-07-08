@@ -1,0 +1,149 @@
+================================================================================
+G-B4-FEASIBILITY — Read-only recon: exact IO-aware KV tiling of prefill attention
+Item B4 (arXiv 2604.21215 thesis: FlashAttention-style tiling → Θ(N log N) HBM,
+score matrix on-chip, KV tile reused across queries, bit-exact)
+Date: 2026-07-09   Mode: READ-ONLY (nothing modified)
+Repo: shannon-prime-system-engine   Main file: src/backends/cuda/cuda_forward.cu
+================================================================================
+
+VERDICT: NO — HONEST-NEGATIVE. Do not build B4.
+  B4's primary mechanism is ALREADY implemented, its remaining sub-mechanism is
+  structurally inapplicable to the production prefill path, and it targets a
+  component (attention) that is NOT the documented prefill bottleneck (weight
+  dequant). Effort to build anyway = multi-week FlashAttention rewrite of 2 head
+  shapes × 2 exactness modes, to chase a non-bottleneck. Not worth it.
+
+--------------------------------------------------------------------------------
+Q1. HOW DOES PREFILL ATTENTION WORK TODAY? (naive [NxN]-to-HBM vs fused on-chip)
+--------------------------------------------------------------------------------
+FINDING: Every prefill/decode attention kernel is ALREADY FUSED / online-in-
+shared-memory. The score row lives in on-chip shared memory and QK→softmax→·V is
+a single kernel. NO kernel materializes an [N×N] (or [N×window]) score matrix to
+HBM, and there is NO separate softmax kernel. B4's headline win is pre-captured.
+
+Batched cold-prefill kernel (the only path with a query batch to tile):
+  k_attn                          cuda_forward.cu:968-1002
+    - launch: cuda_forward.cu:4960  k_attn<<<n*nh, bd, n*sizeof(float), st>>>
+    - dynamic shared = n floats  = the score row `sc[]` (on-chip), line 971
+    - line 981: sc[s] = acc*ascale;         (scores → SHARED MEM, not HBM)
+    - line 985-992: row-max + exp-sum over sc[] in shared mem (fused softmax)
+    - line 995-1001: acc += sc[s]*V[...]     (·V reads scores from shared mem)
+  => single fused pass, zero HBM score traffic. This is a "half-flash" kernel.
+
+Production per-token prefill kernels (gemma4_kv_prefill → g4_kv_step, one token
+per step; single-query GQA over the resident KV cache), dispatch at :4475-4511:
+  k_attn_decode_ring_bx   :716   (40 SWA layers, byte-exact, ring)   launch :4483
+  k_attn_decode_ring      :670   (40 SWA layers, float, ring)        launch :4486
+  k_attn_decode_win_bx    :556   (global/full ctx, byte-exact)       launch :4503
+  k_attn_decode_win_dyn   :2346  (global/full ctx, float)            launch :4510
+  All: dynamic shared = wl|ctx * sizeof(...) = score row in shared mem; fused
+  QK→softmax→·V; scores NEVER written to HBM.
+
+NEGATIVE CONTROL (the only HBM `scores` buffers exist, and are NOT attention):
+  k_qk_scores :838, dscores cudaMalloc :3067, launch :3560, k_topb_dev :892
+    = XBAR P3.2-b ARM shadow-ROUTER recall-set SELECTION (a diagnostic/router
+    that scores QK to pick a sparse key set), NOT the attention output path.
+  dg_k_softmax_rows :6931 / :7444 = DiffusionGemma per-row VOCAB softmax, not attn.
+
+EVIDENCE CLASS: an online/fused running-max+running-sum over a shared-memory
+score row = ALREADY TILED (FlashAttention-class on the score axis). The naive
+signature B4 assumes (materialized scores buffer + separate softmax kernel) is
+ABSENT from the prefill path.
+
+--------------------------------------------------------------------------------
+Q2. WHAT IS THE ACTUAL PREFILL BOTTLENECK? (attention vs FFN/weight GEMMs)
+--------------------------------------------------------------------------------
+FINDING: The documented prefill bottleneck is the WEIGHT-GEMM f32 dequant
+bandwidth, NOT attention. B4 touches only attention and cannot move it.
+
+  cuda_forward.cu:1409-1415 (verbatim): the batched prefill matmul
+  "gemm_w_lift → k_dequant_arena_q4b, which MATERIALIZES the whole OK_Q4B weight
+   as f32 into scratch [out×in] every call (7 matmuls × 48 layers) — the
+   bandwidth cost center of the ~98s cold n=1765 prefill."
+  The shipped prefill speed levers are ALL weight-side, never attention:
+    - SP_KV_PREFILL_DP4A: packed int4 GEMM, "8× less bandwidth"      :1409-1415, :4855
+    - batched prefill: amortize weight read across N tokens          :4762-4775
+  Corroborated by MEMORY ADR-010/011/012: whole-machine perf is bandwidth-bound;
+  the prefill STALL was fixed by arming the SWA ring (PK2-T1), not by attention.
+
+  Traffic model (N=1765 = documented cold prefill; SW≈1024; upper bound, no L2):
+    Weight dequant, BATCHED path (once/prefill):  ~96 GB f32  (~6.4 GB packed dp4a)
+    Weight dequant, PER-TOKEN path (×N, PRODUCTION): N×~6.4–48 GB = ~11–85 TB
+    Attention KV reads (batched, upper bound):    ~1.05 TB total
+       global 8 layers : 65,536·N² B ≈ 204 GB (≈20%)
+       SWA   40 layers : 8·(N·SW − SW²/2)·2048·40 B ≈ 843 GB (≈80%)
+  In the PRODUCTION per-token path weight dequant dominates attention by ~1–2
+  orders of magnitude. In the batched path the attention UPPER BOUND exceeds
+  weights, BUT (a) that path is non-production (declines under persist-KV, Q3)
+  and (b) the upper bound collapses under L2 (Q4).
+
+--------------------------------------------------------------------------------
+Q3. BYTE-EXACT ENVELOPE OF PREFILL ATTENTION
+--------------------------------------------------------------------------------
+FINDING: Prefill IS byte-exact-capable, but only via the PER-TOKEN path.
+  - Per-token prefill, bx_on (SP_BYTEEXACT): exact-integer dual-prime Garner dot
+    + FB30 integer softmax, reduction-order-immune —
+      SWA layers    → k_attn_decode_ring_bx  :716 (launch :4483)
+      global layers → k_attn_decode_win_bx   :556 (launch :4503)
+    (bx chunked-fold detail :575-599, :632-651; G-BX-ATTN-FAST.)
+  - Batched cold prefill (k_attn) is FLOAT ONLY — no bx twin. Comment :4769-4774:
+    "FLOAT attention ⇒ K/V differ from the bx per-token path ... Bit-parity is
+     NOT claimed; coherence + no-corruption + speed is the gate."
+  IMPLICATION FOR B4: an exact IO-aware TILED kernel would have to reproduce the
+  FB30 integer softmax as a STREAMING online-softmax (running max/sum) in the
+  exact-integer domain while staying bit-identical to the CPU oracle. The current
+  exact kernels do a two-phase max-then-exp over the FULL shared-mem row; making
+  that streaming-yet-bit-identical is a new, non-trivial gate — not a free port.
+
+--------------------------------------------------------------------------------
+Q4. SWA-vs-GLOBAL TRAFFIC SPLIT (bounds B4's max possible win)
+--------------------------------------------------------------------------------
+Geometry (cuda_forward.cu:1687-1688, 1915-1916; arm_geom_test.c:43):
+  48 layers, period 6, kvfs=48 (no KV sharing).
+  Global (8 layers, L%6==5): head_dim 512, n_head 4, n_head_kv 1 → QD 2048, KVD 512,
+    win = -1 (FULL CAUSAL, O(N²)).
+  SWA (40 layers): head_dim 256, n_head 8, n_head_kv 2 → QD 2048, KVD 512,
+    win = SW ≈ 1024 (O(N·window)).
+
+Attention KV HBM upper bound at N=1765, SW=1024 (see Q2): SWA ≈ 80%, global ≈ 20%.
+So the O(N²) term B4 could actually shrink (globals) is only ~1/5 of attention
+traffic, and even that is only ~200 GB vs the ~11–85 TB production weight cost.
+
+L2 EROSION (RTX 2060, 3 MB L2 — MEMORY reference_host_gpu_2060_12gb):
+  SWA per-kv-head window working set = SW·head_dim·4·2(K,V) = 1024·256·4·2 = 2 MB
+    < 3 MB L2  ⇒ SWA KV re-reads across adjacent query blocks are L2-SERVED, real
+    HBM ≪ upper bound. FlashAttention's Θ(N²)→Θ(N) win is largely already realized
+    by the L2 for the 40 SWA layers.
+  Global per-kv-head causal set at N=1765 = 1765·512·4·2 = 7.2 MB > 3 MB ⇒ partial
+    L2 reuse; some real HBM headroom, but only on 8 layers / ~20% of attn traffic.
+
+--------------------------------------------------------------------------------
+WHY NO (summary of the four independent kill-shots)
+--------------------------------------------------------------------------------
+1. B4's headline mechanism ("keep the score matrix on-chip") is ALREADY DONE in
+   every attention kernel (scores in shared mem; fused QK→softmax→·V). Zero
+   headroom. There is NO [N×N]-to-HBM naive path to replace.  (:968, :510, :556)
+2. Documented prefill bottleneck = WEIGHT f32 dequant bandwidth, not attention.
+   B4 only touches attention.  (:1409-1415; ADR-010/011/012)
+3. Production prefill is PER-TOKEN (persist-KV declines the batched path,
+   :4808-4810), so there is NO query batch to tile — FlashAttention query-tiling
+   is structurally inapplicable to the shipped path. The only place a query batch
+   exists (batched cold prefill) is opt-in / non-production and FLOAT-only.
+4. 40/48 layers are SWA (O(N·window), window 2 MB fits the 2060's 3 MB L2), so KV
+   re-reads are already L2-served. Only 8 global layers are O(N²) (~20% of attn
+   traffic, partial L2). Max theoretical win is small and on a non-bottleneck.
+
+The one genuinely-real gap — batched k_attn re-reads KV per query head instead of
+reusing a KV tile across a query tile — is (a) off the production path, (b) mostly
+absorbed by L2 for the 40 SWA layers, and (c) dwarfed by the weight-dequant cost
+that IS the bound. Tiling it would not move served prefill wall-clock.
+
+EFFORT IF BUILT ANYWAY: NOT a small kernel tweak. A true exact IO-aware
+FlashAttention would need TWO head shapes (global full-causal hd=512; SWA windowed
+hd=256) × TWO exactness modes (float + dual-prime/Garner byte-exact with a NEW
+streaming-online-softmax-in-integers bit-exact gate) = a multi-week rewrite. The
+byte-exact streaming softmax gate alone is novel work. Recommend: DO NOT BUILD.
+Redirect any prefill-perf effort to the weight-dequant lane (packed dp4a batched
+GEMM already exists behind SP_KV_PREFILL_DP4A; that is where prefill bandwidth
+lives).
+================================================================================

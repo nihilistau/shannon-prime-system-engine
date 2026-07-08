@@ -258,6 +258,9 @@ pub struct Episode {
     /// MEM-OKF v2 / ADR-004: this entry's own delivery/decline policy (from the
     /// registry row's mem_class/mem_delivery/mem_decline_*). `None` ⇒ global env path.
     pub policy: Option<MemPolicy>,
+    /// A1 (SP_MEM_LIFECYCLE): 0 = active, 1 = superseded (kept for audit, excluded from
+    /// the live recall set). Non-destructive supersede replaces the old delete.
+    pub lifecycle: u8,
 }
 
 // gemma4-12b global attention head geometry (g_nkv=1, g_nh=16, g_hd=512 ⇒ g_kvd=HD).
@@ -581,6 +584,7 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
             tokens: None,
             l5key,
             policy,
+            lifecycle: v.get("lifecycle").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
         });
     }
     // JUDGE-SERVED: backfill entry text from a sibling corpus_manifest.jsonl (the
@@ -611,6 +615,46 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
         }
     }
     Ok(out)
+}
+
+/// A1: rewrite the registry JSONL marking (NOT deleting) rows whose "text" == victim with
+/// "lifecycle": lc. Non-destructive supersede — keeps the row for audit/rollback.
+pub fn mark_superseded_registry(reg_path: &str, victim: &str, lc: u64) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(reg_path)?;
+    let mut out = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        match serde_json::from_str::<serde_json::Value>(t) {
+            Ok(mut v) => {
+                if v.get("text").and_then(|x| x.as_str()) == Some(victim) {
+                    if let Some(obj) = v.as_object_mut() { obj.insert("lifecycle".to_string(), serde_json::json!(lc)); }
+                    out.push_str(&serde_json::to_string(&v).unwrap_or_else(|_| t.to_string()));
+                } else { out.push_str(t); }
+            }
+            Err(_) => out.push_str(t),
+        }
+        out.push('\n');
+    }
+    std::fs::write(reg_path, out)
+}
+
+#[cfg(test)]
+mod a1_tests {
+    use super::*;
+    #[test]
+    fn supersede_marks_not_deletes() {
+        let dir = std::env::temp_dir().join(format!("a1reg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("registry.jsonl");
+        std::fs::write(&p, "{\"text\":\"blue\",\"dir\":\"d\",\"sig_bits\":\"00\"}\n{\"text\":\"green\",\"dir\":\"d\",\"sig_bits\":\"01\"}\n").unwrap();
+        mark_superseded_registry(p.to_str().unwrap(), "blue", 1).unwrap();
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.contains("\"blue\""), "victim row must be KEPT (non-destructive), got: {}", after);
+        assert!(after.contains("\"lifecycle\":1"), "victim must be marked superseded");
+        assert!(after.contains("\"green\""), "other row untouched");
+        assert_eq!(after.lines().count(), 2, "no rows dropped");
+    }
 }
 
 /// B3-v2: read `<dir>/ep.k` and extract the GLOBAL-owner K rows `[0,npos)`, packed

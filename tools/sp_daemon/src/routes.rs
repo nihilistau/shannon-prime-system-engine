@@ -1014,6 +1014,7 @@ pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
             tokens: None,
             l5key,
             policy,
+            lifecycle: 0,
         });
         added += 1;
     }
@@ -1227,6 +1228,7 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
         l5key: l5k, // B4-SEAL: minted at capture (mint_live_ep_l5); empty only on mint failure.
         policy: mem_class.map(sp_daemon::recall::MemPolicy::from_class), // #73: self-govern if classified
+        lifecycle: 0,
     });
     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
     true
@@ -1582,10 +1584,15 @@ fn run_kvdecode_chat(
                 }
             }
             if let Some((ov, text)) = best.filter(|(ov, _)| *ov >= 0.25) {
-                // (1) drop from the live nightshift set (all exact copies)
-                { let mut ns = app.nightshift.write().unwrap(); ns.retain(|e| e.text != text); }
-                // (2) rewrite the persisted registry, dropping every line with this text
+                let sp_life = std::env::var("SP_MEM_LIFECYCLE").ok().as_deref() == Some("1");
+                // (1) drop (A1: or mark superseded) from the live nightshift set (all exact copies)
+                { let mut ns = app.nightshift.write().unwrap();
+                  if sp_life { for e in ns.iter_mut() { if e.text == text { e.lifecycle = 1; } } }
+                  else { ns.retain(|e| e.text != text); } }
+                // (2) rewrite the persisted registry, dropping (A1: or marking) every line with this text
                 if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                    if sp_life { let _ = recall::mark_superseded_registry(&reg_path, &text, 1); }
+                    else {
                     if let Ok(content) = std::fs::read_to_string(&reg_path) {
                         let kept: Vec<&str> = content.lines().filter(|line| {
                             match serde_json::from_str::<serde_json::Value>(line) {
@@ -1596,6 +1603,7 @@ fn run_kvdecode_chat(
                         let mut out = kept.join("\n");
                         if !out.is_empty() { out.push('\n'); }
                         let _ = std::fs::write(&reg_path, out);
+                    }
                     }
                 }
                 tracing::info!("LAYER-2 FORGET: removed memory (overlap {:.3}) -> \"{}\"", ov, text);
@@ -2176,6 +2184,7 @@ fn run_kvdecode_chat(
                                         let ns_guard = app.nightshift.read().unwrap();
                                         for ep in registry.iter().chain(ns_guard.iter()) {
                                             if ep.l5key.len() != recall::HD { continue; }
+                                            if ep.lifecycle != 0 && std::env::var("SP_RECALL_AUDIT").ok().as_deref() != Some("1") { continue; }
                                             scored.push((recall::cos512(&qk5, &ep.l5key), ep.name.clone(), ep.text.clone(), ep.policy.clone()));
                                         }
                                     }
@@ -3348,6 +3357,20 @@ Tag of the answer (or [NULL]):");
             f3_prompt = Vec::new();
         }
     }
+    // -- COCONUT continuous-thought seed (ADR-B1 section 5) -- SP_COCONUT=<N>; unset/0
+    // => nothing armed => byte-identical null floor. Reuse the SAME one-shot post-final
+    // -norm tap F3 uses so the syn_last decode_step below writes the LAST-PROMPT hidden
+    // (the Coconut seed) at zero extra forward cost. F3 keeps precedence (single tap slot).
+    let coconut_n: usize = std::env::var("SP_COCONUT").ok()
+        .and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
+    let mut coconut_seed: Vec<f32> = Vec::new();
+    if coconut_n > 0 && f3_prompt.is_empty() {
+        coconut_seed = vec![0f32; F3_E];
+        if let Err(e) = unsafe { kv::capture_feat_arm(handle, &mut coconut_seed) } {
+            tracing::warn!("SP_COCONUT: seed arm failed ({e}) -- thoughts skipped this turn");
+            coconut_seed = Vec::new();
+        }
+    }
     // G-INT-2-FIX: synthesis starts from syn_last (== last[0] for null/clean turns;
     // the augmented prompt's last token when the B3-JUDGE PICKed a memory text-in-context).
     if let Err(e) = unsafe { kv::decode_step(handle, syn_last, logits) } {
@@ -3358,6 +3381,48 @@ Tag of the answer (or [NULL]):");
         send_err(format!("kvdecode decode_step(prefill-tail): {e}"));
         sessions.remove(chat_id);
         return;
+    }
+
+    // -- COCONUT continuous thoughts (ADR-B1 section 5, zero-CUDA variant) --------------
+    // SP_COCONUT=N (N>0): before decoding the answer, run N continuous thoughts. Each
+    // thought feeds the previous position's post-final-norm hidden back as the next input
+    // residual (kv::inject_frames advances the resident KV by 1 and mints K/V), so the N
+    // thought positions become latent context the answer attends to. Thoughts emit NO
+    // stream tokens; the decode loop below samples the first answer token from the current
+    // logits (syn_last's) and every answer token attends the thought KV. SP_COCONUT unset
+    // or 0 => coconut_seed empty => whole block skipped => byte-identical null floor.
+    if coconut_n > 0 && coconut_seed.len() == F3_E {
+        let coconut_scale: f32 = std::env::var("SP_COCONUT_SCALE").ok()
+            .and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(1.0);
+        let mut h = coconut_seed.clone();
+        let mut norms: Vec<f32> = Vec::with_capacity(coconut_n);
+        let mut ok = true;
+        for _ in 0..coconut_n {
+            let mut hs = h.clone();
+            for v in hs.iter_mut() { *v *= coconut_scale; }
+            let mut h_next = vec![0f32; F3_E];
+            // arm the tap so the inject below writes the injected position's post-norm hidden.
+            if let Err(e) = unsafe { kv::capture_feat_arm(handle, &mut h_next) } {
+                tracing::warn!("SP_COCONUT: thought arm failed ({e})"); ok = false; break;
+            }
+            // inject the (scaled) hidden as 1 new residual position; KV += 1; tap fires.
+            if let Err(e) = unsafe { kv::inject_frames(handle, &hs, 1, inject_ph) } {
+                std::mem::forget(std::mem::take(&mut h_next)); // dangling-write guard on failed inject
+                tracing::warn!("SP_COCONUT: thought inject failed ({e})"); ok = false; break;
+            }
+            let n2: f32 = h_next.iter().map(|x| x * x).sum::<f32>().sqrt();
+            norms.push(n2);
+            h = h_next; // continuous thought: next input = this hidden
+        }
+        if let Ok(dump) = std::env::var("SP_COCONUT_DUMP") {
+            if !dump.is_empty() {
+                let mut s = format!("# SP_COCONUT n={} scale={}\n", coconut_n, coconut_scale);
+                for nm in &norms { s.push_str(&format!("{}\n", nm)); }
+                let _ = std::fs::write(&dump, s);
+            }
+        }
+        eprintln!("[SP_COCONUT] injected {} thoughts (scale {}), ok={}, norms={:?}",
+            norms.len(), coconut_scale, ok, norms);
     }
 
     // ── SPECTEST v1 (SP_SPECTEST=1, default-off = byte-identical null floor) ────
@@ -3921,6 +3986,7 @@ Tag of the answer (or [NULL]):");
                                                     tokens: Some(toks),
                                                     l5key: l5k, // B4-SEAL: minted at capture; empty only on mint failure
                                                     policy: mem_class.map(sp_daemon::recall::MemPolicy::from_class), // #73: self-govern if classified
+                                                    lifecycle: 0,
                                                 });
                                                 let total = ns.len();
                                                 tracing::info!(
@@ -4031,8 +4097,13 @@ Tag of the answer (or [NULL]):");
                             if let Some(n) = n {
                                 if n >= 1 && n <= cands.len() {
                                     let victim = cands[n - 1].1.clone();
-                                    { let mut ns = app.nightshift.write().unwrap(); ns.retain(|e| e.text != victim); }
+                                    let sp_life = std::env::var("SP_MEM_LIFECYCLE").ok().as_deref() == Some("1");
+                                    { let mut ns = app.nightshift.write().unwrap();
+                                      if sp_life { for e in ns.iter_mut() { if e.text == victim { e.lifecycle = 1; } } }
+                                      else { ns.retain(|e| e.text != victim); } }
                                     if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                                        if sp_life { let _ = recall::mark_superseded_registry(&reg_path, &victim, 1); }
+                                        else {
                                         if let Ok(content) = std::fs::read_to_string(&reg_path) {
                                             let kept: Vec<&str> = content.lines().filter(|line| {
                                                 match serde_json::from_str::<serde_json::Value>(line) {
@@ -4042,6 +4113,7 @@ Tag of the answer (or [NULL]):");
                                             }).collect();
                                             let mut out = kept.join("\n"); if !out.is_empty() { out.push('\n'); }
                                             let _ = std::fs::write(&reg_path, out);
+                                        }
                                         }
                                     }
                                     tracing::info!("LAYER-3 DECIDE: the model chose to FORGET #{} -> \"{}\" (superseded by the new fact)", n, victim);
@@ -4103,9 +4175,15 @@ Tag of the answer (or [NULL]):");
                                         // candidate) from the live set and the persisted registry...
                                         let drop_a = new_text.clone();
                                         let drop_b = cand0.clone();
+                                        let sp_life = std::env::var("SP_MEM_LIFECYCLE").ok().as_deref() == Some("1");
                                         { let mut ns = app.nightshift.write().unwrap();
-                                          ns.retain(|e| e.text != drop_a && e.text != drop_b); }
+                                          if sp_life { for e in ns.iter_mut() { if e.text == drop_a || e.text == drop_b { e.lifecycle = 1; } } }
+                                          else { ns.retain(|e| e.text != drop_a && e.text != drop_b); } }
                                         if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
+                                            if sp_life {
+                                                let _ = recall::mark_superseded_registry(&reg_path, &drop_a, 1);
+                                                let _ = recall::mark_superseded_registry(&reg_path, &drop_b, 1);
+                                            } else {
                                             if let Ok(content) = std::fs::read_to_string(&reg_path) {
                                                 let kept: Vec<&str> = content.lines().filter(|line| {
                                                     match serde_json::from_str::<serde_json::Value>(line) {
@@ -4116,6 +4194,7 @@ Tag of the answer (or [NULL]):");
                                                 }).collect();
                                                 let mut out = kept.join("\n"); if !out.is_empty() { out.push('\n'); }
                                                 let _ = std::fs::write(&reg_path, out);
+                                            }
                                             }
                                         }
                                         // ...and capture the single synthesized consolidation.

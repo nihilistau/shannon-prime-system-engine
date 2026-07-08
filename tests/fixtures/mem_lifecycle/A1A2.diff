@@ -1,0 +1,180 @@
+diff --git a/tools/sp_daemon/src/recall.rs b/tools/sp_daemon/src/recall.rs
+index e572e26..c02a42c 100644
+--- a/tools/sp_daemon/src/recall.rs
++++ b/tools/sp_daemon/src/recall.rs
+@@ -258,6 +258,9 @@ pub struct Episode {
+     /// MEM-OKF v2 / ADR-004: this entry's own delivery/decline policy (from the
+     /// registry row's mem_class/mem_delivery/mem_decline_*). `None` ⇒ global env path.
+     pub policy: Option<MemPolicy>,
++    /// A1 (SP_MEM_LIFECYCLE): 0 = active, 1 = superseded (kept for audit, excluded from
++    /// the live recall set). Non-destructive supersede replaces the old delete.
++    pub lifecycle: u8,
+ }
+ 
+ // gemma4-12b global attention head geometry (g_nkv=1, g_nh=16, g_hd=512 ⇒ g_kvd=HD).
+@@ -581,6 +584,7 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
+             tokens: None,
+             l5key,
+             policy,
++            lifecycle: v.get("lifecycle").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+         });
+     }
+     // JUDGE-SERVED: backfill entry text from a sibling corpus_manifest.jsonl (the
+@@ -613,6 +617,46 @@ pub fn load_registry(path: &Path) -> std::io::Result<Vec<Episode>> {
+     Ok(out)
+ }
+ 
++/// A1: rewrite the registry JSONL marking (NOT deleting) rows whose "text" == victim with
++/// "lifecycle": lc. Non-destructive supersede — keeps the row for audit/rollback.
++pub fn mark_superseded_registry(reg_path: &str, victim: &str, lc: u64) -> std::io::Result<()> {
++    let text = std::fs::read_to_string(reg_path)?;
++    let mut out = String::new();
++    for line in text.lines() {
++        let t = line.trim();
++        if t.is_empty() { continue; }
++        match serde_json::from_str::<serde_json::Value>(t) {
++            Ok(mut v) => {
++                if v.get("text").and_then(|x| x.as_str()) == Some(victim) {
++                    if let Some(obj) = v.as_object_mut() { obj.insert("lifecycle".to_string(), serde_json::json!(lc)); }
++                    out.push_str(&serde_json::to_string(&v).unwrap_or_else(|_| t.to_string()));
++                } else { out.push_str(t); }
++            }
++            Err(_) => out.push_str(t),
++        }
++        out.push('\n');
++    }
++    std::fs::write(reg_path, out)
++}
++
++#[cfg(test)]
++mod a1_tests {
++    use super::*;
++    #[test]
++    fn supersede_marks_not_deletes() {
++        let dir = std::env::temp_dir().join(format!("a1reg_{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let p = dir.join("registry.jsonl");
++        std::fs::write(&p, "{\"text\":\"blue\",\"dir\":\"d\",\"sig_bits\":\"00\"}\n{\"text\":\"green\",\"dir\":\"d\",\"sig_bits\":\"01\"}\n").unwrap();
++        mark_superseded_registry(p.to_str().unwrap(), "blue", 1).unwrap();
++        let after = std::fs::read_to_string(&p).unwrap();
++        assert!(after.contains("\"blue\""), "victim row must be KEPT (non-destructive), got: {}", after);
++        assert!(after.contains("\"lifecycle\":1"), "victim must be marked superseded");
++        assert!(after.contains("\"green\""), "other row untouched");
++        assert_eq!(after.lines().count(), 2, "no rows dropped");
++    }
++}
++
+ /// B3-v2: read `<dir>/ep.k` and extract the GLOBAL-owner K rows `[0,npos)`, packed
+ /// `[n_global][npos][HD]` row-major (global layers ascending), matching the
+ /// `read_global_q`/`gemma4_kv_read_global_k` layout so a live query and the stored
+diff --git a/tools/sp_daemon/src/routes.rs b/tools/sp_daemon/src/routes.rs
+index 088a925..8feaf18 100644
+--- a/tools/sp_daemon/src/routes.rs
++++ b/tools/sp_daemon/src/routes.rs
+@@ -1014,6 +1014,7 @@ pub fn load_and_mint_okf_store(app: &Arc<AppState>, root: &str) -> usize {
+             tokens: None,
+             l5key,
+             policy,
++            lifecycle: 0,
+         });
+         added += 1;
+     }
+@@ -1227,6 +1228,7 @@ fn capture_live_episode(app: &Arc<AppState>, text: &str) -> bool {
+         text: text.to_string(), sig, gk, gk_ng: ng, tokens: Some(toks),
+         l5key: l5k, // B4-SEAL: minted at capture (mint_live_ep_l5); empty only on mint failure.
+         policy: mem_class.map(sp_daemon::recall::MemPolicy::from_class), // #73: self-govern if classified
++        lifecycle: 0,
+     });
+     tracing::info!("LAYER-3 MERGE: captured synthesized episode -> \"{}\"", text.chars().take(60).collect::<String>());
+     true
+@@ -1582,10 +1584,15 @@ fn run_kvdecode_chat(
+                 }
+             }
+             if let Some((ov, text)) = best.filter(|(ov, _)| *ov >= 0.25) {
+-                // (1) drop from the live nightshift set (all exact copies)
+-                { let mut ns = app.nightshift.write().unwrap(); ns.retain(|e| e.text != text); }
+-                // (2) rewrite the persisted registry, dropping every line with this text
++                let sp_life = std::env::var("SP_MEM_LIFECYCLE").ok().as_deref() == Some("1");
++                // (1) drop (A1: or mark superseded) from the live nightshift set (all exact copies)
++                { let mut ns = app.nightshift.write().unwrap();
++                  if sp_life { for e in ns.iter_mut() { if e.text == text { e.lifecycle = 1; } } }
++                  else { ns.retain(|e| e.text != text); } }
++                // (2) rewrite the persisted registry, dropping (A1: or marking) every line with this text
+                 if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
++                    if sp_life { let _ = recall::mark_superseded_registry(&reg_path, &text, 1); }
++                    else {
+                     if let Ok(content) = std::fs::read_to_string(&reg_path) {
+                         let kept: Vec<&str> = content.lines().filter(|line| {
+                             match serde_json::from_str::<serde_json::Value>(line) {
+@@ -1597,6 +1604,7 @@ fn run_kvdecode_chat(
+                         if !out.is_empty() { out.push('\n'); }
+                         let _ = std::fs::write(&reg_path, out);
+                     }
++                    }
+                 }
+                 tracing::info!("LAYER-2 FORGET: removed memory (overlap {:.3}) -> \"{}\"", ov, text);
+                 // (3) confirm via text-in-context (the judge-PICK synthesis machinery)
+@@ -2176,6 +2184,7 @@ fn run_kvdecode_chat(
+                                         let ns_guard = app.nightshift.read().unwrap();
+                                         for ep in registry.iter().chain(ns_guard.iter()) {
+                                             if ep.l5key.len() != recall::HD { continue; }
++                                            if ep.lifecycle != 0 && std::env::var("SP_RECALL_AUDIT").ok().as_deref() != Some("1") { continue; }
+                                             scored.push((recall::cos512(&qk5, &ep.l5key), ep.name.clone(), ep.text.clone(), ep.policy.clone()));
+                                         }
+                                     }
+@@ -3921,6 +3930,7 @@ Tag of the answer (or [NULL]):");
+                                                     tokens: Some(toks),
+                                                     l5key: l5k, // B4-SEAL: minted at capture; empty only on mint failure
+                                                     policy: mem_class.map(sp_daemon::recall::MemPolicy::from_class), // #73: self-govern if classified
++                                                    lifecycle: 0,
+                                                 });
+                                                 let total = ns.len();
+                                                 tracing::info!(
+@@ -4031,8 +4041,13 @@ Tag of the answer (or [NULL]):");
+                             if let Some(n) = n {
+                                 if n >= 1 && n <= cands.len() {
+                                     let victim = cands[n - 1].1.clone();
+-                                    { let mut ns = app.nightshift.write().unwrap(); ns.retain(|e| e.text != victim); }
++                                    let sp_life = std::env::var("SP_MEM_LIFECYCLE").ok().as_deref() == Some("1");
++                                    { let mut ns = app.nightshift.write().unwrap();
++                                      if sp_life { for e in ns.iter_mut() { if e.text == victim { e.lifecycle = 1; } } }
++                                      else { ns.retain(|e| e.text != victim); } }
+                                     if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
++                                        if sp_life { let _ = recall::mark_superseded_registry(&reg_path, &victim, 1); }
++                                        else {
+                                         if let Ok(content) = std::fs::read_to_string(&reg_path) {
+                                             let kept: Vec<&str> = content.lines().filter(|line| {
+                                                 match serde_json::from_str::<serde_json::Value>(line) {
+@@ -4043,6 +4058,7 @@ Tag of the answer (or [NULL]):");
+                                             let mut out = kept.join("\n"); if !out.is_empty() { out.push('\n'); }
+                                             let _ = std::fs::write(&reg_path, out);
+                                         }
++                                        }
+                                     }
+                                     tracing::info!("LAYER-3 DECIDE: the model chose to FORGET #{} -> \"{}\" (superseded by the new fact)", n, victim);
+                                     decided = true;
+@@ -4103,9 +4119,15 @@ Tag of the answer (or [NULL]):");
+                                         // candidate) from the live set and the persisted registry...
+                                         let drop_a = new_text.clone();
+                                         let drop_b = cand0.clone();
++                                        let sp_life = std::env::var("SP_MEM_LIFECYCLE").ok().as_deref() == Some("1");
+                                         { let mut ns = app.nightshift.write().unwrap();
+-                                          ns.retain(|e| e.text != drop_a && e.text != drop_b); }
++                                          if sp_life { for e in ns.iter_mut() { if e.text == drop_a || e.text == drop_b { e.lifecycle = 1; } } }
++                                          else { ns.retain(|e| e.text != drop_a && e.text != drop_b); } }
+                                         if let Ok(reg_path) = std::env::var("SP_RECALL_REGISTRY") {
++                                            if sp_life {
++                                                let _ = recall::mark_superseded_registry(&reg_path, &drop_a, 1);
++                                                let _ = recall::mark_superseded_registry(&reg_path, &drop_b, 1);
++                                            } else {
+                                             if let Ok(content) = std::fs::read_to_string(&reg_path) {
+                                                 let kept: Vec<&str> = content.lines().filter(|line| {
+                                                     match serde_json::from_str::<serde_json::Value>(line) {
+@@ -4117,6 +4139,7 @@ Tag of the answer (or [NULL]):");
+                                                 let mut out = kept.join("\n"); if !out.is_empty() { out.push('\n'); }
+                                                 let _ = std::fs::write(&reg_path, out);
+                                             }
++                                            }
+                                         }
+                                         // ...and capture the single synthesized consolidation.
+                                         let okc = capture_live_episode(app, &combined);

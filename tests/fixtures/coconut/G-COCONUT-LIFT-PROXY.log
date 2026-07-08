@@ -1,0 +1,99 @@
+G-COCONUT-LIFT-PROXY — Coconut continuous-thought recipe, small-scale de-risk (GPT-2 124M)
+date: 2026-07-09
+verdict: PASS (GREEN)   [pre-registered gate met with a large margin]
+paper: Coconut / "Training LLMs to Reason in a Continuous Latent Space" (arXiv 2412.06769)
+purpose: de-risk a later 12B bake — does latent continuous-thought (n>0) beat no-CoT (n=0)
+         on a held-out multi-hop task by a pre-registered margin, at small scale?
+
+=================================================================================
+PRE-REGISTERED GATE
+  PASS iff  coconut(N>0) OOD acc − NoCoT-model OOD acc >= +15 pts (absolute)
+       AND  coconut(N>0) OOD acc >= 60%.
+  Null baseline = the SEPARATELY-TRAINED NoCoT model (question->answer, no thoughts).
+=================================================================================
+
+=== 1. DATASET (synthetic multi-hop path-reasoning, ProsQA-style, compositional-OOD) ===
+  seed=13 (deterministic), K=4 hops, 300 nodes, 4 relations, 3 decoy nodes/example.
+  Query = start node + program of 4 relations; answer = terminal node after following
+  the program over a random relation graph (facts shuffled, distractors included).
+  A no-reasoning model must compose 4 sequential branch-lookups in ONE forward -> fails.
+  Compositional-OOD split: a "composition" = adjacent traversed edge-pair
+  (junction_pred, r_in, r_out). Held out 720/4800 composition triples. Every EDGE (node,rel)
+  still appears in train (coverage pass: 1200/1200 edges covered, 0 augment needed);
+  every val_ood query traverses >=1 held-out composition (the COMBINATION is never seen).
+  Sizes:  train=12000  val_id=1500  val_ood=1500   (val_ood is the headline)
+  Repro:  COCONUT_SEED=13 COCONUT_N_TRAIN=12000 COCONUT_N_VAL_ID=1500 COCONUT_N_VAL_OOD=1500 \
+          python gen_data.py    (pure-python, no deps; identical bytes each run)
+
+=== 2. LOCAL CPU SMOKE (de-risk before GPU) ===
+  Tiny config (40 nodes, 80/86 train ex, 1 stage/epoch), modes=nocot,coco:1, CPU.
+  (a) latent feedback loop runs (no shape/dtype errors) — OK
+  (b) training loss decreases — nocot 22.9->7.55 (1 epoch), coco:1 curriculum ->1.63 — OK
+  (c) eval runs, emits accuracy for both arms (0.0 at 86-ex scale = expected undertrained) — OK
+  Repro:  bash run_smoke.sh   (artifacts in models_smoke/)
+
+=== 3. GPU RUN ===
+  lane: Colab G4 (colab CLI in WSL, acct nihilistcod) -> NVIDIA RTX PRO 6000 Blackwell.
+        (HF Jobs lane was BLOCKED: HTTP 402 "insufficient pre-paid credit balance".)
+  base: GPT-2 (124M), full finetune. special tokens <bot><eot><latent><ans>.
+  train config: BASELINE=4 ep, curriculum stages 0..4 (STAGE=1 ep, FINAL_EXTRA=2 ep),
+                batch=32, lr=1e-4, thoughts-per-step c=1, N_eval = c*K = 4 latent thoughts.
+  method (faithful to paper): latent slot input-embed = previous position's post-ln_f last
+                hidden state (manual multi-forward, KV reuse); loss masks question+latent
+                positions; optimizer reset per stage; 0.3 mix of earlier stages.
+  wall: pass A (nocot,cot,coco:1) train+eval ~17 min, uploaded before the session dropped.
+
+  HEADLINE — OOD accuracy (val_ood, 1500 ex, greedy):
+    arm                         OOD acc     ID acc
+    NoCoT (n=0, the null)        7.13%       8.60%
+    Coconut c=1, N=4 thoughts   69.87%      75.33%     <-- the recipe
+    Full-CoT (ceiling)          89.60%      90.13%
+    [coco c=1 self-ablation N=0: OOD 67.87%  ->  thoughts ON vs OFF = +2.0 pts]
+
+=== 4. GATE VERDICT: PASS (GREEN) ===
+    lift  = coconut(N>0) OOD − NoCoT OOD = 69.87% − 7.13% = +62.73 pts   (>= +15 required)  PASS
+    floor = coconut(N>0) OOD = 69.87%                                    (>= 60% required)   PASS
+    => G-COCONUT-LIFT-PROXY = GREEN.  Recipe works at small scale; 12B bake is de-risked.
+
+  HONEST CAVEAT (load-bearing for the 12B decision):
+    The huge lift is measured vs the NoCoT MODEL (the pre-registered null) and is decisive.
+    BUT the same coconut model with thoughts turned OFF at inference already scores 67.87% OOD
+    (self-ablation lift only +2.0 pts). => Most of the OOD gain comes from the CURRICULUM
+    TRAINING PROCEDURE (staged internalization of reasoning), not from test-time latent compute.
+    For the 12B bake this means: the Coconut *training curriculum* is the high-value component;
+    do not expect large marginal gains from adding latent thoughts at inference on top of it.
+
+=== 5. DETERMINISM (greedy eval reproducible) ===
+    verdict: PASS.
+    Empirical: coco_c1 (with the N=4 latent-thought forward loop) evaluated TWICE on identical
+    weights -> BIT-IDENTICAL prediction vectors (full argmax vectors compared, not just accuracy).
+    By construction: eval is temperature-0 argmax (answer-position argmax for nocot/coco;
+    token-by-token greedy for cot) with no sampling -> a deterministic function of (weights,inputs).
+    Also: the seeded pipeline reproduced bit-identically at init across independent GPU sessions
+    (nocot step-1 loss 22.9088 and cot step-1 loss 16.2427 identical in sessions 1/2/3).
+    Repro:  python det2.py   (loads models_smoke/coco_c1, evals x2, compares predictions)
+
+=== 6. ARTIFACTS ===
+    HF dataset (private):  https://huggingface.co/datasets/KnackAU/sp-coconut-proxy
+      data/{train,val_id,val_ood}.jsonl, data/meta.json   (the dataset)
+      gen_data.py, train_coconut.py, eval_coconut.py, colab_run.py, colab_run2.py (pipeline)
+      result.json                         (gate + determinism + notes; the headline artifact)
+      results/eval_report.json            (pass-A gate: nocot, cot, coco_c1)
+      results/train_metrics.json          (per-arm final losses / seconds)
+      results/determinism_probe.json      (two-run identical prediction check)
+    Local code:  shannon-prime-harness/datagen/coconut/{gen_data,train_coconut,eval_coconut}.py
+                 + cloud/{colab_run.py,colab_run2.py,colab_secret_coco*.sh,colab_poll_coco.py}
+    This receipt: shannon-prime-system-engine/tests/fixtures/coconut/G-COCONUT-LIFT-PROXY.log
+
+=== 7. BLOCKER / NOT-COMPLETED (honest) ===
+    c=2 arm NOT completed. c=2's coco:2 leg (up to 8 latents = 9 sequential forwards/step) plus
+    eval finishes at ~32-40 min; Colab G4 sessions were repeatedly torn down at ~30-40 min
+    (runtime limit), before that leg could eval+upload. Attempted 3 sessions (cocoproxy2/3/4);
+    the 4th used strict HF-only polling (no session interference) and still dropped -> confirms a
+    Colab runtime cap, not a polling artifact. Pass A (c=1) survived only because its A/B split
+    uploaded the gate at ~17 min. Compute cap (~2 GPU-hours) reached; no 5th session launched;
+    all Colab sessions stopped/terminated. c=1 result is decisive, so the gate verdict stands.
+    HF Jobs lane unusable until the account has a positive credit balance (402 Payment Required).
+
+REGISTRATION: none (proxy only). This gates whether the 12B Coconut bake is worth it -> YES for
+the training curriculum; treat inference-time latent thoughts as low marginal value (see caveat).

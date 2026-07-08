@@ -1,0 +1,91 @@
+G-DPLR-MEM  2026-07-09   (B5: DPLR delta-rule editable associative memory vs deployed L5-direct+tau)
+================================================================================================
+VERDICT: HONEST-NEGATIVE  (closes B5; DPLR does NOT earn a build)
+
+PRE-REGISTERED GATE (from task):
+  PASS iff  DPLR recall@1 >= plain-cosine  AND  >= incumbent (~85%)  AND  foreign-reject >= incumbent
+            AND  erase test clean (erasing A -> A~0 while non-target stays within a couple points).
+  Standing rule: a learned/heuristic replacement for a DEPLOYED mechanism must WIN head-to-head first.
+
+--------------------------------------------------------------------------------------------------
+REPRO (CPU only, no GPU, no daemon; deterministic bge-small CLS+L2norm, eval mode):
+  cd D:\F\shannon-prime-repos\shannon-prime-harness\datagen\dplr
+  python dplr_vs_cosine.py --corpus D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus --instr none
+  python dplr_vs_cosine.py --corpus D:\F\shannon-prime-repos\shannon-prime-system-engine\_faithful_corpus --instr bge
+  (embeddings=BAAI/bge-small-en-v1.5, 384-d; instr=none sha256[:16]=d8b72e65b70cda55 ; instr=bge=4b950974863cf2d0)
+
+DPLR delta rule (as specified): S <- (I - beta k k^T) diag(alpha) S + beta k v^T   (online, per key)
+  read(q) = q^T S.  Arms use the SAME bge vectors, so the DPLR-vs-cosine comparison is apples-to-apples.
+
+--------------------------------------------------------------------------------------------------
+(1) DATA USED (engine/_faithful_corpus, the SAME 61-fact faithful corpus the incumbent is gated on):
+    N_facts (stored episodes, .fact text) = 61
+    N_paraphrase recall queries (.para)   = 61   (obfuscated question paraphrases -- the hard case)
+    N_direct-question queries (.q)        = 61   (sanity control)
+    N_foreign (reject set)                = 58   (40 plain foreign_queries.json + 18 hard_foreign_queries.json)
+    NOTE: plain-foreign overlaps corpus TOPICS by design (e.g. "largest ocean on Earth","boiling point of
+          water") -> topically-adjacent distractors, not clean out-of-corpus. A global cosine tau cannot
+          separate them in bge space (AUROC ~0.45-0.50); the incumbent rejects in the L5 space + attr-gate.
+
+--------------------------------------------------------------------------------------------------
+(2) NUMBERS TABLE  (paraphrase recall@1 among the 61 facts; foreign-reject @ 99%-recall-preserving tau)
+
+  INCUMBENT (deployed L5-direct+tau, cited G-ONECONFIG-LIVE.log):
+     full-stack paraphrase-recall = 54/61 = 88.5%  (recall+inject+deliver obey-token); tau=0.30 reject.
+     L5 retrieval@1 bar (task-cited)            ~= 85%     <-- the head-to-head bar for this probe.
+
+  CONTENT-BEARING (bge-small), instr=none (symmetric):
+    arm                          recall@1        foreign-reject   in/foreign AUROC
+    plain cosine (baseline)      77.0% (47/61)   3.4% @tau0.55    0.505
+    DPLR one-hot-id (best*)      75.4% (46/61)   8.6% @tau0.20    0.430
+    DPLR embedding-value         75.4%           --               --
+    DPLR-converged (ridge fixpt) 83.6% (51/61)   --               0.445
+    direct-q control             100.0%          --               --      (embeddings are healthy)
+    *best grid cell: beta=0.25 alpha=1.0 epochs=20  (sweep beta{.25,.5,.75,1} x alpha{1,.995} x ep{1,5,20})
+
+  CONTENT-BEARING (bge-small), instr=bge (documented retrieval recipe -- cosine's strongest fair form):
+    arm                          recall@1        foreign-reject   in/foreign AUROC
+    plain cosine (baseline)      73.8% (45/61)   3.4% @tau0.54    0.451
+    DPLR one-hot-id (best)       75.4% (46/61)   3.4% @tau0.18    0.419
+    DPLR embedding-value         73.8%           --               --
+    DPLR-converged (ridge fixpt) 78.7% (48/61)   --               0.425
+    direct-q control             100.0%          --               --
+
+  Read: DPLR == plain cosine within +/-2 pp (= ~1 fact of 61 = noise) in BOTH embedding variants.
+        The online delta rule adds NOTHING over cosine. Even the DPLR-converged least-squares fixpoint
+        (78.7-83.6%) does not clear the incumbent's ~85% bar. Both content-bearing arms LOSE to the
+        deployed L5 on the very ranking axis (paraphrase intent), consistent with L5-Q capturing query
+        INTENT that a small content encoder misses on these adversarial paraphrases.
+
+(3) ERASE / SUPERSEDE TEST  (DPLR one-hot store; erase A via S <- (I - k_A k_A^T) S, beta=1; over all 61):
+    target still recalled after erase = 0/61      (GOOD: target cleanly removed)
+    mean non-target recall drop       = +0.14 pp  (tiny)
+    max  non-target recall drop       = +3.33 pp
+    nearest-neighbor knocked out      = 9-10/61   (COLLATERAL: erase perturbs correlated neighbors)
+    => erase is "mostly clean but NOT lossless": ~15% of erases collaterally drop the nearest neighbor.
+       This is strictly worse than A1's deterministic, non-destructive supersede (lossless by construction).
+
+--------------------------------------------------------------------------------------------------
+(4) GATE VERDICT: HONEST-NEGATIVE  (fails on every axis)
+    [FAIL] DPLR recall@1 does NOT beat plain cosine (== within noise; delta-rule decorrelation is a no-op
+           on 61 near-orthogonal content-bearing vectors).
+    [FAIL] DPLR recall@1 (73.8-83.6%) does NOT reach the incumbent ~85% / 88.5% paraphrase bar.
+    [FAIL] foreign-reject via a global cosine/DPLR tau is not clean (AUROC ~0.42-0.50) -- content-bearing
+           cosine cannot separate topically-adjacent foreign; the deployed L5+attr-gate path is better.
+    [FAIL] erase is not lossless (9-10/61 neighbor collateral) vs A1's non-destructive supersede.
+
+    MECHANISM READ: On content-bearing bge vectors the 61 facts are already near-orthogonal, so the DPLR
+    erase-then-write delta rule reduces to plain cosine ranking -- it adds nothing. DPLR's ONLY distinctive
+    value is editable erase/overwrite, and even that is not lossless here (perturbs correlated neighbors),
+    whereas A1's deterministic supersede/dedup already provides clean, lossless overwrite. DPLR is therefore
+    REDUNDANT for our memory path and does not beat the deployed L5-direct+tau incumbent. B5 CLOSED-NEGATIVE.
+
+--------------------------------------------------------------------------------------------------
+NOTES / CAVEATS:
+  - para is matched against the stored FACT statement (mirrors deployment: episode=fact text, query=user
+    paraphrase). direct-q->fact = 100% confirms embeddings are healthy; the paraphrases are hard by design.
+  - Deterministic: bge in eval mode, no sampling; rerun of a given --instr reproduces the same embed sha.
+  - Not tuned to pass: full sweep reported; verdict uses DPLR's BEST grid cell + converged fixpoint
+    (maximum benefit of the doubt) and it still loses.
+  - Nothing wired into the daemon; not committed.
+================================================================================================

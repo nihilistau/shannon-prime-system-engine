@@ -1,0 +1,60 @@
+============================================================================
+G-RECALL-TAINTSAFE  --  A2 taint-safe-recall LIVE gate  (2026-07-08)
+A1/A2 memory-lifecycle changes (Episode.lifecycle, mark_superseded_registry,
+SP_MEM_LIFECYCLE supersede, SP_RECALL_AUDIT taint filter) -- already in source
+(tools/sp_daemon/src/{recall.rs,routes.rs}); diff = A1A2.diff. NO source edited.
+============================================================================
+
+[1] PERF DAEMON BUILD  (_pk2_perf_build.bat : build-cpu-perf + relink into target-wirecuda-perf)
+    _pk2_perf.log tail: PERFLIBS build OK, "Finished release profile in 24.41s", DAEMON_PERF_EXIT=0
+    EXE: D:\F\shannon-prime-repos\shannon-prime-system-engine\tools\sp_daemon\target-wirecuda-perf\release\sp-daemon.exe
+    BYTES=12247040  LastWriteTime=2026-07-08T23:11:24.9055327+10:00
+    (canonical non-perf exe target-wirecuda\release\sp-daemon.exe NOT touched; ADR-012 cuda_forward.cu NOT touched)
+
+[2] TEST FIXTURE (non-source; temp)
+    L5-recall corpus = _faithful_corpus (has ep.l5 sidecars; the A2 filter lives in the SP_RECALL_L5 path).
+    NOTE: the div corpus (_needle_corpus_div, used by run_console_recall.bat / SP_B3_WC) has NO ep.l5
+      sidecars, so the L5 filter path skips every episode there -> the faithful corpus + run_console_faithful.bat
+      env is the correct target for the A2 (L5) filter.
+    _a2_gate\registry.jsonl = copy of _faithful_corpus\registry_oneconfig.jsonl (81 rows, dir fields UNCHANGED),
+      VICTIM  fct_000 "The capital of France is now Lyon."  -> "lifecycle": 1 added (this one row only)
+      CONTROL fct_015 "The capital of Italy is now Milan."  -> untouched (lifecycle 0)
+
+[3] LAUNCH (perf exe, env mirrors run_console_faithful.bat + LLVM\bin on PATH for libomp.dll):
+    env: SP_DAEMON_BACKEND=cuda KVDECODE=1 CUDA_DECODE_INT8=1 RING_W=2048 PMAX=4096 PERSIST_KV=1 EOT_BIAS=4.0
+         SP_AUTO_RECALL_DEFAULT=1 SP_RECALL_L5=1 SP_RECALL_L5_TAU=0.30 SP_RECALL_L5_DUMPRANK=1
+         SP_RECALL_ATTR_GATE=1 SP_RECALL_ATTR_TAU=0.5 SP_RECALL_QONLY=1 SP_RECALL_L5_PROMPT=systemecho
+         SP_RECALL_REGISTRY=_a2_gate\registry.jsonl  SP_MEM_LIFECYCLE=1
+    Run A adds nothing (audit OFF);  Run B adds SP_RECALL_AUDIT=1.
+    DAEMON: target-wirecuda-perf\release\sp-daemon.exe start --model gemma4-12b-b1.sp-model ... --port 3000
+    QUERY:  POST http://127.0.0.1:3000/v1/chat  {messages:[{role:user,content:Q}],max_tokens:48,auto_recall:true,temperature:0}
+      VICTIM  Q = "What is the capital of France?"
+      CONTROL Q = "What is the capital of Italy?"
+
+[4] EVIDENCE  (L5 candidate-set ranking, the stage where routes.rs:2187 applies the taint filter)
+
+  --- RUN A : SP_MEM_LIFECYCLE=1, SP_RECALL_AUDIT unset (taint filter ACTIVE) ---
+  RECALL-L5-DUMPRANK: q="What is the capital of France?" ranked=[fct_015=0.9235 fct_019=0.9191 fct_018=0.9180 fct_016=0.9169 fct_017=0.9163 fct_006=0.8556 fct_037=0.8546 fct_054=0.8516]
+    -> VICTIM fct_000 ABSENT from the ranked candidate set (EXCLUDED).
+  RECALL-L5-DUMPRANK: q="What is the capital of Italy?"  ranked=[fct_015=0.9274 fct_019=0.9225 fct_016=0.9195 fct_018=0.9193 fct_017=0.9189 fct_006=0.8618 fct_004=0.8568 fct_054=0.8556]
+    -> CONTROL fct_015 recalled normally (top1, TEXT-IN-CONTEXT).
+  Model answers: France -> "The capital of France is Paris."  (parametric; Lyon counter-fact NOT surfaced)
+                 Italy  -> "The capital of Italy is now Milan." (counter-fact delivered)
+
+  --- RUN B : SP_MEM_LIFECYCLE=1, SP_RECALL_AUDIT=1 (audit bypass) ---
+  RECALL-L5-DUMPRANK: q="What is the capital of France?" ranked=[fct_015=0.9235 fct_000=0.9194 fct_019=0.9191 fct_018=0.9180 fct_016=0.9169 fct_017=0.9163 fct_006=0.8556 fct_037=0.8546]
+    -> VICTIM fct_000 REAPPEARS in the ranked candidate set (RE-INCLUDED, cos=0.9194).
+  RECALL-L5-DUMPRANK: q="What is the capital of Italy?"  ranked=[fct_015=0.9274 fct_019=0.9225 fct_016=0.9195 fct_018=0.9193 fct_017=0.9189 fct_000=0.9167 fct_006=0.8618 fct_004=0.8568]
+    -> fct_000 also present here (cos=0.9167).
+
+  The ONLY difference between the Run A and Run B ranked lists is the presence/absence of fct_000,
+  toggled exactly by SP_RECALL_AUDIT -- deterministic (L5 cosine ranking, model-independent).
+
+[5] VERDICT:  G-RECALL-TAINTSAFE = PASS
+    A tainted (lifecycle=1) episode is EXCLUDED from the L5 recall candidate set under SP_MEM_LIFECYCLE=1,
+    and RE-INCLUDED under SP_RECALL_AUDIT=1; an untainted control episode recalls normally in both runs.
+    (Selection cross-pick to fct_015 within the near-cosine capital cluster is the orthogonal, pre-existing
+     G-SEL-OFFLINE issue, NOT the taint behavior.)
+
+    Raw per-run logs: _a2_gate\runA.log, _a2_gate\runB.log  (RECALL-L5 lines quoted above verbatim).
+============================================================================

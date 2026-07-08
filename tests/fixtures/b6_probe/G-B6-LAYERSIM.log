@@ -1,0 +1,98 @@
+========================================================================================
+G-B6-LAYERSIM -- adjacent-layer weight-similarity profile for gemma-4-12b (48 decoder layers)
+Item B6 (adoption campaign): go/no-go for a looped / weight-aliased variant.
+Weights source: D:/Files/Models/Gemma4/gemma-4-12b-bucket/model.safetensors (bf16, single 23.9GB file)
+Method: offline safetensors header-parse + bf16->f32 (reuses tools/t4_weights_probe.py reader);
+        flat cosine of corresponding tensors of ADJACENT layers (L vs L+1); float64 chunked accumulation.
+Repro (per tensor type; MLP types chunked by layer-range to fit the shell cap, then merged):
+  python b6_layersim_probe.py <model.safetensors> {q,k,v,o} .            # attention (full, incl global series)
+  python b6_layersim_probe.py <model.safetensors> down . 0 20 ; ... 19 39 ; ... 38 48
+  python b6_layersim_probe.py <model.safetensors> gate . 0 25 ; ... 24 48   (same for up)
+  python b6_analyze.py     # merge + summary + this log
+
+GEOMETRY (from header): L%6==5 (L=5,11,17,23,29,35,41,47) = 8 V-less GLOBAL-attn layers with a
+  DIFFERENT attention shape (q[8192,3840] k[512,3840] o[3840,8192], NO v_proj); other 40 = SWA
+  (q[4096,3840] k/v[2048,3840] o[3840,4096]). MLP (gate/up/down) is UNIFORM [.,3840]/[3840,.] on ALL 48.
+  => attention cosine only defined between SAME-shape (SWA-SWA) adjacent layers; MLP defined for all 47 pairs.
+========================================================================================
+
+--- self_attn.q_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:-0.000 01:0.000 02:-0.001 03:-0.001 04:null 05:null 06:-0.001 07:-0.001 08:-0.001 09:0.000 10:null 11:null
+  12:-0.000 13:-0.000 14:-0.000 15:-0.001 16:null 17:null 18:0.000 19:0.001 20:-0.001 21:0.000 22:null 23:null
+  24:-0.000 25:-0.001 26:-0.000 27:-0.000 28:null 29:null 30:-0.000 31:0.000 32:-0.000 33:-0.001 34:null 35:null
+  36:-0.001 37:0.000 38:0.000 39:-0.000 40:null 41:null 42:-0.001 43:-0.000 44:-0.000 45:-0.000 46:null
+
+--- self_attn.k_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:0.000 01:0.001 02:-0.000 03:0.000 04:null 05:null 06:-0.002 07:-0.002 08:0.000 09:-0.000 10:null 11:null
+  12:-0.001 13:0.001 14:0.000 15:-0.000 16:null 17:null 18:0.001 19:0.000 20:0.000 21:0.000 22:null 23:null
+  24:-0.001 25:-0.002 26:0.002 27:-0.000 28:null 29:null 30:0.002 31:0.000 32:-0.000 33:-0.000 34:null 35:null
+  36:-0.001 37:0.001 38:-0.000 39:0.001 40:null 41:null 42:-0.000 43:0.000 44:0.001 45:0.001 46:null
+
+--- self_attn.v_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:-0.000 01:-0.001 02:0.000 03:0.000 04:null 05:null 06:-0.001 07:-0.000 08:-0.000 09:0.000 10:null 11:null
+  12:-0.000 13:0.001 14:-0.000 15:0.000 16:null 17:null 18:-0.000 19:-0.000 20:-0.000 21:0.000 22:null 23:null
+  24:-0.001 25:-0.001 26:0.001 27:-0.000 28:null 29:null 30:0.001 31:0.000 32:-0.000 33:0.000 34:null 35:null
+  36:-0.002 37:0.000 38:-0.000 39:0.000 40:null 41:null 42:0.001 43:0.000 44:0.000 45:-0.000 46:null
+
+--- self_attn.o_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:-0.000 01:0.000 02:-0.000 03:-0.000 04:null 05:null 06:-0.000 07:0.000 08:0.000 09:-0.001 10:null 11:null
+  12:-0.000 13:0.000 14:-0.000 15:0.000 16:null 17:null 18:0.000 19:0.001 20:0.000 21:-0.000 22:null 23:null
+  24:0.001 25:-0.000 26:-0.000 27:-0.000 28:null 29:null 30:-0.000 31:-0.000 32:-0.000 33:0.000 34:null 35:null
+  36:0.000 37:0.000 38:0.000 39:0.000 40:null 41:null 42:0.000 43:0.000 44:0.000 45:-0.000 46:null
+
+--- mlp.gate_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:0.001 01:0.001 02:0.002 03:0.002 04:0.004 05:0.005 06:0.009 07:0.009 08:0.005 09:0.008 10:0.006 11:0.003
+  12:0.010 13:0.007 14:0.007 15:0.009 16:0.010 17:0.006 18:0.005 19:0.005 20:0.006 21:0.005 22:0.004 23:0.004
+  24:0.004 25:0.004 26:0.004 27:0.005 28:0.006 29:0.005 30:0.006 31:0.005 32:0.008 33:0.010 34:0.011 35:0.012
+  36:0.009 37:0.007 38:0.008 39:0.007 40:0.006 41:0.004 42:0.004 43:0.003 44:0.004 45:0.002 46:0.000
+
+--- mlp.up_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:0.000 01:-0.000 02:-0.000 03:-0.000 04:-0.000 05:-0.000 06:0.000 07:-0.000 08:-0.000 09:-0.000 10:0.000 11:-0.000
+  12:0.000 13:0.000 14:-0.000 15:0.000 16:-0.000 17:-0.000 18:-0.000 19:0.000 20:-0.000 21:-0.000 22:0.000 23:-0.000
+  24:0.000 25:0.000 26:-0.000 27:-0.000 28:-0.000 29:0.000 30:-0.000 31:-0.000 32:-0.000 33:-0.000 34:-0.000 35:0.000
+  36:-0.000 37:-0.000 38:-0.000 39:0.000 40:0.000 41:0.000 42:-0.000 43:-0.000 44:-0.000 45:-0.000 46:-0.000
+
+--- mlp.down_proj.weight : adjacent flat cosine (pair l = layers l..l+1; 'null' = shape gap at a global) ---
+  00:0.000 01:-0.000 02:-0.000 03:0.000 04:-0.000 05:-0.000 06:-0.000 07:0.000 08:-0.000 09:-0.000 10:0.000 11:0.000
+  12:0.000 13:-0.000 14:0.000 15:0.000 16:-0.000 17:0.000 18:0.000 19:0.000 20:-0.000 21:-0.000 22:0.000 23:0.000
+  24:-0.000 25:0.000 26:0.000 27:-0.000 28:-0.000 29:-0.000 30:0.000 31:0.000 32:-0.000 33:0.000 34:-0.000 35:0.000
+  36:-0.000 37:0.000 38:0.000 39:0.000 40:-0.000 41:-0.000 42:-0.000 43:-0.000 44:-0.000 45:0.000 46:0.000
+
+--- mlp.down_proj.weight : mean PER-OUTPUT-ROW cosine (robustness vs scale-dominated flatten) ---
+  00:0.000 01:-0.000 02:-0.000 03:0.000 04:-0.000 05:-0.000 06:-0.000 07:0.000 08:-0.000 09:-0.000 10:-0.000 11:0.000
+  12:0.000 13:0.000 14:0.000 15:0.000 16:-0.000 17:0.000 18:0.000 19:0.000 20:-0.000 21:-0.000 22:0.000 23:0.000
+  24:-0.000 25:0.000 26:0.000 27:-0.000 28:-0.000 29:-0.000 30:0.000 31:0.000 32:-0.000 33:0.000 34:-0.000 35:0.000
+  36:-0.000 37:0.000 38:0.000 39:0.000 40:-0.000 41:-0.000 42:-0.000 43:-0.000 44:-0.000 45:0.000 46:-0.000
+
+--- GLOBAL-attn consecutive (period-6) cosine [globals can only alias among themselves] ---
+  q: L5-L11:-0.000  L11-L17:-0.000  L17-L23:0.000  L23-L29:0.000  L29-L35:-0.001  L35-L41:-0.001  L41-L47:0.000
+  k: L5-L11:0.001  L11-L17:-0.001  L17-L23:0.002  L23-L29:-0.001  L29-L35:0.000  L35-L41:-0.002  L41-L47:-0.000
+  o: L5-L11:0.000  L11-L17:-0.000  L17-L23:0.000  L23-L29:-0.000  L29-L35:0.000  L35-L41:0.000  L41-L47:0.000
+
+========================================================================================
+SUMMARY  (adjacent flat cosine over VALID pairs; attention valid = SWA-SWA only)
+tensor                 n      min   median      max  mid[12..36]    L0-L1      last
+self_attn.q_proj      32  -0.0009  -0.0003   0.0009      -0.0003  -0.0002   -0.0004
+self_attn.k_proj      32  -0.0021   0.0001   0.0021       0.0000   0.0003    0.0010
+self_attn.v_proj      32  -0.0017  -0.0000   0.0009      -0.0001  -0.0001   -0.0000
+self_attn.o_proj      32  -0.0008   0.0000   0.0008       0.0001  -0.0001   -0.0004
+mlp.gate_proj         47   0.0004   0.0051   0.0117       0.0067   0.0011    0.0004
+mlp.up_proj           47  -0.0002  -0.0000   0.0002      -0.0000   0.0000   -0.0000
+mlp.down_proj         47  -0.0003   0.0000   0.0003       0.0000   0.0000    0.0000
+down(per-row-mean)    47  -0.0003  -0.0000   0.0003       0.0000   0.0000   -0.0000
+
+========================================================================================
+FROBENIUS-NORM RATIO  ||W_{l+1}||/||W_l||  across depth (ratio only where same shape)
+  self_attn.q_proj     n=32  min=0.922 median=1.002 max=1.068  |  Fro(L0)=65.4 Fro(L47)=89.8
+  self_attn.k_proj     n=32  min=0.922 median=1.002 max=1.068  |  Fro(L0)=46.2 Fro(L47)=22.4
+  self_attn.v_proj     n=32  min=0.922 median=1.002 max=1.068  |  Fro(L0)=46.2 Fro(L47)=nan
+  self_attn.o_proj     n=32  min=0.916 median=1.003 max=1.069  |  Fro(L0)=61.4 Fro(L47)=61.4
+  mlp.gate_proj        n=47  min=0.917 median=0.995 max=1.090  |  Fro(L0)=121.9 Fro(L47)=121.3
+  mlp.up_proj          n=47  min=0.917 median=0.995 max=1.090  |  Fro(L0)=121.9 Fro(L47)=121.3
+  mlp.down_proj        n=47  min=0.925 median=0.999 max=1.086  |  Fro(L0)=63.4 Fro(L47)=60.3
+
+  mlp.down_proj Frobenius norm per layer (depth trend):
+  00:63 01:61 02:64 03:64 04:63 05:60 06:61 07:62 08:64 09:65 10:61 11:63
+  12:64 13:59 14:64 15:61 16:64 17:64 18:59 19:60 20:62 21:60 22:60 23:64
+  24:62 25:63 26:63 27:64 28:65 29:63 30:65 31:63 32:65 33:63 34:60 35:61
+  36:65 37:61 38:64 39:62 40:61 41:61 42:63 43:62 44:60 45:59 46:61 47:60
