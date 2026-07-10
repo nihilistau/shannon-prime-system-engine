@@ -42,6 +42,10 @@ set "SP_CUDA_DECODE_INT8=1"
 set "SP_DAEMON_KVDECODE_RING_W=2048"
 set "SP_DAEMON_KVDECODE_PMAX=12096"
 set "SP_PERSIST_KV=1"
+REM HINDSIGHT: keep the O(1) conversation cache ALIVE under B4 memory growth
+REM (persist was silently force-disabled whenever SP_B4_NIGHTSHIFT=1 -> every
+REM turn full-re-prefilled ~1.5k tokens = the minutes-long agent turns).
+set "SP_PERSIST_B4=1"
 set "SP_EOT_BIAS=4.0"
 set "SP_NO_REPEAT_NGRAM=3"
 set "CUBLAS_WORKSPACE_CONFIG=:16:8"

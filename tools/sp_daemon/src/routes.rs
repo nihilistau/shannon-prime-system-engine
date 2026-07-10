@@ -1383,11 +1383,23 @@ fn run_kvdecode_chat(
     // Default-ON (G-PERSIST-KV GREEN 2026-06-30: 6-turn byte-identical on==off; TTFT off 7.47x growth
     // vs on flat; engine receipts tests/perf/_persist_gate_{off,on}.json). SP_PERSIST_KV=0 forces the
     // O(n) re-prefill null floor. The cache-mutating paths below still hard-exclude persist (reset/turn).
+    // HINDSIGHT 2026-07-10: SP_B4_NIGHTSHIFT no longer needs to kill persist wholesale.
+    // The B4 capture path (kv::capture_batched / mint_live_ep_l5) runs through the
+    // BATCHED gemma4_decode_cuda forward on the model pointer, NOT the resident
+    // sp_g4_kv session — the conversation cache is untouched and session pos is
+    // unchanged; anything that DOES move the cache (recall delivery re-prefill,
+    // episode injection) is already caught by the pos==cl guard + the recalled-turn
+    // committed-clear below (fails closed to a full re-prefill). With B4 excluded,
+    // EVERY memory-enabled serve ran O(n) re-prefill per turn (= the 2–5-minute
+    // agent turns). Opt-in via SP_PERSIST_B4=1 (unset = the old exclusion =
+    // byte-identical null floor) until G-PERSIST-B4 seals it.
+    let persist_b4_ok = std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() != Some("1")
+        || std::env::var("SP_PERSIST_B4").ok().as_deref() == Some("1");
     let persist_kv = std::env::var("SP_PERSIST_KV").ok().as_deref() != Some("0")
         && replay_dir.is_none() && !single_entry && inject_frames.is_none()
         && std::env::var("SP_DECIDE").ok().as_deref() != Some("1")
         && std::env::var("SP_FORGET").ok().as_deref() != Some("1")
-        && std::env::var("SP_B4_NIGHTSHIFT").ok().as_deref() != Some("1")
+        && persist_b4_ok
         && std::env::var("SP_B3_JUDGE").ok().as_deref() != Some("1")
         && std::env::var("SP_B3_DISPOSER").is_err()
         && std::env::var("SP_INT2").ok().as_deref() != Some("1");
