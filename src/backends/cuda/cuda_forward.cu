@@ -45,6 +45,10 @@
 /* ADR-011 CPU LAYER OFFLOAD: the math-core CPU FFN residual block (core/forward/gemma4.c),
  * run for the offloaded tail layers so their FFN weights need not be VRAM-resident. */
 extern "C" int gemma4_ffn_block_cpu(const qwen3_model *m, int L, float *x);
+/* ADR-012 CONTIGUOUS full-layer CPU tail: run layers [L_start, NL) for one token at position
+ * `pos` entirely on the CPU, reading host-mirrored owner KV — ONE boundary crossing/token. */
+extern "C" int gemma4_tail_cpu(const qwen3_model *m, int L_start, int pos, float *x,
+                               const float *ipl, float **hK, float **hV);
 
 extern "C" void sp_set_error(const char *msg);
 
@@ -1767,20 +1771,30 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
                           ? (int)ly->ffn_gate->dims[1] : FF;
         const int owns_kv = !is_g4 || (Li < g4_kvfs);   /* shared-KV: sharers skip K/V */
 
-        BUILDW(Wq, attn_q, E, qd_L);
-        if (owns_kv) {
+        /* ADR-012 CONTIGUOUS full-layer CPU tail: when SP_G4_CPU_TAIL_FULL=K, the last K layers run
+         * ENTIRELY on the CPU (attention+FFN+AltUp via gemma4_tail_cpu), so NONE of their matmul
+         * weights (Wq/Wo/FFN/AltUp) need be VRAM-resident — freeing the full ~168 MB/layer, not just
+         * the FFN. The DevTensors stay zeroed; the GPU layer loop breaks before them. */
+        static int cpu_tailf_b = -2;
+        if (cpu_tailf_b == -2) { const char *e = getenv("SP_G4_CPU_TAIL_FULL"); cpu_tailf_b = (e&&*e)?atoi(e):0; if (cpu_tailf_b<0) cpu_tailf_b=0; }
+        const int in_full_tail = (cpu_tailf_b > 0 && Li >= L - cpu_tailf_b);
+        if (!in_full_tail) BUILDW(Wq, attn_q, E, qd_L);
+        else { DevTensor z0={}; w->Wq[Li]=z0; }
+        if (owns_kv && !in_full_tail) {
             BUILDW(Wk, attn_k, E, kvd_L);
             /* V-less layers (dense gemma-4 globals): attn_v ABSENT — the forward
              * copies the raw K projection (Wv[Li] stays zeroed, detectable). */
             if (ly->attn_v) BUILDW(Wv, attn_v, E, kvd_L);
         }
-        BUILDW(Wo, attn_output, qd_L, E);
+        if (!in_full_tail) BUILDW(Wo, attn_output, qd_L, E);
+        else { DevTensor z0={}; w->Wo[Li]=z0; }
         /* ADR-011 CPU FFN OFFLOAD: skip uploading this layer's FFN weights (~150 MB) when it's in
          * the CPU tail (last SP_G4_CPU_TAIL layers). The DevTensors stay zeroed; g4_kv_step routes
-         * these layers' FFN to gemma4_ffn_block_cpu (host weights). Frees the VRAM = the lever. */
+         * these layers' FFN to gemma4_ffn_block_cpu (host weights). Frees the VRAM = the lever.
+         * ADR-012's full tail also frees these (via in_full_tail). */
         { static int cpu_tail_b = -2;
           if (cpu_tail_b == -2) { const char *e = getenv("SP_G4_CPU_TAIL"); cpu_tail_b = (e&&*e)?atoi(e):0; if (cpu_tail_b<0) cpu_tail_b=0; }
-          if (cpu_tail_b > 0 && Li >= L - cpu_tail_b) {
+          if (in_full_tail || (cpu_tail_b > 0 && Li >= L - cpu_tail_b)) {
               DevTensor z0={}; w->Wgate[Li]=z0; w->Wup[Li]=z0; w->Wdown[Li]=z0;   /* not resident */
           } else {
               BUILDW(Wgate, ffn_gate, E, ff_L); BUILDW(Wup, ffn_up, E, ff_L); BUILDW(Wdown, ffn_down, ff_L, E);
@@ -1789,11 +1803,11 @@ static int build_weights(const qwen3_model *m, CudaWeights *w) {
         UPV(q_norm, attn_q_norm, hd_L);
         if (owns_kv) UPV(k_norm, attn_k_norm, hd_L);     /* sharers never norm K */
         if (is_gemma) { UPV(post_attn, post_attn_norm, E); UPV(post_ffw, post_ffw_norm, E); }
-        if (g4_PL) {
+        if (g4_PL && !in_full_tail) {
             BUILDW(Wplig, per_layer_inp_gate, E, g4_PL);
             BUILDW(Wplproj, per_layer_proj, g4_PL, E);
             UPV(pl_post_norm, per_layer_post_norm, E);
-        }
+        } else if (g4_PL) { DevTensor z0={}; w->Wplig[Li]=z0; w->Wplproj[Li]=z0; }
         if (w->pl_out_scale && ly->out_scale) UPV(pl_out_scale, out_scale, 1);
     }
 
@@ -4067,6 +4081,16 @@ struct sp_g4_kv {
      * (their FFN weights are NOT uploaded to VRAM; build_weights skips them). cpu_x = a host
      * E-float staging buffer for the D2H→CPU-FFN→H2D boundary. 0 = null floor (all-GPU). */
     int   cpu_tail; float *cpu_x;
+    /* ADR-012 CONTIGUOUS full-layer CPU tail (the sync-killer). cpu_tail_full = number of trailing
+     * layers run ENTIRELY on the CPU (attention+FFN+AltUp), severed at ONE boundary crossing/token
+     * (vs the FFN-only path's ~2K syncs). gemma4-12b has NO KV sharing (kvfs==NL) so each tail
+     * layer OWNS its K/V and keeps its OWN cache on host — tail_hK[L]/tail_hV[L] are per-layer
+     * linear [Pmax*kvd] host buffers (allocated for L in [NL-K,NL), NULL otherwise), built from
+     * position 0 (the tail runs on CPU every token). NO cross-boundary KV mirror needed. tail_x =
+     * E-float residual staging; tail_ipl = the token's [NL*PL] AltUp inputs (D2H of dipl). 0 = null
+     * floor (all-GPU). Mutually exclusive with cpu_tail (FFN-only) — full supersedes. */
+    int   cpu_tail_full;
+    float *tail_x, *tail_ipl; float **tail_hK, **tail_hV;
     /* KAI-2 latent interrupt: residual-entry capture/inject at the post-embed/pre-layer
      * point (the SP_XBAR_EMB seam, persistent-ABI edition). Off by default = null floor.
      * cap_active ⇒ next step D2H its post-embed dx into cap_host; inj_active ⇒ next step
@@ -4372,6 +4396,25 @@ static int g4_kv_step(sp_g4_kv *s, int do_head) {
         }
     }
     for (int L = 0; L < NL; L++) {
+        /* ADR-012 CONTIGUOUS full-layer CPU tail: at the first tail layer, hand the residual + the
+         * two shared-KV owner caches to host in ONE batched async D2H set + ONE sync, run EVERY
+         * remaining layer on the CPU (attention+FFN+AltUp via gemma4_tail_cpu), hand the residual
+         * back ONCE, then break to the head. One boundary crossing/token vs the FFN-only path's
+         * ~2K syncs = the sync-bound-slope fix. Default-off (cpu_tail_full==0) = untouched null floor. */
+        if (s->cpu_tail_full > 0 && L == NL - s->cpu_tail_full) {
+            const int pos = s->dpos_host;
+            /* one boundary crossing: hand the residual (+ this token's AltUp inputs) to host. No KV
+             * mirror — each tail layer owns its K/V and keeps it host-side (built from position 0). */
+            cudaMemcpyAsync(s->tail_x, s->dx, (size_t)E*sizeof(float), cudaMemcpyDeviceToHost, st);
+            if (PL) cudaMemcpyAsync(s->tail_ipl, s->dipl, (size_t)NLPL*sizeof(float), cudaMemcpyDeviceToHost, st);
+            cudaStreamSynchronize(st);   /* THE one sync/token */
+            if (gemma4_tail_cpu(s->m, NL - s->cpu_tail_full, pos, s->tail_x, PL ? s->tail_ipl : NULL,
+                                s->tail_hK, s->tail_hV)) {
+                sp_set_error("gemma4_tail_cpu failed"); return -1;
+            }
+            cudaMemcpyAsync(s->dx, s->tail_x, (size_t)E*sizeof(float), cudaMemcpyHostToDevice, st);
+            break;   /* GPU layers [NL-K, NL) skipped; fall through to the head */
+        }
         const int global = ((L % period) == period - 1);
         const int nh = global ? g_nh : s_nh, nkv = global ? g_nkv : s_nkv;
         const int hd = global ? g_hd : s_hd;
@@ -4665,9 +4708,39 @@ extern "C" sp_g4_kv *gemma4_kv_open(const qwen3_model *m, int Pmax) {
         if (!s->cpu_x) { sp_set_error("gemma4_kv_open: cpu_x OOM"); gemma4_kv_close(s); return NULL; }
         fprintf(stderr, "    [g4-kv] CPU-TAIL: last %d layers' FFN on CPU (weights host-resident, VRAM freed)\n", s->cpu_tail);
     }
+    /* ADR-012 CONTIGUOUS full-layer CPU tail config. cpu_tail_full trailing layers run ENTIRELY on
+     * the CPU (attention+FFN+AltUp), severed at ONE boundary crossing/token (kills the FFN-only
+     * path's ~2K syncs). Supersedes cpu_tail (FFN-only) when both set. gemma4-12b has NO KV sharing
+     * (kvfs==NL) → each tail layer OWNS its K/V and keeps its own host cache tail_hK[L]/tail_hV[L]
+     * (per-layer kvd = nkv*hd; global 1*512, SWA 2*256 = both 512), built from position 0. */
+    s->cpu_tail_full = getenv("SP_G4_CPU_TAIL_FULL") ? atoi(getenv("SP_G4_CPU_TAIL_FULL")) : 0;
+    if (s->cpu_tail_full < 0) s->cpu_tail_full = 0;
+    if (s->cpu_tail_full > s->NL - 1) s->cpu_tail_full = s->NL - 1;   /* keep >=1 layer on GPU */
+    s->tail_x = s->tail_ipl = NULL; s->tail_hK = s->tail_hV = NULL;
+    if (s->cpu_tail_full > 0) {
+        s->cpu_tail = 0;   /* full supersedes FFN-only */
+        s->tail_x   = (float *)malloc((size_t)s->E * sizeof(float));
+        if (s->PL) s->tail_ipl = (float *)malloc((size_t)s->NLPL * sizeof(float));
+        s->tail_hK = (float **)calloc((size_t)s->NL, sizeof(float *));
+        s->tail_hV = (float **)calloc((size_t)s->NL, sizeof(float *));
+        if (!s->tail_x || (s->PL && !s->tail_ipl) || !s->tail_hK || !s->tail_hV) {
+            sp_set_error("gemma4_kv_open: CPU-TAIL-FULL alloc OOM"); gemma4_kv_close(s); return NULL;
+        }
+        for (int L = s->NL - s->cpu_tail_full; L < s->NL; L++) {
+            const int g4_global = ((L % s->period) == s->period - 1);
+            const int kvd = g4_global ? (s->g_nkv * s->g_hd) : (s->s_nkv * s->s_hd);
+            s->tail_hK[L] = (float *)calloc((size_t)s->Pmax * kvd, sizeof(float));
+            s->tail_hV[L] = (float *)calloc((size_t)s->Pmax * kvd, sizeof(float));
+            if (!s->tail_hK[L] || !s->tail_hV[L]) {
+                sp_set_error("gemma4_kv_open: CPU-TAIL-FULL host KV OOM"); gemma4_kv_close(s); return NULL;
+            }
+        }
+        fprintf(stderr, "    [g4-kv] CPU-TAIL-FULL: last %d layers ENTIRELY on CPU (own host KV; one crossing/token; VRAM freed ~%.2f GB)\n",
+                s->cpu_tail_full, (double)s->cpu_tail_full * 0.164);
+    }
     /* A1: CUDA-graph decode state (lazily armed in g4_kv_step_graph). The graph cannot capture a
-     * host CPU call, so CPU-tail forces the per-step path (graph disabled). */
-    s->graph_mode = (s->cpu_tail > 0) ? 0 : -1; s->graph_ready = 0; s->gcap = NULL; s->gexec = NULL;
+     * host CPU call, so CPU-tail (either mode) forces the per-step path (graph disabled). */
+    s->graph_mode = (s->cpu_tail > 0 || s->cpu_tail_full > 0) ? 0 : -1; s->graph_ready = 0; s->gcap = NULL; s->gexec = NULL;
     /* the JAGGED cache — owners only, per-layer width. */
     s->dKc=(float**)calloc((size_t)s->NL,sizeof(float*));
     s->dVc=(float**)calloc((size_t)s->NL,sizeof(float*));
@@ -5985,6 +6058,10 @@ extern "C" void gemma4_kv_close(sp_g4_kv *s) {
     if (s->jV) { for (int L=0;L<s->NL;L++) if (s->jV[L]) cudaFree(s->jV[L]); free(s->jV); }
     if (s->dinj) cudaFree(s->dinj);   /* KAI-2 inject staging */
     if (s->cpu_x) free(s->cpu_x);   /* ADR-011 CPU-tail host staging buffer */
+    /* ADR-012 full-layer CPU-tail: residual staging + per-layer host KV caches */
+    if (s->tail_x) free(s->tail_x); if (s->tail_ipl) free(s->tail_ipl);
+    if (s->tail_hK) { for (int L = 0; L < s->NL; L++) if (s->tail_hK[L]) free(s->tail_hK[L]); free(s->tail_hK); }
+    if (s->tail_hV) { for (int L = 0; L < s->NL; L++) if (s->tail_hV[L]) free(s->tail_hV[L]); free(s->tail_hV); }
     if (s->steer_dev) cudaFree(s->steer_dev);   /* GEODESIC steering vector */
     if (s->gexec) cudaGraphExecDestroy(s->gexec);   /* A1: graph decode teardown */
     if (s->gcap)  cudaGraphDestroy(s->gcap);

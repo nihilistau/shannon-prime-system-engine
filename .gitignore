@@ -167,3 +167,11 @@ _faithful_corpus/eps/sne_*/*
 _b3_wc/*
 !_b3_wc/wc_deploy.bin
 !tests/fixtures/**/*.log
+
+tools/sp_daemon/target-wirecuda-perf/
+_gw_probe.*
+_gate_grow.*
+_gateway.out
+_gateway.err
+_persist_probe.out
+_mcp_gate.*

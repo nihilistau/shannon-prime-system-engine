@@ -233,6 +233,30 @@
     <div class="seg"><label>peers</label> <span class="v" id="tel-peers">--/--</span></div>
     <div class="seg"><label>frontier</label> <span class="v" id="tel-frontier">--</span></div>
     <div class="connection" id="conn-pill" title="click to set the daemon endpoint"><span class="dot"></span><span id="conn-text">connecting…</span></div>
+    <div class="connection" id="agent-pill" style="border-color:rgba(212,161,74,0.35);background:rgba(212,161,74,0.05);color:var(--text-dim);"
+         title="agent gateway (:8800): tool calling + cards + persona. Falls back to direct daemon chat when the gateway is down. Launch: run_console_agent.bat">
+      <span class="dot" style="animation:none;"></span><span>probing…</span></div>
+  </div>
+</div>
+<style>
+  #agent-pill.on { border-color: rgba(212,161,74,0.6); background: rgba(212,161,74,0.1); color: var(--gold-hot); }
+  #agent-pill.on .dot { animation: dotPulse 1.6s ease-in-out infinite; }
+</style>
+
+<!-- PERSONA EDITOR MODAL (gateway :8800 — GET/POST /v1/persona) -->
+<div id="persona-modal" style="display:none;position:fixed;inset:0;background:rgba(4,5,8,0.75);backdrop-filter:blur(4px);z-index:50;align-items:center;justify-content:center;">
+  <div style="width:min(720px,92vw);max-height:84vh;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--gold);box-shadow:0 0 60px rgba(212,161,74,0.15),0 40px 80px rgba(0,0,0,0.6);">
+    <div class="ph" style="border-bottom:1px solid var(--rule);">
+      <span class="t">edit personality · persona.md</span>
+      <span class="badge" id="persona-modal-status">gateway :8800</span>
+    </div>
+    <textarea id="persona-text" spellcheck="false"
+      style="flex:1;min-height:340px;background:rgba(8,9,13,0.9);border:0;outline:0;color:var(--text);font-family:var(--font);font-size:12.5px;line-height:1.65;padding:16px 18px;resize:vertical;"></textarea>
+    <div style="display:flex;gap:10px;align-items:center;padding:12px 16px;border-top:1px solid var(--rule);">
+      <span style="font-size:9px;letter-spacing:1.5px;color:var(--text-faint);">prose = voice · '## Personality state' block = voice/mood/traits · saves record operator provenance</span>
+      <button class="toolbtn" id="persona-cancel" style="margin-left:auto;">cancel</button>
+      <button class="send-btn" id="persona-save" style="height:32px;padding:0 16px;">save</button>
+    </div>
   </div>
 </div>
 
@@ -342,6 +366,15 @@
 
   <!-- RIGHT -->
   <div class="pane right">
+    <div id="persona-panel" style="display:none;border-bottom:1px solid var(--rule);">
+      <div class="ph" style="border-bottom:1px solid var(--rule-faint);">
+        <span class="t">personality</span>
+        <button class="toolbtn" id="persona-edit-btn" style="padding:3px 9px;font-size:9px;">edit</button>
+      </div>
+      <div id="persona-chips" style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 14px;font-size:10px;letter-spacing:1px;">
+        <span style="color:var(--text-faint)">loading…</span>
+      </div>
+    </div>
     <div class="ph">
       <span class="t">pouw receipt ledger</span>
       <span class="badge live" id="ledger-badge">SSE</span>
@@ -396,11 +429,30 @@
   const isHttp = location.protocol === 'http:' || location.protocol === 'https:';
   const DEFAULT_DAEMON = 'http://127.0.0.1:3000';
   let DAEMON = isHttp ? location.origin : (localStorage.getItem('sp_endpoint') || DEFAULT_DAEMON);
-  // CHAT defaults to the SAME daemon that served this console (run_console.bat /
-  // run_console_recall.bat -- the coherent W_c-librarian chat with persistent O(1) KV). To route
-  // through the harness AGENT GATEWAY instead (so the model CALLS its tools in Gemma tool_code
-  // format), start run_gateway.bat and set localStorage 'sp_chat_endpoint' = 'http://127.0.0.1:8800'.
-  const CHAT_URL = (localStorage.getItem('sp_chat_endpoint') || DAEMON);
+  // AGENT GATEWAY AUTODETECT (AUDIT 2026-07-10). Chat routes through the harness
+  // agent gateway (:8800 — ephemeral tool calling, spine, tool cards, persona)
+  // whenever it is up; otherwise falls back to the daemon's plain chat. A manual
+  // localStorage 'sp_chat_endpoint' still wins over autodetection.
+  const GATEWAY = localStorage.getItem('sp_gateway_endpoint') || 'http://127.0.0.1:8800';
+  let CHAT_URL = (localStorage.getItem('sp_chat_endpoint') || DAEMON);
+  let AGENT_MODE = false;
+  async function probeGateway() {
+    if (localStorage.getItem('sp_chat_endpoint')) { setAgentPill(CHAT_URL.includes('8800')); return; }
+    try {
+      const r = await fetch(`${GATEWAY}/health`, { signal: AbortSignal.timeout(2500) });
+      const j = await r.json();
+      const up = !!(j && j.ok);
+      if (up !== AGENT_MODE) { AGENT_MODE = up; CHAT_URL = up ? GATEWAY : DAEMON; setAgentPill(up); }
+    } catch (_) { if (AGENT_MODE) { AGENT_MODE = false; CHAT_URL = DAEMON; setAgentPill(false); } else setAgentPill(false); }
+  }
+  function setAgentPill(on) {
+    const pill = document.getElementById('agent-pill'); if (!pill) return;
+    pill.classList.toggle('on', on);
+    pill.querySelector('span:last-child').textContent = on ? 'agent · :8800' : 'direct · :3000';
+    const sub = document.querySelector('.canvas-head .sub');
+    if (sub) sub.firstChild && (sub.childNodes[0].textContent = on ? '/v1/chat · agent gateway · tools live ' : '/v1/chat · sse · text/event-stream ');
+    const pp = document.getElementById('persona-panel'); if (pp) pp.style.display = on ? '' : 'none';
+  }
   const wsBase = () => DAEMON.replace(/^http/, 'ws');
 
   const $ = (id) => document.getElementById(id);
@@ -590,6 +642,72 @@
     chatWindow.appendChild(card);
     chatWindow.scrollTop = chatWindow.scrollHeight;
   }
+  function pushNoteCard(kind, text, color) {
+    clearEmpty();
+    const card = document.createElement('div');
+    card.style.cssText = `margin:4px 0 4px 22px;padding:4px 10px;border-left:2px solid ${color};` +
+      'background:rgba(29,110,122,0.05);border-radius:2px;font-size:10px;letter-spacing:0.5px;color:var(--text-dim);animation:rowIn 0.3s ease-out;';
+    card.innerHTML = `<span style="color:${color}">◈ ${kind}</span> <span>${text}</span>`;
+    chatWindow.appendChild(card);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+  }
+
+  /* ── persona panel + editor (gateway :8800) ── */
+  function renderPersonaChips(state) {
+    const host = document.getElementById('persona-chips'); if (!host) return;
+    const chip = (label, val, color) =>
+      `<span style="padding:2px 9px;border:1px solid var(--rule);border-radius:10px;background:rgba(13,17,23,0.6);">` +
+      `<span style="color:var(--text-faint);font-size:8.5px;letter-spacing:2px;">${label}</span> ` +
+      `<span style="color:${color};font-weight:600;">${val}</span></span>`;
+    const bits = [];
+    if (state.voice) bits.push(chip('voice', state.voice, 'var(--gold-hot)'));
+    if (state.mood) bits.push(chip('mood', state.mood, 'var(--q2)'));
+    if (state.traits) String(state.traits).split(',').map(s => s.trim()).filter(Boolean)
+      .forEach(t => bits.push(chip('trait', t, 'var(--cyan-bright)')));
+    host.innerHTML = bits.join('') || '<span style="color:var(--text-faint)">no personality state</span>';
+  }
+  async function pollPersonaState() {
+    if (!AGENT_MODE) return;
+    try {
+      const r = await fetch(`${GATEWAY}/v1/persona/state`, { signal: AbortSignal.timeout(3000) });
+      const j = await r.json();
+      renderPersonaChips(j.state || j);
+      if (j.state || j.voice || j.mood) updatePersonaChip(j.state || j, false);
+    } catch (_) {}
+  }
+  async function openPersonaEditor() {
+    const modal = document.getElementById('persona-modal');
+    const ta = document.getElementById('persona-text');
+    const status = document.getElementById('persona-modal-status');
+    try {
+      const r = await fetch(`${GATEWAY}/v1/persona`, { signal: AbortSignal.timeout(4000) });
+      const j = await r.json();
+      ta.value = (j.persona != null ? j.persona : (j.text != null ? j.text : ''));
+      status.textContent = 'gateway :8800';
+      status.style.color = '';
+    } catch (e) {
+      ta.value = '';
+      status.textContent = 'gateway offline — start run_console_agent.bat';
+      status.style.color = 'var(--err)';
+    }
+    modal.style.display = 'flex';
+    ta.focus();
+  }
+  async function savePersona() {
+    const modal = document.getElementById('persona-modal');
+    const status = document.getElementById('persona-modal-status');
+    try {
+      const r = await fetch(`${GATEWAY}/v1/persona`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persona: document.getElementById('persona-text').value }),
+      });
+      if (!r.ok) throw new Error(`http ${r.status}`);
+      status.textContent = 'saved ✓'; status.style.color = 'var(--ok)';
+      setTimeout(() => { modal.style.display = 'none'; }, 550);
+      pollPersonaState();
+    } catch (e) { status.textContent = `save failed: ${e.message}`; status.style.color = 'var(--err)'; }
+  }
+
   function updatePersonaChip(state, changed) {
     let chip = document.getElementById('persona-chip');
     if (!chip) {
@@ -648,7 +766,10 @@
              * {persona}: update the live personality chip (changed:true = mid-conversation shift). */
             if (o.hb != null) { sendBtn.style.opacity = (sendBtn.style.opacity === '0.55' ? '1' : '0.55'); continue; }
             if (o.tool) { pushToolCard(o.tool); continue; }
-            if (o.persona) { updatePersonaChip(o.persona, o.changed === true); continue; }
+            if (o.persona) { updatePersonaChip(o.persona, o.changed === true); renderPersonaChips(o.persona); continue; }
+            if (o.recall) { pushNoteCard('recall', JSON.stringify(o.recall).slice(0, 220), 'var(--cyan-bright)'); continue; }
+            if (o.toolset) { pushNoteCard('toolset', String(o.toolset), 'var(--q3)'); continue; }
+            if (o.authority) { pushNoteCard('authority', String(o.authority), 'var(--q4)'); continue; }
           }
           catch (e) { if (e.message && e.message !== 'Unexpected end of JSON input') throw e; delta = null; }
           if (delta == null) continue;
@@ -795,6 +916,17 @@
   connectLedger();
   pollMetrics();   setInterval(pollMetrics, 1000);
   fetchMesh();     setInterval(fetchMesh, 2000);
+  probeGateway();  setInterval(probeGateway, 8000);
+  pollPersonaState(); setInterval(pollPersonaState, 12000);
+  const peBtn = document.getElementById('persona-edit-btn');
+  if (peBtn) peBtn.addEventListener('click', openPersonaEditor);
+  const pcBtn = document.getElementById('persona-cancel');
+  if (pcBtn) pcBtn.addEventListener('click', () => { document.getElementById('persona-modal').style.display = 'none'; });
+  const psBtn = document.getElementById('persona-save');
+  if (psBtn) psBtn.addEventListener('click', savePersona);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { const m = document.getElementById('persona-modal'); if (m && m.style.display !== 'none') m.style.display = 'none'; }
+  });
   chatInput.focus();
 })();
 </script>
