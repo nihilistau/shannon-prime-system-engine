@@ -3848,10 +3848,24 @@ Tag of the answer (or [NULL]):");
             || matches!(first_word,
                 "what"|"who"|"whom"|"whose"|"where"|"when"|"why"|"how"|"which"
                 |"tell"|"describe"|"list"|"show"|"explain"|"summarize"|"recall"|"remind");
+        // HINDSIGHT 2026-07-10 admission hygiene (live console found the registry full of
+        // junk): (1) NEVER capture fenced content — the gateway's tool rounds arrive as
+        // role:user ```tool_output blocks and were being stored as "memories" (then
+        // recalled as stale tool results: "what time is it?" answered from a captured
+        // get_time output); (2) require >= 4 WORDS — greetings/acks ("hi there!",
+        // "she is good") captured as memories and spammed recall on chit-chat. Short
+        // durable facts still reach memory via the explicit store verb / remember() tool.
+        let is_fenced = lc.starts_with("```") || lc.contains("```tool_output");
+        let n_words = lc.split_whitespace().count();
         let admit = !forget_done
             && !is_forget_turn
             && !is_question
+            && !is_fenced
+            && n_words >= 4
             && !lc.is_empty();
+        if !lc.is_empty() && (is_fenced || (n_words < 4 && !is_question)) {
+            tracing::info!("B4-NIGHTSHIFT: skip (admission hygiene: fenced={is_fenced} words={n_words})");
+        }
         if let Some(text) = raw_user.as_ref().map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()).filter(|_| admit) {
             // (a) tokenize the RAW user content (no chat template — match the curator).
