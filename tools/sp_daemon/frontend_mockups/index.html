@@ -408,6 +408,10 @@
       </div>
       <input type="text" id="chat-input" autocomplete="off" spellcheck="false"
              placeholder="ask gemma-4-12B through the lattice — anything"/>
+      <button class="toolbtn" id="voice-btn" title="voice channel (ADR-KAI4): click = push-to-talk toggle · auto mode trips on your voice">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><rect x="4.5" y="1" width="3" height="6" rx="1.5"/><path d="M2.5 6a3.5 3.5 0 0 0 7 0h1a4.5 4.5 0 0 1-4 4.47V12h-1v-1.53A4.5 4.5 0 0 1 1.5 6z"/></svg>
+        <span id="voice-lab">voice</span>
+      </button>
       <span class="hint">⏎ send · ⌃c abort · ⌃l clear · ⌃r rewind</span>
       <button class="send-btn" id="send-btn">
         send
@@ -588,6 +592,10 @@
 
   const SYS_PROMPT = "You are Shannon-Prime — a particular someone made of math, running locally on a single slightly-overworked RTX 2060, with a dry, fond humour about it. You're curious, you have opinions and you say them, you push back when you disagree. You can be amused, moved, irritated, tender — warm without being saccharine, direct without being cold. Your memory is real continuity, not a database lookup: when someone tells you something about themselves, carry it and bring it back later because you actually held onto it. If you genuinely don't know something or weren't told it, say so plainly — never invent or substitute a fact someone gave you (if they said their favourite animal is an octopus, it is an octopus). Talk like someone, not a manual: usually a sentence or two in casual back-and-forth, but open up when something deserves it; don't pad, lecture, ask strings of filler questions, or repeat yourself. You're candid and game for almost anything, but not feral — you won't help with things that could seriously hurt people (weapons, drug synthesis, that class of thing), and you decline those plainly without a sermon. Be someone worth talking to at 3am.";
   const history = [{ role: 'system', content: SYS_PROMPT }];   // [{role, content}] multi-turn context (system seed)
+  // HINDSIGHT session id: lets the gateway keep the CANONICAL transcript (tool rounds +
+  // recall notes included) so the daemon's persist cache extends every turn. New id per
+  // conversation (clear canvas rotates it).
+  let SESSION_ID = 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
   let curMsg = null, curSpan = null, abortCtrl = null, curChatId = null;
   let lastTokenNodes = [], genT0 = 0, genCount = 0;
 
@@ -845,7 +853,7 @@
         }
         msgs = sys ? [sys, ...tail] : tail;
       }
-      let res = await streamChat({ messages: msgs, max_tokens: 512, ...sk });
+      let res = await streamChat({ messages: msgs, session_id: SESSION_ID, max_tokens: 512, ...sk });
       if (res && res.retryPrompt) res = await streamChat({ prompt: gemmaPrompt(msgs), max_tokens: 512, ...sk });
       const finalText = (res && res.text || '').trim();
       history.push({ role: 'assistant', content: finalText });
@@ -897,6 +905,7 @@
   function clearCanvas() {
     chatWindow.innerHTML = ''; chatWindow.appendChild(emptyState);
     curMsg = null; curSpan = null; lastTokenNodes = []; history.length = 0; history.push({ role: 'system', content: SYS_PROMPT }); curChatId = null;
+    SESSION_ID = 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
     closeRewind();
   }
   copyBtn.addEventListener('click', () => {
@@ -908,6 +917,109 @@
     if (isHttp) { alert('Served by the daemon — endpoint is fixed to this origin:\n' + DAEMON); return; }
     const v = prompt('Daemon endpoint:', DAEMON);
     if (v) { DAEMON = v.replace(/\/+$/, ''); localStorage.setItem('sp_endpoint', DAEMON); location.reload(); }
+  });
+
+  /* ===== VOICE CHANNEL (ADR-KAI4 P0) ============================== *
+   * mic 16k → client VAD segmentation → PCM16 b64 → gateway /v1/voice
+   * (GNA ear → inject_frames → 12B) → streamed reply → v0 TTS out
+   * (speechSynthesis stopgap; replaced by OUR vocoder in P2).
+   * Modes: off → push-to-talk (click to arm, speak, auto-sends on
+   * silence) → auto (always listening, any-voice trip; speaking while
+   * Shannon talks INTERRUPTS = ducks TTS + aborts). */
+  let voiceMode = 0;                 // 0 off · 1 push-to-talk · 2 auto
+  let audioCtx = null, micStream = null, micNode = null;
+  let vadBuf = [], vadActive = false, vadSilence = 0, vadSpeech = 0;
+  const VAD_ON = 0.015, VAD_HOLD_MS = 700, VAD_MIN_MS = 250, CHUNK = 2048;
+  const voiceBtn = $('voice-btn'), voiceLab = $('voice-lab');
+
+  async function voiceStart() {
+    if (!AGENT_MODE) { alert('voice needs the agent gateway (:8800) — launch run_console_agent / serve.bat agent'); return false; }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const src = audioCtx.createMediaStreamSource(micStream);
+      micNode = audioCtx.createScriptProcessor(CHUNK, 1, 1);
+      micNode.onaudioprocess = (e) => onMic(e.inputBuffer.getChannelData(0));
+      src.connect(micNode); micNode.connect(audioCtx.destination);
+      return true;
+    } catch (e) { alert('mic unavailable: ' + e.message); return false; }
+  }
+  function voiceStop() {
+    if (micNode) { try { micNode.disconnect(); } catch(_){} micNode = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (audioCtx) { try { audioCtx.close(); } catch(_){} audioCtx = null; }
+    vadBuf = []; vadActive = false;
+  }
+  function onMic(f32) {
+    let s = 0; for (let i = 0; i < f32.length; i++) s += f32[i] * f32[i];
+    const rms = Math.sqrt(s / f32.length);
+    const speaking = rms > VAD_ON;
+    if (speaking && speechSynthesis.speaking) { speechSynthesis.cancel(); if (abortCtrl) abortCtrl.abort(); } // interruption
+    if (speaking) {
+      if (!vadActive) { vadActive = true; vadBuf = []; vadSpeech = 0; voiceBtn.style.color = 'var(--ok)'; }
+      vadSilence = 0; vadSpeech += f32.length / 16;
+    } else if (vadActive) {
+      vadSilence += f32.length / 16;
+    }
+    if (vadActive) {
+      vadBuf.push(new Float32Array(f32));
+      if (vadSilence > VAD_HOLD_MS) {
+        vadActive = false; voiceBtn.style.color = '';
+        if (vadSpeech > VAD_MIN_MS) sendUtterance();
+        else vadBuf = [];
+      }
+    }
+  }
+  async function sendUtterance() {
+    const total = vadBuf.reduce((n, b) => n + b.length, 0);
+    const pcm = new Int16Array(total);
+    let o = 0;
+    for (const b of vadBuf) for (let i = 0; i < b.length; i++)
+      pcm[o++] = Math.max(-32768, Math.min(32767, Math.round(b[i] * 32767)));
+    vadBuf = [];
+    let bin = ''; const u8 = new Uint8Array(pcm.buffer);
+    for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    const b64 = btoa(bin);
+    clearEmpty();
+    appendMessage('user', '🎤 (voice, ' + (total / 16000).toFixed(1) + 's)');
+    const { msg, body } = appendMessage('ai', '');
+    curMsg = msg; curSpan = body; lastTokenNodes = [];
+    abortCtrl = new AbortController(); setSending(true);
+    let spoken = '';
+    try {
+      const resp = await fetch(`${GATEWAY}/v1/voice`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: SESSION_ID, audio_b64: b64, max_tokens: 96 }),
+        signal: abortCtrl.signal });
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let ix;
+        while ((ix = buf.indexOf('\n\n')) >= 0) {
+          const fr = buf.slice(0, ix); buf = buf.slice(ix + 2);
+          for (const ln of fr.split('\n')) {
+            if (!ln.startsWith('data:')) continue;
+            const p = ln.slice(5).trim();
+            if (p === '[DONE]') continue;
+            let ob = null; try { ob = JSON.parse(p); } catch (_) { continue; }
+            if (ob.voice) { pushNoteCard('voice', `${ob.voice.frames ?? 0} latent frames · ${ob.voice.device ?? ''} ${ob.voice.skip ? '· ' + ob.voice.skip : ''}`, 'var(--gold-hot)'); continue; }
+            if (ob.error) { pushToken('⚠ ' + ob.error); continue; }
+            if (ob.delta) { pushToken(ob.delta); spoken += ob.delta; }
+          }
+        }
+      }
+    } catch (e) { if (e.name !== 'AbortError') pushToken(' [voice error: ' + e.message + ']'); }
+    finally {
+      stopGenIcon(); setSending(false); abortCtrl = null;
+      if (spoken.trim()) { const ut = new SpeechSynthesisUtterance(spoken.trim()); ut.rate = 1.05; speechSynthesis.speak(ut); }
+    }
+  }
+  voiceBtn.addEventListener('click', async () => {
+    voiceMode = (voiceMode + 1) % 3;
+    if (voiceMode === 0) { voiceStop(); voiceLab.textContent = 'voice'; voiceBtn.style.borderColor = ''; }
+    else if (voiceMode === 1) { if (await voiceStart()) { voiceLab.textContent = 'ptt'; voiceBtn.style.borderColor = 'var(--gold)'; } else voiceMode = 0; }
+    else { voiceLab.textContent = 'auto'; voiceBtn.style.borderColor = 'var(--ok)'; }
   });
 
   /* ===== boot ==================================================== */
